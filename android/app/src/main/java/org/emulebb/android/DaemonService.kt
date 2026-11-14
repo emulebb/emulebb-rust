@@ -32,12 +32,9 @@ class DaemonService : Service() {
     companion object {
         const val START = "org.emulebb.android.START"
         const val STOP = "org.emulebb.android.STOP"
-        const val RESUME = "org.emulebb.android.RESUME"
         const val STATUS = 1
-        const val SET_BOOT_RESUME = 2
         const val PREFERENCES = "service-lifecycle"
         const val DESIRED = "desired-running"
-        const val BOOT = "resume-on-boot"
         const val LOCAL_NETWORK = Manifest.permission.ACCESS_LOCAL_NETWORK
         private const val CHANNEL = "daemon"
         private const val NOTICE = 1
@@ -105,18 +102,12 @@ class DaemonService : Service() {
     private val messenger = Messenger(object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(message: Message) {
             // The service is non-exported; Binder calls remain within this application's UID.
-            if (message.what == SET_BOOT_RESUME) {
-                if (!prefs.edit().putBoolean(BOOT, message.arg1 != 0).commit()) {
-                    error = "Cannot save reboot preference"
-                }
-            }
-            if (message.what == STATUS || message.what == SET_BOOT_RESUME) {
+            if (message.what == STATUS) {
                 val response = Message.obtain(null, STATUS).apply {
                     data = Bundle().apply {
                         putString("phase", phase)
                         putString("error", error)
                         putString("address", address)
-                        putBoolean("resumeOnBoot", prefs.getBoolean(BOOT, false))
                         putBoolean("waitingForNetwork", waitingForNetwork)
                     }
                 }

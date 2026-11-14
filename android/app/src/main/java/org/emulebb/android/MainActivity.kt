@@ -28,7 +28,6 @@ import android.view.View
 import android.view.WindowManager
 import android.view.WindowInsets
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -46,7 +45,6 @@ class MainActivity : Activity() {
     private var busy = true
     private var phase = "Stopped"
     private var address: String? = null
-    private var updatingBoot = false
     private var pendingLink: String? = null
     private var pendingLinkError = ""
     private var sharingDiagnostics = false
@@ -64,7 +62,6 @@ class MainActivity : Activity() {
     private lateinit var save: Button
     private lateinit var regenerate: Button
     private lateinit var open: Button
-    private lateinit var boot: CheckBox
     private lateinit var shareDiagnostics: Button
 
     private val replies = Messenger(object : Handler(Looper.getMainLooper()) {
@@ -75,9 +72,6 @@ class MainActivity : Activity() {
             status.show(phase)
             networkWait.show(if (message.data.getBoolean("waitingForNetwork")) "Waiting for a usable default network" else "")
             error.show(message.data.getString("error") ?: "")
-            updatingBoot = true
-            boot.isChecked = message.data.getBoolean("resumeOnBoot")
-            updatingBoot = false
             updateControls()
         }
     })
@@ -182,14 +176,6 @@ class MainActivity : Activity() {
                 }
                 catch (_: android.content.ActivityNotFoundException) { error.text = "Install a browser to open the WebUI" }
             }
-        }
-        boot = CheckBox(this).apply {
-            id = R.id.resume_on_boot
-            text = "Resume after reboot"
-            setOnCheckedChangeListener { _, checked ->
-                if (!updatingBoot) send(DaemonService.SET_BOOT_RESUME, if (checked) 1 else 0)
-            }
-            panel.addView(this)
         }
         label("Share version, service and Android details plus up to 200 recent log summaries. Keys, configuration, paths, peer/content data and free-form messages are excluded.")
         shareDiagnostics = button("Share diagnostics", R.id.share_diagnostics) { shareDiagnosticReport() }
@@ -361,15 +347,12 @@ class MainActivity : Activity() {
         start.isEnabled = !busy && stopped
         stop.isEnabled = phase == "Starting" || phase == "Running"
         open.isEnabled = phase == "Running" && address != null
-        boot.isEnabled = remote != null
     }
 
-    private fun send(what: Int, arg: Int = 0) {
-        try { remote?.send(Message.obtain(null, what, arg, 0).apply { replyTo = replies }) }
+    private fun queryStatus() {
+        try { remote?.send(Message.obtain(null, DaemonService.STATUS).apply { replyTo = replies }) }
         catch (_: android.os.RemoteException) { remote = null }
     }
-
-    private fun queryStatus() = send(DaemonService.STATUS)
     private val poll = object : Runnable {
         override fun run() {
             queryStatus()
