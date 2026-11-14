@@ -111,14 +111,15 @@ class ApkDiagnosticWorkflowTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=10)
 
     def test_actual_first_step_rejects_publication_partial_and_malformed_requests(self):
-        for api in (34, 35, 36, 37):
+        for api in (31, 32, 33, 34, 35, 36, 37):
             self.assertEqual(self.run_guard({**VALID, FIELDS[3]: f"apk{api}"}).returncode, 0)
         self.assertNotEqual(self.run_guard(VALID, publish="true").returncode, 0)
         for field in FIELDS:
             with self.subTest(missing=field):
                 self.assertNotEqual(self.run_guard({key: value for key, value in VALID.items() if key != field}).returncode, 0)
         for field, value in ((FIELDS[0], "0"), (FIELDS[0], "12;echo unsafe"), (FIELDS[1], "refs/heads/main"),
-                             (FIELDS[1], "A" * 40), (FIELDS[2], "b" * 63), (FIELDS[3], "none"), (FIELDS[3], "current")):
+                             (FIELDS[1], "A" * 40), (FIELDS[2], "b" * 63), (FIELDS[3], "none"), (FIELDS[3], "current"),
+                             (FIELDS[3], "apk30"), (FIELDS[3], "apk38")):
             with self.subTest(field=field, value=value):
                 self.assertNotEqual(self.run_guard({**VALID, field: value}).returncode, 0)
 

@@ -55,9 +55,9 @@ env:
   EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:98da7751087bc9a47a597571f99e4bebdccadb5ea80e9757d0f15452a35308bb
   EMULEBB_BUILD_TESTS_REF: 7c680ed68e478c2f22c56c65f21f12c3790d3826
   EMULEBB_TOOLING_REF: 8125e1a42dbac792eae6e35bbc427d6b885d599f
-  EMULEBB_RELEASE_VALIDATOR_REF: ff4852d3ed6d4145669cb018d1287561e9983fe3
-  EMULEBB_APK_BUILD_REF: ce89ba75c722b49f29791fe8be1d75728c147289
-  EMULEBB_APK_BUILD_TESTS_REF: 19893d8c6c224e48b6d1442cce2abc36bf69f3a6
+  EMULEBB_RELEASE_VALIDATOR_REF: 51c5ba36cd893bb2d528ac0e18a6432a2f9bf7dd
+  EMULEBB_APK_BUILD_REF: 51c5ba36cd893bb2d528ac0e18a6432a2f9bf7dd
+  EMULEBB_APK_BUILD_TESTS_REF: da9abd9c4097494686dd2f3d1b784d0c2e4d24e7
   EMULEBB_ANDROID_SIGNER_SHA256: 9edc742d7230a714a0149c20eb2afb235b8ad5237166090f10e7ac69e2bb359f
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
@@ -773,7 +773,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [apk34, apk35, apk36, apk37]
+        image: [apk31, apk32, apk33, apk34, apk35, apk36, apk37]
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
       EMULEBB_ANDROID_VERSION_CODE: ${{ needs.prepare.outputs.apk_version_code }}
@@ -1141,7 +1141,7 @@ jobs:
         with:
           name: emulebb-rust-android-apk-payload
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Download four separate Android runtime proofs
+      - name: Download seven separate Android runtime proofs
         if: ${{ inputs.channel == 'nightly' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -1194,7 +1194,7 @@ jobs:
         with:
           name: emulebb-rust-release-documents
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
-      - name: Bind four API proofs to the same signed APK and trusted authorities
+      - name: Bind seven API proofs to the same signed APK and trusted authorities
         if: ${{ inputs.channel == 'nightly' }}
         working-directory: emulebb-build
         env:

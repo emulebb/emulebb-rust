@@ -37,7 +37,7 @@ on:
         description: "Replay one original APK on an isolated guest; never eligible for publication"
         required: false
         type: choice
-        options: [none, apk34, apk35, apk36, apk37]
+        options: [none, apk31, apk32, apk33, apk34, apk35, apk36, apk37]
         default: none
 
 concurrency:
@@ -53,8 +53,8 @@ permissions:
   contents: read
 
 env:
-  EMULEBB_APK_DIAGNOSTIC_BUILD_REF: 4db2e24672dce935847ea670e9b825aedcaf49a4
-  EMULEBB_APK_DIAGNOSTIC_HARNESS_REF: b522c218b4a93ee842b99b68471664a700700ebc
+  EMULEBB_APK_DIAGNOSTIC_BUILD_REF: 51c5ba36cd893bb2d528ac0e18a6432a2f9bf7dd
+  EMULEBB_APK_DIAGNOSTIC_HARNESS_REF: da9abd9c4097494686dd2f3d1b784d0c2e4d24e7
   EMULEBB_APK_DIAGNOSTIC_TOOLING_REF: 8125e1a42dbac792eae6e35bbc427d6b885d599f
   EMULEBB_APK_DIAGNOSTIC_MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   EMULEBB_APK_DIAGNOSTIC_PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b
@@ -167,7 +167,7 @@ jobs:
               "PRODUCER_RUN_ID": r"[1-9][0-9]*",
               "PRODUCER_SOURCE_SHA": r"[0-9a-f]{40}",
               "APK_MANIFEST_SHA256": r"[0-9a-f]{64}",
-              "DIAGNOSTIC_IMAGE": r"apk(?:34|35|36|37)",
+              "DIAGNOSTIC_IMAGE": r"apk3[1-7]",
           }
           if os.environ.get("DIAGNOSTIC_PUBLISH") != "false" or any(
               re.fullmatch(pattern, os.environ.get(name, "")) is None

@@ -1551,8 +1551,8 @@ def check_release_android_packages(workflow_text: str | None = None) -> list[str
         errors.append("Signed APK packaging must require exact-source qualification")
     if qualify.get("needs") != ["prepare", "android-apk-package", "android-package"]:
         errors.append("APK runtime qualification must require the same signed APK and source-matched CLI")
-    if qualify.get("strategy", {}).get("matrix") != {"image": ["apk34", "apk35", "apk36", "apk37"]}:
-        errors.append("APK runtime qualification must cover exactly Android APIs 34 through 37")
+    if qualify.get("strategy", {}).get("matrix") != {"image": ["apk31", "apk32", "apk33", "apk34", "apk35", "apk36", "apk37"]}:
+        errors.append("APK runtime qualification must cover exactly Android APIs 31 through 37")
     for job in (package, qualify):
         if job.get("if") != "${{ inputs.channel == 'nightly' }}" or "continue-on-error" in job:
             errors.append("APK jobs must be nightly-required without failure waivers")
