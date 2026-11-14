@@ -26,6 +26,23 @@ impl std::fmt::Display for NetworkStartupError {
 impl std::error::Error for NetworkStartupError {}
 
 impl DaemonProfile {
+    /// Preserve the original operator route selection before resolving its source IP.
+    pub(crate) fn egress_route(&self) -> emulebb_ed2k::networking::EgressRoute {
+        use emulebb_ed2k::networking::EgressRoute;
+        if self.p2p_bind_ip.is_none()
+            && self
+                .p2p_bind_interface
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+            && !self.vpn_guard.enabled
+            && self.vpn_guard.mode.eq_ignore_ascii_case("off")
+        {
+            EgressRoute::DirectSystemRoute
+        } else {
+            EgressRoute::StrictInterface
+        }
+    }
+
     pub(crate) fn resolve_p2p_bind_ip_from_interfaces(
         &self,
         interfaces: &[NetworkInterface],
@@ -150,4 +167,31 @@ fn interface_token_matches(iface: &NetworkInterface, bind_interface: &str) -> bo
             .description
             .as_deref()
             .is_some_and(|description| description.to_ascii_lowercase().contains(&token))
+}
+
+#[cfg(test)]
+mod route_intent_tests {
+    use super::*;
+    use emulebb_ed2k::networking::EgressRoute;
+
+    #[test]
+    fn only_unconfigured_and_disabled_off_profile_uses_system_route() {
+        let mut profile = DaemonProfile::default();
+        assert_eq!(profile.egress_route(), EgressRoute::DirectSystemRoute);
+        profile.p2p_bind_interface = Some("  ".into());
+        assert_eq!(profile.egress_route(), EgressRoute::DirectSystemRoute);
+        profile.p2p_bind_interface = Some("tunnel".into());
+        assert_eq!(profile.egress_route(), EgressRoute::StrictInterface);
+        profile.p2p_bind_interface = None;
+        profile.p2p_bind_ip = Some(Ipv4Addr::LOCALHOST);
+        assert_eq!(profile.egress_route(), EgressRoute::StrictInterface);
+        profile.p2p_bind_ip = None;
+        profile.vpn_guard.enabled = true;
+        assert_eq!(profile.egress_route(), EgressRoute::StrictInterface);
+        profile.vpn_guard.enabled = false;
+        profile.vpn_guard.mode = "block".into();
+        assert_eq!(profile.egress_route(), EgressRoute::StrictInterface);
+        profile.vpn_guard.mode = "unknown".into();
+        assert_eq!(profile.egress_route(), EgressRoute::StrictInterface);
+    }
 }

@@ -295,6 +295,7 @@ impl Ed2kServerState {
 #[derive(Clone)]
 pub(super) struct ServerSessionContext {
     pub(super) bind_ip: Ipv4Addr,
+    pub(super) egress_route: crate::networking::EgressRoute,
     pub(super) nat: Arc<NatManager>,
     pub(super) hello_identity: Ed2kHelloIdentity,
     pub(super) nickname: String,

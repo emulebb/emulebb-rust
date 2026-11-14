@@ -145,6 +145,7 @@ pub(in crate::ed2k_tcp) struct Ed2kCallbackSessionRuntime {
     pub port_test_registry: PortTestRegistry,
     pub callback_sessions: Ed2kCallbackSessionHandle,
     pub bind_ip: Ipv4Addr,
+    pub egress_route: crate::networking::EgressRoute,
     pub shutdown: Arc<AtomicBool>,
 }
 
@@ -211,7 +212,7 @@ async fn serve_callback_session(
     }
     let transport = Ed2kTransport::connect_outgoing(
         "listener_callback",
-        runtime.bind_ip,
+        crate::networking::EgressBinding::new(runtime.bind_ip, runtime.egress_route),
         request.peer_addr,
         runtime.hello_identity.connect_options,
         request.expected_user_hash,
@@ -333,6 +334,7 @@ mod tests {
             port_test_registry: PortTestRegistry::new(),
             callback_sessions,
             bind_ip: Ipv4Addr::LOCALHOST,
+            egress_route: crate::networking::EgressRoute::StrictInterface,
             shutdown: Arc::new(AtomicBool::new(false)),
         };
         (root, runtime)

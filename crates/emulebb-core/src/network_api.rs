@@ -419,8 +419,9 @@ impl EmulebbCore {
         let prerequisites = async {
             let configured_bootstrap_endpoints_text =
                 configured_kad_bootstrap_endpoints_text(&network.kad_bootstrap_endpoints);
-            let kad_bind_if_index =
-                emulebb_ed2k::networking::require_bind_if_index(network.bind_ip, "Kad UDP")?;
+            let kad_bind_if_index = network
+                .egress_route
+                .interface_index(network.bind_ip, "Kad UDP")?;
             let dht = DhtNode::new(DhtConfig {
                 bind_addr: Some(network.kad_bind_addr),
                 obfuscation_enabled: network.ed2k.obfuscation_enabled,
@@ -430,7 +431,7 @@ impl EmulebbCore {
                 nodes_text: configured_bootstrap_endpoints_text,
                 class_budgets: kad_rpc_class_budgets(),
                 // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
-                bind_if_index: Some(kad_bind_if_index),
+                bind_if_index: kad_bind_if_index,
                 ..DhtConfig::default()
             })
             .await
@@ -620,6 +621,7 @@ impl EmulebbCore {
         }
         let port_test_registry = PortTestRegistry::new();
         tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
+            egress_route: network.egress_route,
             listener: Arc::clone(&ed2k_listener),
             dht: dht.clone(),
             server_state: Arc::clone(&server_state),
@@ -738,7 +740,10 @@ impl EmulebbCore {
             // path keeps precedence (eMule GetPublicIP order: server, then Kad/STUN).
             if enable_udp_reask || kad_network_enabled {
                 tasks.push(tokio::spawn(run_ed2k_public_ip_probe(
-                    network.bind_ip,
+                    emulebb_ed2k::networking::EgressBinding::new(
+                        network.bind_ip,
+                        network.egress_route,
+                    ),
                     ed2k_public_ip.clone(),
                     reachability_writer.clone(),
                     Arc::clone(&shutdown),
@@ -749,7 +754,10 @@ impl EmulebbCore {
             // fragile (symmetric). Informational; reask degrades to TCP either way.
             if enable_udp_reask {
                 tasks.push(tokio::spawn(run_ed2k_nat_type_probe(
-                    network.bind_ip,
+                    emulebb_ed2k::networking::EgressBinding::new(
+                        network.bind_ip,
+                        network.egress_route,
+                    ),
                     Arc::clone(&shutdown),
                 )));
             }

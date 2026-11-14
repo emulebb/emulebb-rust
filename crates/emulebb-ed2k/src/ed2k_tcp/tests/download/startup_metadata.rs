@@ -338,6 +338,7 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
     };
     let report = download_files_from_peer(
         Ed2kPeerDownloadOptions {
+            egress_route: crate::networking::EgressRoute::StrictInterface,
             bind_ip: test_bind_ip(),
             peer: &peer,
             hello_identity: Ed2kHelloIdentity {

@@ -881,7 +881,10 @@ async fn udp_firewall_check_request_completes_hello_exchange_before_request() {
 
     request_udp_firewall_check(
         None,
-        test_bind_ip(),
+        crate::networking::EgressBinding::new(
+            test_bind_ip(),
+            crate::networking::EgressRoute::StrictInterface,
+        ),
         helper_addr,
         Ed2kHelloIdentity {
             user_hash: [0x77; 16],
@@ -950,7 +953,10 @@ async fn udp_firewall_check_request_skips_silent_helper_before_request() {
 
     let error = request_udp_firewall_check(
         None,
-        test_bind_ip(),
+        crate::networking::EgressBinding::new(
+            test_bind_ip(),
+            crate::networking::EgressRoute::StrictInterface,
+        ),
         helper_addr,
         Ed2kHelloIdentity {
             user_hash: [0x77; 16],
@@ -1050,7 +1056,10 @@ async fn kad_firewall_tcp_ack_sends_hello_then_modern_ack() {
     });
 
     let mode = send_kad_firewall_tcp_ack(
-        test_bind_ip(),
+        crate::networking::EgressBinding::new(
+            test_bind_ip(),
+            crate::networking::EgressRoute::StrictInterface,
+        ),
         peer_addr,
         hello_identity,
         [0x10; 16],

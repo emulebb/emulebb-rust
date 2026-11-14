@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -41,15 +41,18 @@ fn received_udp_evidence(from: SocketAddr, transport_mode: &str) -> Ed2kServerUd
     Ed2kServerUdpEvidence::new(next_server_udp_receive_trace_id(), transport, from)
 }
 
-pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
+pub(super) async fn bind_server_udp_socket(
+    binding: crate::networking::EgressBinding,
+) -> Result<UdpSocket> {
+    let bind_ip = binding.address;
     let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
         .await
         .with_context(|| format!("failed to bind ED2K server UDP helper on {bind_ip}:0"))?;
-    let bind_if_index = crate::networking::require_bind_if_index(bind_ip, "ED2K server UDP")?;
+    let bind_if_index = binding.interface_index("ED2K server UDP")?;
     // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) — solid VPN binding.
     emulebb_kad_dht::socket_opts::pin_egress_to_interface(
         socket2::SockRef::from(&socket),
-        Some(bind_if_index),
+        bind_if_index,
     )
     .with_context(|| format!("failed to pin ED2K server UDP egress for {bind_ip}"))?;
     Ok(socket)
@@ -587,5 +590,33 @@ mod tests {
         );
         assert!(!packet.evidence.transport().obfuscated());
         assert_eq!(packet.evidence.peer(), server_peer);
+    }
+}
+
+#[cfg(test)]
+mod route_intent_tests {
+    use super::*;
+    use crate::networking::{EgressBinding, EgressRoute};
+    use std::net::Ipv4Addr;
+
+    #[tokio::test]
+    async fn direct_server_udp_keeps_source_address_and_exchanges_datagrams() {
+        let socket = bind_server_udp_socket(EgressBinding::new(
+            Ipv4Addr::LOCALHOST,
+            EgressRoute::DirectSystemRoute,
+        ))
+        .await
+        .expect("direct UDP bind");
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("receiver");
+        socket
+            .send_to(b"test", receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+        let mut bytes = [0; 4];
+        let (count, from) = receiver.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(&bytes[..count], b"test");
+        assert_eq!(from.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 }

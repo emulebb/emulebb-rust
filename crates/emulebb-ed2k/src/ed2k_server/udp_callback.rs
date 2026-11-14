@@ -68,7 +68,11 @@ pub async fn request_callback_via_udp_server(
         options.requester_tcp_port,
         options.target_client_id,
     );
-    let socket = bind_server_udp_socket(options.bind_ip).await?;
+    let socket = bind_server_udp_socket(crate::networking::EgressBinding::new(
+        options.bind_ip,
+        options.config.egress_route,
+    ))
+    .await?;
     send_server_udp_packet(&socket, &server, OP_GLOBCALLBACKREQ, &body).await
 }
 

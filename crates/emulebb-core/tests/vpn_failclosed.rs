@@ -106,6 +106,32 @@ async fn data_plane_recovers_when_tunnel_is_confirmed() {
     );
 }
 
+#[test]
+fn direct_route_rejects_conflicting_guard_or_named_interface() {
+    use emulebb_ed2k::networking::EgressRoute;
+    for case in ["allowed", "guard-enabled", "guard-mode", "named-interface"] {
+        let root = unique_runtime_dir(case);
+        let mut network = test_network_config(&root);
+        // This is an auto-resolved address in the public runtime shape, not
+        // evidence of an operator-selected bind IP.
+        network.egress_route = EgressRoute::DirectSystemRoute;
+        network.vpn_guard.mode = "off".into();
+        match case {
+            "guard-enabled" => network.vpn_guard.enabled = true,
+            "guard-mode" => network.vpn_guard.mode = "block".into(),
+            "named-interface" => network.p2p_bind_interface = Some("tunnel".into()),
+            _ => {}
+        }
+        let result = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::open(root.join("metadata.sqlite")).unwrap(),
+            root.join("transfers"),
+            Some(network),
+        );
+        assert_eq!(result.is_ok(), case == "allowed", "case {case}");
+    }
+}
+
 fn build_core(transfer_root: &Path, network: Ed2kNetworkConfig) -> EmulebbCore {
     EmulebbCore::new_with_network(
         "test",
@@ -124,6 +150,7 @@ fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
         ..Ed2kRuntimeConfig::default()
     };
     Ed2kNetworkConfig {
+        egress_route: emulebb_ed2k::networking::EgressRoute::StrictInterface,
         bind_ip: Ipv4Addr::new(198, 51, 100, 10),
         kad_bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)), 4665),
         listen_port: 4662,

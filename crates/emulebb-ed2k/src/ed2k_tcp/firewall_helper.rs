@@ -295,7 +295,7 @@ async fn handle_firewall_helper_packet(
 /// Send one `OP_FWCHECKUDPREQ` to a helper peer over eD2k TCP.
 pub async fn request_udp_firewall_check(
     dht: Option<DhtNode>,
-    bind_ip: Ipv4Addr,
+    binding: crate::networking::EgressBinding,
     helper_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
     secure_ident: Arc<Ed2kSecureIdent>,
@@ -304,7 +304,7 @@ pub async fn request_udp_firewall_check(
 ) -> Result<()> {
     let mut transport = match Ed2kTransport::connect_outgoing(
         "udp_firewall_check",
-        bind_ip,
+        binding,
         helper_addr,
         hello_identity.connect_options,
         None,
@@ -533,7 +533,7 @@ pub(crate) async fn complete_authorized_kad_callback(
 /// eD2k client connection, sends its normal `OP_HELLO`, then reports TCP reachability
 /// with `OP_KAD_FWTCPCHECK_ACK` on that same connection.
 pub async fn send_kad_firewall_tcp_ack(
-    bind_ip: Ipv4Addr,
+    binding: crate::networking::EgressBinding,
     peer_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
     peer_user_hash: [u8; 16],
@@ -542,7 +542,7 @@ pub async fn send_kad_firewall_tcp_ack(
 ) -> Result<Ed2kPeerConnectMode> {
     let mut transport = Ed2kTransport::connect_outgoing(
         "kad_tcp_firewall_ack",
-        bind_ip,
+        binding,
         peer_addr,
         hello_identity.connect_options,
         Some(peer_user_hash),

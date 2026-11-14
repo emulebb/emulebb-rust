@@ -1514,6 +1514,8 @@ pub struct TransferThroughputStats {
 
 #[derive(Debug, Clone)]
 pub struct Ed2kNetworkConfig {
+    /// Original operator routing intent, independent of the resolved source address.
+    pub egress_route: emulebb_ed2k::networking::EgressRoute,
     pub bind_ip: Ipv4Addr,
     pub kad_bind_addr: SocketAddr,
     pub listen_port: u16,

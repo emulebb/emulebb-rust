@@ -200,16 +200,17 @@ async fn run_hostname_lookup_tick(core: &EmulebbCore, settings: &HostnameLookupS
         return;
     }
     let bind_ip = network.bind_ip;
-    let bind_if_index =
-        match emulebb_ed2k::networking::require_bind_if_index(bind_ip, "hostname reverse DNS") {
-            Ok(index) => Some(index),
-            Err(error) if network.p2p_bind_ip.is_some() || network.p2p_bind_interface.is_some() => {
-                core.hostname_lookup_cache
-                    .set_blocked(queued, error.to_string());
-                return;
-            }
-            Err(_) => None,
-        };
+    let bind_if_index = match network
+        .egress_route
+        .interface_index(bind_ip, "hostname reverse DNS")
+    {
+        Ok(index) => index,
+        Err(error) => {
+            core.hostname_lookup_cache
+                .set_blocked(queued, error.to_string());
+            return;
+        }
+    };
     for ip in queued {
         let result = reverse_lookup(ip, bind_ip, bind_if_index, &dns_servers).await;
         core.hostname_lookup_cache

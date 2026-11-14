@@ -9,7 +9,7 @@
 //! dispatch and the test module reach them by their bare names.
 
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -275,12 +275,12 @@ async fn send_kad_firewalled_response(dht: &DhtNode, from: SocketAddr) -> Result
 }
 
 async fn probe_kad_firewalled_tcp(
-    bind_ip: Ipv4Addr,
+    binding: emulebb_ed2k::networking::EgressBinding,
     peer_addr: SocketAddr,
     timeout: Duration,
 ) -> Result<()> {
-    let bind_if_index =
-        emulebb_ed2k::networking::require_bind_if_index(bind_ip, "Kad TCP firewall probe")?;
+    let bind_ip = binding.address;
+    let bind_if_index = binding.interface_index("Kad TCP firewall probe")?;
     let socket = match peer_addr {
         SocketAddr::V4(_) => TcpSocket::new_v4(),
         SocketAddr::V6(_) => {
@@ -296,7 +296,7 @@ async fn probe_kad_firewalled_tcp(
     // interface used by the eD2K TCP paths before connect.
     emulebb_kad_dht::socket_opts::pin_egress_to_interface(
         socket2::SockRef::from(&socket),
-        Some(bind_if_index),
+        bind_if_index,
     )
     .with_context(|| format!("failed to pin Kad TCP firewall probe egress for {bind_ip}"))?;
     tokio::time::timeout(timeout, socket.connect(peer_addr))
@@ -354,7 +354,7 @@ async fn kad_firewalled_request_allowed(
 
 pub(crate) fn spawn_kad_firewalled_response(
     dht: DhtNode,
-    bind_ip: Ipv4Addr,
+    binding: emulebb_ed2k::networking::EgressBinding,
     reachability: ExternalReachability,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     our_tcp_port: u16,
@@ -384,7 +384,7 @@ pub(crate) fn spawn_kad_firewalled_response(
 
         let peer_addr = SocketAddr::new(from.ip(), tcp_port);
         let timeout = Duration::from_secs(KAD_FIREWALLED_TCP_PROBE_TIMEOUT_SECS);
-        match probe_kad_firewalled_tcp(bind_ip, peer_addr, timeout).await {
+        match probe_kad_firewalled_tcp(binding, peer_addr, timeout).await {
             Ok(()) => {
                 if let Err(error) = dht.send_packet(from, &KadPacket::FirewalledAckRes).await {
                     tracing::debug!("Kad FIREWALLED_ACK_RES failed for {from}: {error:#}");
@@ -485,7 +485,7 @@ pub(crate) fn spawn_modern_kad_firewalled_response(
         };
 
         match send_kad_firewall_tcp_ack(
-            network.bind_ip,
+            emulebb_ed2k::networking::EgressBinding::new(network.bind_ip, network.egress_route),
             peer_addr,
             hello_identity,
             req.user_hash.0,
@@ -508,6 +508,7 @@ pub(crate) fn spawn_modern_kad_firewalled_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn kad_hello_advertises_source_uport_even_when_firewalled() {
@@ -537,7 +538,10 @@ mod tests {
     #[tokio::test]
     async fn kad_tcp_firewall_probe_requires_resolved_bind_interface_index() {
         let err = probe_kad_firewalled_tcp(
-            Ipv4Addr::new(203, 0, 113, 234),
+            emulebb_ed2k::networking::EgressBinding::new(
+                Ipv4Addr::new(203, 0, 113, 234),
+                emulebb_ed2k::networking::EgressRoute::StrictInterface,
+            ),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 44)), 4662),
             Duration::from_millis(1),
         )

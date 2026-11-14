@@ -84,6 +84,11 @@ impl EmulebbCore {
         base: &Ed2kRuntimeConfig,
     ) -> Result<Ed2kRuntimeConfig> {
         let mut config = base.clone();
+        // Route intent belongs to the active runtime, not persisted server settings.
+        config.egress_route = self.ed2k_network.as_ref().map_or(
+            emulebb_ed2k::networking::EgressRoute::StrictInterface,
+            |network| network.egress_route,
+        );
         let state = self.state.lock().await;
         config.server_entries.retain(|entry| {
             let endpoint = format!("{}:{}", entry.host, entry.port);

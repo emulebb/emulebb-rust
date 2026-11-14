@@ -79,13 +79,15 @@ pub(super) async fn poll_server_descriptions(
     let Some(events) = events else {
         return;
     };
-    let socket = match bind_server_udp_socket(bind_ip).await {
-        Ok(socket) => socket,
-        Err(error) => {
-            warn!("server description poll disabled: {error}");
-            return;
-        }
-    };
+    let route = server_connect_plan.borrow().config().egress_route;
+    let socket =
+        match bind_server_udp_socket(crate::networking::EgressBinding::new(bind_ip, route)).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                warn!("server description poll disabled: {error}");
+                return;
+            }
+        };
     let mut last_polled = None;
     'runtime: loop {
         if task_cancel.is_cancelled() || shutdown.load(Ordering::Relaxed) {

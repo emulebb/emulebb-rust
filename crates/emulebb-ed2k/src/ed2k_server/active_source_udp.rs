@@ -145,7 +145,11 @@ pub async fn search_source_udp_servers(
         return Ok(Vec::new());
     }
 
-    let socket = bind_server_udp_socket(bind_ip).await?;
+    let socket = bind_server_udp_socket(crate::networking::EgressBinding::new(
+        bind_ip,
+        config.egress_route,
+    ))
+    .await?;
     let mut aggregated_results = Vec::new();
     let mut last_error = None;
     let per_server_timeout = timeout.max(Duration::from_secs(5));
@@ -445,7 +449,11 @@ pub async fn search_source_udp_server_batches(
             file_size: target.file_size,
         })
         .collect::<Vec<_>>();
-    let socket = bind_server_udp_socket(bind_ip).await?;
+    let socket = bind_server_udp_socket(crate::networking::EgressBinding::new(
+        bind_ip,
+        config.egress_route,
+    ))
+    .await?;
     let mut results_by_hash: HashMap<Ed2kHash, Vec<Ed2kUdpSourceSearchResult>> = HashMap::new();
     let mut last_error = None;
     let per_server_timeout = timeout.max(Duration::from_secs(5));

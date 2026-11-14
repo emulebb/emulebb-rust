@@ -270,6 +270,7 @@ fn test_network_config_with_store(
     kad_snoop_queue: SnoopQueueConfig,
 ) -> Ed2kNetworkConfig {
     Ed2kNetworkConfig {
+        egress_route: emulebb_ed2k::networking::EgressRoute::StrictInterface,
         bind_ip: Ipv4Addr::new(198, 51, 100, 10),
         kad_bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)), 4665),
         listen_port: 4662,

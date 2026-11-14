@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     time::Duration,
 };
 
@@ -356,13 +356,14 @@ impl Ed2kTransport {
 
     pub(super) async fn connect_outgoing(
         flow: &'static str,
-        bind_ip: Ipv4Addr,
+        binding: crate::networking::EgressBinding,
         peer_addr: SocketAddr,
         local_connect_options: u8,
         peer_user_hash: Option<[u8; 16]>,
         peer_connect_options: Option<u8>,
         timeout: Duration,
     ) -> Result<Self> {
+        let bind_ip = binding.address;
         let socket = match peer_addr {
             SocketAddr::V4(_) => {
                 TcpSocket::new_v4().context("failed to create outgoing eD2k TCP socket")?
@@ -371,7 +372,7 @@ impl Ed2kTransport {
                 anyhow::bail!("IPv6 callback peer connections are not supported yet: {peer_addr}")
             }
         };
-        let bind_if_index = crate::networking::require_bind_if_index(bind_ip, "eD2k TCP")?;
+        let bind_if_index = binding.interface_index("eD2k TCP")?;
         socket
             .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
             .with_context(|| format!("failed to bind outgoing eD2k socket to {bind_ip}"))?;
@@ -380,7 +381,7 @@ impl Ed2kTransport {
         // solid VPN binding (eMule ApplyConfiguredIpv4UnicastInterface).
         emulebb_kad_dht::socket_opts::pin_egress_to_interface(
             socket2::SockRef::from(&socket),
-            Some(bind_if_index),
+            bind_if_index,
         )
         .with_context(|| {
             format!("failed to pin eD2k egress to the bind interface for {bind_ip}")
