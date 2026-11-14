@@ -73,7 +73,7 @@ android {
     ndkVersion = "30.0.16248370"
     defaultConfig {
         applicationId = "org.emulebb.android"
-        minSdk = 34
+        minSdk = 31
         targetSdk = 37
         versionCode = providers.gradleProperty("emulebbVersionCode").get().toInt()
         versionName = providers.gradleProperty("emulebbVersionName").get()
