@@ -1742,6 +1742,93 @@ async fn destructive_delete_recovers_transfer_directory_tombstone() {
 }
 
 #[tokio::test]
+async fn destructive_delete_preserves_invalid_markers_across_restart_and_retry() {
+    for tombstoned in [false, true] {
+        for (case, length) in [
+            ("empty", 0),
+            ("short", 15),
+            ("wrong-uuid", 16),
+            ("overflow", 17),
+            ("long", 32),
+            ("huge", 64 * 1024 * 1024),
+        ] {
+            let root = unique_test_dir(&format!("ed2k-delete-marker-{case}-{tombstoned}"));
+            let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            let payload = b"preserve pending deletion payload";
+            let hash = ingest_completed_bytes(&runtime, "Marker.Bounds.bin", payload).await;
+            let transfer_dir = runtime.transfer_dir(&hash);
+            let transfer_tombstone = transfer_directory_tombstone_path(&hash, &transfer_dir);
+            let authority = persist_deletion_intent(&runtime, &hash);
+            let directory = if tombstoned {
+                fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
+                &transfer_tombstone
+            } else {
+                &transfer_dir
+            };
+            let payload_path = directory.join(runtime.payload_path(&hash).file_name().unwrap());
+            let marker_path =
+                transfer_directory_authority_marker_path(directory, authority.marker_id);
+            let mut contents = *authority.marker_id.as_bytes();
+            if case == "wrong-uuid" {
+                contents[0] ^= 1;
+            }
+            fs::write(&marker_path, contents).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&marker_path)
+                .unwrap()
+                .set_len(length)
+                .unwrap();
+            drop(runtime);
+
+            let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            for _ in 0..2 {
+                let report = restarted
+                    .recover_pending_transfer_deletions()
+                    .await
+                    .unwrap();
+                assert_eq!(report.recovered, 0, "{case}, tombstoned={tombstoned}");
+                assert_eq!(report.failures.len(), 1);
+                assert!(report.failures[0].contains("authority marker changed"));
+                assert_eq!(fs::read(&payload_path).unwrap(), payload);
+                assert_eq!(fs::metadata(&marker_path).unwrap().len(), length);
+                assert_eq!(
+                    super::super::ingest::native_directory_identity(directory),
+                    Some(authority.identity)
+                );
+                assert_eq!(transfer_dir.exists(), !tombstoned);
+                assert_eq!(transfer_tombstone.exists(), tombstoned);
+                assert_eq!(
+                    restarted
+                        .metadata
+                        .pending_transfer_deletion_hashes()
+                        .unwrap(),
+                    vec![hash.clone()]
+                );
+            }
+
+            fs::write(&marker_path, authority.marker_id.as_bytes()).unwrap();
+            assert_complete_deletion_recovery(
+                restarted
+                    .recover_pending_transfer_deletions()
+                    .await
+                    .unwrap(),
+                1,
+            );
+            assert!(!transfer_dir.exists());
+            assert!(!transfer_tombstone.exists());
+            assert!(
+                restarted
+                    .metadata
+                    .pending_transfer_deletion_hashes()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn destructive_delete_preserves_tombstone_without_authority_marker() {
     let root = unique_test_dir("ed2k-delete-transfer-dir-tombstone-marker-missing");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
