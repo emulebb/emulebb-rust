@@ -417,6 +417,9 @@ pub struct Ed2kTransferRuntime {
     /// When false a corrupted part is fully re-downloaded, never re-hashed
     /// early against its retained stale bytes.
     ich_enabled: AtomicBool,
+    /// Per-runtime test probe, incremented before attempting to open a raw part.
+    #[cfg(test)]
+    raw_part_read_attempts: AtomicUsize,
     /// In-memory client ban store (eMule `CClientList` ban lists), keyed by IP +
     /// user hash with a 4h `CLIENTBANTIME` TTL. Shared with the inbound listener,
     /// the download driver, the UDP reask runtime, and core via this runtime's
@@ -790,6 +793,8 @@ impl Ed2kTransferRuntime {
             shared_source_invalidations: Ed2kSharedSourceInvalidationSignal::default(),
             credit_system_enabled: AtomicBool::new(true),
             ich_enabled: AtomicBool::new(true),
+            #[cfg(test)]
+            raw_part_read_attempts: AtomicUsize::new(0),
             ban_store,
             tracked_client_identities,
             corruption_blackbox: Arc::new(StdMutex::new(HashMap::new())),

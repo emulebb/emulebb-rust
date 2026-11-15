@@ -91,11 +91,6 @@ impl Ed2kTransferRuntime {
             return Ok(None);
         }
 
-        // Read the current (corrupt) local part bytes.
-        let part_bytes = self
-            .read_part_raw_unlocked(file_hash, part_start, part_len)
-            .await?;
-
         // Verify the recovery data against the trusted master hash and recover
         // the per-block trusted hashes for this part.
         let trusted_block_hashes = trusted_part_block_hashes_from_recovery(
@@ -104,6 +99,11 @@ impl Ed2kTransferRuntime {
             u64::from(part_index),
             recovery_body,
         )?;
+        // WHY: reject untrusted recovery proofs before any raw payload read;
+        // proof validation depends only on geometry and the trusted root.
+        let part_bytes = self
+            .read_part_raw_unlocked(file_hash, part_start, part_len)
+            .await?;
         let recovery = compute_part_recovery(
             manifest.file_size,
             u64::from(part_index),
@@ -386,6 +386,9 @@ impl Ed2kTransferRuntime {
         start: u64,
         len: u64,
     ) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        self.raw_part_read_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)

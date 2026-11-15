@@ -22,6 +22,11 @@ use super::super::{
 use crate::paths::unique_test_dir;
 use emulebb_kad_proto::Ed2kHash;
 use std::fs;
+use std::net::Ipv4Addr;
+use std::sync::atomic::Ordering;
+
+const GOOD_SENDER: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 10);
+const BAD_SENDER: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 20);
 
 /// Distinct byte for block `idx` so each 180 KB block hashes differently and a
 /// corruption stays localized to one block.
@@ -86,6 +91,230 @@ fn recovery_body_for(data: &[u8], part: u64) -> Vec<u8> {
     sharer.create_part_recovery_data(part).unwrap()
 }
 
+async fn initialized_salvage_transfer(
+    tag: &str,
+) -> (Ed2kTransferRuntime, String, Vec<u8>, Ed2kAichHashset) {
+    let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(tag)).unwrap();
+    let data = build_two_part_payload();
+    let (file_hash, md4_parts) = md4_hashset(&data);
+    let aich = aich_hashset(&data);
+    let job = new_transfer_job(file_hash, "proof.bin".to_string(), data.len() as u64);
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, md4_parts)
+        .await
+        .unwrap();
+    runtime
+        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .await
+        .unwrap();
+    runtime
+        .store_aich_hashset(&job.file_hash, aich.clone())
+        .await
+        .unwrap();
+    fs::write(runtime.payload_path(&job.file_hash), &data).unwrap();
+    (runtime, job.file_hash, data, aich)
+}
+
+#[tokio::test]
+async fn rejected_recovery_proofs_never_attempt_raw_payload_reads_or_change_state() {
+    let (runtime, file_hash, data, aich) =
+        initialized_salvage_transfer("ed2k-salvage-proof-before-io").await;
+    runtime.cbb_record_received_data(&file_hash, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
+    let mut before = runtime.manifest(&file_hash).await.unwrap();
+    let mut bitmap = PartBlockBitmap::empty(ED2K_PART_SIZE);
+    bitmap.set_present(1);
+    before.pieces[0].apply_block_bitmap(&bitmap);
+    before.pieces[0].ich_corrupted = true;
+    {
+        let _guard = runtime.lock_manifest(&file_hash).await;
+        runtime.store_manifest_unlocked(&before).await.unwrap();
+    }
+    let attribution = format!("{:?}", runtime.corruption_blackbox.lock().unwrap());
+    let mut sharer = AichRecoveryHashSet::new(data.len() as u64);
+    sharer.build_from_data(&data).unwrap();
+    let body16 = sharer.create_part_recovery_data(0).unwrap();
+    let body32 = sharer.create_part_recovery_data_force_32bit(0).unwrap();
+    let mut cases = Vec::new();
+    for (name, body, count_offset, ident_offset, ident_size) in
+        [("16-bit", &body16, 0, 2, 2), ("32-bit", &body32, 2, 4, 4)]
+    {
+        // Remove hash bytes, rather than the ignored 16-bit trailing count.
+        cases.push((
+            format!("{name} truncated"),
+            body[..body.len() - 5].to_vec(),
+            "short",
+        ));
+        let mut invalid_count = body.clone();
+        invalid_count[count_offset..count_offset + 2].copy_from_slice(&1u16.to_le_bytes());
+        cases.push((
+            format!("{name} count"),
+            invalid_count,
+            "hash count mismatch",
+        ));
+        for ident in [0u32, 1] {
+            let mut forbidden = body.clone();
+            forbidden[ident_offset..ident_offset + ident_size]
+                .copy_from_slice(&ident.to_le_bytes()[..ident_size]);
+            let message = match (ident, ident_size) {
+                (0, _) => "invalid hash ident (0)",
+                (_, 2) => "master hash overwrite rejected",
+                _ => "invalid 32-bit ident",
+            };
+            cases.push((
+                format!("{name} forbidden ident {ident}"),
+                forbidden,
+                message,
+            ));
+        }
+        if ident_size == 4 {
+            let mut forbidden = body.clone();
+            forbidden[ident_offset..ident_offset + 4].copy_from_slice(&0x40_0001u32.to_le_bytes());
+            cases.push((
+                format!("{name} oversized ident"),
+                forbidden,
+                "invalid 32-bit ident",
+            ));
+        }
+        let mut wrong_root = body.clone();
+        wrong_root[ident_offset + ident_size] ^= 0xFF;
+        cases.push((
+            format!("{name} root failure"),
+            wrong_root,
+            "hash tree verification failed",
+        ));
+
+        // Supply the correct two part roots, but no block leaves. Repeating the
+        // part-0 root preserves the required count and passes root verification;
+        // the separate lowest-level coverage check must still reject it.
+        let mut incomplete = body.clone();
+        let count = u16::from_le_bytes(body[count_offset..count_offset + 2].try_into().unwrap());
+        for index in 0..usize::from(count) {
+            let offset = ident_offset + index * (ident_size + 20);
+            let (ident, hash) = if index == 0 {
+                (2u32, aich.part_hashes[1])
+            } else {
+                (3u32, aich.part_hashes[0])
+            };
+            incomplete[offset..offset + ident_size]
+                .copy_from_slice(&ident.to_le_bytes()[..ident_size]);
+            incomplete[offset + ident_size..offset + ident_size + 20].copy_from_slice(&hash);
+        }
+        cases.push((
+            format!("{name} incomplete leaves"),
+            incomplete,
+            "missing lowest-level block hash",
+        ));
+    }
+    for (name, body, message) in cases {
+        let error = runtime
+            .begin_part_salvage(&file_hash, 0, aich.master_hash, &body)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(message), "{name}: {error:#}");
+        assert_eq!(
+            runtime.raw_part_read_attempts.load(Ordering::Relaxed),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            runtime.manifest(&file_hash).await.unwrap(),
+            before,
+            "{name}"
+        );
+        assert_eq!(
+            format!("{:?}", runtime.corruption_blackbox.lock().unwrap()),
+            attribution,
+            "{name}"
+        );
+        assert!(!runtime.is_client_banned(Some(GOOD_SENDER), None), "{name}");
+    }
+    for (part, master) in [(0, [0xAB; 20]), (u16::MAX, aich.master_hash)] {
+        assert!(
+            runtime
+                .begin_part_salvage(&file_hash, part, master, &body16)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.manifest(&file_hash).await.unwrap(), before);
+        assert_eq!(
+            format!("{:?}", runtime.corruption_blackbox.lock().unwrap()),
+            attribution
+        );
+    }
+    assert_eq!(fs::read(runtime.payload_path(&file_hash)).unwrap(), data);
+}
+
+#[tokio::test]
+async fn recovery_proof_errors_precede_payload_errors_but_valid_proofs_keep_storage_errors() {
+    let (runtime, file_hash, data, aich) =
+        initialized_salvage_transfer("ed2k-salvage-proof-storage-errors").await;
+    let before = runtime.manifest(&file_hash).await.unwrap();
+    // Separate from the intact-payload rejection fixtures: deliberately make
+    // storage unreadable as a complete part to pin the error precedence.
+    fs::write(runtime.payload_path(&file_hash), []).unwrap();
+    let proof_error = runtime
+        .begin_part_salvage(&file_hash, 0, aich.master_hash, &[0])
+        .await
+        .unwrap_err();
+    assert_eq!(proof_error.to_string(), "AICH reader: short u16");
+    assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 0);
+    let storage_error = runtime
+        .begin_part_salvage(
+            &file_hash,
+            0,
+            aich.master_hash,
+            &recovery_body_for(&data, 0),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        storage_error
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::UnexpectedEof,
+    );
+    assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(runtime.manifest(&file_hash).await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn salvage_repair_still_requires_final_part_md4_verification() {
+    let (runtime, file_hash, mut data, aich) =
+        initialized_salvage_transfer("ed2k-salvage-md4-required").await;
+    let body = recovery_body_for(&data, 0);
+    data[0] ^= 0xFF;
+    fs::write(runtime.payload_path(&file_hash), &data).unwrap();
+    let outcome = runtime
+        .begin_part_salvage(&file_hash, 0, aich.master_hash, &body)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(outcome.needed_ranges, vec![(0, ED2K_EMBLOCK_SIZE)]);
+    let repair = runtime
+        .write_salvage_block(
+            &file_hash,
+            0,
+            0,
+            ED2K_EMBLOCK_SIZE,
+            &data[..ED2K_EMBLOCK_SIZE as usize],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repair,
+        super::super::PieceWriteOutcome::VerificationFailed { part_index: 0 }
+    );
+    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
+    assert!(manifest.pieces[0].ich_corrupted);
+    assert!(!manifest.completed);
+}
+
 #[tokio::test]
 async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     let root = unique_test_dir("ed2k-salvage-one-block");
@@ -134,11 +363,30 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
 
     // Begin salvage with a valid recovery answer for part 0.
     let body = recovery_body_for(&data, 0);
+    runtime.cbb_record_received_data(&job.file_hash, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
+    runtime.cbb_record_received_data(
+        &job.file_hash,
+        cb_start as u64,
+        cb_end as u64,
+        BAD_SENDER,
+        None,
+    );
     let outcome = runtime
         .begin_part_salvage(&job.file_hash, 0, aich.master_hash, &body)
         .await
         .unwrap()
         .expect("salvage should start for a corrupt part with a trusted AICH root");
+    assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 1);
+    assert!(!runtime.is_client_banned(Some(GOOD_SENDER), None));
+    assert!(runtime.is_client_banned(Some(BAD_SENDER), None));
+    assert_eq!(
+        runtime.cbb_verified_bytes_for_test(&job.file_hash, GOOD_SENDER),
+        ED2K_PART_SIZE - ED2K_EMBLOCK_SIZE
+    );
+    assert_eq!(
+        runtime.cbb_verified_bytes_for_test(&job.file_hash, BAD_SENDER),
+        0
+    );
 
     // Exactly the one corrupt block is needed; every other block was salvaged.
     assert_eq!(
