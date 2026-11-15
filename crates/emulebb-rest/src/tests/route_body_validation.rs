@@ -747,6 +747,98 @@ async fn core_settings_patch_body_uses_canonical_validation() {
 }
 
 #[tokio::test]
+async fn nat_settings_patch_booleans_reject_non_boolean_values_with_valid_siblings() {
+    let app = test_router();
+    for field in ["enabled", "requireInitialMapping"] {
+        for value in ["null", r#""true""#, "1", "[]", "{}"] {
+            for sibling in ["", r#", "renewMarginSecs":300"#] {
+                assert_invalid_json_response(
+                    app.clone(),
+                    "PATCH",
+                    "/api/v1/app/settings",
+                    format!(r#"{{"nat":{{"{field}":{value}{sibling}}}}}"#),
+                    &format!("{field} must be a boolean"),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn nat_settings_patch_booleans_accept_both_values_and_omission() {
+    for field in ["enabled", "requireInitialMapping"] {
+        let app = test_router();
+        for value in [Some(false), Some(true), None] {
+            let mut nat = json!({"renewMarginSecs": 300});
+            if let Some(value) = value {
+                nat[field] = json!(value);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/v1/app/settings")
+                        .header("X-API-Key", "secret")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(json!({"nat": nat}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{field}: {value:?}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(response["data"]["nat"][field], value.unwrap_or(true));
+        }
+    }
+}
+
+#[tokio::test]
+async fn nat_settings_patch_keeps_nullable_ip_and_socket_fields_clearable() {
+    let app = test_router();
+    let fields = [
+        "bindIp",
+        "pcpServerIp",
+        "igdIp",
+        "externalIpOverride",
+        "minissdpdSocket",
+    ];
+    for clear in [false, true] {
+        let mut nat = json!({});
+        for field in fields {
+            nat[field] = if clear {
+                Value::Null
+            } else if field == "minissdpdSocket" {
+                json!("/tmp/synthetic-minissdpd.sock")
+            } else {
+                json!("192.0.2.1")
+            };
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/app/settings")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(json!({"nat": nat}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        for field in fields {
+            assert_eq!(response["data"]["nat"][field].is_null(), clear, "{field}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn transfer_add_body_keeps_canonical_link_validation_before_paused() {
     let app = test_router();
     let link = "ed2k://|file|PausedOrder.bin|1|00112233445566778899aabbccddeeff|/";
