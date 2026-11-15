@@ -519,6 +519,9 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
 }
 
 fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    // WHY: Reject explicit null before Option<bool> decoding can treat it as an omitted patch.
+    validate_optional_boolean_body_field(object, "enabled")?;
+    validate_optional_boolean_body_field(object, "requireInitialMapping")?;
     validate_nullable_ipv4_text(object, "bindIp", "settings.nat.bindIp")?;
     validate_nullable_ipv4_text(object, "pcpServerIp", "settings.nat.pcpServerIp")?;
     validate_nullable_ipv4_text(object, "igdIp", "settings.nat.igdIp")?;
