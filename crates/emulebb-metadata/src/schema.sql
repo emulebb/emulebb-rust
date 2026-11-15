@@ -606,6 +606,35 @@ CREATE TABLE kad_bootstrap_endpoints (
     CHECK(length(trim(endpoint)) > 0)
 ) STRICT;
 
+CREATE TABLE kad_routing_revision (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    revision INTEGER NOT NULL CHECK(revision >= 0)
+) STRICT;
+INSERT INTO kad_routing_revision(id, revision) VALUES (1, 0);
+
+CREATE TABLE kad_routing_contacts (
+    node_id BLOB PRIMARY KEY CHECK(length(node_id) = 16),
+    ip INTEGER NOT NULL UNIQUE CHECK(ip BETWEEN 1 AND 4294967295),
+    udp_port INTEGER NOT NULL CHECK(udp_port BETWEEN 1 AND 65535),
+    tcp_port INTEGER NOT NULL CHECK(tcp_port BETWEEN 0 AND 65535),
+    version INTEGER NOT NULL CHECK(version BETWEEN 0 AND 255),
+    udp_key INTEGER NOT NULL CHECK(udp_key BETWEEN 0 AND 4294967295),
+    udp_key_ip INTEGER CHECK(udp_key_ip BETWEEN 1 AND 4294967295),
+    hello_source_udp_port INTEGER CHECK(hello_source_udp_port BETWEEN 1 AND 65535),
+    udp_firewalled INTEGER NOT NULL CHECK(udp_firewalled IN (0, 1)),
+    tcp_firewalled INTEGER NOT NULL CHECK(tcp_firewalled IN (0, 1)),
+    requests_hello_res_ack INTEGER NOT NULL CHECK(requests_hello_res_ack IN (0, 1)),
+    received_hello_packet INTEGER NOT NULL CHECK(received_hello_packet IN (0, 1)),
+    verified INTEGER NOT NULL CHECK(verified IN (0, 1)),
+    contact_type TEXT NOT NULL CHECK(contact_type IN ('active', 'inactive', 'dead')),
+    probe_type INTEGER NOT NULL CHECK(probe_type BETWEEN 0 AND 4),
+    bootstrap INTEGER NOT NULL CHECK(bootstrap IN (0, 1)),
+    expires_at_seconds INTEGER CHECK(expires_at_seconds >= 0),
+    last_type_set_at_seconds INTEGER CHECK(last_type_set_at_seconds >= 0),
+    last_seen_at_seconds INTEGER NOT NULL CHECK(last_seen_at_seconds >= 0),
+    created_at_seconds INTEGER NOT NULL CHECK(created_at_seconds >= 0)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE kad_keyword_publishes (
     id INTEGER PRIMARY KEY,
     size_bytes BLOB NOT NULL CHECK(length(size_bytes) = 8),

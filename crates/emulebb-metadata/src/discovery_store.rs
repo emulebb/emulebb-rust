@@ -51,7 +51,10 @@ impl MetadataStore {
     ///
     /// An intentionally empty collection can also be initialized. Callers must
     /// commit this update together with the collection mutation or import.
-    pub fn mark_discovery_initialized(tx: &Transaction<'_>, domain: DiscoveryDomain) -> Result<()> {
+    pub(crate) fn mark_discovery_initialized(
+        tx: &Transaction<'_>,
+        domain: DiscoveryDomain,
+    ) -> Result<()> {
         let changed = tx.execute(
             "UPDATE discovery_initialization SET status = 'initialized' WHERE domain = ?1",
             [domain.as_str()],

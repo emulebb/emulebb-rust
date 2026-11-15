@@ -55,6 +55,14 @@ pub(crate) fn validate(conn: &Connection) -> Result<()> {
         )? == 2,
         "metadata discovery initialization state is missing or invalid"
     );
+    ensure!(
+        conn.query_row(
+            "SELECT count(*) FROM kad_routing_revision WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )? == 1,
+        "metadata Kad routing revision is missing"
+    );
     Ok(())
 }
 

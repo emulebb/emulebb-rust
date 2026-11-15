@@ -10,6 +10,7 @@ mod identity_model;
 mod identity_store;
 mod kad_publish_model;
 mod kad_publish_store;
+mod kad_routing_store;
 mod library_projection;
 mod local_catalog;
 mod local_file_store;
@@ -43,6 +44,9 @@ pub use kad_publish_model::{
     MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadOutboundPublish,
     MetadataKadOutboundPublishKind, MetadataKadOutboundPublishSchedule, MetadataKadPublishCache,
     MetadataKadSourcePublish,
+};
+pub use kad_routing_store::{
+    KAD_ROUTING_MAX_CONTACTS, KadRoutingContact, KadRoutingContactType, KadRoutingSnapshot,
 };
 pub use local_file_store::{
     MetadataContentConflict, MetadataLocalFileInstance, MetadataLocalShareEntry,

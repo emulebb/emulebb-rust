@@ -10,6 +10,7 @@ fn current_marker_cannot_hide_missing_indexes_triggers_or_wrong_columns() {
         "DELETE FROM profile",
         "DELETE FROM library_catalog_revision",
         "DELETE FROM discovery_initialization WHERE domain = 'kad'",
+        "DELETE FROM kad_routing_revision",
     ] {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::SCHEMA_SQL).unwrap();
