@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md"><strong>Use eMuleBB Rust</strong></a> &nbsp;&middot;&nbsp;
+  <a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md"><strong>Use eMuleBB Rust</strong></a> &nbsp;&middot;&nbsp;
   <a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-CONTRIBUTING/"><strong>Develop with eMuleBB Rust</strong></a>
 </p>
 <p align="center">
@@ -58,34 +58,34 @@ channel. Prebuilt packages need no Rust toolchain.
 
 Choose a runnable asset from the [nightly releases](https://github.com/emulebb/emulebb-rust/releases),
 then compare its exact filename against that release's `SHA256SUMS`.
-The [platform run guide](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md)
+The [platform run guide](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/)
 owns installation commands, profile paths, requirements and qualification scope.
 
 | Platform | Choose | Install and run |
 | --- | --- | --- |
-| Windows | x64 or ARM64 ZIP | [Extract and launch](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#windows-x64-and-arm64) |
-| Linux | x64 or ARM64 DEB, AppImage or static-musl tar/zstd | [Choose a Linux variant](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#linux) |
-| macOS | Intel or Apple Silicon DMG | [Copy and launch the app](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#macos-intel-and-apple-silicon) |
-| Docker / OCI | Linux amd64 or arm64; Ubuntu or Alpine | [Run with persistent volumes](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#containers) |
-| Android APK | Universal ARM64 + x86_64; Android 12+ | [Permissions, manual Start and WebUI](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#android-application) |
-| Android / Termux native | Experimental `android-arm64-v8a.tar.zst` or `android-x86_64.tar.zst` | [Extract under private HOME and launch](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md#termux-native-shell) |
+| Windows | x64 or ARM64 ZIP | [Extract and launch](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/#windows-x64-and-arm64) |
+| Linux | x64 or ARM64 DEB, AppImage or static-musl tar/zstd | [Choose a Linux variant](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/#linux) |
+| macOS | Intel or Apple Silicon DMG | [Copy and launch the app](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/#macos-intel-and-apple-silicon) |
+| Docker / OCI | Linux amd64 or arm64; Ubuntu or Alpine | [Run with persistent volumes](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/#containers) |
+| Android APK | Universal ARM64 + x86_64; Android 12+ | [Permissions, manual Start and WebUI](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/#android-application) |
+| Android / Termux native | Experimental `android-arm64-v8a.tar.zst` or `android-x86_64.tar.zst` | [Extract under private HOME and launch](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/#termux-native-shell) |
 
 The macOS app is unsigned and not notarized. For containers, both
 [`ghcr.io/emulebb/emulebb-rust`](https://github.com/emulebb/emulebb-rust/pkgs/container/emulebb-rust)
 variants publish versioned tags and moving `nightly` / `nightly-ubuntu` /
 `nightly-alpine` aliases; there is no `latest` tag.
 
-**Android remains experimental.** Use the signed APK only when the selected
-published release includes it after qualification. Both native ABI archives
-remain separate public nightly assets alongside that APK. Their API 28 binary
-floor and compile/ELF evidence do not qualify Termux runtime, the full Android
-API matrix, Fire OS or 24-hour continuous operation. The APK minimum is Android
-12/API 31; its foreground service starts manually and has no boot-resume option.
-See [Android evidence and remaining acceptance](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/active/items/RUST-FEAT-056.md).
+**Android remains experimental.** The nightly release contract includes the
+signed Android 12+ APK and both native archives, `android-arm64-v8a.tar.zst`
+and `android-x86_64.tar.zst`. Follow the platform guide for installation and
+manual foreground-service start, including after reboot. The native archives
+target API 28 for compilation; compile and ELF checks do not qualify Termux or
+Fire OS runtime. Termux runtime, Fire OS, automatic boot-resume and 24-hour
+endurance remain unqualified. See [Android evidence and remaining acceptance](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/active/items/RUST-FEAT-056/).
 
 ## Get started
 
-1. Follow your [platform's run instructions](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS.md).
+1. Follow your [platform's run instructions](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-DOWNLOADS-PLATFORMS/).
    Keep the complete extracted archive layout, including `webui`.
 2. Open **<http://127.0.0.1:20017/>** on the daemon host. The default listener
    is **`0.0.0.0:20017`**. Native packages use the ready key
@@ -103,7 +103,7 @@ settings; mutable client settings live in the profile database.
 Startup may fetch discovery inputs and start configured networking. During beta,
 an incompatible database requires an entirely fresh profile; preserve the
 stopped old profile, payloads and matching binary for rollback. The
-[getting-started guide](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md)
+[getting-started guide](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED/)
 covers everyday operation, shutdown and troubleshooting.
 
 ## Use the API
@@ -144,10 +144,10 @@ this trust set. Updated roots arrive with new client builds.
 
 ## Help and security
 
-- [Troubleshoot startup, listeners and logs](https://github.com/emulebb/emulebb-tooling/blob/f88a8ce608bc75a619aea6909f54a9cdecdddb6e/docs/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md#common-problems).
+- [Troubleshoot startup, listeners and logs](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED/#common-problems).
 - [Report a bug](https://github.com/emulebb/emulebb-rust/issues) with the package
   version and sanitized reproduction steps.
-- Follow [private security reporting](SECURITY.md) for vulnerabilities.
+- Follow [private security reporting](SECURITY/) for vulnerabilities.
 
 Diagnostic bundles are private operator evidence and can contain credentials,
 paths, identifiers and logs. Review them before sharing publicly.
@@ -155,4 +155,4 @@ paths, identifiers and logs. Review them before sharing publicly.
 ## License
 
 [GPL-2.0-only](LICENSE). Dependencies retain their own licenses; see
-[third-party notices](THIRD-PARTY-LICENSES.md).
+[third-party notices](THIRD-PARTY-LICENSES/).
