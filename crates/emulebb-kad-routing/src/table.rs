@@ -242,6 +242,36 @@ impl RoutingTable {
         self.root.get(id, &self.own_id)
     }
 
+    /// Merge durable evidence without letting a stale snapshot replace a live
+    /// endpoint or weaken existing contact knowledge. New contacts still pass
+    /// the ordinary routing admission and subnet rules.
+    pub fn merge_restored_contact(&mut self, incoming: Contact) -> Result<bool, RoutingError> {
+        if let Some(existing) = self.root.get_mut(&incoming.id, &self.own_id) {
+            if existing.ip != incoming.ip || existing.udp_port != incoming.udp_port {
+                return Ok(false);
+            }
+            existing.kad_version = existing.kad_version.max(incoming.kad_version);
+            if existing.tcp_port == 0 {
+                existing.tcp_port = incoming.tcp_port;
+            }
+            if existing.udp_key == emulebb_kad_proto::KadUdpKey::ZERO {
+                existing.udp_key = incoming.udp_key;
+                existing.udp_key_ip = incoming.udp_key_ip;
+            }
+            existing.verified |= incoming.verified;
+            existing.received_hello_packet |= incoming.received_hello_packet;
+            existing.bootstrap |= incoming.bootstrap;
+            if existing.hello_source_udp_port.is_none() {
+                existing.hello_source_udp_port = incoming.hello_source_udp_port;
+            }
+            existing.created_at = existing.created_at.min(incoming.created_at);
+            existing.last_seen = existing.last_seen.max(incoming.last_seen);
+            return Ok(true);
+        }
+        self.add_contact(incoming)?;
+        Ok(true)
+    }
+
     /// Mark a contact as IP-verified after a successful three-way handshake or
     /// legacy challenge response.
     ///

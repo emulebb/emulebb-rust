@@ -26,6 +26,10 @@ pub enum DhtError {
     Io(#[from] std::io::Error),
     #[error("nodes.dat parse error")]
     NodesDatParse,
+    #[error("invalid Kad routing snapshot")]
+    InvalidRoutingSnapshot,
+    #[error("Kad routing snapshot exceeds the contact limit")]
+    RoutingSnapshotTooLarge,
     #[error("search semaphore closed")]
     SemaphoreClosed,
     #[error("unexpected packet type")]

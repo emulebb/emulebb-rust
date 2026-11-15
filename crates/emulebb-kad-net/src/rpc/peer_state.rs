@@ -31,6 +31,13 @@ impl RpcManager {
         self.inner.obfuscation.register_peer_key(addr, key);
     }
 
+    /// Fill an absent restored key without replacing live key evidence.
+    pub fn register_peer_key_if_absent(&self, addr: SocketAddr, key: u32) {
+        self.inner
+            .obfuscation
+            .register_peer_key_if_absent(addr, key);
+    }
+
     /// Clear all peer receiver keys after our public IPv4 binding changes and
     /// control whether newly observed keys may be retained under that binding.
     pub fn reset_peer_keys(&self, accept_new_keys: bool) {
@@ -55,10 +62,28 @@ impl RpcManager {
         self.inner.obfuscation.register_peer_identity(addr, node_id);
     }
 
+    /// Restore an absent peer identity without replacing live evidence.
+    pub fn register_peer_identity_if_absent(
+        &self,
+        addr: SocketAddr,
+        node_id: emulebb_kad_proto::NodeId,
+    ) {
+        self.inner
+            .obfuscation
+            .register_peer_identity_if_absent(addr, node_id);
+    }
+
     /// Register the peer Kad version so outbound transport shape can match the oracle gates.
     pub fn register_peer_version(&self, addr: SocketAddr, kad_version: u8) {
         self.inner
             .obfuscation
             .register_peer_version(addr, kad_version);
+    }
+
+    /// Restore a peer version without lowering an already learned version.
+    pub fn register_peer_version_if_higher(&self, addr: SocketAddr, kad_version: u8) {
+        self.inner
+            .obfuscation
+            .register_peer_version_if_higher(addr, kad_version);
     }
 }

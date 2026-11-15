@@ -10,6 +10,7 @@ pub(crate) mod concurrency;
 mod config;
 mod contact_helpers;
 mod legacy_challenge;
+mod persistence;
 mod publish;
 mod routing;
 mod search;
@@ -20,6 +21,7 @@ use legacy_challenge::LegacyChallengeTracker;
 
 pub use config::DhtConfig;
 use contact_helpers::expire_contact_for_massive_flood;
+pub use persistence::{RoutingRestoreOutcome, RoutingSnapshotContact};
 pub use routing::{HelloRoutingMutation, HelloRoutingOutcome, HelloRoutingUnchangedReason};
 
 use crate::error::DhtError;
@@ -45,6 +47,8 @@ struct DhtInner {
     /// unknown). Peer UDP keys loaded from disk are exposed to the RPC layer
     /// only when their saved binding matches this value.
     current_public_ip: Arc<AtomicU32>,
+    /// Serializes public-address/key-map transitions with durable snapshots.
+    key_binding_gate: Mutex<()>,
     config: DhtConfig,
     /// Per-target dedup + bounded concurrency for search/publish traversals
     /// (oracle `CSearchManager::AlreadySearchingFor` + the concurrent-search
@@ -190,6 +194,7 @@ impl DhtNode {
                 routing_table,
                 rpc,
                 current_public_ip,
+                key_binding_gate: Mutex::new(()),
                 config,
                 search_concurrency,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
@@ -275,6 +280,7 @@ impl DhtNode {
     /// Every live receiver key is invalidated on a change; only persisted keys
     /// whose saved binding matches the new address are re-exposed.
     pub async fn set_public_ip_for_udp_keys(&self, public_ip: Option<Ipv4Addr>) {
+        let _binding = self.inner.key_binding_gate.lock().await;
         let bits = public_ip.map_or(0, u32::from);
         let previous = self.inner.current_public_ip.swap(bits, Ordering::Relaxed);
         if previous == bits {

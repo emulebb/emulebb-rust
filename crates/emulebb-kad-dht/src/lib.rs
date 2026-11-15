@@ -13,7 +13,8 @@ pub use emulebb_kad_net::{
 pub use error::DhtError;
 pub use node::{
     DhtConfig, DhtNode, HelloRoutingMutation, HelloRoutingOutcome, HelloRoutingUnchangedReason,
-    KadRoutingContactSnapshot, KadRoutingSummaryCounts,
+    KadRoutingContactSnapshot, KadRoutingSummaryCounts, RoutingRestoreOutcome,
+    RoutingSnapshotContact,
 };
 pub use publish::{KeywordPublishEntry, PublishAttemptStats};
 pub use search::{KadSearchCompletion, KadSearchStream};
