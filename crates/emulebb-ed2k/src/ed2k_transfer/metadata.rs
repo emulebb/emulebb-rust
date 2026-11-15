@@ -1795,14 +1795,15 @@ async fn validate_transfer_directory_authority(
     let matches = tokio::task::spawn_blocking(move || -> Result<bool> {
         use std::io::Read;
 
-        let mut marker = match super::ingest::open_regular_file_without_follow(&marker_path) {
+        let marker = match super::ingest::open_regular_file_without_follow(&marker_path) {
             Ok(marker) => marker,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        let mut contents = Vec::new();
-        marker.read_to_end(&mut contents)?;
-        Ok(contents == marker_id.as_bytes())
+        // WHY: Bound corrupt-marker reads while requiring the exact UUID plus no overflow byte.
+        let mut contents = [0_u8; 17];
+        let length = std::io::copy(&mut marker.take(17), &mut contents.as_mut_slice())?;
+        Ok(length == 16 && contents[..16] == marker_id.as_bytes()[..])
     })
     .await
     .context("transfer directory deletion marker validation task failed")??;
