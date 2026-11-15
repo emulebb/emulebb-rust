@@ -26,6 +26,28 @@ fn contact(id: u8, ip: u32) -> KadRoutingContact {
 }
 
 #[test]
+fn load_rejects_more_than_the_routing_limit() {
+    let store = MetadataStore::in_memory().unwrap();
+    {
+        let mut conn = store.connection().unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO kad_routing_contacts (node_id, ip, udp_port, tcp_port, version, udp_key, udp_firewalled, tcp_firewalled, requests_hello_res_ack, received_hello_packet, verified, contact_type, probe_type, bootstrap, last_seen_at_seconds, created_at_seconds) VALUES (?1, ?2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 'inactive', 0, 0, 0, 0)").unwrap();
+            for i in 0..=KAD_ROUTING_MAX_CONTACTS {
+                insert
+                    .execute(rusqlite::params![
+                        (i as u128).to_be_bytes().as_slice(),
+                        (i + 1) as i64
+                    ])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+    assert!(store.load_kad_routing_snapshot().is_err());
+}
+
+#[test]
 fn full_snapshot_reopens_and_replacement_preserves_independent_status() {
     let path =
         std::env::temp_dir().join(format!("emulebb-kad-snapshot-{}.db", uuid::Uuid::new_v4()));

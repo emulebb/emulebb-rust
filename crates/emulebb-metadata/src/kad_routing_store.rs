@@ -83,6 +83,16 @@ impl MetadataStore {
             "initialized" => DiscoveryInitializationStatus::Initialized,
             _ => bail!("invalid Kad initialization status"),
         };
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM kad_routing_contacts LIMIT ?1)",
+            [(KAD_ROUTING_MAX_CONTACTS + 1) as i64],
+            |row| row.get(0),
+        )?;
+        let count = usize::try_from(count)?;
+        ensure!(
+            count <= KAD_ROUTING_MAX_CONTACTS,
+            "Kad routing snapshot exceeds contact limit"
+        );
         let contacts = {
             let mut stmt = tx.prepare("SELECT node_id, ip, udp_port, tcp_port, version, udp_key, udp_key_ip, hello_source_udp_port, udp_firewalled, tcp_firewalled, requests_hello_res_ack, received_hello_packet, verified, contact_type, probe_type, bootstrap, expires_at_seconds, last_type_set_at_seconds, last_seen_at_seconds, created_at_seconds FROM kad_routing_contacts ORDER BY node_id LIMIT ?1")?;
             let rows = stmt.query_map([(KAD_ROUTING_MAX_CONTACTS + 1) as i64], |row| {
@@ -116,7 +126,23 @@ impl MetadataStore {
                     created_at_seconds: row.get(19)?,
                 })
             })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
+            let mut contacts = Vec::with_capacity(count);
+            ensure!(
+                contacts.capacity() <= KAD_ROUTING_MAX_CONTACTS.next_power_of_two(),
+                "Kad routing allocation exceeds reserved capacity"
+            );
+            for row in rows {
+                ensure!(
+                    contacts.len() < count,
+                    "Kad routing row count changed within transaction"
+                );
+                contacts.push(row?);
+            }
+            ensure!(
+                contacts.len() == count,
+                "Kad routing row count changed within transaction"
+            );
+            contacts
         };
         ensure!(
             contacts.len() <= KAD_ROUTING_MAX_CONTACTS,

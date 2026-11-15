@@ -28,6 +28,238 @@ async fn wait_for_slots(owner: &PersistenceOwner, expected: usize) {
     .unwrap();
 }
 
+fn kad_contact(i: u32) -> KadRoutingContact {
+    let mut id = [0; 16];
+    id[..4].copy_from_slice(&i.to_be_bytes());
+    KadRoutingContact {
+        node_id: id,
+        ip: i + 1,
+        udp_port: 20020,
+        tcp_port: 20019,
+        version: 9,
+        udp_key: 123,
+        udp_key_ip: Some(42),
+        hello_source_udp_port: Some(20020),
+        udp_firewalled: false,
+        tcp_firewalled: false,
+        requests_hello_res_ack: false,
+        received_hello_packet: true,
+        verified: true,
+        contact_type: emulebb_metadata::KadRoutingContactType::Active,
+        probe_type: 1,
+        bootstrap: false,
+        expires_at_seconds: Some(1_900_000_000),
+        last_type_set_at_seconds: Some(1_700_000_000),
+        last_seen_at_seconds: 1_700_000_000,
+        created_at_seconds: 1_700_000_000,
+    }
+}
+
+#[tokio::test]
+async fn kad_full_snapshot_reply_retains_bytes_without_retaining_slot() {
+    use emulebb_metadata::DiscoveryInitializationStatus;
+    let (_, _, owner) = setup();
+    let input: Vec<_> = (0..KAD_ROUTING_MAX_CONTACTS as u32)
+        .map(kad_contact)
+        .collect();
+    assert!(kad_charge().unwrap() <= MAX_BYTES);
+    assert_eq!(
+        owner.initialize_kad_pending(0, &input).await.unwrap(),
+        Some(1)
+    );
+    let loaded = owner.load_kad().await.unwrap();
+    assert_eq!(loaded.snapshot().contacts, input);
+    assert_eq!(
+        loaded.snapshot().initialization,
+        DiscoveryInitializationStatus::Initialized
+    );
+    wait_for_slots(&owner, 0).await;
+    let actual = loaded.snapshot().contacts.capacity() * std::mem::size_of::<KadRoutingContact>();
+    assert_eq!(usage(&owner), (0, actual));
+    assert!(actual <= kad_charge().unwrap());
+    owner.close_and_drain().await.unwrap();
+    assert_eq!(usage(&owner), (0, actual));
+    drop(loaded);
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn kad_pending_guard_empty_and_failed_batch_are_atomic() {
+    use emulebb_metadata::DiscoveryInitializationStatus;
+    let (store, _, owner) = setup();
+    let duplicate = kad_contact(4);
+    assert!(matches!(
+        owner
+            .initialize_kad_pending(0, &[duplicate.clone(), duplicate])
+            .await,
+        Err(PersistenceError::Storage(_))
+    ));
+    let pending = owner.load_kad().await.unwrap();
+    assert_eq!(
+        pending.snapshot().initialization,
+        DiscoveryInitializationStatus::Pending
+    );
+    assert_eq!(pending.snapshot().revision, 0);
+    wait_for_slots(&owner, 0).await;
+    assert_eq!(pending.snapshot().contacts.capacity(), 0);
+    assert_eq!(usage(&owner), (0, 0));
+    drop(pending);
+    assert_eq!(owner.initialize_kad_pending(0, &[]).await.unwrap(), Some(1));
+    assert_eq!(
+        owner
+            .initialize_kad_pending(1, &[kad_contact(5)])
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        owner
+            .initialize_kad_pending(0, &[kad_contact(6)])
+            .await
+            .unwrap(),
+        None
+    );
+    let empty = store.load_kad_routing_snapshot().unwrap();
+    assert_eq!(
+        empty.initialization,
+        DiscoveryInitializationStatus::Initialized
+    );
+    assert!(empty.contacts.is_empty());
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_kad_replies_apply_shared_byte_backpressure() {
+    let (_, _, owner) = setup();
+    let input: Vec<_> = (0..KAD_ROUTING_MAX_CONTACTS as u32)
+        .map(kad_contact)
+        .collect();
+    assert_eq!(
+        owner.initialize_kad_pending(0, &input).await.unwrap(),
+        Some(1)
+    );
+    let mut replies = Vec::new();
+    loop {
+        match owner.load_kad().await {
+            Ok(snapshot) => replies.push(snapshot),
+            Err(PersistenceError::Busy) => break,
+            Err(error) => panic!("unexpected load error: {error}"),
+        }
+    }
+    assert!(!replies.is_empty());
+    wait_for_slots(&owner, 0).await;
+    assert!(usage(&owner).1 <= MAX_BYTES);
+    drop(replies.pop());
+    let next = owner.load_kad().await.unwrap();
+    drop(next);
+    drop(replies);
+    owner.close_and_drain().await.unwrap();
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn only_one_concurrent_pending_initializer_can_commit() {
+    let (store, _, owner) = setup();
+    let first = {
+        let owner = Arc::clone(&owner);
+        tokio::spawn(async move {
+            owner
+                .initialize_kad_pending(0, &[kad_contact(7)])
+                .await
+                .unwrap()
+        })
+    };
+    let second = {
+        let owner = Arc::clone(&owner);
+        tokio::spawn(async move {
+            owner
+                .initialize_kad_pending(0, &[kad_contact(8)])
+                .await
+                .unwrap()
+        })
+    };
+    let outcomes = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(
+        outcomes.iter().filter(|result| **result == Some(1)).count(),
+        1
+    );
+    assert_eq!(outcomes.iter().filter(|result| result.is_none()).count(), 1);
+    let loaded = store.load_kad_routing_snapshot().unwrap();
+    assert_eq!(loaded.revision, 1);
+    assert_eq!(loaded.contacts.len(), 1);
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_queued_kad_initialization_survives_last_owner_drop() {
+    use emulebb_metadata::ProfileLeaseGuard;
+    use std::{
+        fs::{self, OpenOptions, TryLockError},
+        path::PathBuf,
+        time::Duration,
+    };
+    let root = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+        .join("tmp/persistence-owner-tests")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&root).unwrap();
+    let lock = || {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join(".emulebb-profile.lock"))
+            .unwrap()
+    };
+    let lease = Arc::new(ProfileLeaseGuard::try_lock(lock()).unwrap());
+    let path = root.join("metadata.db");
+    let store = MetadataStore::open_with_profile_lease(&path, Arc::clone(&lease)).unwrap();
+    let state = Arc::new(Mutex::new(
+        profile_state::load_core_state(&store, vec![]).unwrap(),
+    ));
+    let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
+    let guard = state.lock().await;
+    let friend = {
+        let owner = Arc::clone(&owner);
+        tokio::spawn(async move { owner.add("88".repeat(16), "sample".into()).await })
+    };
+    wait_for_slots(&owner, 1).await;
+    let kad = {
+        let owner = Arc::clone(&owner);
+        tokio::spawn(async move { owner.initialize_kad_pending(0, &[kad_contact(17)]).await })
+    };
+    wait_for_slots(&owner, 2).await;
+    kad.abort();
+    let _ = kad.await;
+    friend.abort();
+    let _ = friend.await;
+    drop(owner);
+    drop(store);
+    drop(lease);
+    drop(guard);
+    drop(state);
+    let next = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ProfileLeaseGuard::try_lock(lock()) {
+                Ok(lease) => break lease,
+                Err(TryLockError::WouldBlock) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                Err(error) => panic!("unexpected lock error: {error:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let reopened = MetadataStore::open_with_profile_lease(&path, Arc::new(next)).unwrap();
+    assert_eq!(
+        reopened.load_kad_routing_snapshot().unwrap().contacts,
+        vec![kad_contact(17)]
+    );
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn cancelled_caller_keeps_permit_until_ordered_publication_and_drain() {
     let (store, state, owner) = setup();
