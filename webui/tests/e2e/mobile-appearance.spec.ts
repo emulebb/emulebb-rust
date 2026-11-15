@@ -233,7 +233,7 @@ for (const width of [320, 390]) {
       await page.keyboard.press("ArrowRight");
       await expect.poll(() => scroll.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
       const action = table.getByTitle("Remove", { exact: true }).first();
-      await action.focus();
+      await page.keyboard.press("Tab");
       await expect(action).toBeFocused();
       await expect.poll(() => action.evaluate((element) => {
         const button = element.getBoundingClientRect();

@@ -25,7 +25,13 @@ export function TableScroll(props: { children: ComponentChildren; label?: string
     <div class="table-region">
       <div class="table-wrap" ref={container} tabIndex={overflow ? 0 : undefined}
         role={overflow ? "region" : undefined} aria-label={overflow ? props.label ?? "Table columns" : undefined}
-        aria-describedby={overflow ? hintId : undefined}>
+        aria-describedby={overflow ? hintId : undefined} onFocusCapture={(event) => {
+          const target = event.target as Element;
+          // WHY: mobile WebKit can leave a focused row action clipped after keyboard scrolling.
+          if (overflow && target !== event.currentTarget) {
+            target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+          }
+        }}>
         {props.children}
       </div>
       <p id={hintId} class="table-scroll-hint hint" hidden={!overflow}>Swipe horizontally for more columns</p>
