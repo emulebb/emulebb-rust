@@ -241,6 +241,21 @@ fn unrelated_profiles_can_be_owned_concurrently() {
 }
 
 #[test]
+fn profile_clones_and_metadata_handles_share_one_logical_lease() {
+    let temporary = temporary();
+    let path = temporary.path().join("profile");
+    let profile = DaemonProfile::load_for_import(path.clone()).unwrap();
+    let cloned = profile.clone();
+    let metadata = profile.open_metadata_store().unwrap();
+    drop(profile);
+    probe(&path, "busy", &temporary.path().join("profile-clone"));
+    drop(cloned);
+    probe(&path, "busy", &temporary.path().join("metadata"));
+    drop(metadata);
+    probe(&path, "available", &temporary.path().join("released"));
+}
+
+#[test]
 #[ignore = "isolated subprocess fixture invoked by the ownership regression tests"]
 fn profile_ownership_child() {
     let profile_path = PathBuf::from(env::var_os(CHILD_PROFILE).unwrap());

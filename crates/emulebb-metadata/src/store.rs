@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{SystemTime, UNIX_EPOCH},
@@ -10,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::{
+    ProfileLeaseGuard,
     model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot},
     native_path::{NativePath, current_platform},
     schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION},
@@ -34,7 +34,7 @@ pub struct MetadataStore {
     conn: Arc<Mutex<Connection>>,
     // WHY: close the connection before releasing its process profile lease.
     // Clones retain both handles; independent profile connections share the lease.
-    _profile_lease: Option<Arc<File>>,
+    _profile_lease: Option<Arc<ProfileLeaseGuard>>,
     initialized_new_schema: bool,
 }
 
@@ -48,7 +48,10 @@ impl MetadataStore {
     ///
     /// The caller acquires the lock before bootstrap/metadata initialization.
     /// Every cloned store retains it until its connection has finished closing.
-    pub fn open_with_profile_lease(path: impl AsRef<Path>, lease: Arc<File>) -> Result<Self> {
+    pub fn open_with_profile_lease(
+        path: impl AsRef<Path>,
+        lease: Arc<ProfileLeaseGuard>,
+    ) -> Result<Self> {
         let conn = Connection::open(path)?;
         Self::from_connection_with_profile_lease(conn, Some(lease), None)
     }
@@ -57,7 +60,7 @@ impl MetadataStore {
     /// never called for an existing schema, including an empty operator root list.
     pub fn open_with_profile_lease_and_storage(
         path: impl AsRef<Path>,
-        lease: Arc<File>,
+        lease: Arc<ProfileLeaseGuard>,
         initialize: impl FnOnce() -> Result<InitialProfileStorage> + 'static,
     ) -> Result<Self> {
         Self::from_connection_with_profile_lease(
@@ -82,7 +85,7 @@ impl MetadataStore {
 
     fn from_connection_with_profile_lease(
         conn: Connection,
-        profile_lease: Option<Arc<File>>,
+        profile_lease: Option<Arc<ProfileLeaseGuard>>,
         initialize_storage: Option<StorageInitializer>,
     ) -> Result<Self> {
         // The guarded constructor retains ownership before any pragma/schema

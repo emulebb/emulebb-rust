@@ -1,25 +1,26 @@
 //! OS-backed ownership of a writable profile, retained by all metadata handles.
 
 use std::{
-    fs::{self, File, OpenOptions, TryLockError},
+    fs::{self, OpenOptions, TryLockError},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use emulebb_metadata::ProfileLeaseGuard;
 
 const PROFILE_LEASE_FILE: &str = ".emulebb-profile.lock";
 
 /// An opaque, cloneable lease for one physical profile directory.
 ///
 /// The persistent empty file is a lock target, not an ownership marker. Never
-/// remove it on release: the operating system releases ownership when the last
-/// handle closes, including after process death. Locks must be supported by the
-/// selected filesystem; an unsupported/failed lock is an error, never a bypass.
+/// remove it on release: the final logical owner unlocks its acquired descriptor,
+/// and the operating system releases ownership after process death. Locks must
+/// be supported by the selected filesystem; a failed lock is never a bypass.
 #[derive(Debug, Clone)]
 pub struct ProfileLease {
     directory: PathBuf,
-    file: Arc<File>,
+    guard: Arc<ProfileLeaseGuard>,
 }
 
 impl ProfileLease {
@@ -63,8 +64,8 @@ impl ProfileLease {
                 profile.display()
             )
         })?;
-        match file.try_lock() {
-            Ok(()) => Ok(Self { directory: canonical_profile, file: Arc::new(file) }),
+        match ProfileLeaseGuard::try_lock(file) {
+            Ok(guard) => Ok(Self { directory: canonical_profile, guard: Arc::new(guard) }),
             Err(TryLockError::WouldBlock) => bail!(
                 "profile is already in use: {}; stop its daemon or offline command before retrying",
                 profile.display()
@@ -82,8 +83,8 @@ impl ProfileLease {
         &self.directory
     }
 
-    pub(crate) fn file(&self) -> Arc<File> {
-        Arc::clone(&self.file)
+    pub(crate) fn guard(&self) -> Arc<ProfileLeaseGuard> {
+        Arc::clone(&self.guard)
     }
 }
 
