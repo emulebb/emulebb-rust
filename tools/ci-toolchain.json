@@ -32,7 +32,7 @@
     "emulebb-miniupnp": "4e7a10948004ca2085ac8103e14fc77edb898b4c",
     "emulebb-libpcpnatpmp": "a6e787f837e507336a8774522c33b54264ef4a4b",
     "emulebb-build-tests": "17438846c1a62fa8228c821071cc79e7cf56145b",
-    "emulebb-tooling": "dafbbece059bbc868ed1cf8ab153b7fc7d3fecb0"
+    "emulebb-tooling": "f88a8ce608bc75a619aea6909f54a9cdecdddb6e"
   },
   "node": "26.13.0",
   "npm": "11.20.0",
