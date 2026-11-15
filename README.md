@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED.md"><strong>Use eMuleBB Rust</strong></a> &nbsp;&middot;&nbsp;
+  <a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED/"><strong>Use eMuleBB Rust</strong></a> &nbsp;&middot;&nbsp;
   <a href="https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-CONTRIBUTING/"><strong>Develop with eMuleBB Rust</strong></a>
 </p>
 <p align="center">
@@ -147,7 +147,7 @@ this trust set. Updated roots arrive with new client builds.
 - [Troubleshoot startup, listeners and logs](https://emulebb.github.io/emulebb-tooling/products/emulebb-rust/reference/GUIDE-GETTING-STARTED/#common-problems).
 - [Report a bug](https://github.com/emulebb/emulebb-rust/issues) with the package
   version and sanitized reproduction steps.
-- Follow [private security reporting](SECURITY/) for vulnerabilities.
+- Follow [private security reporting](SECURITY.md) for vulnerabilities.
 
 Diagnostic bundles are private operator evidence and can contain credentials,
 paths, identifiers and logs. Review them before sharing publicly.
@@ -155,4 +155,4 @@ paths, identifiers and logs. Review them before sharing publicly.
 ## License
 
 [GPL-2.0-only](LICENSE). Dependencies retain their own licenses; see
-[third-party notices](THIRD-PARTY-LICENSES/).
+[third-party notices](THIRD-PARTY-LICENSES.md).
