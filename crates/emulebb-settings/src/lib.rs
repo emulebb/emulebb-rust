@@ -1200,6 +1200,8 @@ impl Ed2kSettingsUpdate {
             && self.reconnect_interval_secs.is_none()
             && self.reconnect_enabled.is_none()
             && self.safe_server_connect.is_none()
+            && self.use_server_priorities.is_none()
+            && self.auto_connect_static_only.is_none()
             && self.server_keepalive_minutes.is_none()
             && self.session_rotation_secs.is_none()
             && self.max_concurrent_downloads.is_none()
@@ -1988,6 +1990,37 @@ fn changed<T: Copy + PartialEq>(next: T, current: T) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_server_preferences_are_nonempty_and_preserve_omitted_fields() {
+        assert!(Ed2kSettingsUpdate::default().is_empty());
+        assert!(app_settings_update_is_empty(&AppSettingsUpdate {
+            ed2k: Some(Ed2kSettingsUpdate::default()),
+            ..Default::default()
+        }));
+        for field in ["useServerPriorities", "autoConnectStaticOnly"] {
+            let path = format!("ed2k.{field}");
+            assert!(
+                app_settings_surface_inventory()
+                    .iter()
+                    .any(|setting| setting.path == path && setting.restart_required)
+            );
+            for value in [false, true] {
+                let update: Ed2kSettingsUpdate =
+                    serde_json::from_value(serde_json::json!({field: value})).unwrap();
+                assert!(!update.is_empty(), "{field}={value}");
+                assert!(!app_settings_update_is_empty(&AppSettingsUpdate {
+                    ed2k: Some(update.clone()),
+                    ..Default::default()
+                }));
+                let mut settings = Ed2kSettings::default();
+                let mut expected = serde_json::to_value(&settings).unwrap();
+                expected[field] = serde_json::json!(value);
+                apply_ed2k_settings_update(&mut settings, update).unwrap();
+                assert_eq!(serde_json::to_value(settings).unwrap(), expected);
+            }
+        }
+    }
 
     #[test]
     fn default_core_settings_include_current_rest_fields() {
