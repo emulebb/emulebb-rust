@@ -65,6 +65,151 @@ fn atomic_settings_rows(connection: &rusqlite::Connection) -> Vec<(String, Strin
 }
 
 #[tokio::test]
+async fn standalone_server_preferences_round_trip_through_sqlite_and_restart() {
+    for field in ["useServerPriorities", "autoConnectStaticOnly"] {
+        for value in [false, true] {
+            let (app, core, database, connection) = atomic_settings_router();
+            let (status, before) = atomic_settings_response(&app, "GET", Value::Null).await;
+            assert_eq!(status, StatusCode::OK);
+            let runtime_core = core.core_settings().await;
+            let mut expected = before["data"].clone();
+            expected["ed2k"][field] = json!(value);
+            let (status, patched) =
+                atomic_settings_response(&app, "PATCH", json!({"ed2k": {field: value}})).await;
+            assert_eq!(status, StatusCode::OK, "{field}={value}: {patched}");
+            assert_eq!(patched["data"], expected);
+            let (status, fetched) = atomic_settings_response(&app, "GET", Value::Null).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(fetched["data"], expected);
+            let persisted: String = connection
+                .query_row(
+                    "SELECT value_json FROM settings WHERE section = 'ed2k' AND key = ?1",
+                    [field],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&persisted).unwrap(),
+                json!(value)
+            );
+            assert_eq!(core.core_settings().await, runtime_core);
+
+            let rows = atomic_settings_rows(&connection);
+            for empty in [json!({}), json!({"ed2k": {}})] {
+                let (status, response) = atomic_settings_response(&app, "PATCH", empty).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+                assert_eq!(response["error"]["code"], "INVALID_ARGUMENT");
+                assert_eq!(atomic_settings_rows(&connection), rows);
+            }
+
+            // Reopen only after the original owner is dropped: these settings
+            // remain durable configuration for the next daemon startup.
+            drop(app);
+            drop(core);
+            drop(connection);
+            let restored = EmulebbCore::new(
+                "test",
+                FileIndex::open(database).unwrap(),
+                unique_test_dir("server-preferences-restart"),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(restored.app_settings().await.unwrap()).unwrap(),
+                expected,
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_nat_boolean_with_valid_siblings_preserves_all_settings() {
+    let (app, core, _, connection) = atomic_settings_router();
+    let (_, before) = atomic_settings_response(&app, "GET", Value::Null).await;
+    let runtime_core = core.core_settings().await;
+    let rows = atomic_settings_rows(&connection);
+    for field in ["enabled", "requireInitialMapping"] {
+        let (status, rejected) = atomic_settings_response(
+            &app,
+            "PATCH",
+            json!({
+                "core": {"uploadLimitKiBps": 1024},
+                "ed2k": {"useServerPriorities": false},
+                "nat": {field: null, "leaseDurationSecs": 7200},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "INVALID_ARGUMENT");
+        let (status, after) = atomic_settings_response(&app, "GET", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(after["data"], before["data"]);
+        assert_eq!(atomic_settings_rows(&connection), rows);
+        assert_eq!(core.core_settings().await, runtime_core);
+    }
+}
+
+#[tokio::test]
+async fn nullable_nat_addresses_can_still_be_cleared_and_remain_cleared_after_restart() {
+    let (app, core, database, connection) = atomic_settings_router();
+    let (_, before) = atomic_settings_response(&app, "GET", Value::Null).await;
+    let (status, seeded) = atomic_settings_response(
+        &app,
+        "PATCH",
+        json!({"nat": {
+            "bindIp": "192.0.2.10", "pcpServerIp": "192.0.2.1",
+            "igdIp": "192.0.2.2", "externalIpOverride": "198.51.100.24",
+        }}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{seeded}");
+    let fields = ["bindIp", "pcpServerIp", "igdIp", "externalIpOverride"];
+    for field in fields {
+        assert!(seeded["data"]["nat"][field].is_string());
+    }
+    let (status, cleared) = atomic_settings_response(
+        &app,
+        "PATCH",
+        json!({"nat": {
+            "bindIp": null, "pcpServerIp": null,
+            "igdIp": null, "externalIpOverride": null,
+        }}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    let mut expected = before["data"].clone();
+    for field in fields {
+        expected["nat"][field] = Value::Null;
+        let persisted: String = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE section = 'nat' AND key = ?1",
+                [field],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&persisted).unwrap(),
+            Value::Null
+        );
+    }
+    assert_eq!(cleared["data"], expected);
+    let (_, fetched) = atomic_settings_response(&app, "GET", Value::Null).await;
+    assert_eq!(fetched["data"], expected);
+    drop(app);
+    drop(core);
+    drop(connection);
+    let restored = EmulebbCore::new(
+        "test",
+        FileIndex::open(database).unwrap(),
+        unique_test_dir("nullable-nat-restart"),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(restored.app_settings().await.unwrap()).unwrap(),
+        expected,
+    );
+}
+
+#[tokio::test]
 async fn settings_http_middleware_rejects_invalid_core_before_any_setting_changes() {
     let (app, core, _, connection) = atomic_settings_router();
     let before = core.app_settings().await.unwrap();
