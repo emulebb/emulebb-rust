@@ -344,7 +344,15 @@ impl PersistenceOwner {
                         quota.lock().map_err(|_| PersistenceError::Worker)?.faulted = true;
                     }
                 }
-                failures |= result.is_err();
+                // WHY: a completed request failure was already returned and
+                // does not mean the worker failed to drain. Preserve worker
+                // and uncertain-commit faults.
+                failures |= matches!(
+                    &result,
+                    Err(PersistenceError::Worker
+                        | PersistenceError::CommitUnknown
+                        | PersistenceError::CommittedAfterWorkerFailure)
+                );
                 let _ = request.response.send(result);
                 // Request retains its permit until commit and publication complete.
             }

@@ -194,7 +194,7 @@ async fn aggregate_owned_bytes_are_reserved_before_work_is_cloned() {
 }
 
 #[tokio::test]
-async fn failed_write_never_publishes_and_drain_reports_failure() {
+async fn failed_write_never_publishes_and_drain_succeeds() {
     let (store, state, owner) = setup();
     assert!(matches!(
         owner.add("invalid".into(), "Sample".into()).await,
@@ -202,8 +202,50 @@ async fn failed_write_never_publishes_and_drain_reports_failure() {
     ));
     assert!(state.lock().await.friends.is_empty());
     assert!(store.load_friends().unwrap().is_empty());
-    assert!(owner.close_and_drain().await.is_err());
-    assert!(owner.close_and_drain().await.is_err());
+    owner.close_and_drain().await.unwrap();
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_failure_retry_drains_and_survives_reopen() {
+    use std::{fs, path::PathBuf};
+
+    let root = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+        .join("tmp/persistence-owner-tests")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("metadata.db");
+    drop(MetadataStore::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TEMP TRIGGER fail_friend_write BEFORE INSERT ON main.friends WHEN NEW.name = 'Blocked' BEGIN SELECT RAISE(ABORT, 'injected SQL failure'); END;").unwrap();
+    let store = MetadataStore::from_connection(conn).unwrap();
+    let state = Arc::new(Mutex::new(
+        profile_state::load_core_state(&store, vec![]).unwrap(),
+    ));
+    let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
+    let hash = "aa".repeat(16);
+    assert!(matches!(
+        owner.add(hash.clone(), "Blocked".into()).await,
+        Err(PersistenceError::Storage(_))
+    ));
+    assert!(state.lock().await.friends.is_empty());
+    assert!(!store.has_friend(&hash).unwrap());
+    assert_eq!(
+        owner
+            .add(hash.clone(), "Allowed".into())
+            .await
+            .unwrap()
+            .name,
+        "Allowed"
+    );
+    owner.close_and_drain().await.unwrap();
+    owner.close_and_drain().await.unwrap();
+    drop(owner);
+    drop(store);
+    let reopened = MetadataStore::open(&path).unwrap();
+    assert_eq!(reopened.load_friends().unwrap()[0].name, "Allowed");
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
