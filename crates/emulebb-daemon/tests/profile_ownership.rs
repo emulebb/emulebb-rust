@@ -260,6 +260,11 @@ fn profile_clones_and_metadata_handles_share_one_logical_lease() {
 fn profile_ownership_child() {
     let profile_path = PathBuf::from(env::var_os(CHILD_PROFILE).unwrap());
     let mode = env::var(CHILD_MODE).unwrap();
+    if mode == "prepare-executable" {
+        let current = env::current_exe().unwrap();
+        fs::copy(&current, profile_path.join(current.file_name().unwrap())).unwrap();
+        return;
+    }
     let result = match mode.as_str() {
         "executable-default" => DaemonProfile::load(None),
         "explicit-dot" => DaemonProfile::load(Some(PathBuf::from("."))),
@@ -333,13 +338,19 @@ fn executable_default_ignores_shell_cwd_and_explicit_profiles_resolve_from_it() 
     for directory in [&executable_dir, &other_cwd, &unused_home] {
         fs::create_dir(directory).unwrap();
     }
-    // WHY: keep default-profile writes in owned output without opening the
-    // executable for writing (transient inherited writers can cause ETXTBSY).
-    // Both paths share the Cargo target filesystem; a hard link keeps the owned launch path.
+    // WHY: tmpfs profile scratch can be on a different mount from Cargo artifacts.
+    // Stage in a child that spawns no descendants and wait for its exit so parallel
+    // parent launches cannot inherit a writer and cause ETXTBSY.
     let current = env::current_exe().unwrap();
     let isolated_executable = executable_dir.join(current.file_name().unwrap());
-    fs::hard_link(&current, &isolated_executable)
-        .expect("hard-link profile fixture within the Cargo target filesystem");
+    {
+        let mut preparation = OwnedChild::start(
+            &executable_dir,
+            "prepare-executable",
+            &temporary.path().join("ready"),
+        );
+        preparation.finish();
+    }
     fs::write(other_cwd.join("not-a-directory"), b"synthetic blocked path").unwrap();
 
     for (mode, cwd, expected) in [
