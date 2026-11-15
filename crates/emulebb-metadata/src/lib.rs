@@ -3,6 +3,7 @@
 mod aich_recovery_store;
 mod content_identity;
 mod delivery_exclusion_store;
+mod discovery_store;
 mod download_history_model;
 mod download_history_store;
 mod identity_model;
@@ -35,6 +36,7 @@ mod transfer_store;
 mod transfer_validation;
 
 pub use aich_recovery_store::MetadataAichRecoverySet;
+pub use discovery_store::{DiscoveryDomain, DiscoveryInitializationStatus};
 pub use download_history_model::{MetadataCurrentSharedFile, MetadataDownloadHistoryEntry};
 pub use identity_model::MetadataLocalIdentity;
 pub use kad_publish_model::{

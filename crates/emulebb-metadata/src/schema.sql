@@ -5,6 +5,14 @@ CREATE TABLE metadata_schema (
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
 ) STRICT;
 
+CREATE TABLE discovery_initialization (
+    domain TEXT PRIMARY KEY CHECK(domain IN ('servers', 'kad')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'initialized'))
+) STRICT, WITHOUT ROWID;
+
+INSERT INTO discovery_initialization(domain, status) VALUES
+    ('servers', 'pending'), ('kad', 'pending');
+
 CREATE TABLE profile (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     uuid TEXT NOT NULL UNIQUE,
