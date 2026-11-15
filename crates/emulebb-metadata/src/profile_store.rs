@@ -471,8 +471,48 @@ impl super::MetadataStore {
     }
 
     pub fn upsert_server(&self, server: &MetadataServer) -> Result<()> {
-        let now = unix_ms();
-        self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        upsert_server_in_transaction(&tx, server)?;
+        Self::mark_discovery_initialized(&tx, crate::DiscoveryDomain::Servers)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Initialize servers only if no other operation has claimed the list.
+    /// Returns false when an operator or another initializer won the race.
+    pub fn initialize_servers_if_pending(&self, servers: &[MetadataServer]) -> Result<bool> {
+        ensure!(
+            !servers.is_empty(),
+            "server bootstrap list must not be empty"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status: String = tx.query_row(
+            "SELECT status FROM discovery_initialization WHERE domain = 'servers'",
+            [],
+            |row| row.get(0),
+        )?;
+        match status.as_str() {
+            "initialized" => return Ok(false),
+            "pending" => {}
+            _ => anyhow::bail!("invalid server initialization status"),
+        }
+        for server in servers {
+            upsert_server_in_transaction(&tx, server)?;
+        }
+        Self::mark_discovery_initialized(&tx, crate::DiscoveryDomain::Servers)?;
+        tx.commit()?;
+        Ok(true)
+    }
+}
+
+fn upsert_server_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    server: &MetadataServer,
+) -> Result<()> {
+    let now = unix_ms();
+    tx.execute(
             r#"
             INSERT INTO servers(
                 address, port, name, description, dynamic_host, auxiliary_ports,
@@ -535,8 +575,7 @@ impl super::MetadataStore {
                 now,
             ],
         )?;
-        Ok(())
-    }
+    Ok(())
 }
 
 fn upsert_category_in_transaction(
@@ -850,6 +889,65 @@ mod tests {
             servers[0].udp_key_ip,
             Some(u32::from_le_bytes([198, 51, 100, 9]))
         );
+    }
+
+    #[test]
+    fn server_bootstrap_rolls_back_and_respects_initialized_empty_list() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let server = MetadataServer {
+            address: "192.0.2.10".into(),
+            port: 4661,
+            name: "Sample".into(),
+            description: String::new(),
+            dynamic_host: String::new(),
+            auxiliary_ports: vec![],
+            server_priority: "normal".into(),
+            static_server: false,
+            enabled: true,
+            failed_count: 0,
+            ping_ms: None,
+            users: 0,
+            files: 0,
+            max_users: 0,
+            low_id_users: 0,
+            soft_files: 0,
+            hard_files: 0,
+            version: String::new(),
+            obfuscation_tcp_port: None,
+            obfuscation_udp_port: None,
+            udp_flags: None,
+            udp_key: None,
+            udp_key_ip: None,
+        };
+        {
+            let conn = store.connection().unwrap();
+            conn.execute_batch("CREATE TEMP TRIGGER fail_server_status BEFORE UPDATE ON discovery_initialization BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        }
+        assert!(
+            store
+                .initialize_servers_if_pending(std::slice::from_ref(&server))
+                .is_err()
+        );
+        assert!(store.load_servers().unwrap().is_empty());
+        assert_eq!(
+            store
+                .discovery_initialization_status(crate::DiscoveryDomain::Servers)
+                .unwrap(),
+            crate::DiscoveryInitializationStatus::Pending
+        );
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        {
+            let mut conn = store.connection().unwrap();
+            let tx = conn.transaction().unwrap();
+            super::super::MetadataStore::mark_discovery_initialized(
+                &tx,
+                crate::DiscoveryDomain::Servers,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(!store.initialize_servers_if_pending(&[server]).unwrap());
+        assert!(store.load_servers().unwrap().is_empty());
     }
 
     #[test]

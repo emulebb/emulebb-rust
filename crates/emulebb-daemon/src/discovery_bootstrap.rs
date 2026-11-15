@@ -1,5 +1,6 @@
 use std::{
     fs,
+    future::Future,
     io::{ErrorKind, Write},
     path::Path,
     time::Duration,
@@ -9,13 +10,16 @@ use anyhow::{Context, Result, ensure};
 use emulebb_core::{DiscoveryUrlPolicy, NODES_DAT_MAX_BYTES, SERVER_MET_MAX_BYTES};
 use emulebb_ed2k::ed2k_server::parse_server_met;
 use emulebb_kad_dht::bootstrap::parse_nodes_dat;
-use emulebb_metadata::{MetadataServer, MetadataStore};
+use emulebb_metadata::{
+    DiscoveryDomain, DiscoveryInitializationStatus, MetadataServer, MetadataStore,
+};
 use reqwest::Client;
 use tracing::{info, warn};
 
 pub(crate) const TRUSTED_SERVER_MET_URLS: &[&str] = &[
     "https://upd.emule-security.org/server.met",
     "https://emuling.gitlab.io/server.met",
+    "https://www.gruk.org/server.met",
 ];
 pub(crate) const TRUSTED_NODES_DAT_URL: &str = "https://upd.emule-security.org/nodes.dat";
 pub(crate) const NODES_DAT_FILE: &str = "nodes.dat";
@@ -49,23 +53,35 @@ fn discovery_client_builder() -> Result<reqwest::ClientBuilder> {
 }
 
 async fn seed_empty_servers(metadata: &MetadataStore, client: &Client) -> Result<()> {
-    // A disabled list is still user-owned state. Seed only a truly empty list
-    // so startup never silently re-enables servers the user turned off.
-    if !metadata.load_servers()?.is_empty() {
+    seed_servers_with(metadata, |url| async move {
+        fetch_bounded(client, url, SERVER_MET_MAX_BYTES).await
+    })
+    .await
+}
+
+async fn seed_servers_with<F, Fut>(metadata: &MetadataStore, fetch: F) -> Result<()>
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>>>,
+{
+    if metadata.discovery_initialization_status(DiscoveryDomain::Servers)?
+        == DiscoveryInitializationStatus::Initialized
+    {
         return Ok(());
     }
 
     for url in TRUSTED_SERVER_MET_URLS {
-        match fetch_bounded(client, url, SERVER_MET_MAX_BYTES).await {
+        match fetch(url).await {
             Ok(bytes) => match seed_servers_from_bytes(metadata, &bytes) {
-                Ok(count) if count > 0 => {
-                    info!(
-                        url,
-                        count, "seeded empty server list from trusted server.met"
-                    );
+                Ok(count) => {
+                    if count > 0 {
+                        info!(
+                            url,
+                            count, "initialized server list from trusted server.met"
+                        );
+                    }
                     return Ok(());
                 }
-                Ok(_) => warn!(url, "trusted server.met contained no usable servers"),
                 Err(error) => warn!(url, %error, "trusted server.met validation failed"),
             },
             Err(error) => warn!(url, %error, "trusted server.met download failed"),
@@ -78,8 +94,9 @@ async fn seed_empty_servers(metadata: &MetadataStore, client: &Client) -> Result
 fn seed_servers_from_bytes(metadata: &MetadataStore, bytes: &[u8]) -> Result<usize> {
     let servers = parse_server_met(bytes).context("failed to parse server.met")?;
     ensure!(!servers.is_empty(), "server.met has no usable entries");
-    for server in &servers {
-        metadata.upsert_server(&MetadataServer {
+    let servers: Vec<MetadataServer> = servers
+        .into_iter()
+        .map(|server| MetadataServer {
             address: server.ip.to_string(),
             port: server.port,
             name: server
@@ -106,9 +123,13 @@ fn seed_servers_from_bytes(metadata: &MetadataStore, bytes: &[u8]) -> Result<usi
             udp_flags: None,
             udp_key: None,
             udp_key_ip: None,
-        })?;
+        })
+        .collect();
+    if metadata.initialize_servers_if_pending(&servers)? {
+        Ok(servers.len())
+    } else {
+        Ok(0)
     }
-    Ok(servers.len())
 }
 
 async fn seed_missing_nodes_dat(profile_dir: &Path, client: &Client) -> Result<()> {
@@ -287,6 +308,104 @@ mod tests {
         let servers = metadata.load_servers().unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].endpoint(), "203.0.113.8:4661");
+    }
+
+    #[tokio::test]
+    async fn server_initialization_retries_on_next_call_and_uses_first_valid_source() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let metadata = MetadataStore::in_memory().unwrap();
+        let calls = AtomicUsize::new(0);
+        seed_servers_with(&metadata, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(b"invalid".to_vec()) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Servers)
+                .unwrap(),
+            DiscoveryInitializationStatus::Pending
+        );
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Kad)
+                .unwrap(),
+            DiscoveryInitializationStatus::Pending
+        );
+        calls.store(0, Ordering::SeqCst);
+        seed_servers_with(&metadata, |url| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(url, TRUSTED_SERVER_MET_URLS[attempt]);
+            async move {
+                if attempt < 2 {
+                    Ok(b"invalid".to_vec())
+                } else {
+                    Ok(one_server_met())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(metadata.load_servers().unwrap().len(), 1);
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Servers)
+                .unwrap(),
+            DiscoveryInitializationStatus::Initialized
+        );
+        seed_servers_with(&metadata, |_| async {
+            panic!("initialized list was fetched")
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_server_mutation_wins_over_bootstrap_response() {
+        let metadata = MetadataStore::in_memory().unwrap();
+        seed_servers_with(&metadata, |_| {
+            assert_eq!(
+                seed_servers_from_bytes(&metadata, &one_server_met()).unwrap(),
+                1
+            );
+            async {
+                let mut bytes = one_server_met();
+                bytes[5..9].copy_from_slice(&[203, 0, 113, 10]);
+                Ok(bytes)
+            }
+        })
+        .await
+        .unwrap();
+        let servers = metadata.load_servers().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].endpoint(), "203.0.113.8:4661");
+    }
+
+    #[tokio::test]
+    async fn first_valid_server_source_stops_fallbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let metadata = MetadataStore::in_memory().unwrap();
+        let calls = AtomicUsize::new(0);
+        seed_servers_with(&metadata, |url| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(url, TRUSTED_SERVER_MET_URLS[attempt]);
+            async move {
+                if attempt == 0 {
+                    Ok(b"invalid".to_vec())
+                } else {
+                    Ok(one_server_met())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(metadata.load_servers().unwrap().len(), 1);
     }
 
     #[test]
