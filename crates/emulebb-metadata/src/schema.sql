@@ -23,7 +23,7 @@ CREATE TABLE profile (
 
 CREATE TABLE local_identities (
     id INTEGER PRIMARY KEY,
-    identity_kind TEXT NOT NULL UNIQUE CHECK(identity_kind IN ('ed2k-user-hash', 'ed2k-secure-ident')),
+    identity_kind TEXT NOT NULL UNIQUE CHECK(identity_kind IN ('ed2k-user-hash', 'ed2k-secure-ident', 'kad-node-id')),
     public_identity BLOB,
     private_secret BLOB,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
@@ -31,6 +31,7 @@ CREATE TABLE local_identities (
     CHECK (
         (identity_kind = 'ed2k-user-hash' AND public_identity IS NOT NULL AND length(public_identity) = 16 AND private_secret IS NULL)
         OR (identity_kind = 'ed2k-secure-ident' AND public_identity IS NULL AND private_secret IS NOT NULL AND length(private_secret) > 0)
+        OR (identity_kind = 'kad-node-id' AND public_identity IS NOT NULL AND length(public_identity) = 16 AND public_identity != zeroblob(16) AND private_secret IS NULL)
     )
 ) STRICT;
 

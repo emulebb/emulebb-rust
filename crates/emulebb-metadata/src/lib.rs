@@ -40,6 +40,7 @@ pub use aich_recovery_store::MetadataAichRecoverySet;
 pub use discovery_store::{DiscoveryDomain, DiscoveryInitializationStatus};
 pub use download_history_model::{MetadataCurrentSharedFile, MetadataDownloadHistoryEntry};
 pub use identity_model::MetadataLocalIdentity;
+pub use identity_store::KadNodeId;
 pub use kad_publish_model::{
     MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadOutboundPublish,
     MetadataKadOutboundPublishKind, MetadataKadOutboundPublishSchedule, MetadataKadPublishCache,

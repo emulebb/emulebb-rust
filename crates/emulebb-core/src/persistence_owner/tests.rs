@@ -28,6 +28,44 @@ async fn wait_for_slots(owner: &PersistenceOwner, expected: usize) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn cancelled_identity_request_completes_before_drain() {
+    let (store, state, owner) = setup();
+    let held = state.lock().await;
+    let friend = {
+        let owner = Arc::clone(&owner);
+        tokio::spawn(async move { owner.add("44".repeat(16), "sample".into()).await })
+    };
+    wait_for_slots(&owner, 1).await;
+    let identity = {
+        let owner = Arc::clone(&owner);
+        tokio::spawn(async move { owner.load_or_create_kad_node_id().await })
+    };
+    wait_for_slots(&owner, 2).await;
+    identity.abort();
+    let _ = identity.await;
+    drop(held);
+    friend.await.unwrap().unwrap();
+    owner.close_and_drain().await.unwrap();
+    let saved = store.load_local_identity("kad-node-id").unwrap().unwrap();
+    assert_ne!(saved.public_identity.unwrap(), vec![0; 16]);
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn identity_owner_returns_the_same_nonzero_id() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let store = MetadataStore::from_connection(conn).unwrap();
+    let state = Arc::new(Mutex::new(
+        profile_state::load_core_state(&store, vec![]).unwrap(),
+    ));
+    let owner = PersistenceOwner::start(store.clone(), state).unwrap();
+    let id = owner.load_or_create_kad_node_id().await.unwrap();
+    assert_ne!(id.as_bytes(), &[0; 16]);
+    assert_eq!(owner.load_or_create_kad_node_id().await.unwrap(), id);
+    owner.close_and_drain().await.unwrap();
+}
+
 fn kad_contact(i: u32) -> KadRoutingContact {
     let mut id = [0; 16];
     id[..4].copy_from_slice(&i.to_be_bytes());

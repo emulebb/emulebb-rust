@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, mpsc as async_mpsc, oneshot};
 
 use crate::{Friend, core_state::CoreState, profile_state};
 use emulebb_metadata::{
-    KAD_ROUTING_MAX_CONTACTS, KadRoutingContact, KadRoutingSnapshot, MetadataStore,
+    KAD_ROUTING_MAX_CONTACTS, KadNodeId, KadRoutingContact, KadRoutingSnapshot, MetadataStore,
 };
 
 #[cfg(test)]
@@ -63,6 +63,7 @@ enum Command {
         hash: String,
     },
     KadLoad,
+    KadIdentity,
     KadInitialize {
         expected_revision: i64,
         contacts: Vec<KadRoutingContact>,
@@ -72,6 +73,7 @@ enum Command {
 enum Response {
     Friend(Option<Friend>),
     KadLoaded(LeasedKadSnapshot),
+    KadIdentity(KadNodeId),
     KadInitialized(Option<i64>),
 }
 
@@ -171,6 +173,7 @@ enum DbCommand {
     Add(Friend),
     Delete(Friend),
     KadLoad,
+    KadIdentity,
     KadInitialize {
         expected_revision: i64,
         contacts: Vec<KadRoutingContact>,
@@ -180,6 +183,7 @@ enum DbCommand {
 enum DbResponse {
     Friend(Friend, bool),
     KadLoaded(KadRoutingSnapshot),
+    KadIdentity(KadNodeId),
     KadInitialized(Option<i64>),
 }
 struct DbRequest {
@@ -296,14 +300,22 @@ impl PersistenceOwner {
                 while let Ok(request) = db_rx.recv() {
                     if matches!(
                         &request.command,
-                        DbCommand::KadLoad | DbCommand::KadInitialize { .. }
+                        DbCommand::KadLoad
+                            | DbCommand::KadIdentity
+                            | DbCommand::KadInitialize { .. }
                     ) {
-                        let writing = matches!(&request.command, DbCommand::KadInitialize { .. });
+                        let writing = matches!(
+                            &request.command,
+                            DbCommand::KadIdentity | DbCommand::KadInitialize { .. }
+                        );
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             || match &request.command {
                                 DbCommand::KadLoad => {
                                     store.load_kad_routing_snapshot().map(DbResponse::KadLoaded)
                                 }
+                                DbCommand::KadIdentity => store
+                                    .load_or_create_kad_node_id()
+                                    .map(DbResponse::KadIdentity),
                                 DbCommand::KadInitialize {
                                     expected_revision,
                                     contacts,
@@ -349,7 +361,9 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::KadLoad | DbCommand::KadInitialize { .. } => unreachable!(),
+                            DbCommand::KadLoad
+                            | DbCommand::KadIdentity
+                            | DbCommand::KadInitialize { .. } => unreachable!(),
                         };
                         #[cfg(test)]
                         if injected != 0 && result.is_ok() {
@@ -390,7 +404,9 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::KadLoad | DbCommand::KadInitialize { .. } => {
+                                DbCommand::KadLoad
+                                | DbCommand::KadIdentity
+                                | DbCommand::KadInitialize { .. } => {
                                     unreachable!()
                                 }
                             };
@@ -412,7 +428,9 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::KadLoad | DbCommand::KadInitialize { .. } => unreachable!(),
+                            DbCommand::KadLoad
+                            | DbCommand::KadIdentity
+                            | DbCommand::KadInitialize { .. } => unreachable!(),
                         };
                         DbResponse::Friend(friend, recovered)
                     });
@@ -508,6 +526,22 @@ impl PersistenceOwner {
     pub(crate) async fn delete(&self, hash: String) -> Result<Option<Friend>, PersistenceError> {
         self.submit(Command::Delete { hash }).await
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "RUST-FEAT-062 Kad runtime integration follows this owner boundary"
+        )
+    )]
+    pub(crate) async fn load_or_create_kad_node_id(&self) -> Result<KadNodeId, PersistenceError> {
+        match self
+            .submit_reserved(FIXED_CHARGE, || Ok(Command::KadIdentity))
+            .await?
+        {
+            Response::KadIdentity(id) => Ok(id),
+            _ => Err(PersistenceError::Worker),
+        }
+    }
     async fn submit(&self, command: Command) -> Result<Option<Friend>, PersistenceError> {
         let payload = match &command {
             Command::Add { hash, name } => hash
@@ -515,7 +549,9 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::KadLoad | Command::KadInitialize { .. } => unreachable!(),
+            Command::KadLoad | Command::KadIdentity | Command::KadInitialize { .. } => {
+                unreachable!()
+            }
         };
         let charge = FIXED_CHARGE
             .checked_add(payload.checked_mul(4).ok_or(PersistenceError::TooLarge)?)
@@ -670,10 +706,11 @@ async fn process(
 ) -> Result<Response, PersistenceError> {
     if matches!(
         &request.command,
-        Command::KadLoad | Command::KadInitialize { .. }
+        Command::KadLoad | Command::KadIdentity | Command::KadInitialize { .. }
     ) {
         let command = match std::mem::replace(&mut request.command, Command::KadLoad) {
             Command::KadLoad => DbCommand::KadLoad,
+            Command::KadIdentity => DbCommand::KadIdentity,
             Command::KadInitialize {
                 expected_revision,
                 contacts,
@@ -703,6 +740,7 @@ async fn process(
                 }))
             }
             DbResponse::KadInitialized(revision) => Ok(Response::KadInitialized(revision)),
+            DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::Friend(..) => Err(PersistenceError::Worker),
         };
     }
@@ -729,7 +767,9 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::KadLoad | Command::KadInitialize { .. } => unreachable!(),
+            Command::KadLoad | Command::KadIdentity | Command::KadInitialize { .. } => {
+                unreachable!()
+            }
         }
     };
     let deleting = matches!(prepared, DbCommand::Delete(_));
