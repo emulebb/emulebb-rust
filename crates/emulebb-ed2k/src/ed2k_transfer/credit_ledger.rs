@@ -206,9 +206,18 @@ impl Ed2kTransferRuntime {
     pub(super) fn settle_parked_peer_credit(&self, user_hash: [u8; 16]) -> anyhow::Result<()> {
         let _gate = self.credit_flush_gate.lock();
         let parked = self.parked_credit.lock().peers.remove(&user_hash);
-        if let Some((uploaded, downloaded)) = parked {
-            self.metadata
-                .apply_credit_deltas(&[(hex::encode(user_hash), uploaded, downloaded)], &[])?;
+        if let Some((uploaded, downloaded)) = parked
+            && let Err(error) = self
+                .metadata
+                .apply_credit_deltas(&[(hex::encode(user_hash), uploaded, downloaded)], &[])
+        {
+            // WHY: a failed settlement must retain its deltas, merging any
+            // additions parked while SQL ran instead of overwriting them.
+            self.parked_credit.lock().restore(
+                HashMap::from([(user_hash, (uploaded, downloaded))]),
+                HashMap::new(),
+            );
+            return Err(error);
         }
         Ok(())
     }
@@ -245,8 +254,106 @@ impl Ed2kTransferRuntime {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::ed2k_transfer::Ed2kTransferRuntime;
     use crate::paths::unique_test_dir;
+
+    #[test]
+    fn failed_peer_settlement_preserves_credit_until_exactly_once_retry_and_reopen() {
+        let root = unique_test_dir("ed2k-credit-settlement-failure");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let user = [0x7Cu8; 16];
+        runtime.record_peer_credit_totals(user, 100, 200).unwrap();
+        runtime.add_peer_credit_delta(user, 1000, 2000).unwrap();
+        let database = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
+        let stored_row = || {
+            database
+                .query_row(
+                    "SELECT uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
+                     FROM peers WHERE user_hash = ?1",
+                    [user.as_slice()],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        let before = stored_row();
+        database
+            .execute_batch(
+                "CREATE TRIGGER synthetic_peer_settlement_failure BEFORE INSERT ON peers
+             BEGIN SELECT RAISE(ABORT, 'synthetic peer settlement failure'); END;",
+            )
+            .unwrap();
+
+        let error = runtime.settle_parked_peer_credit(user).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message == "synthetic peer settlement failure"
+        ));
+        assert_eq!(
+            stored_row(),
+            before,
+            "failed SQL leaves the durable row unchanged"
+        );
+        assert_eq!(runtime.parked_peer_credit_delta(user), (1000, 2000));
+        let visible = runtime.peer_credit_by_hash(user).unwrap().unwrap();
+        assert_eq!(
+            (visible.uploaded_bytes, visible.downloaded_bytes),
+            (1100, 2200)
+        );
+
+        // A later add must survive alongside the failed settlement's deltas.
+        runtime.add_peer_credit_delta(user, 7, 11).unwrap();
+        database
+            .execute_batch("DROP TRIGGER synthetic_peer_settlement_failure")
+            .unwrap();
+        runtime.settle_parked_peer_credit(user).unwrap();
+        assert_eq!(runtime.parked_peer_credit_delta(user), (0, 0));
+        assert_eq!((stored_row().0, stored_row().1), (1107, 2211));
+        runtime.settle_parked_peer_credit(user).unwrap();
+        assert_eq!((stored_row().0, stored_row().1), (1107, 2211));
+        drop(database);
+        drop(runtime);
+
+        let reopened = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let stored = reopened.peer_credit_by_hash(user).unwrap().unwrap();
+        assert_eq!(
+            (stored.uploaded_bytes, stored.downloaded_bytes),
+            (1107, 2211)
+        );
+        assert_eq!(reopened.parked_peer_credit_delta(user), (0, 0));
+    }
+
+    #[test]
+    fn failed_settlement_restore_merges_additions_parked_during_sql_with_saturation() {
+        let runtime =
+            Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-credit-settlement-merge"))
+                .unwrap();
+        let user = [0x8Du8; 16];
+        let other = [0x9Eu8; 16];
+        runtime
+            .add_peer_credit_delta(user, u64::MAX - 3, 20)
+            .unwrap();
+        // Model the controlled interleaving while settlement owns the flush
+        // gate: SQL has the removed bucket, and producers can still park adds.
+        let _gate = runtime.credit_flush_gate.lock();
+        let removed = runtime.parked_credit.lock().peers.remove(&user).unwrap();
+        runtime.add_peer_credit_delta(user, 10, 30).unwrap();
+        runtime.add_peer_credit_delta(other, 7, 11).unwrap();
+        runtime
+            .parked_credit
+            .lock()
+            .restore(HashMap::from([(user, removed)]), HashMap::new());
+        assert_eq!(runtime.parked_peer_credit_delta(user), (u64::MAX, 50));
+        assert_eq!(runtime.parked_peer_credit_delta(other), (7, 11));
+    }
 
     #[tokio::test]
     async fn parked_credit_is_read_through_and_flushes_durably() {
