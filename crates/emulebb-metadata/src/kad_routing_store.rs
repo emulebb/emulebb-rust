@@ -170,7 +170,18 @@ impl MetadataStore {
             .ok_or_else(|| anyhow::anyhow!("Kad routing revision exhausted"))?;
         tx.execute("DELETE FROM kad_routing_contacts", [])?;
         {
-            let mut insert = tx.prepare_cached("INSERT INTO kad_routing_contacts VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)")?;
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO kad_routing_contacts (
+                    node_id, ip, udp_port, tcp_port, version, udp_key, udp_key_ip,
+                    hello_source_udp_port, udp_firewalled, tcp_firewalled,
+                    requests_hello_res_ack, received_hello_packet, verified,
+                    contact_type, probe_type, bootstrap, expires_at_seconds,
+                    last_type_set_at_seconds, last_seen_at_seconds, created_at_seconds
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                )",
+            )?;
             for c in contacts {
                 insert.execute(params![
                     c.node_id.as_slice(),
