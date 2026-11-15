@@ -19,6 +19,7 @@ mod peer_model;
 mod peer_store;
 mod profile_import;
 mod profile_model;
+mod profile_ownership;
 mod profile_store;
 mod schema;
 mod schema_validation;
@@ -51,6 +52,7 @@ pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimes
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
+pub use profile_ownership::ProfileLeaseGuard;
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
     MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,

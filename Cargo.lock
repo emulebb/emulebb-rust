@@ -796,6 +796,7 @@ dependencies = [
  "anyhow",
  "data-encoding",
  "hex",
+ "libc",
  "rusqlite",
  "unicode-normalization",
  "uuid",

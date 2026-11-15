@@ -191,7 +191,7 @@ impl DaemonProfile {
         let opened = match host_folders {
             Some((incoming, shared)) => MetadataStore::open_with_profile_lease_and_storage(
                 metadata_path,
-                profile_lease.file(),
+                profile_lease.guard(),
                 move || {
                     anyhow::ensure!(
                         incoming.is_absolute() && shared.is_absolute(),
@@ -209,7 +209,7 @@ impl DaemonProfile {
                     })
                 },
             ),
-            None => MetadataStore::open_with_profile_lease(metadata_path, profile_lease.file()),
+            None => MetadataStore::open_with_profile_lease(metadata_path, profile_lease.guard()),
         };
         let metadata = opened.with_context(|| {
             format!(
@@ -267,7 +267,7 @@ impl DaemonProfile {
             .context("load the profile before opening writable metadata")?;
         MetadataStore::open_with_profile_lease(
             lease.directory().join(PROFILE_METADATA_FILE),
-            lease.file(),
+            lease.guard(),
         )
     }
 
