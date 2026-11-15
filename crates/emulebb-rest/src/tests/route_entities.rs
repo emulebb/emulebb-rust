@@ -1,6 +1,47 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
+async fn transfer_source_friend_routes_report_closed_persistence() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let transfer = core.create_transfer(emulebb_core::TransferCreate {
+        known_file_policy: Default::default(),
+        link: Some("ed2k://|file|Sample.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/".into()),
+        links: None, category_id: None, category_name: None, paused: Some(true),
+    }).await.unwrap();
+    core.drain_persistence().await.unwrap();
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    for action in ["add-friend", "remove-friend"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/transfers/{}/sources/{}/operations/{action}",
+                        transfer.hash,
+                        "aa".repeat(16)
+                    ))
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING");
+    }
+}
+
+#[tokio::test]
 async fn servers_use_canonical_crud_routes() {
     let app = test_router();
     let create = app

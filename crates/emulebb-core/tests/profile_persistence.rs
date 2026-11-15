@@ -65,7 +65,7 @@ async fn profile_state_survives_core_restart() {
     assert_eq!(categories[1].name, "Samples");
     assert_eq!(categories[1].priority, 2);
 
-    let friends = reloaded.friends().await;
+    let friends = reloaded.friends().await.unwrap();
     assert_eq!(friends.len(), 1);
     assert_eq!(friends[0].name, "Peer One");
 
@@ -96,7 +96,7 @@ async fn profile_state_survives_core_restart() {
 
     let reloaded_again = open_core(&metadata_path, &transfer_root);
     assert_eq!(reloaded_again.categories().await.len(), 1);
-    assert!(reloaded_again.friends().await.is_empty());
+    assert!(reloaded_again.friends().await.unwrap().is_empty());
     let disabled_server = reloaded_again.server("192.0.2.10:4661").await.unwrap();
     assert!(!disabled_server.enabled);
     assert_eq!(disabled_server.name, "Server Renamed");

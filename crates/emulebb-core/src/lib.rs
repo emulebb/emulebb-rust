@@ -100,6 +100,7 @@ use emulebb_metadata::{
     MetadataTransferPublishEntry,
 };
 pub use http_client::http_client_builder;
+pub use persistence_owner::PersistenceError;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock, broadcast},
@@ -156,6 +157,7 @@ mod lifecycle;
 mod local_search_response;
 mod network_api;
 mod network_binding;
+mod persistence_owner;
 mod physical_disk;
 mod profile_state;
 mod search_api;
@@ -540,6 +542,7 @@ pub struct EmulebbCore {
     next_transfer_event_id: Arc<AtomicU64>,
     /// Orders settings commit and runtime publication, including canceled waiters.
     settings_update_order: Arc<Mutex<()>>,
+    persistence_owner: Arc<persistence_owner::PersistenceSlot>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -732,6 +735,7 @@ impl EmulebbCore {
             transfer_events,
             next_transfer_event_id: Arc::new(AtomicU64::new(1)),
             settings_update_order: Arc::new(Mutex::new(())),
+            persistence_owner: Arc::new(persistence_owner::PersistenceSlot::default()),
             state: Arc::new(Mutex::new(core_state)),
         })
     }

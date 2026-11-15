@@ -59,6 +59,7 @@ pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use profile_ownership::ProfileLeaseGuard;
+pub use profile_store::FriendWriteTiming;
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
     MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,

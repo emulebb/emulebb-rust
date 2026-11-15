@@ -1057,6 +1057,9 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     // Idempotent final teardown also covers serve errors that bypassed or
     // interrupted the normal shutdown future.
     graceful_teardown(&core).await;
+    core.drain_persistence()
+        .await
+        .context("failed to drain persistence")?;
     serve_result?;
     Ok(())
 }

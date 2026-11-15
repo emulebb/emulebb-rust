@@ -273,8 +273,11 @@ pub(crate) fn persist_category(metadata: &MetadataStore, category: &Category) ->
     })
 }
 
-pub(crate) fn persist_friend(metadata: &MetadataStore, friend: &Friend) -> Result<()> {
-    metadata.upsert_friend(&MetadataFriend {
+pub(crate) fn persist_friend(
+    metadata: &MetadataStore,
+    friend: &Friend,
+) -> Result<emulebb_metadata::FriendWriteTiming> {
+    metadata.upsert_friend_timed(&MetadataFriend {
         user_hash: friend.user_hash.clone(),
         name: friend.name.clone(),
         last_address: friend.address.clone(),

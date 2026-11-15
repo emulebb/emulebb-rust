@@ -606,6 +606,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "reqwest",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",

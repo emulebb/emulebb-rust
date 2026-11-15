@@ -8,6 +8,13 @@ use crate::{
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
 };
 
+/// Time spent acquiring the shared connection and executing a friend write.
+#[derive(Debug, Clone, Copy)]
+pub struct FriendWriteTiming {
+    pub connection_wait: std::time::Duration,
+    pub execution: std::time::Duration,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CategoryDeletionWrite {
     CategoriesRetired,
@@ -384,9 +391,18 @@ impl super::MetadataStore {
     }
 
     pub fn upsert_friend(&self, friend: &MetadataFriend) -> Result<()> {
+        self.upsert_friend_timed(friend).map(|_| ())
+    }
+
+    /// Write a friend and report connection wait and statement/commit time.
+    pub fn upsert_friend_timed(&self, friend: &MetadataFriend) -> Result<FriendWriteTiming> {
         let now = unix_ms();
         let user_hash = decode_fixed_hex(&friend.user_hash, 16, "friend user hash")?;
-        self.connection()?.execute(
+        let waiting = std::time::Instant::now();
+        let conn = self.connection()?;
+        let connection_wait = waiting.elapsed();
+        let execution = std::time::Instant::now();
+        conn.execute(
             r#"
             INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_ms, last_seen_at_ms, deleted_at_ms)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
@@ -410,16 +426,58 @@ impl super::MetadataStore {
                 friend.last_seen_ms,
             ],
         )?;
-        Ok(())
+        Ok(FriendWriteTiming {
+            connection_wait,
+            execution: execution.elapsed(),
+        })
+    }
+
+    /// Check one friend without materializing an unbounded collection.
+    pub fn has_friend(&self, user_hash: &str) -> Result<bool> {
+        let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
+        self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL)",
+            [user_hash],
+            |row| row.get(0),
+        ).map_err(Into::into)
+    }
+
+    /// Compare one durable friend against a candidate without loading its strings.
+    pub fn friend_matches(
+        &self,
+        user_hash: &str,
+        name: &str,
+        address: Option<&str>,
+        port: u16,
+        last_seen_ms: Option<i64>,
+    ) -> Result<bool> {
+        let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
+        self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL AND name = ?2 AND last_address IS ?3 AND last_port = ?4 AND last_seen_at_ms IS ?5)",
+            params![user_hash, name, address, i64::from(port), last_seen_ms],
+            |row| row.get(0),
+        ).map_err(Into::into)
     }
 
     pub fn delete_friend(&self, user_hash: &str) -> Result<()> {
+        self.delete_friend_timed(user_hash).map(|_| ())
+    }
+
+    /// Delete a friend and report connection wait and statement/commit time.
+    pub fn delete_friend_timed(&self, user_hash: &str) -> Result<FriendWriteTiming> {
         let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
-        self.connection()?.execute(
+        let waiting = std::time::Instant::now();
+        let conn = self.connection()?;
+        let connection_wait = waiting.elapsed();
+        let execution = std::time::Instant::now();
+        conn.execute(
             "UPDATE friends SET deleted_at_ms = ?1 WHERE user_hash = ?2",
             params![unix_ms(), user_hash],
         )?;
-        Ok(())
+        Ok(FriendWriteTiming {
+            connection_wait,
+            execution: execution.elapsed(),
+        })
     }
 
     pub fn load_servers(&self) -> Result<Vec<MetadataServer>> {
