@@ -311,10 +311,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_initialization_retries_on_next_call_and_uses_first_valid_source() {
+    async fn server_initialization_retries_after_reopen_and_uses_first_valid_source() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let metadata = MetadataStore::in_memory().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("metadata.db");
+        let metadata = MetadataStore::open(&path).unwrap();
         let calls = AtomicUsize::new(0);
         seed_servers_with(&metadata, |_| {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -335,6 +337,10 @@ mod tests {
                 .unwrap(),
             DiscoveryInitializationStatus::Pending
         );
+        // Startup invokes this operation once. Reopen models the next launch;
+        // no background retry is scheduled by this operation.
+        drop(metadata);
+        let metadata = MetadataStore::open(&path).unwrap();
         calls.store(0, Ordering::SeqCst);
         seed_servers_with(&metadata, |url| {
             let attempt = calls.fetch_add(1, Ordering::SeqCst);
@@ -367,11 +373,12 @@ mod tests {
     #[tokio::test]
     async fn concurrent_server_mutation_wins_over_bootstrap_response() {
         let metadata = MetadataStore::in_memory().unwrap();
+        let fixture = MetadataStore::in_memory().unwrap();
+        seed_servers_from_bytes(&fixture, &one_server_met()).unwrap();
+        let mut operator_server = fixture.load_servers().unwrap().remove(0);
+        operator_server.enabled = false;
         seed_servers_with(&metadata, |_| {
-            assert_eq!(
-                seed_servers_from_bytes(&metadata, &one_server_met()).unwrap(),
-                1
-            );
+            metadata.upsert_server(&operator_server).unwrap();
             async {
                 let mut bytes = one_server_met();
                 bytes[5..9].copy_from_slice(&[203, 0, 113, 10]);
@@ -383,6 +390,16 @@ mod tests {
         let servers = metadata.load_servers().unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].endpoint(), "203.0.113.8:4661");
+        assert!(!servers[0].enabled);
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Servers)
+                .unwrap(),
+            DiscoveryInitializationStatus::Initialized
+        );
+        seed_servers_with(&metadata, |_| async { panic!("disabled list was fetched") })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
