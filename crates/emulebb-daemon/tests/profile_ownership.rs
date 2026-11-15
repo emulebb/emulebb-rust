@@ -333,11 +333,13 @@ fn executable_default_ignores_shell_cwd_and_explicit_profiles_resolve_from_it() 
     for directory in [&executable_dir, &other_cwd, &unused_home] {
         fs::create_dir(directory).unwrap();
     }
-    // WHY: invoking the original unit-test executable with no profile would
-    // write beside a shared Cargo artifact. Copy the fixture into owned output.
+    // WHY: keep default-profile writes in owned output without opening the
+    // executable for writing (transient inherited writers can cause ETXTBSY).
+    // Both paths share the Cargo target filesystem; a hard link keeps the owned launch path.
     let current = env::current_exe().unwrap();
-    let copied = executable_dir.join(current.file_name().unwrap());
-    fs::copy(current, &copied).unwrap();
+    let isolated_executable = executable_dir.join(current.file_name().unwrap());
+    fs::hard_link(&current, &isolated_executable)
+        .expect("hard-link profile fixture within the Cargo target filesystem");
     fs::write(other_cwd.join("not-a-directory"), b"synthetic blocked path").unwrap();
 
     for (mode, cwd, expected) in [
@@ -362,7 +364,7 @@ fn executable_default_ignores_shell_cwd_and_explicit_profiles_resolve_from_it() 
             other_cwd.join("not-a-directory"),
         ),
     ] {
-        let mut command = Command::new(&copied);
+        let mut command = Command::new(&isolated_executable);
         command
             .current_dir(cwd)
             .env("HOME", &unused_home)
@@ -374,4 +376,11 @@ fn executable_default_ignores_shell_cwd_and_explicit_profiles_resolve_from_it() 
     }
     assert!(!other_cwd.join("emulebb-rust-settings.toml").exists());
     assert!(fs::read_dir(unused_home).unwrap().next().is_none());
+    temporary
+        .close()
+        .expect("remove owned profile executable fixture");
+    assert!(
+        current.is_file(),
+        "fixture cleanup removed the original test executable"
+    );
 }
