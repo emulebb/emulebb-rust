@@ -255,6 +255,16 @@ impl RoutingZone {
         }
     }
 
+    pub(crate) fn visit_contacts(&self, visit: &mut impl FnMut(&Contact)) {
+        match &self.content {
+            ZoneContent::Leaf(bin) => bin.iter().for_each(visit),
+            ZoneContent::Branch { left, right } => {
+                left.visit_contacts(visit);
+                right.visit_contacts(visit);
+            }
+        }
+    }
+
     /// Remove a contact by ID. Returns the removed contact if found.
     pub fn remove(&mut self, id: &NodeId, own_id: &NodeId) -> Option<Contact> {
         match &mut self.content {
@@ -362,7 +372,8 @@ impl RoutingZone {
     ) {
         match &mut self.content {
             ZoneContent::Leaf(bin) => {
-                let (removed, probe) = crate::maintenance::small_timer_for_bin(bin, now);
+                let (removed, probe, changed) = crate::maintenance::small_timer_for_bin(bin, now);
+                outcome.snapshot_changed |= changed;
                 outcome.removed.extend(removed);
                 if let Some(candidate) = probe {
                     outcome.probes.push(candidate);

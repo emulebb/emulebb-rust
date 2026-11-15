@@ -36,6 +36,33 @@ async fn node() -> DhtNode {
 }
 
 #[tokio::test]
+async fn compact_projection_ignores_unrelated_key_changes_and_tracks_bound_key() {
+    let dht = node().await;
+    let source = contact(1, Ipv4Addr::new(192, 0, 2, 1));
+    dht.add_contact(source.clone()).await.unwrap();
+    dht.set_public_ip_for_udp_keys(Some(Ipv4Addr::new(198, 51, 100, 6)))
+        .await;
+    let before = dht.capture_routing_projection().await.unwrap();
+    dht.register_peer_key("192.0.2.2:20020".parse().unwrap(), 55);
+    let unrelated = dht.capture_routing_projection().await.unwrap();
+    assert_ne!(before.token.keys, unrelated.token.keys);
+    assert!(!unrelated.differs_from(&before));
+    dht.register_peer_key(SocketAddr::new(IpAddr::V4(source.ip), source.udp_port), 99);
+    let changed = dht.capture_routing_projection().await.unwrap();
+    assert!(changed.differs_from(&unrelated));
+    assert_eq!(changed.keys[0].key, KadUdpKey::new(99));
+    assert_eq!(
+        changed.keys[0].binding,
+        Some(Ipv4Addr::new(198, 51, 100, 6))
+    );
+    assert!(RoutingProjection::reservation_bytes(DEFAULT_MAX_SIZE).unwrap() < 8 * 1024 * 1024);
+    assert_eq!(
+        RoutingProjection::reservation_bytes(DEFAULT_MAX_SIZE + 1),
+        None
+    );
+}
+
+#[tokio::test]
 async fn full_contact_roundtrips_and_learned_key_overlays_with_binding() {
     let source = contact(1, Ipv4Addr::new(192, 0, 2, 1));
     let record = RoutingSnapshotContact::try_from(&source).unwrap();
@@ -178,4 +205,32 @@ async fn capture_and_public_address_transition_share_a_binding_gate() {
     transition.await.unwrap();
     let saved = capture.await.unwrap().pop().unwrap();
     assert!(!(saved.udp_key == KadUdpKey::new(0x1122_3344) && saved.udp_key_ip == Some(new)));
+}
+
+#[tokio::test]
+async fn compact_capture_cannot_mix_old_key_with_new_binding() {
+    let dht = node().await;
+    let peer = contact(8, Ipv4Addr::new(192, 0, 2, 8));
+    dht.add_contact(peer.clone()).await.unwrap();
+    let old = Ipv4Addr::new(198, 51, 100, 7);
+    let new = Ipv4Addr::new(198, 51, 100, 8);
+    dht.set_public_ip_for_udp_keys(Some(old)).await;
+    dht.register_peer_key(SocketAddr::new(IpAddr::V4(peer.ip), peer.udp_port), 42);
+    let guard = dht.inner.key_binding_gate.lock().await;
+    let transition = {
+        let dht = dht.clone();
+        tokio::spawn(async move { dht.set_public_ip_for_udp_keys(Some(new)).await })
+    };
+    let capture = {
+        let dht = dht.clone();
+        tokio::spawn(async move { dht.capture_routing_projection().await.unwrap() })
+    };
+    tokio::task::yield_now().await;
+    assert!(!transition.is_finished());
+    assert!(!capture.is_finished());
+    drop(guard);
+    transition.await.unwrap();
+    let projection = capture.await.unwrap();
+    let key = &projection.keys[0];
+    assert!(!(key.key == KadUdpKey::new(42) && key.binding == Some(new)));
 }

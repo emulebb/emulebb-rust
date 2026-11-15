@@ -25,6 +25,8 @@ pub struct RoutingTable {
     subnet_counts: HashMap<[u8; 3], usize>,
     /// Total contact count across all bins.
     total_contacts: usize,
+    /// None means the counter exhausted and persistence must fail visibly.
+    generation: Option<u64>,
 }
 
 impl RoutingTable {
@@ -42,6 +44,7 @@ impl RoutingTable {
             ip_counts: HashMap::new(),
             subnet_counts: HashMap::new(),
             total_contacts: 0,
+            generation: Some(0),
         }
     }
 
@@ -73,7 +76,9 @@ impl RoutingTable {
         }
 
         // Save old IP if contact already exists (for bookkeeping update).
-        let old_ip = self.root.get(&contact.id, &own_id).map(|c| c.ip);
+        let id = contact.id;
+        let previous = self.root.get(&id, &own_id).cloned();
+        let old_ip = previous.as_ref().map(|c| c.ip);
         let new_ip = contact.ip;
 
         let result = self
@@ -89,6 +94,7 @@ impl RoutingTable {
                     *self.subnet_counts.entry(subnet).or_insert(0) += 1;
                 }
                 self.total_contacts += 1;
+                self.advance_generation();
                 Ok(())
             }
             Ok(AddOutcome::Replaced(evicted)) => {
@@ -101,6 +107,7 @@ impl RoutingTable {
                     let subnet = subnet24(new_ip);
                     *self.subnet_counts.entry(subnet).or_insert(0) += 1;
                 }
+                self.advance_generation();
                 Ok(())
             }
             Ok(AddOutcome::Updated) => {
@@ -132,6 +139,13 @@ impl RoutingTable {
                         let subnet = subnet24(new_ip);
                         *self.subnet_counts.entry(subnet).or_insert(0) += 1;
                     }
+                }
+                if previous
+                    .as_ref()
+                    .zip(self.root.get(&id, &own_id))
+                    .is_some_and(|(old, new)| !old.persistence_eq(new))
+                {
+                    self.advance_generation();
                 }
                 Ok(())
             }
@@ -181,6 +195,7 @@ impl RoutingTable {
         if let Some(contact) = self.root.remove(id, &own_id) {
             self.release_ip_bookkeeping(contact.ip);
             self.total_contacts -= 1;
+            self.advance_generation();
             true
         } else {
             false
@@ -242,6 +257,20 @@ impl RoutingTable {
         self.root.get(id, &self.own_id)
     }
 
+    /// Current persistence generation, or None after counter exhaustion.
+    pub fn persistence_generation(&self) -> Option<u64> {
+        self.generation
+    }
+
+    fn advance_generation(&mut self) {
+        self.generation = self.generation.and_then(|value| value.checked_add(1));
+    }
+
+    /// Visit contacts without cloning the full routing table.
+    pub fn visit_contacts(&self, mut visit: impl FnMut(&Contact)) {
+        self.root.visit_contacts(&mut visit);
+    }
+
     /// Merge durable evidence without letting a stale snapshot replace a live
     /// endpoint or weaken existing contact knowledge. New contacts still pass
     /// the ordinary routing admission and subnet rules.
@@ -250,6 +279,7 @@ impl RoutingTable {
             if existing.ip != incoming.ip || existing.udp_port != incoming.udp_port {
                 return Ok(false);
             }
+            let previous = existing.clone();
             existing.kad_version = existing.kad_version.max(incoming.kad_version);
             if existing.tcp_port == 0 {
                 existing.tcp_port = incoming.tcp_port;
@@ -266,6 +296,10 @@ impl RoutingTable {
             }
             existing.created_at = existing.created_at.min(incoming.created_at);
             existing.last_seen = existing.last_seen.max(incoming.last_seen);
+            let changed = !previous.persistence_eq(existing);
+            if changed {
+                self.advance_generation();
+            }
             return Ok(true);
         }
         self.add_contact(incoming)?;
@@ -282,13 +316,18 @@ impl RoutingTable {
     /// `false` otherwise (unknown contact or IP mismatch).
     pub fn verify_contact(&mut self, id: &NodeId, ip: Ipv4Addr) -> bool {
         let own_id = self.own_id;
-        match self.root.get_mut(id, &own_id) {
+        let (found, changed) = match self.root.get_mut(id, &own_id) {
             Some(contact) if contact.ip == ip => {
+                let changed = !contact.verified;
                 contact.verified = true;
-                true
+                (true, changed)
             }
-            _ => false,
+            _ => (false, false),
+        };
+        if changed {
+            self.advance_generation();
         }
+        found
     }
 
     /// Snapshot all known contacts ordered by XOR distance from our own ID.
@@ -342,6 +381,9 @@ impl RoutingTable {
                 self.total_contacts = self.total_contacts.saturating_sub(1);
             }
         }
+        if outcome.snapshot_changed {
+            self.advance_generation();
+        }
         outcome
     }
 
@@ -355,9 +397,13 @@ impl RoutingTable {
     pub fn consolidate(&mut self) -> u32 {
         let mut dropped = Vec::new();
         let merges = self.root.consolidate(&mut dropped);
+        let changed = !dropped.is_empty();
         for contact in dropped {
             self.release_ip_bookkeeping(contact.ip);
             self.total_contacts = self.total_contacts.saturating_sub(1);
+        }
+        if changed {
+            self.advance_generation();
         }
         merges
     }
@@ -385,9 +431,17 @@ impl RoutingTable {
     /// new counter value, or `None` if the contact is gone.
     pub fn checking_type(&mut self, id: &NodeId) -> Option<u8> {
         let own_id = self.own_id;
-        self.root
-            .get_mut(id, &own_id)
-            .map(|contact| contact.checking_type())
+        let mut changed = false;
+        let result = self.root.get_mut(id, &own_id).map(|contact| {
+            let previous = contact.clone();
+            let value = contact.checking_type();
+            changed = !previous.persistence_eq(contact);
+            value
+        });
+        if changed {
+            self.advance_generation();
+        }
+        result
     }
 }
 

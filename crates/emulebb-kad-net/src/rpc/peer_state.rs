@@ -56,6 +56,11 @@ impl RpcManager {
         self.inner.obfuscation.receiver_verify_key_for_addr(addr)
     }
 
+    /// Capture a batch of learned keys with their generation and binding epoch.
+    pub fn capture_peer_keys(&self, lookups: &mut [(Ipv4Addr, Option<u32>)]) -> Option<(u64, u64)> {
+        self.inner.obfuscation.capture_peer_keys(lookups)
+    }
+
     /// Register a peer's Kad node ID for request-obfuscation fallback when no
     /// receiver verify key is known yet.
     pub fn register_peer_identity(&self, addr: SocketAddr, node_id: emulebb_kad_proto::NodeId) {

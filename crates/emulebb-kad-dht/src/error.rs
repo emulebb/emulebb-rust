@@ -30,6 +30,8 @@ pub enum DhtError {
     InvalidRoutingSnapshot,
     #[error("Kad routing snapshot exceeds the contact limit")]
     RoutingSnapshotTooLarge,
+    #[error("Kad routing persistence generation exhausted")]
+    RoutingGenerationExhausted,
     #[error("search semaphore closed")]
     SemaphoreClosed,
     #[error("unexpected packet type")]

@@ -137,7 +137,96 @@ pub struct RoutingRestoreOutcome {
     pub rejected: usize,
 }
 
+/// An exact, compact projection of the effective durable UDP keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingKeyProjection {
+    pub node_id: NodeId,
+    pub key: KadUdpKey,
+    pub binding: Option<Ipv4Addr>,
+}
+
+/// Counters identifying the coherent capture, independent of database revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutingProjectionToken {
+    pub routing: u64,
+    pub keys: u64,
+    pub binding_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingProjection {
+    pub token: RoutingProjectionToken,
+    pub keys: Vec<RoutingKeyProjection>,
+}
+
+impl RoutingProjection {
+    /// Whether a checkpoint changes durable content. Key generation is coarse:
+    /// unrelated key-cache changes do not change the routing projection.
+    /// Both projections must come from the same DHT runtime instance. The
+    /// persistence owner must fence its baseline when the runtime is replaced.
+    pub fn differs_from(&self, previous: &Self) -> bool {
+        self.token.routing != previous.token.routing || self.keys != previous.keys
+    }
+
+    /// Payload required for a retained baseline, a capture and its lookup buffer.
+    /// The persistence owner must reserve this before capture and account for
+    /// allocator capacities and any full snapshot separately.
+    pub fn reservation_bytes(count: usize) -> Option<usize> {
+        if count > DEFAULT_MAX_SIZE {
+            return None;
+        }
+        count.checked_mul(
+            2 * std::mem::size_of::<RoutingKeyProjection>()
+                + std::mem::size_of::<(Ipv4Addr, Option<u32>)>(),
+        )
+    }
+}
+
 impl DhtNode {
+    /// Capture an exact compact key projection with the binding and table fenced.
+    pub async fn capture_routing_projection(&self) -> Result<RoutingProjection, DhtError> {
+        let _binding = self.inner.key_binding_gate.lock().await;
+        let table = self.inner.routing_table.lock().await;
+        if table.len() > DEFAULT_MAX_SIZE {
+            return Err(DhtError::RoutingSnapshotTooLarge);
+        }
+        let routing = table
+            .persistence_generation()
+            .ok_or(DhtError::RoutingGenerationExhausted)?;
+        let binding = self.public_ip_for_udp_keys();
+        let mut keys = Vec::with_capacity(table.len());
+        let mut lookups = Vec::with_capacity(table.len());
+        table.visit_contacts(|contact| {
+            keys.push(RoutingKeyProjection {
+                node_id: contact.id,
+                key: contact.udp_key,
+                binding: contact.udp_key_ip,
+            });
+            lookups.push((contact.ip, None));
+        });
+        let (key_generation, binding_epoch) = self
+            .inner
+            .rpc
+            .capture_peer_keys(&mut lookups)
+            .ok_or(DhtError::RoutingGenerationExhausted)?;
+        if let Some(ip) = binding {
+            for (entry, (_, learned)) in keys.iter_mut().zip(lookups) {
+                if let Some(key) = learned.filter(|key| *key != 0) {
+                    entry.key = KadUdpKey::new(key);
+                    entry.binding = Some(ip);
+                }
+            }
+        }
+        keys.sort_unstable_by_key(|entry| entry.node_id);
+        Ok(RoutingProjection {
+            token: RoutingProjectionToken {
+                routing,
+                keys: key_generation,
+                binding_epoch,
+            },
+            keys,
+        })
+    }
     /// Capture the complete bounded table and currently bound learned UDP keys.
     /// The address and key overlay are captured under the binding gate.
     /// Routing-generation fencing belongs to the persistence integration.

@@ -32,6 +32,28 @@ pub(super) struct VerifyKeyEntry {
     last_seen: Instant,
 }
 
+pub(super) struct ReceiverKeys {
+    entries: HashMap<std::net::IpAddr, VerifyKeyEntry>,
+    generation: Option<u64>,
+}
+
+impl Default for ReceiverKeys {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            generation: Some(0),
+        }
+    }
+}
+
+impl ReceiverKeys {
+    fn changed(&mut self) {
+        self.generation = self
+            .generation
+            .and_then(|generation| generation.checked_add(1));
+    }
+}
+
 /// Evict the least-recently-seen entry from `map` while it is over `cap`. Called
 /// after each insert so the map size never exceeds `cap`. O(n) over the map, but
 /// only runs on the rare over-cap insert.
@@ -150,6 +172,7 @@ impl ObfuscationLayer {
         // WHY: a packet admitted before an address reset can be delayed on the
         // map lock. Its old binding must not repopulate the new key epoch.
         if !self.peer_key_learning_enabled.load(Ordering::Acquire)
+            || epoch == u64::MAX
             || self.peer_key_epoch.load(Ordering::Acquire) != epoch
         {
             return;
@@ -158,12 +181,26 @@ impl ObfuscationLayer {
             key,
             last_seen: Instant::now(),
         };
+        let old = guard.entries.get(&addr.ip()).map(|entry| entry.key);
         if only_if_absent {
-            guard.entry(addr.ip()).or_insert(entry);
+            guard.entries.entry(addr.ip()).or_insert(entry);
         } else {
-            guard.insert(addr.ip(), entry);
+            guard.entries.insert(addr.ip(), entry);
         }
-        evict_over_cap(&mut guard, PEER_MAP_CAP, |entry| entry.last_seen);
+        if old != guard.entries.get(&addr.ip()).map(|entry| entry.key) {
+            guard.changed();
+        }
+        if guard.entries.len() > PEER_MAP_CAP {
+            let oldest = guard
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen)
+                .map(|(ip, _)| *ip);
+            if let Some(ip) = oldest {
+                guard.entries.remove(&ip);
+                guard.changed();
+            }
+        }
     }
 
     /// Forget every receiver verify key. Persisted Kad keys are bound to our
@@ -175,10 +212,15 @@ impl ObfuscationLayer {
         let mut keys = self.receiver_verify_keys.lock();
         self.peer_key_learning_enabled
             .store(false, Ordering::Release);
-        self.peer_key_epoch.fetch_add(1, Ordering::AcqRel);
-        keys.clear();
+        let epoch = self.peer_key_epoch.load(Ordering::Acquire);
+        let next = epoch.checked_add(1).unwrap_or(u64::MAX);
+        self.peer_key_epoch.store(next, Ordering::Release);
+        if !keys.entries.is_empty() {
+            keys.entries.clear();
+            keys.changed();
+        }
         self.peer_key_learning_enabled
-            .store(accept_new_keys, Ordering::Release);
+            .store(accept_new_keys && next != u64::MAX, Ordering::Release);
     }
 
     /// Return the latest receiver verify key learned for the peer IP behind this endpoint.
@@ -186,8 +228,29 @@ impl ObfuscationLayer {
     pub fn receiver_verify_key_for_addr(&self, addr: SocketAddr) -> Option<u32> {
         self.receiver_verify_keys
             .lock()
+            .entries
             .get(&addr.ip())
             .map(|entry| entry.key)
+    }
+
+    /// Capture key lookups and both counters under one key-map lock.
+    pub fn capture_peer_keys(
+        &self,
+        lookups: &mut [(std::net::Ipv4Addr, Option<u32>)],
+    ) -> Option<(u64, u64)> {
+        let keys = self.receiver_verify_keys.lock();
+        let epoch = self.peer_key_epoch.load(Ordering::Acquire);
+        if epoch == u64::MAX {
+            return None;
+        }
+        let generation = keys.generation?;
+        for (ip, key) in lookups {
+            *key = keys
+                .entries
+                .get(&std::net::IpAddr::V4(*ip))
+                .map(|entry| entry.key);
+        }
+        Some((generation, epoch))
     }
 
     pub(super) fn peer_state_for_addr(&self, addr: SocketAddr) -> ResolvedPeerCryptoState {
@@ -195,6 +258,7 @@ impl ObfuscationLayer {
         let receiver_verify_key = self
             .receiver_verify_keys
             .lock()
+            .entries
             .get(&addr.ip())
             .map(|entry| entry.key);
         ResolvedPeerCryptoState {
@@ -209,6 +273,38 @@ impl ObfuscationLayer {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn key_generation_ignores_refresh_and_tracks_reset_and_exhaustion() {
+        let layer = ObfuscationLayer::new(NodeId::ZERO, 1, true);
+        let peer: SocketAddr = "192.0.2.1:20020".parse().unwrap();
+        let mut lookups = [("192.0.2.1".parse().unwrap(), None)];
+        assert_eq!(layer.capture_peer_keys(&mut lookups), Some((0, 0)));
+        layer.register_peer_key(peer, 11);
+        assert_eq!(layer.capture_peer_keys(&mut lookups), Some((1, 0)));
+        assert_eq!(lookups[0].1, Some(11));
+        layer.register_peer_key(peer, 11);
+        assert_eq!(layer.capture_peer_keys(&mut lookups), Some((1, 0)));
+        layer.register_peer_key(peer, 12);
+        assert_eq!(layer.capture_peer_keys(&mut lookups), Some((2, 0)));
+        layer.reset_peer_keys(true);
+        assert_eq!(layer.capture_peer_keys(&mut lookups), Some((3, 1)));
+        assert_eq!(lookups[0].1, None);
+        layer.receiver_verify_keys.lock().generation = Some(u64::MAX);
+        layer.register_peer_key(peer, 13);
+        assert_eq!(layer.capture_peer_keys(&mut lookups), None);
+    }
+
+    #[test]
+    fn exhausted_binding_epoch_never_accepts_an_old_registration() {
+        let layer = ObfuscationLayer::new(NodeId::ZERO, 1, true);
+        let peer: SocketAddr = "192.0.2.1:20020".parse().unwrap();
+        layer.peer_key_epoch.store(u64::MAX - 1, Ordering::Release);
+        layer.reset_peer_keys(true);
+        layer.register_peer_key(peer, 7);
+        assert_eq!(layer.receiver_verify_key_for_addr(peer), None);
+        assert_eq!(layer.capture_peer_keys(&mut []), None);
+    }
 
     #[test]
     fn delayed_registration_cannot_cross_a_key_reset() {
@@ -280,9 +376,13 @@ mod tests {
             layer.register_peer_key(SocketAddr::new(ip, 4000), i as u32);
         }
         assert_eq!(
-            layer.receiver_verify_keys.lock().len(),
+            layer.receiver_verify_keys.lock().entries.len(),
             PEER_MAP_CAP,
             "receiver verify key map must stay at the cap"
+        );
+        assert_eq!(
+            layer.capture_peer_keys(&mut []).unwrap().0,
+            (PEER_MAP_CAP + 32) as u64
         );
     }
 }
