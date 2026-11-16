@@ -50,7 +50,7 @@ impl MetadataStore {
         Ok(admitted)
     }
 
-    fn admit_local_path_on_connection(
+    pub(crate) fn admit_local_path_on_connection(
         tx: &rusqlite::Connection,
         root: &Path,
         path: &Path,

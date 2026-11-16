@@ -261,13 +261,23 @@ impl MetadataStore {
         file: &MetadataIndexedFile,
         origin: MetadataIndexedFileOrigin,
     ) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        Self::upsert_indexed_file_on_connection(&tx, file, origin)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn upsert_indexed_file_on_connection(
+        tx: &rusqlite::Connection,
+        file: &MetadataIndexedFile,
+        origin: MetadataIndexedFileOrigin,
+    ) -> Result<()> {
         let hash = decode_fixed_hex(&file.ed2k_hash, 16, "ED2K hash")?;
         let normalized = normalize_search_text(&file.name);
         let now = unix_ms();
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
         crate::content_identity::check_accepted_identity(
-            &tx,
+            tx,
             &hash,
             i64::try_from(file.size_bytes)?,
             None,
@@ -396,7 +406,6 @@ impl MetadataStore {
             "#,
             params![file_name_id, origin.as_str(), now],
         )?;
-        tx.commit()?;
         Ok(())
     }
 

@@ -15,6 +15,11 @@ mod library_projection;
 mod local_catalog;
 pub use local_catalog::MetadataPartialOffer;
 mod local_file_store;
+mod local_ingest_store;
+pub use local_ingest_store::{
+    MetadataIngestCommit, MetadataIngestCommitUncertain, MetadataIngestPathChanged,
+    MetadataIngestProjection, MetadataIngestRoot,
+};
 mod model;
 mod native_file;
 mod native_path;

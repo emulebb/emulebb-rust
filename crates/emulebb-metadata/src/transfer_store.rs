@@ -834,8 +834,17 @@ impl super::MetadataStore {
         file_hash: &str,
         media: &MetadataTransferMediaMetadata,
     ) -> Result<bool> {
+        let conn = self.connection()?;
+        Self::update_transfer_media_on_connection(&conn, file_hash, media)
+    }
+
+    pub(crate) fn update_transfer_media_on_connection(
+        conn: &rusqlite::Connection,
+        file_hash: &str,
+        media: &MetadataTransferMediaMetadata,
+    ) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let changed = self.connection()?.execute(
+        let changed = conn.execute(
             r#"
             UPDATE known_files
             SET media_artist = ?2,
@@ -2039,7 +2048,7 @@ fn delete_transfer_and_unreferenced_identity(
     Ok(())
 }
 
-fn read_transfer_aich_identity(
+pub(crate) fn read_transfer_aich_identity(
     conn: &rusqlite::Connection,
     hash: &[u8],
 ) -> Result<Option<MetadataTransferAichIdentity>> {

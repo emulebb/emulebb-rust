@@ -147,7 +147,7 @@ impl MetadataStore {
     }
 }
 
-fn write_set(
+pub(crate) fn write_set(
     conn: &rusqlite::Connection,
     root: &[u8],
     size: u64,
