@@ -12,19 +12,33 @@ use crate::{
 async fn source_exchange_reask_throttles_same_peer_and_file() {
     let root = unique_test_dir("ed2k-transfer-source-exchange-reask");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let aa = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([1; 16]),
+        "aa.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&aa).await.unwrap();
+    let bb = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([2; 16]),
+        "bb.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&bb).await.unwrap();
     let now = Instant::now();
     let peer_addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 3), 4662));
     let user_hash = Some([0x51; 16]);
 
     assert!(
         runtime
-            .should_request_source_exchange("aa", peer_addr, user_hash, 0, now)
+            .should_request_source_exchange(aa.token, peer_addr, user_hash, 0, now)
             .await
     );
     assert!(
         !runtime
             .should_request_source_exchange(
-                "aa",
+                aa.token,
                 peer_addr,
                 user_hash,
                 0,
@@ -35,7 +49,7 @@ async fn source_exchange_reask_throttles_same_peer_and_file() {
     assert!(
         runtime
             .should_request_source_exchange(
-                "aa",
+                aa.token,
                 peer_addr,
                 user_hash,
                 0,
@@ -46,7 +60,7 @@ async fn source_exchange_reask_throttles_same_peer_and_file() {
     assert!(
         runtime
             .should_request_source_exchange(
-                "bb",
+                bb.token,
                 peer_addr,
                 user_hash,
                 0,
@@ -60,19 +74,26 @@ async fn source_exchange_reask_throttles_same_peer_and_file() {
 async fn source_exchange_common_files_use_common_reask_penalty() {
     let root = unique_test_dir("ed2k-transfer-source-exchange-common-reask");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let aa = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([1; 16]),
+        "aa.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&aa).await.unwrap();
     let now = Instant::now();
     let peer_addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 5), 4662));
     let user_hash = Some([0x52; 16]);
 
     assert!(
         runtime
-            .should_request_source_exchange("aa", peer_addr, user_hash, 51, now)
+            .should_request_source_exchange(aa.token, peer_addr, user_hash, 51, now)
             .await
     );
     assert!(
         !runtime
             .should_request_source_exchange(
-                "aa",
+                aa.token,
                 peer_addr,
                 user_hash,
                 51,
@@ -83,7 +104,7 @@ async fn source_exchange_common_files_use_common_reask_penalty() {
     assert!(
         runtime
             .should_request_source_exchange(
-                "aa",
+                aa.token,
                 peer_addr,
                 user_hash,
                 51,
@@ -101,23 +122,43 @@ async fn source_exchange_respects_soft_source_cap() {
         max_sources_per_file: 10,
         ..Ed2kDownloadCoordinatorConfig::default()
     });
+    let aa = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([1; 16]),
+        "aa.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&aa).await.unwrap();
+    let bb = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([2; 16]),
+        "bb.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&bb).await.unwrap();
     let now = Instant::now();
     let peer_addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 4), 4662));
 
     assert!(
         runtime
-            .should_request_source_exchange("aa", peer_addr, None, 8, now)
+            .should_request_source_exchange(aa.token, peer_addr, None, 8, now)
             .await
     );
     assert!(
         !runtime
-            .should_request_source_exchange("bb", peer_addr, None, 9, now + Duration::from_secs(60))
+            .should_request_source_exchange(
+                bb.token,
+                peer_addr,
+                None,
+                9,
+                now + Duration::from_secs(60)
+            )
             .await
     );
     assert!(
         runtime
             .should_request_source_exchange(
-                "bb",
+                bb.token,
                 peer_addr,
                 None,
                 8,
@@ -132,22 +173,45 @@ async fn source_exchange_respects_soft_source_cap() {
 async fn source_exchange_answer_cools_down_rare_and_common_files() {
     let root = unique_test_dir("ed2k-transfer-source-exchange-answer-cooldown");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let very_rare = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([1; 16]),
+        "very_rare.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&very_rare).await.unwrap();
+    let rare = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([2; 16]),
+        "rare.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&rare).await.unwrap();
+    let common = super::super::test_support::admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([3; 16]),
+        "common.bin".into(),
+        16,
+    );
+    runtime.ensure_job(&common).await.unwrap();
     let now = Instant::now();
     let peer_addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 6), 4662));
 
-    runtime.note_source_exchange_answer("very_rare", now).await;
+    runtime
+        .note_source_exchange_answer(very_rare.token, now)
+        .await;
     assert!(
         runtime
-            .should_request_source_exchange("very_rare", peer_addr, None, 10, now)
+            .should_request_source_exchange(very_rare.token, peer_addr, None, 10, now)
             .await,
         "very rare files do not use the file-level answer cooldown"
     );
 
-    runtime.note_source_exchange_answer("rare", now).await;
+    runtime.note_source_exchange_answer(rare.token, now).await;
     assert!(
         !runtime
             .should_request_source_exchange(
-                "rare",
+                rare.token,
                 peer_addr,
                 None,
                 11,
@@ -158,7 +222,7 @@ async fn source_exchange_answer_cools_down_rare_and_common_files() {
     assert!(
         runtime
             .should_request_source_exchange(
-                "rare",
+                rare.token,
                 peer_addr,
                 None,
                 11,
@@ -167,11 +231,11 @@ async fn source_exchange_answer_cools_down_rare_and_common_files() {
             .await
     );
 
-    runtime.note_source_exchange_answer("common", now).await;
+    runtime.note_source_exchange_answer(common.token, now).await;
     assert!(
         !runtime
             .should_request_source_exchange(
-                "common",
+                common.token,
                 peer_addr,
                 None,
                 51,
@@ -182,7 +246,7 @@ async fn source_exchange_answer_cools_down_rare_and_common_files() {
     assert!(
         runtime
             .should_request_source_exchange(
-                "common",
+                common.token,
                 peer_addr,
                 None,
                 51,

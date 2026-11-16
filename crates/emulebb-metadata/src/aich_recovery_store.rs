@@ -233,6 +233,7 @@ mod tests {
     fn native_content_and_recovery_commit_together_or_preserve_md4_on_optional_failure() {
         let db = MetadataStore::in_memory().unwrap();
         let content = MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: "11".repeat(16),
             display_name: "Sample.bin".to_string(),
             file_size: 184_321,
@@ -352,16 +353,19 @@ mod tests {
                 first.clone(),
                 std::env::temp_dir().join("Sample.bin"),
                 fingerprint.clone(),
+                crate::NativeFileIdentityEvidence::new(fingerprint.identity, None).unwrap(),
             ),
             (
                 alias,
                 std::env::temp_dir().join("Alias.bin"),
                 fingerprint.clone(),
+                crate::NativeFileIdentityEvidence::new(fingerprint.identity, None).unwrap(),
             ),
             (
                 other_identity,
                 std::env::temp_dir().join("Other Identity.bin"),
-                fingerprint,
+                fingerprint.clone(),
+                crate::NativeFileIdentityEvidence::new(fingerprint.identity, None).unwrap(),
             ),
         ])
         .unwrap();

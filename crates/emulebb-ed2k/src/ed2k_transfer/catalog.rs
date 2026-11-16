@@ -24,8 +24,8 @@ use super::{ED2K_PART_SIZE, Ed2kResumeManifest, ed2k_part_count};
 /// per-fragment/per-request crediting an O(1) lookup instead of a full scan held
 /// under the write lock.
 pub type Ed2kSharedCatalog = Arc<RwLock<IndexedSharedCatalog>>;
-type EligibilityRows = Vec<(bool, Option<emulebb_metadata::MetadataPartialOffer>)>;
-type EligibilityTask = tokio::task::JoinHandle<anyhow::Result<Option<EligibilityRows>>>;
+type EligibilityTask =
+    tokio::sync::oneshot::Receiver<anyhow::Result<super::local_mutation::job_payload::Output>>;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct ShareStripe {
@@ -112,9 +112,10 @@ impl ShareStripes {
 }
 
 /// One separately bounded, tracked eligibility read for outgoing batches.
-/// Product-owned read/projection buffers are capped at 1 MiB independently
+/// Product-owned retained result buffers are capped at 1 MiB independently
 /// of persistence-owner payloads; SQLite/allocator and transport internals
-/// are outside this retained-payload bound.
+/// are outside this retained-payload bound. Physical probes additionally use
+/// the existing registry long-filesystem workspace and admission sublimits.
 #[derive(Debug)]
 pub struct SharedEligibility {
     metadata: emulebb_metadata::MetadataStore,
@@ -123,8 +124,9 @@ pub struct SharedEligibility {
     publication_failed: Arc<AtomicBool>,
     sealed: AtomicBool,
     stripes: Arc<std::sync::Mutex<ShareStripes>>,
-    manifests: Arc<tokio::sync::Mutex<HashMap<String, Ed2kResumeManifest>>>,
+    manifests: Arc<tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, Ed2kResumeManifest>>>,
     read_slot: Arc<tokio::sync::Mutex<Option<EligibilityTask>>>,
+    local_mutations: Arc<super::local_mutation::LocalMutationRegistry>,
 }
 
 pub struct SharedEligibilityBatch {
@@ -133,16 +135,18 @@ pub struct SharedEligibilityBatch {
     pub complete: Vec<bool>,
     pub partial: Vec<Option<emulebb_metadata::MetadataPartialOffer>>,
     _slot: tokio::sync::OwnedMutexGuard<Option<EligibilityTask>>,
+    _result_lease: super::local_mutation::capacity::CapacityLease,
 }
 
 impl SharedEligibility {
-    pub(crate) fn new(
+    pub(super) fn new(
         metadata: emulebb_metadata::MetadataStore,
         root_epoch: Arc<AtomicU64>,
         root_dirty: Arc<AtomicBool>,
         publication_failed: Arc<AtomicBool>,
         stripes: Arc<std::sync::Mutex<ShareStripes>>,
-        manifests: Arc<tokio::sync::Mutex<HashMap<String, Ed2kResumeManifest>>>,
+        manifests: Arc<tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, Ed2kResumeManifest>>>,
+        local_mutations: Arc<super::local_mutation::LocalMutationRegistry>,
     ) -> Self {
         Self {
             metadata,
@@ -152,6 +156,7 @@ impl SharedEligibility {
             sealed: AtomicBool::new(false),
             stripes,
             manifests,
+            local_mutations,
             read_slot: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
@@ -169,11 +174,14 @@ impl SharedEligibility {
         if self.sealed.load(Ordering::Acquire) {
             return Ok(None);
         }
-        if slot.as_ref().is_some_and(|task| !task.is_finished()) {
-            return Ok(None);
-        }
-        if let Some(task) = slot.take() {
-            let _ = task.await;
+        if let Some(task) = slot.as_mut() {
+            if matches!(
+                task.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ) {
+                return Ok(None);
+            }
+            slot.take();
         }
         let epoch = self.root_epoch.load(Ordering::Acquire);
         if epoch % 2 != 0 {
@@ -187,14 +195,29 @@ impl SharedEligibility {
         else {
             return Ok(None);
         };
-        let owned = hashes.to_vec();
-        let metadata = self.metadata.clone();
-        *slot = Some(tokio::task::spawn_blocking(move || {
-            metadata.try_verified_share_batch(&owned)
-        }));
+        let receipt = match self.local_mutations.submit_payload_read(
+            &self.metadata,
+            super::local_mutation::job_payload::Request::Eligibility(hashes),
+        ) {
+            Ok(receipt) => receipt,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<super::LocalMutationError>(),
+                    Some(super::LocalMutationError::Busy | super::LocalMutationError::Closing)
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        *slot = Some(receipt);
         let result = slot.as_mut().expect("eligibility read slot").await;
         slot.take();
-        let result = result.context("eligibility read task panicked")??;
+        let super::local_mutation::job_payload::Output::Eligibility(result, result_lease) =
+            result.context("eligibility read owner stopped")??
+        else {
+            unreachable!()
+        };
         let Some(rows) = result else {
             return Ok(None);
         };
@@ -207,8 +230,12 @@ impl SharedEligibility {
         let mut complete = Vec::with_capacity(hashes.len());
         let mut partial = Vec::with_capacity(hashes.len());
         let mut output_text_bytes = 0usize;
-        for (hash, (is_complete, persisted_partial)) in hashes.iter().zip(rows) {
-            let offer = if let Some(manifest) = cache.get(&hex::encode(hash)) {
+        for (_hash, (is_complete, persisted_partial)) in hashes.iter().zip(rows) {
+            let offer = if let Some(manifest) = persisted_partial.as_ref().and_then(|partial| {
+                cache
+                    .get(&partial.job_token.job_id)
+                    .filter(|manifest| manifest.token == partial.job_token)
+            }) {
                 if !manifest.completed
                     && !manifest.final_rehash_pending
                     && manifest.md4_hashset_acquired
@@ -230,6 +257,7 @@ impl SharedEligibility {
                     }
                     output_text_bytes = next;
                     Some(emulebb_metadata::MetadataPartialOffer {
+                        job_token: manifest.token,
                         name: manifest.display_name.clone(),
                         size: manifest.file_size,
                         priority: manifest.upload_priority.clone(),
@@ -263,6 +291,7 @@ impl SharedEligibility {
             complete,
             partial,
             _slot: slot,
+            _result_lease: result_lease,
         }))
     }
 
@@ -294,7 +323,7 @@ impl SharedEligibility {
         &self,
         snapshot: &[(u8, u64)],
         catalog: &mut IndexedSharedCatalog,
-        entries: Vec<Ed2kSharedEntry>,
+        rebuilt: &mut IndexedSharedCatalog,
     ) -> bool {
         let Ok(state) = self.stripes.lock() else {
             return false;
@@ -302,9 +331,56 @@ impl SharedEligibility {
         if !state.matches(snapshot) {
             return false;
         }
-        catalog.replace_with(entries);
+        catalog.replace_rebuilt(rebuilt);
         self.publication_failed.store(false, Ordering::Release);
         true
+    }
+
+    /// Complete payload candidates were physically checked by the retained
+    /// worker. Validate only their stripes; unrelated content cannot starve a
+    /// page. Existing complete local copies keep precedence.
+    pub(crate) fn publish_payload_page(
+        &self,
+        snapshot: &[(u8, u64)],
+        catalog: &mut IndexedSharedCatalog,
+        entries: Vec<Ed2kSharedEntry>,
+    ) -> Result<Option<usize>> {
+        let hashes = entries
+            .iter()
+            .map(|entry| entry.file_hash.parse::<Ed2kHash>().map(|h| h.0))
+            .collect::<Result<Vec<_>, _>>()?;
+        let indexes = ShareStripes::indexes(&hashes);
+        let selected = snapshot
+            .iter()
+            .copied()
+            .filter(|(index, _)| indexes.contains(index))
+            .collect::<Vec<_>>();
+        let state = self
+            .stripes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("share stripe lock poisoned"))?;
+        if !state.matches(&selected) {
+            return Ok(None);
+        }
+        let mut inserted = 0;
+        for (mut entry, hash) in entries.into_iter().zip(hashes) {
+            let hash = Ed2kHash::from_bytes(hash);
+            if catalog
+                .entry_by_hash(&hash)
+                .is_some_and(|old| old.verified_complete)
+            {
+                continue;
+            }
+            if let Some(old) = catalog.entry_by_hash(&hash) {
+                entry.publish = old.publish.clone();
+                entry.all_time_uploaded_bytes = entry
+                    .all_time_uploaded_bytes
+                    .max(old.all_time_uploaded_bytes);
+            }
+            catalog.upsert_verified(hash, Some(entry));
+            inserted += 1;
+        }
+        Ok(Some(inserted))
     }
 
     pub(crate) fn begin_mutation(&self, hashes: &[[u8; 16]]) -> Result<SharedFileMutation> {
@@ -353,7 +429,7 @@ impl SharedEligibility {
         if let Some(task) = slot.as_mut() {
             let outcome = task.await;
             slot.take();
-            outcome.context("eligibility read task panicked")??;
+            outcome.context("eligibility read owner stopped")??;
         }
         Ok(())
     }
@@ -363,7 +439,7 @@ impl SharedEligibility {
 ///
 /// `entries` is the ordered source of truth. `by_hash` is an ADDITIONAL lookup
 /// structure mapping the raw 16-byte MD4 file hash to the index of the unique
-/// non-compatibility-hint entry carrying that hash — the exact entry every by-hash
+/// non-compatibility-hint entry carrying that hash - the exact entry every by-hash
 /// hot-path lookup targets (`update_shared_publish_stats`,
 /// `add_file_all_time_uploaded`, and the reask serve check all filter to the
 /// verified/servable entry, never a bare hint). Compatibility hints are
@@ -570,13 +646,46 @@ impl IndexedSharedCatalog {
         self.rebuild_index();
     }
 
+    /// Publish the prepared projection without another whole-library vector.
+    /// Live partial progress wins over a persisted partial, while a verified
+    /// complete copy wins over either. Preserve counters updated during the read.
+    fn replace_rebuilt(&mut self, rebuilt: &mut Self) {
+        self.invalidate_category_watch(None);
+        for current in &self.entries {
+            if current.compatibility_hint {
+                rebuilt.push(current.clone());
+                continue;
+            }
+            let Some(hash) = Self::entry_hash_key(current) else {
+                continue;
+            };
+            if let Some(&index) = rebuilt.by_hash.get(&hash) {
+                let next = &mut rebuilt.entries[index];
+                if !next.verified_complete && !current.verified_complete {
+                    *next = current.clone();
+                } else {
+                    next.publish = current.publish.clone();
+                    next.all_time_uploaded_bytes = next
+                        .all_time_uploaded_bytes
+                        .max(current.all_time_uploaded_bytes);
+                }
+            } else if !current.verified_complete {
+                rebuilt.push(current.clone());
+            }
+        }
+        self.entries = std::mem::take(&mut rebuilt.entries);
+        self.by_hash = std::mem::take(&mut rebuilt.by_hash);
+        self.completed_verified_count = rebuilt.completed_verified_count;
+        rebuilt.completed_verified_count = 0;
+    }
+
     /// Upsert a verified entry in place: drop the entries `keep` rejects, append
     /// `new_entry` when present, canonicalise the survivors through `dedup`, and
     /// rebuild the by-hash index ONCE.
     ///
     /// The owned inner `Vec` is moved through `dedup` via [`std::mem::take`], so
-    /// entries are MOVED, never deep cloned — this replaces the previous
-    /// `retain` → `to_vec` (whole-catalog deep clone) → `dedup` → `replace_with`
+    /// entries are MOVED, never deep cloned - this replaces the previous
+    /// `retain` -> `to_vec` (whole-catalog deep clone) -> `dedup` -> `replace_with`
     /// chain, which cloned every entry (and its inner `Vec`s) on each mutation.
     ///
     /// The end state is byte-identical to that chain: `keep` filters in place
@@ -1114,6 +1223,7 @@ mod indexed_catalog_tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
             Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
         );
         assert!(provider.try_batch(&[[0; 16]; 201]).await.is_err());
         let first = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
@@ -1134,6 +1244,7 @@ mod indexed_catalog_tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
             Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
         ));
         let batch = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
         let draining = {
@@ -1160,6 +1271,7 @@ mod indexed_catalog_tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
             Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
         ));
         let mut catalog = IndexedSharedCatalog::default();
         catalog.set_eligibility(Arc::clone(&provider));
@@ -1183,6 +1295,7 @@ mod indexed_catalog_tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
             Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
         );
         let hash = [1; 16];
         let snapshot = provider.stripe_snapshot(&[hash]).unwrap();
@@ -1222,6 +1335,10 @@ mod indexed_catalog_tests {
         let input_range_bytes =
             ranges.capacity() * std::mem::size_of::<emulebb_metadata::MetadataTransferRange>();
         let partial = emulebb_metadata::MetadataPartialShare {
+            job_token: emulebb_metadata::JobToken {
+                job_id: emulebb_metadata::JobId::new(1).unwrap(),
+                generation: 0,
+            },
             file_hash: "11".repeat(16),
             display_name: "n".repeat(65_536),
             file_size: 0x4000000000,
@@ -1329,6 +1446,58 @@ mod indexed_catalog_tests {
             .index_by_hash(&key(1))
             .expect("re-added entry present");
         assert_eq!(catalog[idx].file_hash, hex_hash(1));
+    }
+
+    #[test]
+    fn rebuilt_projection_preserves_live_partial_progress_hints_and_counters() {
+        let mut partial = verified_entry(1);
+        partial.verified_complete = false;
+        partial.verified_ranges = vec![super::super::Ed2kSharedRange { start: 0, end: 7 }];
+        partial.publish.session_request_count = 9;
+        let mut complete = verified_entry(2);
+        complete.publish.session_request_count = 11;
+        complete.all_time_uploaded_bytes = 17;
+        let mut hint = verified_entry(3);
+        hint.compatibility_hint = true;
+        let mut current = IndexedSharedCatalog::from_entries(vec![partial.clone(), complete, hint]);
+        let watched = current.watch_category_hash(key(1).0).unwrap();
+        let mut persisted_partial = partial.clone();
+        persisted_partial.verified_ranges.clear();
+        let mut rebuilt =
+            IndexedSharedCatalog::from_entries(vec![persisted_partial, verified_entry(2)]);
+        current.replace_rebuilt(&mut rebuilt);
+        current.assert_index_consistent();
+        assert!(rebuilt.is_empty());
+        assert!(!current.finish_category_watch(key(1).0, watched));
+        assert_eq!(
+            current.entry_by_hash(&key(1)).unwrap().verified_ranges,
+            partial.verified_ranges
+        );
+        assert_eq!(
+            current
+                .entry_by_hash(&key(1))
+                .unwrap()
+                .publish
+                .session_request_count,
+            9
+        );
+        assert_eq!(
+            current
+                .entry_by_hash(&key(2))
+                .unwrap()
+                .publish
+                .session_request_count,
+            11
+        );
+        assert_eq!(
+            current
+                .entry_by_hash(&key(2))
+                .unwrap()
+                .all_time_uploaded_bytes,
+            17
+        );
+        assert_eq!(current.completed_verified_len(), 1);
+        assert!(current.iter().any(|entry| entry.compatibility_hint));
     }
 
     #[test]

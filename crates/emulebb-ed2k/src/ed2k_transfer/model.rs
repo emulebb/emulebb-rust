@@ -8,7 +8,8 @@ use std::{
 
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp, NativePath,
+    DownloadIntent, JobToken, NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp,
+    NativePath,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
@@ -18,6 +19,9 @@ use super::{Ed2kSharedRange, manifest::piece_count};
 /// One persisted ED2K transfer job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ed2kTransferJob {
+    /// Exact persisted job execution; never resolved again from the wire hash.
+    #[serde(with = "job_token_serde")]
+    pub token: JobToken,
     /// ED2K file hash in lowercase hex.
     pub file_hash: String,
     /// Canonical file name.
@@ -177,22 +181,6 @@ pub struct Ed2kSourceHint {
     pub file_rating: u8,
 }
 
-/// One immutable filename report retained with its peer and discovery provenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Ed2kFileNameObservation {
-    pub source_ip: Option<String>,
-    pub source_tcp_port: Option<u16>,
-    pub user_hash: Option<String>,
-    #[serde(default)]
-    pub client_software: String,
-    pub origin: String,
-    #[serde(default)]
-    pub server_endpoint: Option<String>,
-    pub raw_name: String,
-    pub normalized_name: String,
-    pub observed_at_ms: i64,
-}
-
 /// Canonical AICH master hash plus per-part hashes for one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ed2kAichHashset {
@@ -268,6 +256,8 @@ pub(crate) struct Ed2kCallbackPeer {
 /// One file to negotiate after an expected callback peer is admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kCallbackDownload {
+    /// Exact execution captured when the callback ticket is reserved.
+    pub job_token: emulebb_metadata::JobToken,
     /// Binary ED2K file hash; callback admission never accepts an invalid hex form.
     pub file_hash: Ed2kHash,
     /// Canonical file name.
@@ -416,6 +406,7 @@ pub enum Ed2kDeliveryOwnership {
 /// It has no download lifecycle or persistence representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kFileServingView {
+    pub job_token: Option<JobToken>,
     pub file_hash: String,
     pub display_name: String,
     pub file_size: u64,
@@ -427,7 +418,6 @@ pub struct Ed2kFileServingView {
     pub aich_root: Option<String>,
     pub aich_hashset: Vec<String>,
     pub verified_ranges: Vec<Ed2kSharedRange>,
-    pub sources: Vec<Ed2kSourceHint>,
     pub upload_priority: String,
     pub auto_upload_priority: bool,
     pub comment: String,
@@ -440,6 +430,7 @@ pub struct Ed2kFileServingView {
 impl From<&Ed2kResumeManifest> for Ed2kFileServingView {
     fn from(download: &Ed2kResumeManifest) -> Self {
         Self {
+            job_token: Some(download.token),
             file_hash: download.file_hash.clone(),
             display_name: download.display_name.clone(),
             file_size: download.file_size,
@@ -451,7 +442,6 @@ impl From<&Ed2kResumeManifest> for Ed2kFileServingView {
             aich_root: download.aich_root.clone(),
             aich_hashset: download.aich_hashset.clone(),
             verified_ranges: download.verified_ranges.clone(),
-            sources: download.sources.clone(),
             upload_priority: download.upload_priority.clone(),
             auto_upload_priority: download.auto_upload_priority,
             comment: download.comment.clone(),
@@ -503,21 +493,13 @@ impl Ed2kAichRootOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ed2kResumeManifest {
+    /// Exact persisted job execution; never resolved again from the wire hash.
+    #[serde(with = "job_token_serde")]
+    pub token: JobToken,
     /// ED2K file hash in lowercase hex.
     pub file_hash: String,
     /// Canonical file name.
     pub display_name: String,
-    /// Manual operator renames pin the canonical name and disable automatic
-    /// majority selection until a new transfer is created.
-    #[serde(default)]
-    pub display_name_pinned: bool,
-    /// Whether source filename observations may automatically update the
-    /// canonical display name for this incomplete transfer.
-    #[serde(default)]
-    pub follow_majority_filename: bool,
-    /// Immutable peer filename reports retained for consensus and diagnostics.
-    #[serde(default)]
-    pub file_name_observations: Vec<Ed2kFileNameObservation>,
     /// Target file size.
     pub file_size: u64,
     /// Piece size used in the piece store.
@@ -553,8 +535,6 @@ pub struct Ed2kResumeManifest {
     pub verified_ranges: Vec<Ed2kSharedRange>,
     /// Piece states keyed by piece index.
     pub pieces: Vec<Ed2kPieceState>,
-    /// Remembered source hints.
-    pub sources: Vec<Ed2kSourceHint>,
     /// Public upload-priority token for shared-file REST metadata.
     #[serde(default = "default_shared_upload_priority")]
     pub upload_priority: String,
@@ -570,9 +550,9 @@ pub struct Ed2kResumeManifest {
     /// Download category index, matching eMule's persisted FT_CATEGORY tag.
     #[serde(default)]
     pub category_id: Option<i64>,
-    /// User-facing transfer control state persisted across restarts.
-    #[serde(default)]
-    pub control_state: Option<String>,
+    /// Durable execution intent; stop invalidates the job generation.
+    #[serde(with = "download_intent_serde")]
+    pub intent: DownloadIntent,
     /// Whether the completed transfer row was removed without deleting the
     /// local payload or shared-file registration.
     #[serde(default)]
@@ -600,6 +580,45 @@ pub struct Ed2kResumeManifest {
     /// conservative startup rehash.
     #[serde(default, with = "optional_native_file_fingerprint_serde")]
     pub payload_fingerprint: Option<NativeFileFingerprint>,
+}
+
+mod job_token_serde {
+    use super::*;
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StoredToken {
+        job_id: String,
+        generation: u64,
+    }
+    pub fn serialize<S: Serializer>(token: &JobToken, serializer: S) -> Result<S::Ok, S::Error> {
+        StoredToken {
+            job_id: token.job_id.to_string(),
+            generation: token.generation,
+        }
+        .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<JobToken, D::Error> {
+        let token = StoredToken::deserialize(deserializer)?;
+        Ok(JobToken {
+            job_id: token.job_id.parse().map_err(D::Error::custom)?,
+            generation: token.generation,
+        })
+    }
+}
+
+mod download_intent_serde {
+    use super::*;
+    pub fn serialize<S: Serializer>(
+        intent: &DownloadIntent,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(intent.as_str())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<DownloadIntent, D::Error> {
+        DownloadIntent::parse(&String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
 }
 
 mod optional_native_file_fingerprint_serde {
@@ -809,11 +828,9 @@ impl Ed2kResumeManifest {
     pub fn new(job: &Ed2kTransferJob) -> Self {
         let piece_count = piece_count(job.file_size, job.piece_size);
         Self {
+            token: job.token,
             file_hash: job.file_hash.clone(),
             display_name: job.display_name.clone(),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
             file_size: job.file_size,
             piece_size: job.piece_size,
             completed: false,
@@ -835,13 +852,12 @@ impl Ed2kResumeManifest {
                     ich_corrupted: false,
                 })
                 .collect(),
-            sources: Vec::new(),
             upload_priority: default_shared_upload_priority(),
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
             category_id: None,
-            control_state: None,
+            intent: DownloadIntent::Started,
             transfer_row_removed: false,
             delivery_state: Ed2kDeliveryState::Pending,
             delivery_ownership: Ed2kDeliveryOwnership::None,
@@ -869,12 +885,12 @@ mod tests {
     use super::*;
 
     fn manifest_with_delivered_path(source_path: PathBuf) -> Ed2kResumeManifest {
-        let mut manifest = Ed2kResumeManifest::new(&Ed2kTransferJob {
-            file_hash: "00112233445566778899aabbccddeeff".to_string(),
-            display_name: "native-path.bin".to_string(),
-            file_size: 1,
-            piece_size: 1,
-        });
+        let (_profile, job) = super::super::test_support::admit_unallocated_job(
+            "00112233445566778899aabbccddeeff".parse().unwrap(),
+            "native-path.bin".into(),
+            1,
+        );
+        let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.delivery_state = Ed2kDeliveryState::Delivered;
         manifest.delivery_ownership = Ed2kDeliveryOwnership::None;
         manifest.delivered_path = Some(source_path);

@@ -106,14 +106,13 @@ async fn unsolicited_queue_rank_bursts_disconnect_then_ban() {
     let payload = vec![0xA5; 32_768];
     let file_size = payload.len() as u64;
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "anti-abuse.bin".to_string(),
-            file_size,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "anti-abuse.bin".to_string(),
+        file_size,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -169,14 +168,13 @@ async fn repeated_out_of_part_requests_suppress_later_accept_with_cancel() {
     let payload = vec![0x6C; 32_768];
     let file_size = payload.len() as u64;
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "anti-abuse.bin".to_string(),
-            file_size,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "anti-abuse.bin".to_string(),
+        file_size,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();

@@ -35,6 +35,7 @@ pub(crate) enum ReaskInboundOutcome {
     /// low rank; `file_hash`/`endpoint` identify the source so the caller can emit a
     /// loop->core event. No datagram reply is owed.
     RoutedReply {
+        job_token: emulebb_metadata::JobToken,
         file_hash: Ed2kHash,
         endpoint: (Ipv4Addr, u16),
         /// The source's TCP endpoint — the key core leased it under
@@ -247,22 +248,34 @@ impl ReaskService {
             .is_some_and(|set| set.is_pending(endpoint.0, endpoint.1))
     }
 
+    pub(crate) fn source_token(
+        &self,
+        endpoint: (Ipv4Addr, u16),
+    ) -> Option<emulebb_metadata::JobToken> {
+        let hash = self.endpoint_index.get(&endpoint)?;
+        self.per_file
+            .get(hash)?
+            .get(endpoint.0, endpoint.1)
+            .map(|source| source.job_token)
+    }
+
     /// Drop a source (e.g. the transfer completed or no longer needs it).
     /// Returns the source's lease endpoint (its TCP endpoint, the key core
     /// leased it under) when a source was actually present and removed, so the
     /// caller releases exactly the lease the loop really owned — and addresses
     /// it by the key core's bookkeeping uses, not the UDP routing endpoint
     /// (RUST-PAR-017 DL-11). `None` for an unknown endpoint.
-    pub(crate) fn remove_source(&mut self, ip: Ipv4Addr, udp_port: u16) -> Option<(Ipv4Addr, u16)> {
+    pub(crate) fn remove_source(
+        &mut self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+    ) -> Option<(emulebb_metadata::JobToken, (Ipv4Addr, u16))> {
         let file_hash = self.endpoint_index.remove(&(ip, udp_port))?;
         let removed = self
             .per_file
             .get_mut(&file_hash)
             .and_then(|set| set.remove(ip, udp_port));
-        // Degenerate index/set mismatch: fall back to the UDP endpoint rather
-        // than dropping the release on the floor (the maps are kept in sync, so
-        // this should be unreachable).
-        Some(removed.map_or((ip, udp_port), |source| source.lease_endpoint))
+        removed.map(|source| (source.job_token, source.lease_endpoint))
     }
 
     /// Flag a registered source as No Needed Parts, routed by endpoint (a TCP
@@ -412,6 +425,9 @@ impl ReaskService {
         let lease_endpoint = set
             .get(ip, port)
             .map_or((ip, port), |source| source.lease_endpoint);
+        let Some(job_token) = set.get(ip, port).map(|source| source.job_token) else {
+            return ReaskInboundOutcome::Ignored(ReaskIgnoredReason::UnregisteredEndpoint);
+        };
         let source_user_hash = set.get(ip, port).and_then(|source| source.user_hash);
         #[cfg(feature = "packet-diagnostics")]
         let diagnostic_identity = set.get(ip, port).map_or(
@@ -453,6 +469,7 @@ impl ReaskService {
                     )
                 });
                 ReaskInboundOutcome::RoutedReply {
+                    job_token,
                     file_hash,
                     endpoint: (ip, port),
                     lease_endpoint,

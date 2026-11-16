@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
-    ed2k_transfer::{
-        Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadSessionStatus, new_transfer_job,
-    },
+    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadSessionStatus},
     paths::unique_test_dir,
 };
 
@@ -195,7 +193,12 @@ async fn low_ratio_bonus_promotes_an_underserved_file() {
         (slot_file, "Slot.bin"),
     ] {
         runtime
-            .ensure_job(&new_transfer_job(hash, name.to_string(), 1_000))
+            .ensure_job(&crate::ed2k_transfer::test_support::admit_download_job(
+                &runtime,
+                hash,
+                name.to_string(),
+                1_000,
+            ))
             .await
             .unwrap();
     }

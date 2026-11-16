@@ -39,6 +39,7 @@ const UDP_FAILURE_RATIO: f64 = 0.3;
 /// no socket open. Drives the per-transfer reask ticker.
 #[derive(Debug, Clone)]
 pub(crate) struct ReaskSource {
+    pub job_token: emulebb_metadata::JobToken,
     pub endpoint: (Ipv4Addr, u16),
     /// The peer's eD2k **TCP** endpoint — the key core leased this source under
     /// (`active_download_peer_endpoints` + the download source registry are keyed
@@ -84,12 +85,14 @@ pub(crate) struct ReaskSource {
 
 impl ReaskSource {
     pub(crate) fn new(
+        job_token: emulebb_metadata::JobToken,
         endpoint: (Ipv4Addr, u16),
         file_hash: Ed2kHash,
         udp_version: u8,
         now: Instant,
     ) -> Self {
         Self {
+            job_token,
             endpoint,
             lease_endpoint: endpoint,
             file_hash,
@@ -351,7 +354,15 @@ mod tests {
     #[test]
     fn reask_source_success_updates_rank_and_reschedules() {
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 5), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 5), 4672),
+            hash(),
+            4,
+            now,
+        );
         assert!(source.is_due(now)); // reasks immediately on entry
         source.record_success(12, now);
         assert_eq!(source.last_rank, Some(12));
@@ -364,7 +375,15 @@ mod tests {
     #[test]
     fn reask_source_failures_flip_to_tcp_fallback() {
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 6), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 6), 4672),
+            hash(),
+            4,
+            now,
+        );
         // 4 attempts, all failed -> ratio 1.0 > 0.3 with > 3 attempts.
         for _ in 0..3 {
             assert!(!source.record_failure(now));
@@ -380,7 +399,15 @@ mod tests {
         // so a recovering source returns to UDP once its ratio drops back under
         // the threshold instead of being permanently disqualified.
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 20), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 20), 4672),
+            hash(),
+            4,
+            now,
+        );
         // Trip the latch: 4 attempts all failed (ratio 1.0 > 0.3).
         for _ in 0..4 {
             source.record_failure(now);
@@ -407,12 +434,14 @@ mod tests {
     #[test]
     fn buddy_reask_target_requires_low_id_endpoint_and_id() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let endpoint = (Ipv4Addr::new(198, 51, 100, 30), 4672);
         let buddy_ep = (Ipv4Addr::new(203, 0, 113, 50), 5000);
         let buddy_id = [0xCD; 16];
 
         // HighID source: never a buddy-reask target even with buddy info present.
-        let high = ReaskSource::new(endpoint, hash(), 4, now).with_buddy(
+        let high = ReaskSource::new(job_token, endpoint, hash(), 4, now).with_buddy(
             false,
             Some(buddy_ep),
             Some(buddy_id),
@@ -420,17 +449,23 @@ mod tests {
         assert!(high.buddy_reask_target().is_none());
 
         // LowID but missing the buddy id (hello-only buddy) -> not eligible.
-        let no_id =
-            ReaskSource::new(endpoint, hash(), 4, now).with_buddy(true, Some(buddy_ep), None);
+        let no_id = ReaskSource::new(job_token, endpoint, hash(), 4, now).with_buddy(
+            true,
+            Some(buddy_ep),
+            None,
+        );
         assert!(no_id.buddy_reask_target().is_none());
 
         // LowID but missing the buddy endpoint -> not eligible.
-        let no_ep =
-            ReaskSource::new(endpoint, hash(), 4, now).with_buddy(true, None, Some(buddy_id));
+        let no_ep = ReaskSource::new(job_token, endpoint, hash(), 4, now).with_buddy(
+            true,
+            None,
+            Some(buddy_id),
+        );
         assert!(no_ep.buddy_reask_target().is_none());
 
         // LowID with both endpoint + id -> eligible, returns (endpoint, id).
-        let ok = ReaskSource::new(endpoint, hash(), 4, now).with_buddy(
+        let ok = ReaskSource::new(job_token, endpoint, hash(), 4, now).with_buddy(
             true,
             Some(buddy_ep),
             Some(buddy_id),
@@ -441,7 +476,15 @@ mod tests {
     #[test]
     fn reask_source_no_needed_parts_doubles_interval() {
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 7), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 7), 4672),
+            hash(),
+            4,
+            now,
+        );
         source.no_needed_parts = true;
         source.schedule_next(now);
         assert!(!source.is_due(now + FILE_REASK_TIME)); // not due at single interval
@@ -451,7 +494,15 @@ mod tests {
     #[test]
     fn reaction_ack_updates_rank_and_clears_queue_full() {
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 8), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 8), 4672),
+            hash(),
+            4,
+            now,
+        );
         source.remote_queue_full = true;
         let action = apply_reask_reply(&mut source, ReaskReply::Ack { rank: 7 }, now);
         assert_eq!(action, ReaskAction::UpdatedRank(7));
@@ -464,7 +515,15 @@ mod tests {
     #[test]
     fn reaction_queue_full_keeps_source_as_rank_zero_not_a_failure() {
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 9), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 9), 4672),
+            hash(),
+            4,
+            now,
+        );
         let action = apply_reask_reply(&mut source, ReaskReply::QueueFull, now);
         assert_eq!(action, ReaskAction::QueueFull);
         assert_eq!(source.last_rank, Some(0));
@@ -478,7 +537,15 @@ mod tests {
     #[test]
     fn reaction_file_not_found_drops_the_source() {
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 10), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 10), 4672),
+            hash(),
+            4,
+            now,
+        );
         assert_eq!(
             apply_reask_reply(&mut source, ReaskReply::FileNotFound, now),
             ReaskAction::DropSource
@@ -488,7 +555,15 @@ mod tests {
     #[test]
     fn reaction_timeout_retries_udp_then_falls_back_to_tcp() {
         let now = Instant::now();
-        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 11), 4672), hash(), 4, now);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
+        let mut source = ReaskSource::new(
+            job_token,
+            (Ipv4Addr::new(198, 51, 100, 11), 4672),
+            hash(),
+            4,
+            now,
+        );
         // First failures retry over UDP until the ratio backoff trips.
         for _ in 0..3 {
             assert_eq!(

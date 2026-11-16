@@ -12,15 +12,13 @@ async fn large_file_download_falls_back_to_upload_request_when_hashset_stalls() 
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(
         Md4::digest(md4_hashset.iter().flatten().copied().collect::<Vec<u8>>()).into(),
     );
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "captured-fallback.iso".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "captured-fallback.iso".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -182,7 +180,10 @@ async fn large_file_download_falls_back_to_upload_request_when_hashset_stalls() 
     .unwrap();
     assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!manifest.completed);
     assert_eq!(
         manifest.pieces[0].state,

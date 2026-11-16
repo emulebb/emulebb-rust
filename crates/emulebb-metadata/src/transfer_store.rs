@@ -5,7 +5,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::{
-    NativeFileFingerprint, NativeFileIdentity, NativePath,
+    DownloadIntent, JobId, JobToken, MetadataDownloadRetirement, NativeFileFingerprint,
+    NativeFileIdentity, NativePath,
     download_history_store::{record_completed_download, records_download_completion},
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
@@ -15,9 +16,8 @@ use crate::{
         MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
         MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
         MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
-        MetadataTransferFileNameObservation, MetadataTransferManifest,
-        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
-        MetadataTransferRange, MetadataTransferSource,
+        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+        MetadataTransferPublishEntry, MetadataTransferRange,
     },
 };
 
@@ -36,250 +36,204 @@ impl super::MetadataStore {
         manifest: &MetadataTransferManifest,
     ) -> Result<MetadataTransferManifest> {
         crate::transfer_validation::validate_manifest(manifest)?;
-        let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
-        let now = unix_ms();
-        let mut conn = self.connection()?;
-        // WHY: this transaction reads deletion authority before writing paths and
-        // transfer rows. A deferred WAL transaction can retain a stale read
-        // snapshot and fail its write upgrade with SQLITE_BUSY_SNAPSHOT after a
-        // concurrent connection commits; acquire the writer slot before reading.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut reconciled = manifest.clone();
-        reconcile_manifest_aich_identity(&tx, &hash, &mut reconciled)?;
-        let manifest = &reconciled;
-        let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
-        let accepted_aich_root =
-            if manifest.aich_root_origin.as_deref() == Some("network_consensus") {
-                None
-            } else {
-                aich_root.as_deref()
-            };
-        crate::content_identity::check_accepted_identity(
-            &tx,
-            &hash,
-            i64::try_from(manifest.file_size)?,
-            aich_root.as_deref(),
-        )?;
-        let cleanup_requested = tx
-            .query_row(
-                r#"
-                SELECT transfers.delete_requested_at_ms IS NOT NULL
-                       OR EXISTS (
-                           SELECT 1 FROM transfer_retirements
-                           WHERE transfer_retirements.transfer_id = transfers.id
-                       )
-                FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
-                WHERE known_files.ed2k_hash = ?1
-                "#,
-                params![hash],
-                |row| row.get::<_, bool>(0),
-            )
-            .optional()?
-            .unwrap_or(false);
         ensure!(
-            !cleanup_requested,
-            "transfer {} has pending cleanup",
-            manifest.file_hash
+            manifest.display_name.len() <= crate::download_job_store::MAX_JOB_TEXT_BYTES,
+            "download name exceeds metadata allowance"
         );
-        let previous_completion = tx
+        if let Some(path) = manifest.delivered_path.as_deref() {
+            crate::download_job_store::validate_job_path(path)?;
+        }
+        let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
+        let now = crate::download_job_store::unix_s();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = crate::download_job_store::read_job(&tx, manifest.token.job_id)?
+            .ok_or_else(|| anyhow::anyhow!("download job does not exist"))?;
+        ensure!(
+            current.token == manifest.token
+                && current.file_hash == manifest.file_hash.to_ascii_lowercase(),
+            "stale download job identity or execution generation"
+        );
+        ensure!(
+            current.removed_at_s.is_none() && current.completed_at_s.is_none(),
+            "removed or terminal download job cannot accept progress"
+        );
+        let cleanup: bool = tx.query_row("SELECT delete_requested_at_s IS NOT NULL OR EXISTS(
+            SELECT 1 FROM download_retirements WHERE job_id=download_jobs.id) FROM download_jobs WHERE id=?1",
+            [manifest.token.job_id], |row| row.get(0))?;
+        ensure!(!cleanup, "download job has pending cleanup");
+        ensure!(
+            current.expected_size_bytes == manifest.expected_size_bytes,
+            crate::MetadataContentConflict("download attempt has conflicting expected size")
+        );
+        let persisted_delivery = tx
             .query_row(
-                r#"
-                SELECT transfers.completed, transfers.final_rehash_pending,
-                       transfers.completed_at_ms
-                FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
-                WHERE known_files.ed2k_hash = ?1
-                "#,
-                params![hash],
+                "SELECT p.platform, CASE WHEN length(p.native_path)<=65536 THEN p.native_path END,
+                j.delivery_ownership,j.source_fingerprint
+             FROM download_jobs j JOIN local_paths p ON p.id=j.delivered_path_id
+             WHERE j.id=?1 AND j.delivery_state='delivered'",
+                [manifest.token.job_id],
                 |row| {
                     Ok((
-                        row.get::<_, bool>(0)?,
-                        row.get::<_, bool>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
+                        path_from_row(row, 0, 1)?,
+                        row.get::<_, String>(2)?,
+                        optional_fingerprint_from_row(row, 3)?,
                     ))
                 },
             )
             .optional()?;
-        let previous_history_completed_at_ms = tx
-            .prepare_cached(
-                "SELECT last_completed_at_ms FROM download_history WHERE ed2k_hash = ?1",
-            )?
-            .query_row(params![hash], |row| row.get::<_, i64>(0))
+        if let Some((path, _, _)) = &persisted_delivery {
+            ensure!(
+                manifest.delivery_state == MetadataTransferDeliveryState::Delivered
+                    && manifest.delivered_path.as_ref() == Some(path)
+                    && manifest.completed
+                    && !manifest.final_rehash_pending,
+                "durable delivery cannot be undone by a progress checkpoint"
+            );
+        }
+        let mut reconciled = manifest.clone();
+        if let Some((_, ownership, fingerprint)) = persisted_delivery {
+            // WHY: a same-generation checkpoint can predate the dedicated
+            // evidence refresh. Persisted Unowned/new evidence must win, or a
+            // stale Owned clone would recreate destructive output authority.
+            reconciled.delivery_ownership = delivery_ownership_from_sql(&ownership)?;
+            reconciled.source_fingerprint = fingerprint;
+        }
+        reconciled.display_name = current.display_name;
+        reconciled.expected_size_bytes = current.expected_size_bytes;
+        reconciled.intent = current.intent;
+        reconciled.transfer_row_removed = current.removed_at_s.is_some();
+        reconciled.category_id = current.category_id;
+        reconcile_manifest_aich_identity(&tx, &hash, &mut reconciled)?;
+        let manifest = &reconciled;
+        let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
+        let accepted_root = if manifest.aich_root_origin.as_deref() == Some("network_consensus") {
+            None
+        } else {
+            aich_root.as_deref()
+        };
+        if let Some(size) = manifest.expected_size_bytes {
+            crate::content_identity::check_accepted_identity(
+                &tx,
+                &hash,
+                i64::try_from(size)?,
+                aich_root.as_deref(),
+            )?;
+        }
+        let verified = records_download_completion(manifest);
+        let previous: (bool, Option<i64>) = tx.query_row(
+            "SELECT completed=1 AND final_rehash_pending=0,completed_at_s
+            FROM download_jobs WHERE id=?1",
+            [manifest.token.job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let transition = verified && !previous.0;
+        let history_completed: Option<i64> = tx
+            .query_row(
+                "SELECT last_completed_at_s FROM download_history WHERE ed2k_hash=?1",
+                [&hash],
+                |row| row.get(0),
+            )
             .optional()?;
-        let previous_records_completion = previous_completion
-            .map(|(completed, final_rehash_pending, _)| completed && !final_rehash_pending)
-            .unwrap_or(false);
-        let records_completion = records_download_completion(manifest);
-        let completion_transition = records_completion && !previous_records_completion;
-        let previous_completed_at_ms =
-            previous_completion.and_then(|(_, _, completed_at_ms)| completed_at_ms);
-        let completed_at_ms = if completion_transition {
+        let completed_at = if transition {
             Some(
-                now.max(previous_completed_at_ms.unwrap_or(0))
-                    .max(previous_history_completed_at_ms.unwrap_or(0)),
+                now.max(previous.1.unwrap_or(0))
+                    .max(history_completed.unwrap_or(0)),
             )
         } else {
-            previous_completed_at_ms
+            previous.1
         };
-        let delivered_path_id = optional_local_path_id(&tx, manifest.delivered_path.as_deref())?;
-        let source_fingerprint = manifest
+        // Only whole-payload verification accepts a size fact. Claims remain on the job.
+        if verified {
+            let size = manifest
+                .expected_size_bytes
+                .ok_or_else(|| anyhow::anyhow!("verified job has unknown size"))?;
+            tx.execute(
+                "UPDATE known_files SET size_bytes=?2,aich_root=coalesce(?3,aich_root),
+                aich_root_origin=CASE WHEN ?3 IS NULL THEN aich_root_origin ELSE ?4 END
+                WHERE id=(SELECT known_file_id FROM download_jobs WHERE id=?1)",
+                params![
+                    manifest.token.job_id,
+                    i64::try_from(size)?,
+                    accepted_root,
+                    accepted_root.and(manifest.aich_root_origin.as_deref())
+                ],
+            )?;
+        }
+        let delivered_path = optional_local_path_id(&tx, manifest.delivered_path.as_deref())?;
+        let source = manifest
             .source_fingerprint
             .as_ref()
             .map(NativeFileFingerprint::storage_bytes);
-        let payload_fingerprint = manifest
+        let payload = manifest
             .payload_fingerprint
             .as_ref()
             .map(NativeFileFingerprint::storage_bytes);
-
-        tx.prepare_cached(
-            r#"
-            INSERT INTO known_files(ed2k_hash, size_bytes, display_name, aich_root, aich_root_origin, first_seen_at_ms, last_seen_at_ms, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5, ?5)
-            ON CONFLICT(ed2k_hash) DO UPDATE SET
-                size_bytes = excluded.size_bytes,
-                display_name = CASE WHEN EXISTS(SELECT 1 FROM verified_local_content WHERE known_file_id = known_files.id)
-                    THEN known_files.display_name ELSE excluded.display_name END,
-                aich_root = coalesce(excluded.aich_root, known_files.aich_root),
-                aich_root_origin = CASE
-                    WHEN excluded.aich_root IS NULL THEN known_files.aich_root_origin
-                    WHEN known_files.aich_root_origin = 'local_computed' THEN known_files.aich_root_origin
-                    WHEN known_files.aich_root_origin = 'stock_import'
-                         AND excluded.aich_root_origin = 'operator_link' THEN known_files.aich_root_origin
-                    ELSE excluded.aich_root_origin END,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                updated_at_ms = excluded.updated_at_ms
-            "#,
-        )?.execute(params![hash, i64::try_from(manifest.file_size)?, manifest.display_name, accepted_aich_root, now,
-            accepted_aich_root.and(manifest.aich_root_origin.as_deref())])?;
-        let known_file_id: i64 = tx
-            .prepare_cached("SELECT id FROM known_files WHERE ed2k_hash = ?1")?
-            .query_row(
-                params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
-                |row| row.get(0),
-            )?;
-        tx.prepare_cached(
-            r#"
-            INSERT INTO known_file_origins(
-                known_file_id, origin, size_bytes, content_type,
-                availability_score, first_seen_at_ms, last_seen_at_ms
-            )
-            VALUES (?1, 'transfer', ?2, '', 0, ?3, ?3)
-            ON CONFLICT(known_file_id, origin) DO UPDATE SET
-                size_bytes = excluded.size_bytes,
-                last_seen_at_ms = excluded.last_seen_at_ms
-            "#,
-        )?
-        .execute(params![
-            known_file_id,
-            i64::try_from(manifest.file_size)?,
-            now
-        ])?;
-
-        tx.prepare_cached(
-            r#"
-            INSERT INTO transfers(
-                known_file_id, completed, md4_hashset_acquired, aich_hashset_acquired,
-                visible_state, final_rehash_pending, control_state,
-                category_id, display_name, delivery_state, delivery_ownership,
-                delivered_path_id, source_fingerprint, payload_fingerprint, created_at_ms, updated_at_ms,
-                completed_at_ms, removed_at_ms, part_size_bytes, part_count, upload_priority, auto_upload_priority, comment, rating,
-                aich_root, aich_root_origin, aich_trust_generation
-            )
-            VALUES (?1, ?16, ?17, ?18, ?2, ?12, ?3, ?4, ?5, ?13, ?15, ?6, ?10, ?11, ?7, ?7, ?8, ?9, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
-            ON CONFLICT(known_file_id) DO UPDATE SET
-                completed = excluded.completed,
-                md4_hashset_acquired = excluded.md4_hashset_acquired,
-                aich_hashset_acquired = excluded.aich_hashset_acquired,
-                aich_root = excluded.aich_root,
-                aich_root_origin = excluded.aich_root_origin,
-                aich_trust_generation = excluded.aich_trust_generation,
-                visible_state = excluded.visible_state,
-                final_rehash_pending = excluded.final_rehash_pending,
-                control_state = excluded.control_state,
-                display_name = excluded.display_name,
-                part_size_bytes = excluded.part_size_bytes, part_count = excluded.part_count,
-                upload_priority = excluded.upload_priority, auto_upload_priority = excluded.auto_upload_priority,
-                comment = excluded.comment, rating = excluded.rating,
-                delivery_state = excluded.delivery_state,
-                delivery_ownership = excluded.delivery_ownership,
-                delivered_path_id = excluded.delivered_path_id,
-                source_fingerprint = excluded.source_fingerprint,
-                payload_fingerprint = excluded.payload_fingerprint,
-                updated_at_ms = excluded.updated_at_ms,
-                completed_at_ms = CASE
-                    WHEN ?14 THEN excluded.completed_at_ms
-                    ELSE transfers.completed_at_ms
-                END,
-                removed_at_ms = excluded.removed_at_ms
-            "#,
-        )?
-        .execute(params![
-            known_file_id,
-            visible_state(manifest),
-            manifest.control_state,
-            manifest.category_id,
-            manifest.display_name,
-            delivered_path_id,
-            now,
-            completed_at_ms,
-            if manifest.transfer_row_removed {
-                Some(now)
-            } else {
-                None
-            },
-            source_fingerprint,
-            payload_fingerprint,
-            bool_to_i64(manifest.final_rehash_pending),
-            delivery_state_to_sql(manifest.delivery_state),
-            completion_transition,
-            delivery_ownership_to_sql(manifest.delivery_ownership),
-            bool_to_i64(manifest.completed),
-            bool_to_i64(manifest.md4_hashset_acquired),
-            bool_to_i64(manifest.aich_hashset_acquired),
-            i64::try_from(manifest.piece_size)?, i64::try_from(manifest.pieces.len())?,
-            manifest.upload_priority, manifest.auto_upload_priority, manifest.comment, i64::from(manifest.rating),
-            aich_root, manifest.aich_root_origin, i64::try_from(manifest.aich_trust_generation)?,
-        ])?;
-        let transfer_id: i64 = tx
-            .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
-            .query_row(params![known_file_id], |row| row.get(0))?;
-        replace_transfer_children(&tx, transfer_id, manifest, now)?;
+        tx.execute(
+            "UPDATE download_jobs SET expected_size_bytes=?2,display_name=?3,completed=?4,
+            md4_hashset_acquired=?5,aich_hashset_acquired=?6,aich_root=?7,aich_root_origin=?8,
+            aich_trust_generation=?9,visible_state=?10,final_rehash_pending=?11,
+            part_size_bytes=?12,part_count=?13,upload_priority=?14,auto_upload_priority=?15,
+            comment=?16,rating=?17,delivery_state=?18,delivery_ownership=?19,delivered_path_id=?20,
+            source_fingerprint=?21,payload_fingerprint=?22,updated_at_s=?23,completed_at_s=?24
+            WHERE id=?1",
+            params![
+                manifest.token.job_id,
+                manifest
+                    .expected_size_bytes
+                    .map(i64::try_from)
+                    .transpose()?,
+                manifest.display_name,
+                manifest.completed,
+                manifest.md4_hashset_acquired,
+                manifest.aich_hashset_acquired,
+                aich_root,
+                manifest.aich_root_origin,
+                i64::try_from(manifest.aich_trust_generation)?,
+                visible_state(manifest),
+                manifest.final_rehash_pending,
+                i64::try_from(manifest.piece_size)?,
+                i64::try_from(manifest.pieces.len())?,
+                manifest.upload_priority,
+                manifest.auto_upload_priority,
+                manifest.comment,
+                manifest.rating,
+                delivery_state_to_sql(manifest.delivery_state),
+                delivery_ownership_to_sql(manifest.delivery_ownership),
+                delivered_path,
+                source,
+                payload,
+                now,
+                completed_at
+            ],
+        )?;
+        replace_transfer_children(&tx, manifest.token.job_id.get(), manifest, now)?;
         record_completed_download(
             &tx,
             manifest,
             &hash,
-            accepted_aich_root,
-            completed_at_ms,
-            completion_transition,
-        )?;
-        // A stale progress snapshot must not restore an old assignment.
-        reconciled.category_id = tx.query_row(
-            "SELECT category_id FROM transfers WHERE id=?1",
-            [transfer_id],
-            |row| row.get(0),
+            accepted_root,
+            completed_at,
+            transition,
         )?;
         tx.commit()?;
         Ok(reconciled)
     }
 
     /// Assign a transfer without replacing unrelated progress or content state.
-    pub fn assign_transfer_category(
-        &self,
-        file_hash: &str,
-        category_id: Option<i64>,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    pub fn assign_transfer_category(&self, id: JobId, category_id: Option<i64>) -> Result<bool> {
         let conn = self.connection()?;
-        let changed = conn.execute("UPDATE transfers SET category_id=?1 WHERE known_file_id=(SELECT id FROM known_files WHERE ed2k_hash=?2)", params![category_id, hash])?;
+        let changed = conn.execute(
+            "UPDATE download_jobs SET category_id=?1 WHERE id=?2",
+            params![category_id, id],
+        )?;
         Ok(changed != 0)
     }
 
     /// Read the current assignment without loading transfer children.
-    pub fn transfer_category_by_hash(&self, file_hash: &str) -> Result<Option<Option<i64>>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    pub fn download_job_category(&self, id: JobId) -> Result<Option<Option<i64>>> {
         let conn = self.connection()?;
-        conn.query_row("SELECT t.category_id FROM transfers t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1", [hash], |row| row.get(0)).optional().map_err(Into::into)
+        conn.query_row("SELECT t.category_id FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE t.id=?1", [id], |row| row.get(0)).optional().map_err(Into::into)
     }
 
     /// Bounded transfer-only projection for restoring a partial share after a root change.
@@ -301,11 +255,11 @@ impl super::MetadataStore {
         const MAX_TEXT_BYTES: i64 = 65_536;
         const MAX_RANGES: i64 = 28_258;
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let header: Option<(i64, i64, i64, i64)> = conn.query_row(
-            "SELECT t.id,length(CAST(t.display_name AS BLOB)),length(CAST(t.comment AS BLOB)),length(CAST(t.upload_priority AS BLOB)) FROM transfers t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_ms IS NULL AND t.delete_requested_at_ms IS NULL",
-            [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        let header: Option<(i64, i64, i64, i64, u64)> = conn.query_row(
+            "SELECT t.id,length(CAST(t.display_name AS BLOB)),length(CAST(t.comment AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.execution_generation FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.delete_requested_at_s IS NULL",
+            [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,crate::sql_value::unsigned::<u64>(row,4)?)),
         ).optional()?;
-        let Some((id, name_len, comment_len, priority_len)) = header else {
+        let Some((id, name_len, comment_len, priority_len, generation)) = header else {
             return Ok(None);
         };
         ensure!(
@@ -315,7 +269,7 @@ impl super::MetadataStore {
             "partial share text exceeds reconciliation budget"
         );
         let count: i64 = conn.query_row(
-            "SELECT count(*) FROM (SELECT 1 FROM verified_ranges WHERE transfer_id=?1 LIMIT 28259)",
+            "SELECT count(*) FROM (SELECT 1 FROM download_job_verified_ranges WHERE job_id=?1 LIMIT 28259)",
             [id],
             |row| row.get(0),
         )?;
@@ -327,10 +281,10 @@ impl super::MetadataStore {
             return Ok(None);
         }
         let (display_name,file_size,aich_root,upload_priority,auto_upload_priority,comment,rating) = conn.query_row(
-            "SELECT t.display_name,k.size_bytes,CASE WHEN t.aich_root IS NULL THEN NULL ELSE lower(hex(t.aich_root)) END,t.upload_priority,t.auto_upload_priority,t.comment,t.rating FROM transfers t JOIN known_files k ON k.id=t.known_file_id WHERE t.id=?1", [id],
+            "SELECT t.display_name,t.expected_size_bytes,CASE WHEN t.aich_root IS NULL THEN NULL ELSE lower(hex(t.aich_root)) END,t.upload_priority,t.auto_upload_priority,t.comment,t.rating FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE t.id=?1", [id],
             |row| Ok((row.get::<_,String>(0)?,crate::sql_value::unsigned::<u64>(row,1)?,row.get::<_,Option<String>>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)? != 0,row.get::<_,String>(5)?,row.get::<_,u8>(6)?)),
         )?;
-        let mut stmt = conn.prepare_cached("SELECT start_offset,end_offset FROM verified_ranges WHERE transfer_id=?1 ORDER BY start_offset,end_offset")?;
+        let mut stmt = conn.prepare_cached("SELECT start_offset,end_offset FROM download_job_verified_ranges WHERE job_id=?1 ORDER BY start_offset,end_offset")?;
         let rows = stmt.query_map([id], |row| {
             Ok(crate::MetadataTransferRange {
                 start: crate::sql_value::unsigned::<u64>(row, 0)?,
@@ -343,6 +297,10 @@ impl super::MetadataStore {
         }
         drop(stmt);
         Ok(Some(crate::MetadataPartialShare {
+            job_token: JobToken {
+                job_id: JobId::new(id)?,
+                generation,
+            },
             file_hash: file_hash.to_owned(),
             display_name,
             file_size,
@@ -355,165 +313,55 @@ impl super::MetadataStore {
         }))
     }
 
-    /// Indexed identity-only read for cached transfer users. Do not load piece,
-    /// source, range or part-hash tables just to fence an AICH response.
-    pub fn transfer_aich_identity_by_hash(
+    /// Exact execution identity read; a stale callback cannot borrow a newer
+    /// same-content attempt's network consensus or trust generation.
+    pub fn download_job_aich_identity(
         &self,
-        file_hash: &str,
+        token: JobToken,
     ) -> Result<Option<MetadataTransferAichIdentity>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let conn = self.connection()?;
-        read_transfer_aich_identity(&conn, &hash)
+        {
+            let conn = self.connection()?;
+            read_download_job_aich_identity(&conn, token)
+        }
     }
 
-    /// Publish a bounded in-memory AICH projection while holding the existing
-    /// connection mutex. Accepted identity writers cannot commit between this
-    /// read and publication. The callback must be synchronous, must not perform
-    /// I/O, and must not re-enter MetadataStore. Acquire runtime async guards
-    /// before invoking this helper on the blocking pool.
-    pub fn publish_transfer_aich_identity<T>(
+    /// Publish a bounded identity view under the existing SQLite mutex. The
+    /// captured token is rechecked here, never refreshed after network or I/O.
+    pub fn publish_download_job_aich_identity<T>(
         &self,
-        file_hash: &str,
+        token: JobToken,
         publish: impl FnOnce(MetadataTransferAichIdentity) -> Result<T>,
     ) -> Result<T> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let identity = read_transfer_aich_identity(&conn, &hash)?
-            .ok_or_else(|| anyhow::anyhow!("missing AICH transfer identity for {file_hash}"))?;
+        let identity = read_download_job_aich_identity(&conn, token)?
+            .ok_or_else(|| anyhow::anyhow!("stale or missing download job AICH identity"))?;
         publish(identity)
     }
 
-    pub fn transfer_manifest_by_hash(
-        &self,
-        file_hash: &str,
-    ) -> Result<Option<MetadataTransferManifest>> {
-        self.transfer_manifest_by_hash_for_deletion_state(file_hash, false)
+    pub fn download_job_manifest(&self, id: JobId) -> Result<Option<MetadataTransferManifest>> {
+        self.download_job_manifest_for_deletion_state(id, false)
     }
 
     /// Read the manifest retained solely to resume a pending destructive
     /// deletion. Normal manifest reads deliberately suppress this row.
-    pub fn pending_transfer_deletion_manifest_by_hash(
+    pub fn pending_download_job_deletion_manifest(
         &self,
-        file_hash: &str,
+        id: JobId,
     ) -> Result<Option<MetadataTransferManifest>> {
-        self.transfer_manifest_by_hash_for_deletion_state(file_hash, true)
+        self.download_job_manifest_for_deletion_state(id, true)
     }
 
-    fn transfer_manifest_by_hash_for_deletion_state(
+    fn download_job_manifest_for_deletion_state(
         &self,
-        file_hash: &str,
+        id: JobId,
         deletion_requested: bool,
     ) -> Result<Option<MetadataTransferManifest>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let conn = self.connection()?;
-        let row = conn
-            .prepare_cached(
-                r#"
-                SELECT transfers.id,
-                       lower(hex(known_files.ed2k_hash)), transfers.display_name,
-                       known_files.size_bytes, coalesce(transfers.part_size_bytes, 0),
-                       transfers.completed, transfers.md4_hashset_acquired,
-                       transfers.aich_hashset_acquired,
-                       CASE
-                           WHEN transfers.aich_root IS NULL THEN NULL
-                           ELSE lower(hex(transfers.aich_root))
-                       END,
-                       transfers.upload_priority, transfers.auto_upload_priority,
-                       transfers.comment, transfers.rating,
-                       transfers.category_id, transfers.control_state, transfers.removed_at_ms,
-                       delivered_paths.platform, delivered_paths.native_path,
-                       transfers.source_fingerprint, transfers.payload_fingerprint,
-                       transfers.final_rehash_pending, transfers.delivery_state,
-                       transfers.delivery_ownership,
-                       transfers.aich_root_origin,
-                       transfers.aich_trust_generation
-                FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
-                LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
-                WHERE known_files.ed2k_hash = ?1
-                  AND (
-                      (?2 = 0 AND transfers.delete_requested_at_ms IS NULL)
-                      OR (?2 != 0 AND transfers.delete_requested_at_ms IS NOT NULL)
-                  )
-                "#,
-            )?
-            .query_row(params![hash, bool_to_i64(deletion_requested)], |row| {
-                Ok(TransferRow {
-                    transfer_id: row.get(0)?,
-                    file_hash: row.get(1)?,
-                    display_name: row.get(2)?,
-                    file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
-                    piece_size: crate::sql_value::unsigned::<u64>(row, 4)?,
-                    completed: row.get::<_, i64>(5)? != 0,
-                    md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
-                    aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
-                    aich_root: row.get(8)?,
-                    aich_root_origin: row.get(23)?,
-                    aich_trust_generation: crate::sql_value::unsigned::<u64>(row, 24)?,
-                    upload_priority: row.get(9)?,
-                    auto_upload_priority: row.get::<_, i64>(10)? != 0,
-                    comment: row.get(11)?,
-                    rating: row.get::<_, u8>(12)?,
-                    category_id: row.get::<_, Option<i64>>(13)?,
-                    control_state: row.get(14)?,
-                    transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
-                    delivered_path: optional_path_from_row(row, 16, 17)?,
-                    source_fingerprint: optional_fingerprint_from_row(row, 18)?,
-                    payload_fingerprint: optional_fingerprint_from_row(row, 19)?,
-                    final_rehash_pending: row.get::<_, i64>(20)? != 0,
-                    delivery_state: row.get(21)?,
-                    delivery_ownership: row.get(22)?,
-                })
-            })
-            .optional()?;
-        row.map(|row| manifest_from_row(&conn, row)).transpose()
-    }
-
-    /// Persist ONE piece's progress fields for an already-persisted transfer
-    /// manifest — the per-block download checkpoint. This is the lightweight
-    /// sibling of `upsert_transfer_manifest`: mid-piece progress only ever
-    /// changes the piece row itself (state / bytes_written / block_bitmap /
-    /// ich_corrupted), so rewriting every child table (all pieces + both
-    /// hashsets + ranges + sources) per received block was pure write
-    /// amplification. Structural transitions (piece verified/failed, hashset
-    /// acquisition, completion, source changes) still take the full upsert.
-    ///
-    /// Returns `false` when the transfer or piece row does not exist yet, so
-    /// the caller can fall back to the full upsert.
-    pub fn checkpoint_transfer_piece_progress(
-        &self,
-        file_hash: &str,
-        piece: &MetadataTransferPiece,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let now = unix_ms();
-        let conn = self.connection()?;
-        let updated = conn
-            .prepare_cached(
-                r#"
-                UPDATE transfer_pieces
-                SET state = ?3, bytes_written = ?4, block_bitmap = ?5,
-                    ich_corrupted = ?6, updated_at_ms = ?7
-                WHERE piece_index = ?2
-                  AND transfer_id = (
-                      SELECT transfers.id
-                      FROM transfers
-                      JOIN known_files ON known_files.id = transfers.known_file_id
-                      WHERE known_files.ed2k_hash = ?1
-                        AND transfers.delete_requested_at_ms IS NULL
-                  )
-                "#,
-            )?
-            .execute(params![
-                hash,
-                i64::from(piece.piece_index),
-                piece.state,
-                i64::try_from(piece.bytes_written)?,
-                piece.block_bitmap,
-                piece.ich_corrupted,
-                now,
-            ])?;
-        Ok(updated != 0)
+        let mut connection = self.connection()?;
+        let conn = connection.transaction()?;
+        let row = read_transfer_row(&conn, id, deletion_requested)?;
+        let result = row.map(|row| manifest_from_row(&conn, row)).transpose()?;
+        conn.commit()?;
+        Ok(result)
     }
 
     /// Add `delta` lifetime-uploaded bytes to a known file (eMule all-time
@@ -571,7 +419,8 @@ impl super::MetadataStore {
     }
 
     /// Returns the file's persisted `(all_time_uploaded_bytes, size_bytes)`,
-    /// or `None` for an unknown hash (so the caller can mirror eMule's
+    /// using accepted size or the sole current job's claim. Returns `None` for
+    /// an unknown hash or unknown size (so the caller can mirror eMule's
     /// `pRequestedFile == NULL` early return rather than treating an unknown
     /// file as a zero ratio). The caller computes the all-time upload ratio
     /// (eMule `CKnownFile::GetAllTimeUploadRatio`) so parked, not-yet-flushed
@@ -581,9 +430,11 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         conn.prepare_cached(
             r#"
-            SELECT all_time_uploaded_bytes, size_bytes
-            FROM known_files
-            WHERE ed2k_hash = ?1
+            SELECT k.all_time_uploaded_bytes, coalesce(k.size_bytes,j.expected_size_bytes)
+            FROM known_files k
+            LEFT JOIN download_jobs j ON j.known_file_id=k.id AND j.removed_at_s IS NULL
+                AND j.terminal_completed_at_s IS NULL AND j.delete_requested_at_s IS NULL
+            WHERE k.ed2k_hash = ?1 AND coalesce(k.size_bytes,j.expected_size_bytes) IS NOT NULL
             "#,
         )?
         .query_row(params![hash], |row| {
@@ -596,123 +447,23 @@ impl super::MetadataStore {
         .map_err(Into::into)
     }
 
-    /// Returns the persisted `(created_at_ms, completed_at_ms)` for a transfer,
+    /// Returns the persisted `(created_at_s, completed_at_s)` for a transfer,
     /// used to surface `addedAt` / `completedAt` in the REST transfer view.
-    pub fn transfer_timestamps_by_hash(
-        &self,
-        file_hash: &str,
-    ) -> Result<Option<(i64, Option<i64>)>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    pub fn download_job_timestamps(&self, id: JobId) -> Result<Option<(i64, Option<i64>)>> {
         let conn = self.connection()?;
         conn.query_row(
             r#"
-            SELECT transfers.created_at_ms, transfers.completed_at_ms
+            SELECT download_jobs.created_at_s, download_jobs.completed_at_s
             FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE known_files.ed2k_hash = ?1
-              AND transfers.delete_requested_at_ms IS NULL
+            JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+            WHERE download_jobs.id = ?1
+              AND download_jobs.delete_requested_at_s IS NULL
             "#,
-            params![hash],
+            params![id],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
         )
         .optional()
         .map_err(Into::into)
-    }
-
-    pub fn transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("")
-    }
-
-    /// Persisted transfer-list rows only. Completed shared catalog entries whose
-    /// transfer row was removed remain available to upload/sharing code but do
-    /// not belong in the operator-facing transfer list.
-    pub fn active_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("AND transfers.removed_at_ms IS NULL")
-    }
-
-    /// Persisted INCOMPLETE download manifests only (`transfers.completed = 0`) —
-    /// the startup-resume set. Orders of magnitude smaller than the full (mostly
-    /// completed) library, so this can be loaded on startup without hauling every
-    /// row like `transfer_manifests`.
-    pub fn incomplete_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("AND transfers.completed = 0")
-    }
-
-    /// Every persisted download whose canonical payload is owned by the
-    /// internal transfer root. Includes incomplete, completed, and
-    /// operator-hidden rows; excludes pending destructive deletions.
-    pub fn managed_download_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
-        self.transfer_manifests_filtered("")
-    }
-
-    fn transfer_manifests_filtered(
-        &self,
-        where_clause: &str,
-    ) -> Result<Vec<MetadataTransferManifest>> {
-        let conn = self.connection()?;
-        let sql = format!(
-            r#"
-            SELECT transfers.id,
-                   lower(hex(known_files.ed2k_hash)), transfers.display_name,
-                   known_files.size_bytes, coalesce(transfers.part_size_bytes, 0),
-                   transfers.completed, transfers.md4_hashset_acquired,
-                   transfers.aich_hashset_acquired,
-                   CASE
-                       WHEN transfers.aich_root IS NULL THEN NULL
-                       ELSE lower(hex(transfers.aich_root))
-                   END,
-                   transfers.upload_priority, transfers.auto_upload_priority,
-                   transfers.comment, transfers.rating,
-                   transfers.category_id, transfers.control_state, transfers.removed_at_ms,
-                   delivered_paths.platform, delivered_paths.native_path,
-                   transfers.source_fingerprint, transfers.payload_fingerprint,
-                   transfers.final_rehash_pending, transfers.delivery_state,
-                   transfers.delivery_ownership,
-                   transfers.aich_root_origin,
-                   transfers.aich_trust_generation
-            FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
-            WHERE transfers.delete_requested_at_ms IS NULL
-            {where_clause}
-            ORDER BY known_files.ed2k_hash
-            "#
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
-            Ok(TransferRow {
-                transfer_id: row.get(0)?,
-                file_hash: row.get(1)?,
-                display_name: row.get(2)?,
-                file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
-                piece_size: crate::sql_value::unsigned::<u64>(row, 4)?,
-                completed: row.get::<_, i64>(5)? != 0,
-                md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
-                aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
-                aich_root: row.get(8)?,
-                aich_root_origin: row.get(23)?,
-                aich_trust_generation: crate::sql_value::unsigned::<u64>(row, 24)?,
-                upload_priority: row.get(9)?,
-                auto_upload_priority: row.get::<_, i64>(10)? != 0,
-                comment: row.get(11)?,
-                rating: row.get::<_, u8>(12)?,
-                category_id: row.get::<_, Option<i64>>(13)?,
-                control_state: row.get(14)?,
-                transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
-                delivered_path: optional_path_from_row(row, 16, 17)?,
-                source_fingerprint: optional_fingerprint_from_row(row, 18)?,
-                payload_fingerprint: optional_fingerprint_from_row(row, 19)?,
-                final_rehash_pending: row.get::<_, i64>(20)? != 0,
-                delivery_state: row.get(21)?,
-                delivery_ownership: row.get(22)?,
-            })
-        })?;
-        rows.map(|row| manifest_from_row(&conn, row?))
-            .collect::<Result<Vec<_>>>()
-    }
-
-    pub fn completed_transfer_catalog_entries(&self) -> Result<Vec<MetadataTransferCatalogEntry>> {
-        self.completed_transfer_catalog_entries_filtered(None, usize::MAX)
     }
 
     /// Return one hash-keyset page of completed shared-catalog entries.
@@ -733,43 +484,63 @@ impl super::MetadataStore {
         after_hash: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        ensure!((1..=256).contains(&limit), "invalid catalog page size");
         let after_hash = after_hash
             .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
             .transpose()?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(
+        let representative = crate::local_catalog::representative_path(true);
+        let mut stmt = conn.prepare(&format!(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), transfers.display_name,
-                   known_files.size_bytes, coalesce(transfers.part_count, 0),
+            SELECT lower(hex(known_files.ed2k_hash)), CASE WHEN length(CAST(verified_local_content.display_name AS BLOB))<=65536 THEN verified_local_content.display_name END,
+                   known_files.size_bytes, coalesce(verified_local_content.part_count, 0),
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
-                   transfers.upload_priority, transfers.auto_upload_priority,
-                   transfers.comment, transfers.rating,
+                   CASE WHEN length(CAST(verified_local_content.upload_priority AS BLOB))<=65536 THEN verified_local_content.upload_priority END, verified_local_content.auto_upload_priority,
+                   CASE WHEN length(CAST(verified_local_content.comment AS BLOB))<=65536 THEN verified_local_content.comment END, verified_local_content.rating,
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
                    known_files.last_upload_requested_at_ms,
-                   media_paths.platform, media_paths.native_path,
-                   known_files.media_artist, known_files.media_album,
-                   known_files.media_title, known_files.media_length_seconds,
-                   known_files.media_bitrate_kbps, known_files.media_codec,
-                   known_files.media_extractor_version
+                   media_paths.platform, CASE WHEN length(CAST(media_paths.native_path AS BLOB))<=65536 THEN media_paths.native_path END,
+                   CASE WHEN length(CAST(known_files.media_artist AS BLOB))<=65536 THEN known_files.media_artist END, CASE WHEN length(CAST(known_files.media_album AS BLOB))<=65536 THEN known_files.media_album END,
+                   CASE WHEN length(CAST(known_files.media_title AS BLOB))<=65536 THEN known_files.media_title END, known_files.media_length_seconds,
+                   known_files.media_bitrate_kbps, CASE WHEN length(CAST(known_files.media_codec AS BLOB))<=65536 THEN known_files.media_codec END,
+                   known_files.media_extractor_version, length(CAST(verified_local_content.display_name AS BLOB)),length(CAST(verified_local_content.upload_priority AS BLOB)),length(CAST(verified_local_content.comment AS BLOB)),length(CAST(known_files.media_artist AS BLOB)),length(CAST(known_files.media_album AS BLOB)),length(CAST(known_files.media_title AS BLOB)),length(CAST(known_files.media_codec AS BLOB)),length(CAST(media_paths.native_path AS BLOB))
             FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            LEFT JOIN local_paths media_paths ON media_paths.id = transfers.delivered_path_id
-            WHERE transfers.completed != 0
-              AND transfers.delete_requested_at_ms IS NULL
-              AND transfers.removed_at_ms IS NULL
-              AND (?1 IS NULL OR known_files.ed2k_hash > ?1)
+            JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
+            JOIN local_paths media_paths ON media_paths.id = ({representative})
+            WHERE (?1 IS NULL OR known_files.ed2k_hash > ?1)
             ORDER BY known_files.ed2k_hash
             LIMIT ?2
-            "#,
-        )?;
-        let rows = stmt.query_map(params![after_hash, limit], |row| {
-            Ok(MetadataTransferCatalogEntry {
+            "#
+        ))?;
+        let mut rows = stmt.query(params![after_hash, limit])?;
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        while let Some(row) = rows.next()? {
+            let charge = crate::download_job_store::bounded_row_bytes(
+                row,
+                &[
+                    (22, 65536, 2),
+                    (23, 65536, 2),
+                    (24, 65536, 2),
+                    (25, 65536, 2),
+                    (26, 65536, 2),
+                    (27, 65536, 2),
+                    (28, 65536, 2),
+                    (29, 65536, 4),
+                ],
+            )?;
+            if bytes + charge > crate::download_job_store::JOB_PAGE_BYTES {
+                ensure!(!entries.is_empty(), "catalog row exceeds page allowance");
+                break;
+            }
+            bytes += charge;
+            entries.push(MetadataTransferCatalogEntry {
                 file_hash: row.get(0)?,
                 display_name: row.get(1)?,
                 file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
@@ -793,9 +564,9 @@ impl super::MetadataStore {
                     codec: row.get(20)?,
                     extractor_version: row.get::<_, u32>(21)?,
                 },
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            });
+        }
+        Ok(entries)
     }
 
     pub fn transfer_media_metadata(
@@ -958,155 +729,57 @@ impl super::MetadataStore {
         transfer_counts_from_connection(&conn).map(Some)
     }
 
-    pub fn completed_transfer_publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT lower(hex(known_files.ed2k_hash)), transfers.display_name,
-                   known_files.size_bytes,
-                   CASE
-                       WHEN known_files.aich_root IS NULL THEN NULL
-                       ELSE lower(hex(known_files.aich_root))
-                   END,
-                   transfers.upload_priority, transfers.auto_upload_priority,
-                   known_files.all_time_uploaded_bytes,
-                   known_files.all_time_upload_requests,
-                   known_files.all_time_upload_accepts,
-                   known_files.last_upload_requested_at_ms,
-                   transfers.comment, transfers.rating
-            FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE (
-                    transfers.completed != 0
-                    OR EXISTS (
-                        SELECT 1 FROM transfer_pieces
-                        WHERE transfer_pieces.transfer_id = transfers.id
-                          AND transfer_pieces.state = 'Verified'
-                    )
-                  )
-              AND transfers.delete_requested_at_ms IS NULL
-              AND transfers.removed_at_ms IS NULL
-            ORDER BY known_files.ed2k_hash
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(MetadataTransferPublishEntry {
-                file_hash: row.get(0)?,
-                display_name: row.get(1)?,
-                file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
-                aich_root: row.get(3)?,
-                upload_priority: row.get(4)?,
-                auto_upload_priority: row.get::<_, i64>(5)? != 0,
-                session_uploaded_bytes: 0,
-                session_request_count: 0,
-                session_accept_count: 0,
-                all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 6)?,
-                all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 7)?,
-                all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 8)?,
-                last_upload_request_ms: row.get(9)?,
-                comment: row.get(10)?,
-                rating: row.get::<_, u8>(11)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub fn try_completed_transfer_publish_entries(
+    pub fn download_publish_entries_after(
         &self,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferPublishEntry>> {
+        {
+            let conn = self.connection()?;
+            publish_entries_after(&conn, after_hash, limit)
+        }
+    }
+    pub fn try_download_publish_entries_after(
+        &self,
+        after_hash: Option<&str>,
+        limit: usize,
     ) -> Result<Option<Vec<MetadataTransferPublishEntry>>> {
         let Some(conn) = self.try_connection()? else {
             return Ok(None);
         };
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT lower(hex(known_files.ed2k_hash)), transfers.display_name,
-                   known_files.size_bytes,
-                   CASE
-                       WHEN known_files.aich_root IS NULL THEN NULL
-                       ELSE lower(hex(known_files.aich_root))
-                   END,
-                   transfers.upload_priority, transfers.auto_upload_priority,
-                   known_files.all_time_uploaded_bytes,
-                   known_files.all_time_upload_requests,
-                   known_files.all_time_upload_accepts,
-                   known_files.last_upload_requested_at_ms,
-                   transfers.comment, transfers.rating
-            FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE (
-                    transfers.completed != 0
-                    OR EXISTS (
-                        SELECT 1 FROM transfer_pieces
-                        WHERE transfer_pieces.transfer_id = transfers.id
-                          AND transfer_pieces.state = 'Verified'
-                    )
-                  )
-              AND transfers.delete_requested_at_ms IS NULL
-              AND transfers.removed_at_ms IS NULL
-            ORDER BY known_files.ed2k_hash
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(MetadataTransferPublishEntry {
-                file_hash: row.get(0)?,
-                display_name: row.get(1)?,
-                file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
-                aich_root: row.get(3)?,
-                upload_priority: row.get(4)?,
-                auto_upload_priority: row.get::<_, i64>(5)? != 0,
-                session_uploaded_bytes: 0,
-                session_request_count: 0,
-                session_accept_count: 0,
-                all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 6)?,
-                all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 7)?,
-                all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 8)?,
-                last_upload_request_ms: row.get(9)?,
-                comment: row.get(10)?,
-                rating: row.get::<_, u8>(11)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map(Some)
-            .map_err(Into::into)
+        publish_entries_after(&conn, after_hash, limit).map(Some)
     }
 
-    pub fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {
-        // A delivered output can still await local-root admission and transfer
-        // retirement after a crash or transient metadata failure.
-        self.completed_delivery_hashes("transfers.delivery_state IN ('pending', 'delivered')")
-    }
-
-    pub fn completed_delivery_reconciliation_hashes(&self) -> Result<Vec<String>> {
-        self.completed_delivery_hashes("transfers.delivery_state IN ('pending', 'delivered')")
-    }
-
-    fn completed_delivery_hashes(&self, delivery_predicate: &str) -> Result<Vec<String>> {
+    /// Pending preterminal materialization/admission work; history never redelivers automatically.
+    pub fn pending_delivery_jobs_after(
+        &self,
+        after: Option<JobId>,
+        limit: usize,
+    ) -> Result<Vec<JobId>> {
+        ensure!((1..=256).contains(&limit), "invalid delivery job page size");
         let conn = self.connection()?;
-        let sql = format!(
-            r#"
-            SELECT lower(hex(known_files.ed2k_hash))
-            FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE transfers.completed != 0
-              AND {delivery_predicate}
-              AND transfers.removed_at_ms IS NULL
-              AND transfers.delete_requested_at_ms IS NULL
-            ORDER BY known_files.ed2k_hash
-            "#
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM download_jobs WHERE id>?1
+            AND completed=1 AND final_rehash_pending=0 AND terminal_completed_at_s IS NULL
+            AND removed_at_s IS NULL AND delete_requested_at_s IS NULL
+            AND storage_failure_code IS NULL ORDER BY id LIMIT ?2",
+        )?;
+        Ok(stmt
+            .query_map(
+                params![after.map_or(0, JobId::get), i64::try_from(limit)?],
+                |row| row.get(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn begin_transfer_delivery_attempt(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt_id: Uuid,
         target_path: &Path,
         staging_path: &Path,
     ) -> Result<MetadataTransferDeliveryAttempt> {
+        let id = token.job_id;
         ensure!(
             target_path.is_absolute(),
             "delivery target path must be absolute"
@@ -1130,36 +803,35 @@ impl super::MetadataStore {
             "delivery staging path does not match attempt {attempt_id}"
         );
 
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let transfer_id = tx
+        let job_id = tx
             .query_row(
                 r#"
-                SELECT transfers.id
+                SELECT download_jobs.id
                 FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.completed != 0
-                  AND transfers.final_rehash_pending = 0
-                  AND transfers.delivery_state = 'pending'
-                  AND transfers.delivered_path_id IS NULL
-                  AND transfers.removed_at_ms IS NULL
-                  AND transfers.delete_requested_at_ms IS NULL
+                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+                WHERE download_jobs.id = ?1 AND download_jobs.execution_generation=?2
+                  AND download_jobs.intent='started' AND download_jobs.completed != 0
+                  AND download_jobs.final_rehash_pending = 0
+                  AND download_jobs.delivery_state = 'pending'
+                  AND download_jobs.delivered_path_id IS NULL
+                  AND download_jobs.removed_at_s IS NULL
+                  AND download_jobs.delete_requested_at_s IS NULL
                 "#,
-                params![hash],
+                params![id, i64::try_from(token.generation)?],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        let Some(transfer_id) = transfer_id else {
-            anyhow::bail!("transfer {file_hash} is not eligible for delivery");
+        let Some(job_id) = job_id else {
+            anyhow::bail!("transfer {id} is not eligible for delivery");
         };
-        if let Some(existing) = delivery_attempt_by_hash(&tx, &hash)? {
+        if let Some(existing) = delivery_attempt_by_job(&tx, id)? {
             ensure!(
                 existing.attempt_id == attempt_id
                     && existing.target_path == target_path
                     && existing.staging_path == staging_path,
-                "transfer {file_hash} already has a different delivery attempt"
+                "transfer {id} already has a different delivery attempt"
             );
             tx.commit()?;
             return Ok(existing);
@@ -1170,91 +842,107 @@ impl super::MetadataStore {
             target_path_id != staging_path_id,
             "delivery target and staging paths must have distinct native identities"
         );
-        let now = unix_ms();
+        let now = crate::download_job_store::unix_s();
         tx.execute(
             r#"
-            INSERT INTO delivery_attempts(
-                transfer_id, attempt_id, phase, target_path_id, staging_path_id,
-                created_at_ms, updated_at_ms
+            INSERT INTO download_delivery_attempts(
+                job_id, attempt_id, phase, target_path_id, staging_path_id,
+                created_at_s, updated_at_s
             )
             VALUES (?1, ?2, 'prepared', ?3, ?4, ?5, ?5)
             "#,
             params![
-                transfer_id,
+                job_id,
                 attempt_id.hyphenated().to_string(),
                 target_path_id,
                 staging_path_id,
                 now,
             ],
         )?;
-        let attempt = delivery_attempt_by_hash(&tx, &hash)?
+        let attempt = delivery_attempt_by_job(&tx, id)?
             .expect("inserted delivery attempt must be queryable in its transaction");
         tx.commit()?;
         Ok(attempt)
     }
 
-    pub fn transfer_delivery_attempt_by_hash(
+    pub fn download_job_delivery_attempt(
         &self,
-        file_hash: &str,
+        id: JobId,
     ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        delivery_attempt_by_hash(&conn, &hash)
+        delivery_attempt_by_job(&conn, id)
     }
 
-    pub fn transfer_delivery_attempts(&self) -> Result<Vec<MetadataTransferDeliveryAttempt>> {
+    pub fn download_delivery_attempts_after(
+        &self,
+        after: Option<JobId>,
+        limit: usize,
+    ) -> Result<Vec<MetadataTransferDeliveryAttempt>> {
+        ensure!((1..=256).contains(&limit), "invalid delivery page size");
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), delivery_attempts.attempt_id,
-                   delivery_attempts.phase,
-                   target_paths.platform, target_paths.native_path,
-                   staging_paths.platform, staging_paths.native_path,
-                   delivery_attempts.staging_fingerprint,
-                   delivery_attempts.published_fingerprint,
-                   delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
-            FROM delivery_attempts
-            JOIN transfers ON transfers.id = delivery_attempts.transfer_id
-            JOIN known_files ON known_files.id = transfers.known_file_id
-            JOIN local_paths target_paths ON target_paths.id = delivery_attempts.target_path_id
-            JOIN local_paths staging_paths ON staging_paths.id = delivery_attempts.staging_path_id
-            ORDER BY known_files.ed2k_hash
+            SELECT lower(hex(known_files.ed2k_hash)), download_delivery_attempts.attempt_id,
+                   download_delivery_attempts.phase,
+                   target_paths.platform, CASE WHEN length(target_paths.native_path)<=65536 THEN target_paths.native_path END,
+                   staging_paths.platform, CASE WHEN length(staging_paths.native_path)<=65536 THEN staging_paths.native_path END,
+                   CASE WHEN length(download_delivery_attempts.staging_fingerprint)<=1024 THEN download_delivery_attempts.staging_fingerprint END,
+                   CASE WHEN length(download_delivery_attempts.published_fingerprint)<=1024 THEN download_delivery_attempts.published_fingerprint END,
+                   download_delivery_attempts.created_at_s, download_delivery_attempts.updated_at_s, download_jobs.id, length(target_paths.native_path),length(staging_paths.native_path),length(download_delivery_attempts.staging_fingerprint),length(download_delivery_attempts.published_fingerprint)
+            FROM download_delivery_attempts
+            JOIN download_jobs ON download_jobs.id = download_delivery_attempts.job_id
+            JOIN known_files ON known_files.id = download_jobs.known_file_id
+            JOIN local_paths target_paths ON target_paths.id = download_delivery_attempts.target_path_id
+            JOIN local_paths staging_paths ON staging_paths.id = download_delivery_attempts.staging_path_id
+            WHERE download_jobs.id>?1 ORDER BY download_jobs.id LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map([], delivery_attempt_from_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let mut rows = stmt.query(params![after.map_or(0, JobId::get), i64::try_from(limit)?])?;
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        while let Some(row) = rows.next()? {
+            let charge = delivery_attempt_row_bytes(row)?;
+            if bytes + charge > crate::download_job_store::JOB_PAGE_BYTES {
+                ensure!(!entries.is_empty(), "delivery row exceeds page allowance");
+                break;
+            }
+            bytes += charge;
+            entries.push(delivery_attempt_from_row(row)?);
+        }
+        Ok(entries)
     }
 
     pub fn mark_transfer_delivery_attempt_staged(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt_id: Uuid,
         staging_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let now = unix_ms();
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+        let id = token.job_id;
+        let now = crate::download_job_store::unix_s();
         let staging_fingerprint = staging_fingerprint.storage_bytes();
-        let changed = self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             r#"
-            UPDATE delivery_attempts
+            UPDATE download_delivery_attempts
             SET phase = 'staged',
                 staging_fingerprint = CASE
                     WHEN phase = 'prepared' THEN ?4
                     ELSE staging_fingerprint
                 END,
-                updated_at_ms = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_ms END
-            WHERE transfer_id = (
-                SELECT transfers.id
-                FROM transfers
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.completed != 0
-                  AND transfers.final_rehash_pending = 0
-                  AND transfers.delivery_state = 'pending'
-                  AND transfers.delivered_path_id IS NULL
-                  AND transfers.removed_at_ms IS NULL
-                  AND transfers.delete_requested_at_ms IS NULL
+                updated_at_s = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_s END
+            WHERE job_id = (
+                SELECT download_jobs.id
+                FROM download_jobs
+                JOIN known_files ON known_files.id = download_jobs.known_file_id
+                WHERE download_jobs.id = ?1 AND download_jobs.execution_generation=?5 AND download_jobs.intent='started'
+                  AND download_jobs.completed != 0
+                  AND download_jobs.final_rehash_pending = 0
+                  AND download_jobs.delivery_state = 'pending'
+                  AND download_jobs.delivered_path_id IS NULL
+                  AND download_jobs.removed_at_s IS NULL
+                  AND download_jobs.delete_requested_at_s IS NULL
             )
               AND attempt_id = ?2
               AND (
@@ -1263,44 +951,53 @@ impl super::MetadataStore {
               )
             "#,
             params![
-                hash,
+                id,
                 attempt_id.hyphenated().to_string(),
                 now,
                 staging_fingerprint,
+                i64::try_from(token.generation)?,
             ],
         )?;
-        Ok(changed != 0)
+        let snapshot = if changed != 0 {
+            delivery_attempt_by_job(&tx, id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(snapshot)
     }
 
     pub fn mark_transfer_delivery_attempt_published(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt_id: Uuid,
         published_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let now = unix_ms();
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+        let id = token.job_id;
+        let now = crate::download_job_store::unix_s();
         let published_fingerprint = published_fingerprint.storage_bytes();
-        let changed = self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             r#"
-            UPDATE delivery_attempts
+            UPDATE download_delivery_attempts
             SET phase = 'published',
                 published_fingerprint = CASE
                     WHEN phase = 'staged' THEN ?4
                     ELSE published_fingerprint
                 END,
-                updated_at_ms = CASE WHEN phase = 'staged' THEN ?3 ELSE updated_at_ms END
-            WHERE transfer_id = (
-                SELECT transfers.id
-                FROM transfers
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.completed != 0
-                  AND transfers.final_rehash_pending = 0
-                  AND transfers.delivery_state = 'pending'
-                  AND transfers.delivered_path_id IS NULL
-                  AND transfers.removed_at_ms IS NULL
-                  AND transfers.delete_requested_at_ms IS NULL
+                updated_at_s = CASE WHEN phase = 'staged' THEN ?3 ELSE updated_at_s END
+            WHERE job_id = (
+                SELECT download_jobs.id
+                FROM download_jobs
+                JOIN known_files ON known_files.id = download_jobs.known_file_id
+                WHERE download_jobs.id = ?1 AND download_jobs.execution_generation=?5 AND download_jobs.intent='started'
+                  AND download_jobs.completed != 0
+                  AND download_jobs.final_rehash_pending = 0
+                  AND download_jobs.delivery_state = 'pending'
+                  AND download_jobs.delivered_path_id IS NULL
+                  AND download_jobs.removed_at_s IS NULL
+                  AND download_jobs.delete_requested_at_s IS NULL
             )
               AND attempt_id = ?2
               AND (
@@ -1309,79 +1006,94 @@ impl super::MetadataStore {
               )
             "#,
             params![
-                hash,
+                id,
                 attempt_id.hyphenated().to_string(),
                 now,
                 published_fingerprint,
+                i64::try_from(token.generation)?,
             ],
         )?;
-        Ok(changed != 0)
+        let snapshot = if changed != 0 {
+            delivery_attempt_by_job(&tx, id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(snapshot)
     }
 
     /// Commit verified direct publication and release its sharing barrier together.
     pub fn publish_reserved_delivery_attempt(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt_id: Uuid,
         fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
+        let job_id = token.job_id;
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = attempt_id.to_string();
         let reserved: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM delivery_exclusions WHERE reservation_id = ?1)",
-            [&id],
+            "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE reservation_id = ?1 AND originating_job_id=?2)",
+            params![id,job_id],
             |row| row.get(0),
         )?;
         if !reserved {
+            return Ok(None);
+        }
+        let changed = tx.execute(
+            "UPDATE download_delivery_attempts SET phase = 'published', published_fingerprint = ?3, updated_at_s = ?4
+             WHERE attempt_id = ?1 AND phase = 'staged' AND job_id = (
+               SELECT download_jobs.id FROM download_jobs JOIN known_files ON known_files.id = download_jobs.known_file_id
+               WHERE download_jobs.id = ?2 AND download_jobs.execution_generation=?5 AND download_jobs.intent='started' AND download_jobs.completed != 0
+                 AND download_jobs.final_rehash_pending = 0 AND download_jobs.delivery_state = 'pending'
+                 AND download_jobs.removed_at_s IS NULL AND download_jobs.delete_requested_at_s IS NULL)",
+            params![id, job_id, fingerprint.storage_bytes(), crate::download_job_store::unix_s(),i64::try_from(token.generation)?],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        tx.execute(
+            "DELETE FROM download_delivery_exclusions WHERE reservation_id = ?1 AND originating_job_id=?2",
+            params![id,job_id],
+        )?;
+        let snapshot = delivery_attempt_by_job(&tx, job_id)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    /// The token and journal snapshot must be captured before recovery I/O under
+    /// the caller's exclusive lifecycle scope, never refreshed after that I/O.
+    /// Monotonic phases and immutable fingerprints form the durable state CAS.
+    pub fn settle_recovered_delivery_attempt(
+        &self,
+        token: JobToken,
+        expected: &MetadataTransferDeliveryAttempt,
+    ) -> Result<bool> {
+        if expected.job_id != token.job_id {
+            return Ok(false);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND execution_generation=?2)",
+            params![token.job_id, i64::try_from(token.generation)?],
+            |row| row.get(0),
+        )?;
+        if !current || delivery_attempt_by_job(&tx, token.job_id)?.as_ref() != Some(expected) {
             return Ok(false);
         }
         let changed = tx.execute(
-            "UPDATE delivery_attempts SET phase = 'published', published_fingerprint = ?3, updated_at_ms = ?4
-             WHERE attempt_id = ?1 AND phase = 'staged' AND transfer_id = (
-               SELECT transfers.id FROM transfers JOIN known_files ON known_files.id = transfers.known_file_id
-               WHERE known_files.ed2k_hash = ?2 AND transfers.completed != 0
-                 AND transfers.final_rehash_pending = 0 AND transfers.delivery_state = 'pending'
-                 AND transfers.removed_at_ms IS NULL AND transfers.delete_requested_at_ms IS NULL)",
-            params![id, hash, fingerprint.storage_bytes(), unix_ms()],
-        )?;
-        if changed == 0 {
-            return Ok(false);
-        }
-        tx.execute(
-            "DELETE FROM delivery_exclusions WHERE reservation_id = ?1",
-            [&id],
+            "DELETE FROM download_delivery_attempts WHERE job_id=?1 AND attempt_id=?2",
+            params![token.job_id, expected.attempt_id.to_string()],
         )?;
         tx.commit()?;
-        Ok(true)
-    }
-
-    pub fn clear_transfer_delivery_attempt(
-        &self,
-        file_hash: &str,
-        attempt_id: Uuid,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let changed = self.connection()?.execute(
-            r#"
-            DELETE FROM delivery_attempts
-            WHERE transfer_id = (
-                SELECT transfers.id
-                FROM transfers
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-            )
-              AND attempt_id = ?2
-            "#,
-            params![hash, attempt_id.hyphenated().to_string()],
-        )?;
         Ok(changed != 0)
     }
 
     pub fn begin_transfer_deletion_tombstone(
         &self,
-        file_hash: &str,
+        id: JobId,
         tombstone_id: Uuid,
         original_path: &Path,
         tombstone_path: &Path,
@@ -1410,44 +1122,45 @@ impl super::MetadataStore {
             "deletion tombstone path does not match tombstone {tombstone_id}"
         );
 
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        crate::download_job_store::validate_job_path(original_path)?;
+        crate::download_job_store::validate_job_path(tombstone_path)?;
         let original = NativePath::from(original_path);
         let source_bytes = source_fingerprint.storage_bytes();
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let transfer_id = tx
+        let job_id = tx
             .query_row(
                 r#"
-                SELECT transfers.id
+                SELECT download_jobs.id
                 FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
+                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
                 LEFT JOIN local_paths delivered_paths
-                  ON delivered_paths.id = transfers.delivered_path_id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.delete_requested_at_ms IS NOT NULL
+                  ON delivered_paths.id = download_jobs.delivered_path_id
+                WHERE download_jobs.id = ?1
+                  AND download_jobs.delete_requested_at_s IS NOT NULL
                   AND (
                       (
-                          transfers.delivery_state = 'delivered'
-                          AND transfers.delivery_ownership = 'owned'
-                          AND transfers.source_fingerprint = ?2
+                          download_jobs.delivery_state = 'delivered'
+                          AND download_jobs.delivery_ownership = 'owned'
+                          AND download_jobs.source_fingerprint = ?2
                           AND delivered_paths.platform = ?3
                           AND delivered_paths.native_path = ?4
                       )
                       OR EXISTS (
                           SELECT 1
-                          FROM delivery_attempts
+                          FROM download_delivery_attempts
                           JOIN local_paths attempted_targets
-                            ON attempted_targets.id = delivery_attempts.target_path_id
-                          WHERE delivery_attempts.transfer_id = transfers.id
-                            AND delivery_attempts.phase = 'published'
-                            AND delivery_attempts.published_fingerprint = ?2
+                            ON attempted_targets.id = download_delivery_attempts.target_path_id
+                          WHERE download_delivery_attempts.job_id = download_jobs.id
+                            AND download_delivery_attempts.phase = 'published'
+                            AND download_delivery_attempts.published_fingerprint = ?2
                             AND attempted_targets.platform = ?3
                             AND attempted_targets.native_path = ?4
                       )
                   )
                 "#,
                 params![
-                    hash,
+                    id,
                     source_bytes,
                     NativePath::platform(),
                     original.storage_bytes(),
@@ -1455,18 +1168,16 @@ impl super::MetadataStore {
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        let Some(transfer_id) = transfer_id else {
-            anyhow::bail!(
-                "transfer {file_hash} has no owned delivered output eligible for tombstoning"
-            );
+        let Some(job_id) = job_id else {
+            anyhow::bail!("transfer {id} has no owned delivered output eligible for tombstoning");
         };
-        if let Some(existing) = transfer_deletion_tombstone_by_hash(&tx, &hash)? {
+        if let Some(existing) = download_job_deletion_tombstone(&tx, id)? {
             ensure!(
                 existing.tombstone_id == tombstone_id
                     && existing.original_path == original_path
                     && existing.tombstone_path == tombstone_path
                     && existing.source_fingerprint == *source_fingerprint,
-                "transfer {file_hash} already has a different deletion tombstone"
+                "transfer {id} already has a different deletion tombstone"
             );
             tx.commit()?;
             return Ok(existing);
@@ -1477,17 +1188,17 @@ impl super::MetadataStore {
             original_path_id != tombstone_path_id,
             "deletion source and tombstone paths must have distinct native identities"
         );
-        let now = unix_ms();
+        let now = crate::download_job_store::unix_s();
         tx.execute(
             r#"
-            INSERT INTO delivery_output_tombstones(
-                transfer_id, tombstone_id, phase, original_path_id,
-                tombstone_path_id, source_fingerprint, created_at_ms, updated_at_ms
+            INSERT INTO download_delivery_tombstones(
+                job_id, tombstone_id, phase, original_path_id,
+                tombstone_path_id, source_fingerprint, created_at_s, updated_at_s
             )
             VALUES (?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?6)
             "#,
             params![
-                transfer_id,
+                job_id,
                 tombstone_id.hyphenated().to_string(),
                 original_path_id,
                 tombstone_path_id,
@@ -1495,45 +1206,45 @@ impl super::MetadataStore {
                 now,
             ],
         )?;
-        let tombstone = transfer_deletion_tombstone_by_hash(&tx, &hash)?
+        let tombstone = download_job_deletion_tombstone(&tx, id)?
             .expect("inserted deletion tombstone must be queryable in its transaction");
         tx.commit()?;
         Ok(tombstone)
     }
 
-    pub fn transfer_deletion_tombstone_by_hash(
+    pub fn download_job_deletion_tombstone(
         &self,
-        file_hash: &str,
+        id: JobId,
     ) -> Result<Option<MetadataTransferDeletionTombstone>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        transfer_deletion_tombstone_by_hash(&conn, &hash)
+        download_job_deletion_tombstone(&conn, id)
     }
 
     pub fn mark_transfer_deletion_tombstone_moved(
         &self,
-        file_hash: &str,
+        id: JobId,
         tombstone_id: Uuid,
         moved_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let now = unix_ms();
+    ) -> Result<Option<MetadataTransferDeletionTombstone>> {
+        let now = crate::download_job_store::unix_s();
         let moved_fingerprint = moved_fingerprint.storage_bytes();
-        let changed = self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             r#"
-            UPDATE delivery_output_tombstones
+            UPDATE download_delivery_tombstones
             SET phase = 'moved',
                 moved_fingerprint = CASE
                     WHEN phase = 'prepared' THEN ?4
                     ELSE moved_fingerprint
                 END,
-                updated_at_ms = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_ms END
-            WHERE transfer_id = (
-                SELECT transfers.id
-                FROM transfers
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.delete_requested_at_ms IS NOT NULL
+                updated_at_s = CASE WHEN phase = 'prepared' THEN ?3 ELSE updated_at_s END
+            WHERE job_id = (
+                SELECT download_jobs.id
+                FROM download_jobs
+                JOIN known_files ON known_files.id = download_jobs.known_file_id
+                WHERE download_jobs.id = ?1
+                  AND download_jobs.delete_requested_at_s IS NOT NULL
             )
               AND tombstone_id = ?2
               AND (
@@ -1542,95 +1253,96 @@ impl super::MetadataStore {
               )
             "#,
             params![
-                hash,
+                id,
                 tombstone_id.hyphenated().to_string(),
                 now,
                 moved_fingerprint,
             ],
         )?;
-        Ok(changed != 0)
+        let snapshot = if changed != 0 {
+            download_job_deletion_tombstone(&tx, id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(snapshot)
     }
 
     pub fn clear_prepared_transfer_deletion_tombstone(
         &self,
-        file_hash: &str,
+        id: JobId,
         tombstone_id: Uuid,
     ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let changed = self.connection()?.execute(
             r#"
-            DELETE FROM delivery_output_tombstones
-            WHERE transfer_id = (
-                SELECT transfers.id
-                FROM transfers
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.delete_requested_at_ms IS NOT NULL
+            DELETE FROM download_delivery_tombstones
+            WHERE job_id = (
+                SELECT download_jobs.id
+                FROM download_jobs
+                JOIN known_files ON known_files.id = download_jobs.known_file_id
+                WHERE download_jobs.id = ?1
+                  AND download_jobs.delete_requested_at_s IS NOT NULL
             )
               AND tombstone_id = ?2
               AND phase = 'prepared'
             "#,
-            params![hash, tombstone_id.hyphenated().to_string()],
+            params![id, tombstone_id.hyphenated().to_string()],
         )?;
         Ok(changed != 0)
     }
 
-    /// Persist a terminal destructive-delete request and its initial owned
-    /// transfer-directory identity before either filesystem authority is
-    /// touched. Repeating the request preserves both original values.
-    pub fn request_transfer_deletion(
+    /// Settle an exact snapshot after reclaiming its owned object or deciding
+    /// to preserve missing/foreign prepared objects, under durable delete
+    /// intent and the same execution generation. Never reacquire a newer token
+    /// after filesystem work merely to make a stale completion eligible.
+    pub fn settle_recovered_output_tombstone(
         &self,
-        file_hash: &str,
-        transfer_directory_authority: Option<MetadataTransferDirectoryDeletionAuthority>,
+        token: JobToken,
+        expected: &MetadataTransferDeletionTombstone,
     ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let now = unix_ms();
-        let transfer_directory_identity =
-            transfer_directory_authority.map(|authority| authority.identity.storage_bytes());
-        let transfer_directory_marker_id = transfer_directory_authority
-            .map(|authority| authority.marker_id.hyphenated().to_string());
-        let conn = self.connection()?;
-        let changed = conn.execute(
-            r#"
-            UPDATE transfers
-            SET delete_requested_at_ms = coalesce(delete_requested_at_ms, ?2),
-                transfer_directory_tombstone_identity = CASE
-                    WHEN delete_requested_at_ms IS NULL THEN ?3
-                    ELSE transfer_directory_tombstone_identity
-                END,
-                transfer_directory_tombstone_marker_id = CASE
-                    WHEN delete_requested_at_ms IS NULL THEN ?4
-                    ELSE transfer_directory_tombstone_marker_id
-                END,
-                updated_at_ms = CASE
-                    WHEN delete_requested_at_ms IS NULL THEN ?2
-                    ELSE updated_at_ms
-                END
-            WHERE known_file_id = (
-                SELECT id FROM known_files WHERE ed2k_hash = ?1
-            )
-            "#,
-            params![
-                hash,
-                now,
-                transfer_directory_identity,
-                transfer_directory_marker_id,
-            ],
+        if expected.job_id != token.job_id {
+            return Ok(false);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND execution_generation=?2 AND delete_requested_at_s IS NOT NULL)",
+            params![token.job_id,i64::try_from(token.generation)?], |row| row.get(0))?;
+        if !current
+            || download_job_deletion_tombstone(&tx, token.job_id)?.as_ref() != Some(expected)
+        {
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "DELETE FROM download_delivery_tombstones WHERE job_id=?1 AND tombstone_id=?2",
+            params![token.job_id, expected.tombstone_id.to_string()],
         )?;
+        tx.commit()?;
         Ok(changed != 0)
     }
 
-    pub fn transfer_deletion_requested(&self, file_hash: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    /// Additional delivered-output deletion intent. Internal pieces always use
+    /// the shared retirement journal, independent of this destructive choice.
+    pub fn request_transfer_deletion(&self, id: JobId) -> Result<bool> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        request_job_removal(&tx, id, true)?;
+        let requested = tx.query_row("SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND delete_requested_at_s IS NOT NULL)",
+            [id], |row| row.get::<_,bool>(0))?;
+        tx.commit()?;
+        Ok(requested)
+    }
+
+    pub fn transfer_deletion_requested(&self, id: JobId) -> Result<bool> {
         self.connection()?
             .query_row(
                 r#"
-                SELECT transfers.delete_requested_at_ms IS NOT NULL
+                SELECT download_jobs.delete_requested_at_s IS NOT NULL
                 FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
-                WHERE known_files.ed2k_hash = ?1
+                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+                WHERE download_jobs.id = ?1
                 "#,
-                params![hash],
+                params![id],
                 |row| row.get(0),
             )
             .optional()
@@ -1638,173 +1350,162 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
-    pub fn transfer_retirement_pending(&self, file_hash: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    /// Refresh current verification after independently proving the recorded
+    /// output's bytes. This never restores destructive ownership or replays a
+    /// manifest's progress. Terminal completion remains a historical fact.
+    pub fn refresh_delivered_verification(
+        &self,
+        token: JobToken,
+        path: &Path,
+        expected_fingerprint: Option<&NativeFileFingerprint>,
+        expected_ownership: MetadataTransferDeliveryOwnership,
+        verified_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        crate::download_job_store::validate_job_path(path)?;
+        let native = NativePath::from(path);
+        let changed = self.connection()?.execute(
+            "UPDATE download_jobs SET source_fingerprint=?7,delivery_ownership='unowned',updated_at_s=?8
+             WHERE id=?1 AND execution_generation=?2 AND removed_at_s IS NULL
+               AND delete_requested_at_s IS NULL AND delivery_state='delivered'
+               AND delivery_ownership=?6 AND source_fingerprint IS ?5
+               AND expected_size_bytes=?9
+               AND delivered_path_id IN(SELECT id FROM local_paths WHERE platform=?3 AND native_path=?4)",
+            params![token.job_id,i64::try_from(token.generation)?,NativePath::platform(),native.storage_bytes(),
+                expected_fingerprint.map(NativeFileFingerprint::storage_bytes),
+                delivery_ownership_to_sql(expected_ownership),verified_fingerprint.storage_bytes(),
+                crate::download_job_store::unix_s(),i64::try_from(verified_fingerprint.size_bytes)?],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn transfer_retirement_pending(&self, id: JobId) -> Result<bool> {
         self.connection()?
             .query_row(
                 r#"
                 SELECT EXISTS (
-                    SELECT 1 FROM transfer_retirements
-                    JOIN transfers ON transfers.id = transfer_retirements.transfer_id
-                    JOIN known_files ON known_files.id = transfers.known_file_id
-                    WHERE known_files.ed2k_hash = ?1
+                    SELECT 1 FROM download_retirements
+                    JOIN download_jobs ON download_jobs.id = download_retirements.job_id
+                    JOIN known_files ON known_files.id = download_jobs.known_file_id
+                    WHERE download_jobs.id = ?1
                 )
                 "#,
-                params![hash],
+                params![id],
                 |row| row.get(0),
             )
             .map_err(Into::into)
     }
 
-    pub fn transfer_directory_deletion_authority(
-        &self,
-        file_hash: &str,
-    ) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        self.connection()?
-            .query_row(
-                r#"
-                SELECT transfers.transfer_directory_tombstone_identity,
-                       transfers.transfer_directory_tombstone_marker_id
-                FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.delete_requested_at_ms IS NOT NULL
-                "#,
-                params![hash],
-                |row| directory_cleanup_authority_from_row(row, 0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(Into::into)
-    }
-
-    /// Hide a delivered download and durably own only its internal piece
+    /// Record terminal completion and durably own only its internal piece
     /// directory. The delivered output and verified local content are retained.
-    pub fn request_transfer_retirement(
-        &self,
-        file_hash: &str,
-        authority: Option<MetadataTransferDirectoryDeletionAuthority>,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    pub fn request_transfer_retirement(&self, token: JobToken) -> Result<bool> {
+        let id = token.job_id;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let transfer_id = tx
+        let job_id = tx
             .query_row(
                 r#"
-                SELECT transfers.id
-                FROM transfers
-                JOIN known_files ON known_files.id = transfers.known_file_id
+                SELECT download_jobs.id
+                FROM download_jobs
+                JOIN known_files ON known_files.id = download_jobs.known_file_id
                 JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.completed = 1
-                  AND transfers.delivery_state = 'delivered'
-                  AND transfers.removed_at_ms IS NULL
-                  AND transfers.delete_requested_at_ms IS NULL
+                WHERE download_jobs.id = ?1 AND download_jobs.execution_generation=?2 AND download_jobs.intent='started'
+                  AND download_jobs.completed = 1
+                  AND download_jobs.final_rehash_pending=0 AND download_jobs.internal_storage_retired=0
+                  AND download_jobs.delivery_state = 'delivered'
+                  AND download_jobs.removed_at_s IS NULL
+                  AND download_jobs.delete_requested_at_s IS NULL
                 "#,
-                params![hash],
+                params![id,i64::try_from(token.generation)?],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        let Some(transfer_id) = transfer_id else {
+        let Some(job_id) = job_id else {
             return Ok(false);
         };
         tx.execute(
-            "UPDATE transfers SET removed_at_ms = ?2, updated_at_ms = ?2 WHERE id = ?1",
-            params![transfer_id, unix_ms()],
+            "UPDATE download_jobs SET terminal_completed_at_s=coalesce(terminal_completed_at_s,?2), updated_at_s=?2 WHERE id=?1",
+            params![job_id, crate::download_job_store::unix_s()],
         )?;
-        tx.execute(
-            "INSERT INTO transfer_retirements(transfer_id, directory_identity, directory_marker_id) VALUES (?1, ?2, ?3)",
-            params![
-                transfer_id,
-                authority.map(|value| value.identity.storage_bytes()),
-                authority.map(|value| value.marker_id.hyphenated().to_string()),
-            ],
-        )?;
+        reserve_internal_retirement(&tx, token.job_id)?;
         tx.commit()?;
         Ok(true)
     }
 
-    pub fn pending_transfer_retirement_hashes(&self) -> Result<Vec<String>> {
+    pub fn pending_transfer_retirement_jobs_after(
+        &self,
+        after: Option<JobId>,
+        limit: usize,
+    ) -> Result<Vec<JobId>> {
+        ensure!((1..=256).contains(&limit), "invalid job page size");
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash))
-            FROM transfer_retirements
-            JOIN transfers ON transfers.id = transfer_retirements.transfer_id
-            JOIN known_files ON known_files.id = transfers.known_file_id
-            ORDER BY known_files.ed2k_hash
+            SELECT download_jobs.id
+            FROM download_retirements
+            JOIN download_jobs ON download_jobs.id = download_retirements.job_id
+            JOIN known_files ON known_files.id = download_jobs.known_file_id
+            WHERE download_jobs.id>?1
+            ORDER BY download_jobs.id LIMIT ?2
             "#,
         )?;
-        stmt.query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        stmt.query_map(
+            params![after.map_or(0, JobId::get), i64::try_from(limit)?],
+            |row| row.get(0),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
     }
 
-    pub fn transfer_retirement_authority(
-        &self,
-        file_hash: &str,
-    ) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        self.connection()?
-            .query_row(
-                r#"
-                SELECT transfer_retirements.directory_identity,
-                       transfer_retirements.directory_marker_id
-                FROM transfer_retirements
-                JOIN transfers ON transfers.id = transfer_retirements.transfer_id
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-                "#,
-                params![hash],
-                |row| directory_cleanup_authority_from_row(row, 0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(Into::into)
+    /// Read one immutable retirement intent; never reconstruct paths from a
+    /// content hash or the current temp-directory setting.
+    pub fn download_job_retirement(&self, id: JobId) -> Result<Option<MetadataDownloadRetirement>> {
+        let conn = self.connection()?;
+        read_download_job_retirement(&conn, id)
     }
 
-    /// Drop the transfer and its piece bookkeeping after owned directory
-    /// cleanup. Verified local content and download history survive. A known
-    /// file identity survives while another domain still references it.
-    pub fn finalize_transfer_retirement(&self, file_hash: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    /// Drop internal piece bookkeeping after owned directory cleanup. The compact
+    /// terminal job, verified local content, and content completion history survive.
+    pub fn finalize_transfer_retirement(&self, id: JobId) -> Result<bool> {
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        let ids = tx
-            .query_row(
-                r#"
-                SELECT known_files.id
-                FROM transfer_retirements
-                JOIN transfers ON transfers.id = transfer_retirements.transfer_id
-                JOIN known_files ON known_files.id = transfers.known_file_id
-                WHERE known_files.ed2k_hash = ?1
-                "#,
-                params![hash],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let Some(known_file_id) = ids else {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pending: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM download_retirements r JOIN download_jobs j ON j.id=r.job_id
+            WHERE r.job_id=?1 AND (j.terminal_completed_at_s IS NOT NULL OR j.removed_at_s IS NOT NULL))",[id],|row| row.get(0))?;
+        if !pending {
             return Ok(false);
-        };
-        delete_transfer_and_unreferenced_identity(&tx, known_file_id)?;
+        }
+        // Output journals retain the compact owner row independently. They do
+        // not require large internal piece/source/hash children after safe cleanup.
+        retire_job_children(&tx, id)?;
+        tx.execute("DELETE FROM download_retirements WHERE job_id=?1", [id])?;
+        tx.execute(
+            "UPDATE download_jobs SET internal_storage_retired=1,updated_at_s=?2 WHERE id=?1",
+            params![id, crate::download_job_store::unix_s()],
+        )?;
         tx.commit()?;
         Ok(true)
     }
 
     /// Return every transfer whose destructive-delete intent must be resumed.
-    pub fn pending_transfer_deletion_hashes(&self) -> Result<Vec<String>> {
+    pub fn pending_transfer_deletion_jobs_after(
+        &self,
+        after: Option<JobId>,
+        limit: usize,
+    ) -> Result<Vec<JobId>> {
+        ensure!((1..=256).contains(&limit), "invalid job page size");
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash))
+            SELECT download_jobs.id
             FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE transfers.delete_requested_at_ms IS NOT NULL
-            ORDER BY known_files.ed2k_hash
+            JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+            WHERE download_jobs.delete_requested_at_s IS NOT NULL AND download_jobs.id>?1
+            ORDER BY download_jobs.id LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
+        let rows = stmt.query_map(
+            params![after.map_or(0, JobId::get), i64::try_from(limit)?],
+            |row| row.get(0),
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -1812,34 +1513,42 @@ impl super::MetadataStore {
     /// Return every hash which owns an internal download directory.
     /// Pending deletion rows remain owners until their strict filesystem
     /// cleanup finalizes the metadata row.
-    pub fn managed_download_transfer_hashes(&self) -> Result<Vec<String>> {
+    pub fn managed_download_transfer_jobs_after(
+        &self,
+        after: Option<JobId>,
+        limit: usize,
+    ) -> Result<Vec<JobId>> {
+        ensure!((1..=256).contains(&limit), "invalid job page size");
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash))
+            SELECT download_jobs.id
             FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
-            ORDER BY known_files.ed2k_hash
+            JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+            WHERE download_jobs.id>?1 AND download_jobs.internal_storage_retired=0
+            ORDER BY download_jobs.id LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
+        let rows = stmt.query_map(
+            params![after.map_or(0, JobId::get), i64::try_from(limit)?],
+            |row| row.get(0),
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
-    pub fn managed_download_transfer_exists(&self, file_hash: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    pub fn managed_download_transfer_exists(&self, id: JobId) -> Result<bool> {
         self.connection()?
             .query_row(
                 r#"
                 SELECT EXISTS(
                     SELECT 1
                     FROM known_files
-                    JOIN transfers ON transfers.known_file_id = known_files.id
-                    WHERE known_files.ed2k_hash = ?1
+                    JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+                    WHERE download_jobs.id = ?1 AND download_jobs.internal_storage_retired=0
                 )
                 "#,
-                params![hash],
+                params![id],
                 |row| row.get(0),
             )
             .map_err(Into::into)
@@ -1847,8 +1556,7 @@ impl super::MetadataStore {
 
     /// Commit metadata removal only for a transfer with a durable destructive
     /// intent. A missing row or a row without intent is an idempotent no-op.
-    pub fn finalize_transfer_deletion(&self, file_hash: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    pub fn finalize_transfer_deletion(&self, id: JobId) -> Result<bool> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let known_file_id = tx
@@ -1856,95 +1564,171 @@ impl super::MetadataStore {
                 r#"
                 SELECT known_files.id
                 FROM known_files
-                JOIN transfers ON transfers.known_file_id = known_files.id
-                WHERE known_files.ed2k_hash = ?1
-                  AND transfers.delete_requested_at_ms IS NOT NULL
+                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+                WHERE download_jobs.id = ?1
+                  AND download_jobs.delete_requested_at_s IS NOT NULL
                 "#,
-                params![hash],
+                params![id],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        let Some(known_file_id) = known_file_id else {
+        let Some(_) = known_file_id else {
             return Ok(false);
         };
-        delete_transfer_and_unreferenced_identity(&tx, known_file_id)?;
+        delete_job_row(&tx, id)?;
         tx.commit()?;
         Ok(true)
     }
 
-    pub fn delete_transfer_manifest(&self, file_hash: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+    pub fn delete_transfer_manifest(&self, id: JobId) -> Result<bool> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let known_file_id = tx
             .query_row(
-                "SELECT known_files.id FROM known_files JOIN transfers ON transfers.known_file_id = known_files.id WHERE known_files.ed2k_hash = ?1",
-                params![hash],
+                "SELECT known_files.id FROM known_files JOIN download_jobs ON download_jobs.known_file_id = known_files.id WHERE download_jobs.id = ?1 AND download_jobs.delete_requested_at_s IS NULL AND (download_jobs.selected_temp_path_id IS NULL OR download_jobs.internal_storage_retired=1)",
+                params![id],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        let Some(known_file_id) = known_file_id else {
+        let Some(_) = known_file_id else {
             return Ok(false);
         };
-        delete_transfer_and_unreferenced_identity(&tx, known_file_id)?;
+        delete_job_row(&tx, id)?;
         tx.commit()?;
         Ok(true)
     }
 }
 
-fn delivery_attempt_by_hash(
+fn publish_entries_after(
     conn: &rusqlite::Connection,
-    hash: &[u8],
+    after: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MetadataTransferPublishEntry>> {
+    use crate::download_job_store::{JOB_PAGE_BYTES, MAX_JOB_TEXT_BYTES, bounded_row_bytes};
+    ensure!((1..=256).contains(&limit), "invalid publication page size");
+    let boundary = after
+        .map(|hash| decode_fixed_hex(hash, 16, "ED2K hash"))
+        .transpose()?
+        .unwrap_or_default();
+    let representative = crate::local_catalog::representative_path(true);
+    let complete = "c.known_file_id IS NOT NULL AND i.path_id IS NOT NULL";
+    let sql=format!("WITH selected AS (SELECT lower(hex(known_files.ed2k_hash)) hash,
+        CASE WHEN {complete} THEN c.display_name ELSE t.display_name END name,
+        CASE WHEN {complete} THEN known_files.size_bytes ELSE t.expected_size_bytes END size,
+        lower(hex(CASE WHEN {complete} THEN c.aich_root ELSE t.aich_root END)) root,
+        CASE WHEN {complete} THEN c.upload_priority ELSE t.upload_priority END priority,
+        CASE WHEN {complete} THEN c.auto_upload_priority ELSE t.auto_upload_priority END auto,
+        known_files.all_time_uploaded_bytes uploaded,known_files.all_time_upload_requests requests,
+        known_files.all_time_upload_accepts accepts,known_files.last_upload_requested_at_ms last_request,
+        CASE WHEN {complete} THEN c.comment ELSE t.comment END comment,
+        CASE WHEN {complete} THEN c.rating ELSE t.rating END rating
+        FROM known_files LEFT JOIN verified_local_content c ON c.known_file_id=known_files.id
+        LEFT JOIN local_file_instances i ON i.path_id=({representative})
+        LEFT JOIN download_jobs t ON t.known_file_id=known_files.id AND t.removed_at_s IS NULL
+            AND t.terminal_completed_at_s IS NULL AND t.delete_requested_at_s IS NULL
+        WHERE known_files.ed2k_hash>?1 AND (({complete}) OR (t.expected_size_bytes IS NOT NULL
+            AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND EXISTS(SELECT 1 FROM download_job_verified_ranges r WHERE r.job_id=t.id)))
+        ORDER BY known_files.ed2k_hash LIMIT ?2)
+        SELECT hash,CASE WHEN length(CAST(name AS BLOB))<=65536 THEN name END,size,NULLIF(root,''),
+            CASE WHEN length(CAST(priority AS BLOB))<=65536 THEN priority END,auto,uploaded,requests,accepts,last_request,
+            CASE WHEN length(CAST(comment AS BLOB))<=65536 THEN comment END,rating,
+            length(CAST(name AS BLOB)),length(CAST(priority AS BLOB)),length(CAST(comment AS BLOB)) FROM selected ORDER BY hash");
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let mut rows = stmt.query(params![boundary, i64::try_from(limit)?])?;
+    let mut entries = Vec::new();
+    let mut bytes = 0;
+    while let Some(row) = rows.next()? {
+        let charge = bounded_row_bytes(
+            row,
+            &[
+                (12, MAX_JOB_TEXT_BYTES, 2),
+                (13, MAX_JOB_TEXT_BYTES, 2),
+                (14, MAX_JOB_TEXT_BYTES, 2),
+            ],
+        )?;
+        if bytes + charge > JOB_PAGE_BYTES {
+            ensure!(
+                !entries.is_empty(),
+                "publication row exceeds page allowance"
+            );
+            break;
+        }
+        bytes += charge;
+        entries.push(MetadataTransferPublishEntry {
+            file_hash: row.get(0)?,
+            display_name: row.get(1)?,
+            file_size: crate::sql_value::unsigned(row, 2)?,
+            aich_root: row.get(3)?,
+            upload_priority: row.get(4)?,
+            auto_upload_priority: row.get(5)?,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_uploaded_bytes: crate::sql_value::unsigned(row, 6)?,
+            all_time_upload_requests: crate::sql_value::unsigned(row, 7)?,
+            all_time_upload_accepts: crate::sql_value::unsigned(row, 8)?,
+            last_upload_request_ms: row.get(9)?,
+            comment: row.get(10)?,
+            rating: row.get(11)?,
+        });
+    }
+    Ok(entries)
+}
+
+pub(crate) fn delivery_attempt_by_job(
+    conn: &rusqlite::Connection,
+    id: JobId,
 ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
     conn.query_row(
         r#"
-        SELECT lower(hex(known_files.ed2k_hash)), delivery_attempts.attempt_id,
-               delivery_attempts.phase,
-               target_paths.platform, target_paths.native_path,
-               staging_paths.platform, staging_paths.native_path,
-               delivery_attempts.staging_fingerprint,
-               delivery_attempts.published_fingerprint,
-               delivery_attempts.created_at_ms, delivery_attempts.updated_at_ms
-        FROM delivery_attempts
-        JOIN transfers ON transfers.id = delivery_attempts.transfer_id
-        JOIN known_files ON known_files.id = transfers.known_file_id
-        JOIN local_paths target_paths ON target_paths.id = delivery_attempts.target_path_id
-        JOIN local_paths staging_paths ON staging_paths.id = delivery_attempts.staging_path_id
-        WHERE known_files.ed2k_hash = ?1
+        SELECT lower(hex(known_files.ed2k_hash)), download_delivery_attempts.attempt_id,
+               download_delivery_attempts.phase,
+               target_paths.platform, CASE WHEN length(target_paths.native_path)<=65536 THEN target_paths.native_path END,
+               staging_paths.platform, CASE WHEN length(staging_paths.native_path)<=65536 THEN staging_paths.native_path END,
+               CASE WHEN length(download_delivery_attempts.staging_fingerprint)<=1024 THEN download_delivery_attempts.staging_fingerprint END,
+               CASE WHEN length(download_delivery_attempts.published_fingerprint)<=1024 THEN download_delivery_attempts.published_fingerprint END,
+               download_delivery_attempts.created_at_s, download_delivery_attempts.updated_at_s, download_jobs.id, length(target_paths.native_path),length(staging_paths.native_path),length(download_delivery_attempts.staging_fingerprint),length(download_delivery_attempts.published_fingerprint)
+        FROM download_delivery_attempts
+        JOIN download_jobs ON download_jobs.id = download_delivery_attempts.job_id
+        JOIN known_files ON known_files.id = download_jobs.known_file_id
+        JOIN local_paths target_paths ON target_paths.id = download_delivery_attempts.target_path_id
+        JOIN local_paths staging_paths ON staging_paths.id = download_delivery_attempts.staging_path_id
+        WHERE download_jobs.id = ?1
         "#,
-        params![hash],
+        params![id],
         delivery_attempt_from_row,
     )
     .optional()
     .map_err(Into::into)
 }
 
-fn transfer_deletion_tombstone_by_hash(
+fn download_job_deletion_tombstone(
     conn: &rusqlite::Connection,
-    hash: &[u8],
+    id: JobId,
 ) -> Result<Option<MetadataTransferDeletionTombstone>> {
     conn.query_row(
         r#"
         SELECT lower(hex(known_files.ed2k_hash)),
-               delivery_output_tombstones.tombstone_id,
-               delivery_output_tombstones.phase,
-               original_paths.platform, original_paths.native_path,
-               tombstone_paths.platform, tombstone_paths.native_path,
-               delivery_output_tombstones.source_fingerprint,
-               delivery_output_tombstones.moved_fingerprint,
-               delivery_output_tombstones.created_at_ms,
-               delivery_output_tombstones.updated_at_ms
-        FROM delivery_output_tombstones
-        JOIN transfers ON transfers.id = delivery_output_tombstones.transfer_id
-        JOIN known_files ON known_files.id = transfers.known_file_id
+               download_delivery_tombstones.tombstone_id,
+               download_delivery_tombstones.phase,
+               original_paths.platform, CASE WHEN length(original_paths.native_path)<=65536 THEN original_paths.native_path END,
+               tombstone_paths.platform, CASE WHEN length(tombstone_paths.native_path)<=65536 THEN tombstone_paths.native_path END,
+               CASE WHEN length(download_delivery_tombstones.source_fingerprint)<=1024 THEN download_delivery_tombstones.source_fingerprint END,
+               CASE WHEN length(download_delivery_tombstones.moved_fingerprint)<=1024 THEN download_delivery_tombstones.moved_fingerprint END,
+               download_delivery_tombstones.created_at_s,
+               download_delivery_tombstones.updated_at_s, download_jobs.id,length(original_paths.native_path),length(tombstone_paths.native_path),length(download_delivery_tombstones.source_fingerprint),length(download_delivery_tombstones.moved_fingerprint)
+        FROM download_delivery_tombstones
+        JOIN download_jobs ON download_jobs.id = download_delivery_tombstones.job_id
+        JOIN known_files ON known_files.id = download_jobs.known_file_id
         JOIN local_paths original_paths
-          ON original_paths.id = delivery_output_tombstones.original_path_id
+          ON original_paths.id = download_delivery_tombstones.original_path_id
         JOIN local_paths tombstone_paths
-          ON tombstone_paths.id = delivery_output_tombstones.tombstone_path_id
-        WHERE known_files.ed2k_hash = ?1
+          ON tombstone_paths.id = download_delivery_tombstones.tombstone_path_id
+        WHERE download_jobs.id = ?1
         "#,
-        params![hash],
+        params![id],
         |row| {
+            delivery_attempt_row_bytes(row)?;
             let tombstone_id = row.get::<_, String>(1)?.parse::<Uuid>().map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     1,
@@ -1968,6 +1752,7 @@ fn transfer_deletion_tombstone_by_hash(
                 }
             };
             Ok(MetadataTransferDeletionTombstone {
+                job_id: row.get(11)?,
                 file_hash: row.get(0)?,
                 tombstone_id,
                 phase,
@@ -1985,8 +1770,8 @@ fn transfer_deletion_tombstone_by_hash(
                     )
                 })?,
                 moved_fingerprint: optional_fingerprint_from_row(row, 8)?,
-                created_at_ms: row.get(9)?,
-                updated_at_ms: row.get(10)?,
+                created_at_s: row.get(9)?,
+                updated_at_s: row.get(10)?,
             })
         },
     )
@@ -1994,9 +1779,17 @@ fn transfer_deletion_tombstone_by_hash(
     .map_err(Into::into)
 }
 
+fn delivery_attempt_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
+    crate::download_job_store::bounded_row_bytes(
+        row,
+        &[(12, 65536, 4), (13, 65536, 4), (14, 1024, 2), (15, 1024, 2)],
+    )
+}
+
 fn delivery_attempt_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<MetadataTransferDeliveryAttempt> {
+    delivery_attempt_row_bytes(row)?;
     let attempt_id = row.get::<_, String>(1)?;
     let attempt_id = Uuid::parse_str(&attempt_id).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into())
@@ -2014,6 +1807,7 @@ fn delivery_attempt_from_row(
         }
     };
     Ok(MetadataTransferDeliveryAttempt {
+        job_id: row.get(11)?,
         file_hash: row.get(0)?,
         attempt_id,
         phase,
@@ -2021,31 +1815,134 @@ fn delivery_attempt_from_row(
         staging_path: path_from_row(row, 5, 6)?,
         staging_fingerprint: optional_fingerprint_from_row(row, 7)?,
         published_fingerprint: optional_fingerprint_from_row(row, 8)?,
-        created_at_ms: row.get(9)?,
-        updated_at_ms: row.get(10)?,
+        created_at_s: row.get(9)?,
+        updated_at_s: row.get(10)?,
     })
 }
 
-fn delete_transfer_and_unreferenced_identity(
-    tx: &rusqlite::Transaction<'_>,
-    known_file_id: i64,
+fn retire_job_children(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> {
+    for table in [
+        "download_job_pieces",
+        "download_job_sources",
+        "download_job_md4_part_hashes",
+        "download_job_aich_part_hashes",
+        "download_job_verified_ranges",
+        "download_job_file_name_observations",
+    ] {
+        tx.execute(&format!("DELETE FROM {table} WHERE job_id=?1"), [id])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_job_row(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> {
+    // Job deletion is not knowledge deletion. Accepted identity, names, origins,
+    // upload history and policy remain even after the final job/path disappears.
+    ensure!(
+        !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE originating_job_id=?1)",
+            [id],
+            |row| row.get::<_, bool>(0)
+        )?,
+        "delivery exclusion authority must be settled before job deletion"
+    );
+    tx.execute("DELETE FROM download_jobs WHERE id=?1", [id])?;
+    Ok(())
+}
+
+/// One transaction for both removal choices: invalidate callbacks, clear only
+/// this job's head, and accept internal retirement before caller cancellation.
+pub(crate) fn request_job_removal(
+    conn: &rusqlite::Transaction<'_>,
+    id: JobId,
+    delete_output: bool,
+) -> Result<bool> {
+    let changed = conn.execute("UPDATE download_jobs SET removed_at_s=coalesce(removed_at_s,?2),
+        delete_requested_at_s=CASE WHEN ?3 THEN coalesce(delete_requested_at_s,?2) ELSE delete_requested_at_s END,
+        updated_at_s=?2,execution_generation=execution_generation+1
+        WHERE id=?1 AND (removed_at_s IS NULL OR (?3 AND delete_requested_at_s IS NULL))
+        AND execution_generation<9223372036854775807",
+        params![id,crate::download_job_store::unix_s(),delete_output])? != 0;
+    if changed {
+        conn.execute(
+            "UPDATE known_files SET latest_download_job_id=NULL WHERE latest_download_job_id=?1",
+            [id],
+        )?;
+    }
+    reserve_internal_retirement(conn, id)?;
+    Ok(changed)
+}
+
+/// Internal pieces only. This journal never authorizes delivered-output
+/// deletion; its path and native authority come from the fixed job allocation.
+pub(crate) fn reserve_internal_retirement(
+    conn: &rusqlite::Transaction<'_>,
+    id: JobId,
 ) -> Result<()> {
-    tx.execute(
-        "DELETE FROM transfers WHERE known_file_id = ?1",
-        params![known_file_id],
-    )?;
-    tx.execute(
-        "DELETE FROM known_file_origins WHERE known_file_id = ?1 AND origin = 'transfer'",
-        params![known_file_id],
-    )?;
-    tx.execute(
-        "DELETE FROM known_files WHERE id = ?1
-         AND NOT EXISTS (SELECT 1 FROM known_file_origins WHERE known_file_id = ?1)
-         AND NOT EXISTS (SELECT 1 FROM verified_local_content WHERE known_file_id = ?1)
-         AND NOT EXISTS (SELECT 1 FROM local_file_instances WHERE known_file_id = ?1)",
-        params![known_file_id],
+    if read_download_job_retirement(conn, id)?.is_some() {
+        return Ok(());
+    }
+    let source = conn
+        .query_row(
+            "SELECT p.platform, CASE WHEN length(p.native_path)<=65536 THEN p.native_path END
+         FROM download_jobs j LEFT JOIN local_paths p ON p.id=j.storage_path_id
+         WHERE j.id=?1 AND j.internal_storage_retired=0
+         AND (j.removed_at_s IS NOT NULL OR j.terminal_completed_at_s IS NOT NULL)",
+            [id],
+            |row| optional_path_from_row(row, 0, 1),
+        )
+        .optional()?;
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let target_path_id = if let Some(source) = source {
+        // Persist the physical target before any I/O. A short random sibling
+        // also avoids increasing the already accepted allocation path length.
+        let target = source.with_file_name(format!(".r-{}", Uuid::new_v4().simple()));
+        crate::download_job_store::validate_job_path(&target)?;
+        Some(upsert_local_path(conn, &target)?)
+    } else {
+        None
+    };
+    conn.execute(
+        "INSERT INTO download_retirements(job_id,target_path_id,directory_identity,directory_marker_id)
+        SELECT id,?2,storage_directory_identity,
+            CASE WHEN storage_directory_identity IS NOT NULL THEN storage_directory_marker_id END
+        FROM download_jobs WHERE id=?1 AND internal_storage_retired=0
+            AND (removed_at_s IS NOT NULL OR terminal_completed_at_s IS NOT NULL)",
+        params![id,target_path_id],
     )?;
     Ok(())
+}
+
+fn read_download_job_retirement(
+    conn: &rusqlite::Connection,
+    id: JobId,
+) -> Result<Option<MetadataDownloadRetirement>> {
+    Ok(conn.query_row(
+        "SELECT source.platform, CASE WHEN length(source.native_path)<=65536 THEN source.native_path END,
+            target.platform, CASE WHEN length(target.native_path)<=65536 THEN target.native_path END,
+            r.directory_identity,r.directory_marker_id
+         FROM download_retirements r JOIN download_jobs j ON j.id=r.job_id
+         LEFT JOIN local_paths source ON source.id=j.storage_path_id
+         LEFT JOIN local_paths target ON target.id=r.target_path_id WHERE r.job_id=?1",
+        [id], |row| Ok(MetadataDownloadRetirement {
+            job_id:id, source_path:optional_path_from_row(row,0,1)?,
+            target_path:optional_path_from_row(row,2,3)?,
+            authority:directory_cleanup_authority_from_row(row,4)?,
+        }),
+    ).optional()?)
+}
+
+fn read_download_job_aich_identity(
+    conn: &rusqlite::Connection,
+    token: JobToken,
+) -> Result<Option<MetadataTransferAichIdentity>> {
+    Ok(conn.query_row("SELECT CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END,
+        aich_root_origin,aich_trust_generation FROM download_jobs WHERE id=?1 AND execution_generation=?2
+        AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL",
+        params![token.job_id,i64::try_from(token.generation)?], |row| Ok(MetadataTransferAichIdentity {
+            root: row.get(0)?, origin: row.get(1)?, generation: crate::sql_value::unsigned::<u64>(row,2)?,
+        })).optional()?)
 }
 
 pub(crate) fn read_transfer_aich_identity(
@@ -2056,8 +1953,8 @@ pub(crate) fn read_transfer_aich_identity(
         .query_row(
             "SELECT CASE WHEN t.aich_root IS NULL THEN NULL ELSE lower(hex(t.aich_root)) END,
                 t.aich_root_origin, t.aich_trust_generation
-         FROM known_files f JOIN transfers t ON t.known_file_id = f.id
-         WHERE f.ed2k_hash = ?1 AND t.delete_requested_at_ms IS NULL",
+         FROM known_files f JOIN download_jobs t ON t.known_file_id = f.id
+         WHERE f.ed2k_hash = ?1 AND t.delete_requested_at_s IS NULL AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL",
             params![hash],
             |row| {
                 Ok(MetadataTransferAichIdentity {
@@ -2075,17 +1972,51 @@ fn reconcile_manifest_aich_identity(
     hash: &[u8],
     manifest: &mut MetadataTransferManifest,
 ) -> Result<()> {
-    let current = read_transfer_aich_identity(conn, hash)?;
+    let mut identity = MetadataTransferAichIdentity {
+        root: manifest.aich_root.take(),
+        origin: manifest.aich_root_origin.take(),
+        generation: manifest.aich_trust_generation,
+    };
+    if reconcile_aich_identity(conn, manifest.token, hash, &mut identity)? {
+        manifest.aich_hashset.clear();
+        manifest.aich_hashset_acquired = false;
+    }
+    manifest.aich_root = identity.root;
+    manifest.aich_root_origin = identity.origin;
+    manifest.aich_trust_generation = identity.generation;
+    Ok(())
+}
+
+pub(crate) fn reconcile_aich_identity(
+    conn: &rusqlite::Connection,
+    token: JobToken,
+    hash: &[u8],
+    identity: &mut MetadataTransferAichIdentity,
+) -> Result<bool> {
+    let mut invalidate_parts = false;
+    let current = conn
+        .query_row(
+            "SELECT CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END,
+        aich_root_origin,aich_trust_generation FROM download_jobs WHERE id=?1",
+            [token.job_id],
+            |row| {
+                Ok(MetadataTransferAichIdentity {
+                    root: row.get(0)?,
+                    origin: row.get(1)?,
+                    generation: crate::sql_value::unsigned(row, 2)?,
+                })
+            },
+        )
+        .optional()?;
     if let Some(current) = &current
-        && manifest.aich_trust_generation < current.generation
+        && identity.generation < current.generation
     {
         // A checkpoint may contain newer payload progress but older authority.
         // Keep the former, and never resurrect its old acquired AICH part set.
-        manifest.aich_root = current.root.clone();
-        manifest.aich_root_origin = current.origin.clone();
-        manifest.aich_trust_generation = current.generation;
-        manifest.aich_hashset.clear();
-        manifest.aich_hashset_acquired = false;
+        identity.root = current.root.clone();
+        identity.origin = current.origin.clone();
+        identity.generation = current.generation;
+        invalidate_parts = true;
     }
     let accepted = conn
         .query_row(
@@ -2096,48 +2027,45 @@ fn reconcile_manifest_aich_identity(
         )
         .optional()?;
     if let Some((root, stored_origin)) = accepted {
-        if manifest.aich_root.is_some() {
+        if identity.root.is_some() {
             ensure!(
-                manifest.aich_root.as_ref() == Some(&root),
+                identity.root.as_ref() == Some(&root),
                 crate::MetadataContentConflict("ED2K identity has conflicting AICH root")
             );
         }
         // Preserve legitimate local/import enrichment of the same accepted
         // root; lower-authority checkpoints cannot downgrade its provenance.
-        let origin = match manifest.aich_root_origin.as_deref() {
+        let origin = match identity.origin.as_deref() {
             Some("local_computed") => "local_computed".to_owned(),
             Some("stock_import") if stored_origin != "local_computed" => "stock_import".to_owned(),
             _ => stored_origin,
         };
-        if manifest.aich_root.as_ref() != Some(&root)
-            || manifest.aich_root_origin.as_ref() != Some(&origin)
-        {
-            if manifest.aich_root.as_ref() != Some(&root) {
-                manifest.aich_hashset.clear();
-                manifest.aich_hashset_acquired = false;
+        if identity.root.as_ref() != Some(&root) || identity.origin.as_ref() != Some(&origin) {
+            if identity.root.as_ref() != Some(&root) {
+                invalidate_parts = true;
             }
-            manifest.aich_trust_generation = match current.as_ref() {
+            identity.generation = match current.as_ref() {
                 Some(current)
                     if current.root.as_ref() == Some(&root)
                         && current.origin.as_ref() == Some(&origin) =>
                 {
                     current.generation
                 }
-                current => manifest.aich_trust_generation.max(
+                current => identity.generation.max(
                     current
                         .map_or(0, |current| current.generation)
                         .checked_add(1)
                         .ok_or_else(|| anyhow::anyhow!("AICH trust generation exhausted"))?,
                 ),
             };
-            i64::try_from(manifest.aich_trust_generation)?;
-            manifest.aich_root = Some(root);
-            manifest.aich_root_origin = Some(origin);
+            i64::try_from(identity.generation)?;
+            identity.root = Some(root);
+            identity.origin = Some(origin);
         }
     }
     if let Some(current) = current {
         let minimum_generation =
-            if manifest.aich_root != current.root || manifest.aich_root_origin != current.origin {
+            if identity.root != current.root || identity.origin != current.origin {
                 current
                     .generation
                     .checked_add(1)
@@ -2145,10 +2073,10 @@ fn reconcile_manifest_aich_identity(
             } else {
                 current.generation
             };
-        manifest.aich_trust_generation = manifest.aich_trust_generation.max(minimum_generation);
-        i64::try_from(manifest.aich_trust_generation)?;
+        identity.generation = identity.generation.max(minimum_generation);
+        i64::try_from(identity.generation)?;
     }
-    Ok(())
+    Ok(invalidate_parts)
 }
 
 /// Local hashing and trusted stock acceptance update the transfer in the same
@@ -2162,9 +2090,9 @@ pub(crate) fn reconcile_transfer_aich_authority_tx(
         .query_row(
             "SELECT t.id, f.aich_root, f.aich_root_origin, t.aich_root,
                 t.aich_root_origin, t.aich_trust_generation
-         FROM known_files f JOIN transfers t ON t.known_file_id = f.id
+         FROM known_files f JOIN download_jobs t ON t.known_file_id = f.id
          WHERE f.id = ?1 AND f.aich_root IS NOT NULL
-           AND f.aich_root_origin IS NOT NULL",
+           AND f.aich_root_origin IS NOT NULL AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL",
             params![known_file_id],
             |row| {
                 Ok((
@@ -2178,7 +2106,7 @@ pub(crate) fn reconcile_transfer_aich_authority_tx(
             },
         )
         .optional()?;
-    let Some((transfer_id, root, origin, previous_root, previous_origin, generation)) = row else {
+    let Some((job_id, root, origin, previous_root, previous_origin, generation)) = row else {
         return Ok(());
     };
     let root_changed = previous_root.as_ref() != Some(&root);
@@ -2190,17 +2118,17 @@ pub(crate) fn reconcile_transfer_aich_authority_tx(
         .ok_or_else(|| anyhow::anyhow!("AICH trust generation exhausted"))?;
     if root_changed {
         tx.execute(
-            "DELETE FROM transfer_aich_part_hashes WHERE transfer_id = ?1",
-            params![transfer_id],
+            "DELETE FROM download_job_aich_part_hashes WHERE job_id = ?1",
+            params![job_id],
         )?;
     }
     tx.execute(
-        "UPDATE transfers SET aich_root = ?2, aich_root_origin = ?3,
+        "UPDATE download_jobs SET aich_root = ?2, aich_root_origin = ?3,
              aich_trust_generation = ?4,
              aich_hashset_acquired = CASE WHEN ?5 THEN 0 ELSE aich_hashset_acquired END
          WHERE id = ?1",
         params![
-            transfer_id,
+            job_id,
             root,
             origin,
             i64::try_from(generation)?,
@@ -2211,91 +2139,72 @@ pub(crate) fn reconcile_transfer_aich_authority_tx(
 }
 
 #[derive(Debug)]
-struct TransferRow {
-    transfer_id: i64,
-    file_hash: String,
-    display_name: String,
-    file_size: u64,
-    piece_size: u64,
-    completed: bool,
-    final_rehash_pending: bool,
-    md4_hashset_acquired: bool,
-    aich_hashset_acquired: bool,
-    aich_root: Option<String>,
-    aich_root_origin: Option<String>,
-    aich_trust_generation: u64,
-    upload_priority: String,
-    auto_upload_priority: bool,
-    comment: String,
-    rating: u8,
-    category_id: Option<i64>,
-    control_state: Option<String>,
-    transfer_row_removed: bool,
-    delivered_path: Option<std::path::PathBuf>,
-    source_fingerprint: Option<NativeFileFingerprint>,
-    payload_fingerprint: Option<NativeFileFingerprint>,
-    delivery_state: String,
-    delivery_ownership: String,
+pub(crate) struct TransferRow {
+    pub(crate) job_id: i64,
+    pub(crate) generation: u64,
+    pub(crate) file_hash: String,
+    pub(crate) display_name: String,
+    pub(crate) expected_size_bytes: Option<u64>,
+    pub(crate) piece_size: u64,
+    pub(crate) completed: bool,
+    pub(crate) final_rehash_pending: bool,
+    pub(crate) md4_hashset_acquired: bool,
+    pub(crate) aich_hashset_acquired: bool,
+    pub(crate) aich_root: Option<String>,
+    pub(crate) aich_root_origin: Option<String>,
+    pub(crate) aich_trust_generation: u64,
+    pub(crate) upload_priority: String,
+    pub(crate) auto_upload_priority: bool,
+    pub(crate) comment: String,
+    pub(crate) rating: u8,
+    pub(crate) category_id: Option<i64>,
+    pub(crate) intent: String,
+    pub(crate) transfer_row_removed: bool,
+    pub(crate) delivered_path: Option<std::path::PathBuf>,
+    pub(crate) source_fingerprint: Option<NativeFileFingerprint>,
+    pub(crate) payload_fingerprint: Option<NativeFileFingerprint>,
+    pub(crate) delivery_state: String,
+    pub(crate) delivery_ownership: String,
 }
 
 fn replace_transfer_children(
     tx: &rusqlite::Transaction<'_>,
-    transfer_id: i64,
+    job_id: i64,
     manifest: &MetadataTransferManifest,
     now: i64,
 ) -> Result<()> {
     let snapshots = [
         crate::snapshot::SnapshotTable::begin(
             tx,
-            "transfer_pieces",
-            &["transfer_id", "piece_index"],
+            "download_job_pieces",
+            &["job_id", "piece_index"],
         )?,
         crate::snapshot::SnapshotTable::begin(
             tx,
-            "transfer_md4_part_hashes",
-            &["transfer_id", "part_index"],
+            "download_job_md4_part_hashes",
+            &["job_id", "part_index"],
         )?,
         crate::snapshot::SnapshotTable::begin(
             tx,
-            "transfer_aich_part_hashes",
-            &["transfer_id", "part_index"],
+            "download_job_aich_part_hashes",
+            &["job_id", "part_index"],
         )?,
         crate::snapshot::SnapshotTable::begin(
             tx,
-            "verified_ranges",
-            &["transfer_id", "start_offset", "end_offset"],
+            "download_job_verified_ranges",
+            &["job_id", "start_offset", "end_offset"],
         )?,
-        crate::snapshot::SnapshotTable::begin(
-            tx,
-            "transfer_sources",
-            &["transfer_id", "ip", "tcp_port"],
-        )?,
-        crate::snapshot::SnapshotTable::begin(
-            tx,
-            "transfer_file_name_observations",
-            &["transfer_id", "position"],
-        )?,
-        crate::snapshot::SnapshotTable::begin(tx, "transfer_name_state", &["transfer_id"])?,
     ];
-
-    tx.prepare_cached(
-        "INSERT INTO temp.incoming_transfer_name_state(transfer_id, display_name_pinned, follow_majority_filename) VALUES (?1, ?2, ?3)",
-    )?
-    .execute(params![
-        transfer_id,
-        bool_to_i64(manifest.display_name_pinned),
-        bool_to_i64(manifest.follow_majority_filename),
-    ])?;
 
     let mut insert_piece = tx.prepare_cached(
         r#"
-        INSERT INTO temp.incoming_transfer_pieces(transfer_id, piece_index, state, bytes_written, block_bitmap, ich_corrupted, updated_at_ms)
+        INSERT INTO temp.incoming_download_job_pieces(job_id, piece_index, state, bytes_written, block_bitmap, ich_corrupted, updated_at_s)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         "#,
     )?;
     for piece in &manifest.pieces {
         insert_piece.execute(params![
-            transfer_id,
+            job_id,
             i64::from(piece.piece_index),
             piece.state,
             i64::try_from(piece.bytes_written)?,
@@ -2307,13 +2216,13 @@ fn replace_transfer_children(
     drop(insert_piece);
     let mut insert_md4 = tx.prepare_cached(
         r#"
-        INSERT INTO temp.incoming_transfer_md4_part_hashes(transfer_id, part_index, md4_hash)
+        INSERT INTO temp.incoming_download_job_md4_part_hashes(job_id, part_index, md4_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
     for (index, hash) in manifest.md4_hashset.iter().enumerate() {
         insert_md4.execute(params![
-            transfer_id,
+            job_id,
             i64::try_from(index)?,
             decode_fixed_hex(hash, 16, "MD4 part hash")?,
         ])?;
@@ -2321,13 +2230,13 @@ fn replace_transfer_children(
     drop(insert_md4);
     let mut insert_aich = tx.prepare_cached(
         r#"
-        INSERT INTO temp.incoming_transfer_aich_part_hashes(transfer_id, part_index, aich_hash)
+        INSERT INTO temp.incoming_download_job_aich_part_hashes(job_id, part_index, aich_hash)
         VALUES (?1, ?2, ?3)
         "#,
     )?;
     for (index, hash) in manifest.aich_hashset.iter().enumerate() {
         insert_aich.execute(params![
-            transfer_id,
+            job_id,
             i64::try_from(index)?,
             decode_fixed_hex(hash, 20, "AICH part hash")?,
         ])?;
@@ -2335,67 +2244,36 @@ fn replace_transfer_children(
     drop(insert_aich);
     let mut insert_range = tx.prepare_cached(
         r#"
-        INSERT INTO temp.incoming_verified_ranges(transfer_id, start_offset, end_offset, created_at_ms)
+        INSERT INTO temp.incoming_download_job_verified_ranges(job_id, start_offset, end_offset, created_at_s)
         VALUES (?1, ?2, ?3, ?4)
         "#,
     )?;
     for range in &manifest.verified_ranges {
         insert_range.execute(params![
-            transfer_id,
+            job_id,
             i64::try_from(range.start)?,
             i64::try_from(range.end)?,
             now
         ])?;
     }
     drop(insert_range);
-    let mut insert_source = tx.prepare_cached(
-        r#"
-        INSERT INTO temp.incoming_transfer_sources(
-            transfer_id, ip, tcp_port, user_hash, connect_options,
-            file_comment, file_rating, first_seen_at_ms, last_seen_at_ms
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-        "#,
+    // WHY: a whole snapshot may repartition already-full geometry. Remove absent
+    // pieces and apply decreases before increases so the checked parent counter
+    // never transiently exceeds the payload size. Unchanged rows stay untouched.
+    tx.execute("DELETE FROM download_job_pieces WHERE job_id=?1 AND NOT EXISTS(
+        SELECT 1 FROM temp.incoming_download_job_pieces p
+        WHERE p.job_id=download_job_pieces.job_id AND p.piece_index=download_job_pieces.piece_index)", [job_id])?;
+    tx.execute(
+        "UPDATE download_job_pieces SET bytes_written=(SELECT p.bytes_written
+        FROM temp.incoming_download_job_pieces p WHERE p.job_id=download_job_pieces.job_id
+        AND p.piece_index=download_job_pieces.piece_index),updated_at_s=?2
+        WHERE job_id=?1 AND bytes_written>(SELECT p.bytes_written
+        FROM temp.incoming_download_job_pieces p WHERE p.job_id=download_job_pieces.job_id
+        AND p.piece_index=download_job_pieces.piece_index)",
+        params![job_id, now],
     )?;
-    for source in &manifest.sources {
-        insert_source.execute(params![
-            transfer_id,
-            source.ip,
-            i64::from(source.tcp_port),
-            optional_fixed_hex(source.user_hash.as_deref(), 16, "source user hash")?,
-            source.connect_options.map(i64::from),
-            source.file_comment,
-            i64::from(source.file_rating),
-            now,
-        ])?;
-    }
-    drop(insert_source);
-    let mut insert_name_observation = tx.prepare_cached(
-        r#"
-        INSERT INTO temp.incoming_transfer_file_name_observations(
-            transfer_id, source_ip, source_tcp_port, user_hash, client_software, position,
-            origin, server_endpoint, raw_name, normalized_name, observed_at_ms
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?11, ?6, ?7, ?8, ?9, ?10)
-        "#,
-    )?;
-    for (position, observation) in manifest.file_name_observations.iter().enumerate() {
-        insert_name_observation.execute(params![
-            transfer_id,
-            observation.source_ip,
-            observation.source_tcp_port.map(i64::from),
-            optional_fixed_hex(observation.user_hash.as_deref(), 16, "source user hash")?,
-            observation.client_software,
-            observation.origin,
-            observation.server_endpoint,
-            observation.raw_name,
-            observation.normalized_name,
-            observation.observed_at_ms,
-            i64::try_from(position)?,
-        ])?;
-    }
     for snapshot in snapshots {
-        snapshot.finish(tx, Some(("transfer_id", transfer_id)))?;
+        snapshot.finish(tx, Some(("job_id", job_id)))?;
     }
     Ok(())
 }
@@ -2404,23 +2282,22 @@ fn manifest_from_row(
     conn: &rusqlite::Connection,
     row: TransferRow,
 ) -> Result<MetadataTransferManifest> {
-    let (display_name_pinned, follow_majority_filename) =
-        read_transfer_name_state(conn, row.transfer_id)?;
     Ok(MetadataTransferManifest {
         file_hash: row.file_hash,
         display_name: row.display_name,
-        display_name_pinned,
-        follow_majority_filename,
-        file_name_observations: read_file_name_observations(conn, row.transfer_id)?,
-        file_size: row.file_size,
+        token: JobToken {
+            job_id: JobId::new(row.job_id)?,
+            generation: row.generation,
+        },
+        expected_size_bytes: row.expected_size_bytes,
         piece_size: row.piece_size,
         completed: row.completed,
         final_rehash_pending: row.final_rehash_pending,
         md4_hashset_acquired: row.md4_hashset_acquired,
         md4_hashset: read_hex_list(
             conn,
-            "SELECT lower(hex(md4_hash)) FROM transfer_md4_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
-            row.transfer_id,
+            "SELECT lower(hex(md4_hash)) FROM download_job_md4_part_hashes WHERE job_id = ?1 ORDER BY part_index",
+            row.job_id,
         )?,
         aich_hashset_acquired: row.aich_hashset_acquired,
         aich_root: row.aich_root,
@@ -2428,18 +2305,17 @@ fn manifest_from_row(
         aich_trust_generation: row.aich_trust_generation,
         aich_hashset: read_hex_list(
             conn,
-            "SELECT lower(hex(aich_hash)) FROM transfer_aich_part_hashes WHERE transfer_id = ?1 ORDER BY part_index",
-            row.transfer_id,
+            "SELECT lower(hex(aich_hash)) FROM download_job_aich_part_hashes WHERE job_id = ?1 ORDER BY part_index",
+            row.job_id,
         )?,
-        verified_ranges: read_ranges(conn, row.transfer_id)?,
-        pieces: read_pieces(conn, row.transfer_id)?,
-        sources: read_sources(conn, row.transfer_id)?,
+        verified_ranges: read_ranges(conn, row.job_id)?,
+        pieces: read_pieces(conn, row.job_id)?,
         upload_priority: row.upload_priority,
         auto_upload_priority: row.auto_upload_priority,
         comment: row.comment,
         rating: row.rating,
         category_id: row.category_id,
-        control_state: row.control_state,
+        intent: DownloadIntent::parse(&row.intent)?,
         transfer_row_removed: row.transfer_row_removed,
         delivery_state: delivery_state_from_sql(&row.delivery_state)?,
         delivery_ownership: delivery_ownership_from_sql(&row.delivery_ownership)?,
@@ -2449,62 +2325,21 @@ fn manifest_from_row(
     })
 }
 
-fn read_transfer_name_state(conn: &rusqlite::Connection, transfer_id: i64) -> Result<(bool, bool)> {
-    conn.query_row(
-        "SELECT display_name_pinned, follow_majority_filename FROM transfer_name_state WHERE transfer_id = ?1",
-        params![transfer_id],
-        |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
-    )
-    .map_err(Into::into)
-}
-
-fn read_file_name_observations(
-    conn: &rusqlite::Connection,
-    transfer_id: i64,
-) -> Result<Vec<MetadataTransferFileNameObservation>> {
-    let mut stmt = conn.prepare_cached(
-        r#"
-        SELECT source_ip, source_tcp_port,
-               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END,
-               client_software, origin, server_endpoint, raw_name, normalized_name,
-               observed_at_ms
-        FROM transfer_file_name_observations
-        WHERE transfer_id = ?1
-        ORDER BY observed_at_ms, id
-        "#,
-    )?;
-    let rows = stmt.query_map(params![transfer_id], |row| {
-        Ok(MetadataTransferFileNameObservation {
-            source_ip: row.get(0)?,
-            source_tcp_port: row.get::<_, Option<u16>>(1)?,
-            user_hash: row.get(2)?,
-            client_software: row.get(3)?,
-            origin: row.get(4)?,
-            server_endpoint: row.get(5)?,
-            raw_name: row.get(6)?,
-            normalized_name: row.get(7)?,
-            observed_at_ms: row.get(8)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
 fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<MetadataTransferCounts> {
     conn.query_row(
         r#"
         SELECT count(*),
                coalesce(sum(CASE
-                   WHEN transfers.completed = 0
-                        AND transfers.control_state IS NULL
-                        AND transfers.visible_state IN ('completing', 'downloading', 'queued')
+                   WHEN download_jobs.terminal_completed_at_s IS NULL
+                        AND download_jobs.intent = 'started'
+
                    THEN 1 ELSE 0 END), 0),
                coalesce(sum(CASE
-                   WHEN transfers.completed != 0 THEN 1 ELSE 0 END), 0)
-        FROM transfers
-        JOIN known_files ON known_files.id = transfers.known_file_id
-        WHERE transfers.removed_at_ms IS NULL
-          AND transfers.delete_requested_at_ms IS NULL
+                   WHEN download_jobs.terminal_completed_at_s IS NOT NULL THEN 1 ELSE 0 END), 0)
+        FROM download_jobs
+        JOIN known_files ON known_files.id = download_jobs.known_file_id
+        WHERE download_jobs.removed_at_s IS NULL
+          AND download_jobs.delete_requested_at_s IS NULL
         "#,
         [],
         |row| {
@@ -2525,19 +2360,16 @@ fn read_hex_list(conn: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<
         .map_err(Into::into)
 }
 
-fn read_pieces(
-    conn: &rusqlite::Connection,
-    transfer_id: i64,
-) -> Result<Vec<MetadataTransferPiece>> {
+fn read_pieces(conn: &rusqlite::Connection, job_id: i64) -> Result<Vec<MetadataTransferPiece>> {
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT piece_index, state, bytes_written, block_bitmap, ich_corrupted
-        FROM transfer_pieces
-        WHERE transfer_id = ?1
+        FROM download_job_pieces
+        WHERE job_id = ?1
         ORDER BY piece_index
         "#,
     )?;
-    let rows = stmt.query_map(params![transfer_id], |row| {
+    let rows = stmt.query_map(params![job_id], |row| {
         Ok(MetadataTransferPiece {
             piece_index: row.get::<_, u32>(0)?,
             state: row.get(1)?,
@@ -2550,50 +2382,19 @@ fn read_pieces(
         .map_err(Into::into)
 }
 
-fn read_ranges(
-    conn: &rusqlite::Connection,
-    transfer_id: i64,
-) -> Result<Vec<MetadataTransferRange>> {
+fn read_ranges(conn: &rusqlite::Connection, job_id: i64) -> Result<Vec<MetadataTransferRange>> {
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT start_offset, end_offset
-        FROM verified_ranges
-        WHERE transfer_id = ?1
+        FROM download_job_verified_ranges
+        WHERE job_id = ?1
         ORDER BY start_offset, end_offset
         "#,
     )?;
-    let rows = stmt.query_map(params![transfer_id], |row| {
+    let rows = stmt.query_map(params![job_id], |row| {
         Ok(MetadataTransferRange {
             start: crate::sql_value::unsigned::<u64>(row, 0)?,
             end: crate::sql_value::unsigned::<u64>(row, 1)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn read_sources(
-    conn: &rusqlite::Connection,
-    transfer_id: i64,
-) -> Result<Vec<MetadataTransferSource>> {
-    let mut stmt = conn.prepare_cached(
-        r#"
-        SELECT ip, tcp_port,
-               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END,
-               connect_options, file_comment, file_rating
-        FROM transfer_sources
-        WHERE transfer_id = ?1
-        ORDER BY id
-        "#,
-    )?;
-    let rows = stmt.query_map(params![transfer_id], |row| {
-        Ok(MetadataTransferSource {
-            ip: row.get(0)?,
-            tcp_port: row.get::<_, u16>(1)?,
-            user_hash: row.get(2)?,
-            connect_options: row.get::<_, Option<u8>>(3)?,
-            file_comment: row.get(4)?,
-            file_rating: row.get::<_, u8>(5)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -2719,7 +2520,7 @@ fn delivery_state_to_sql(state: MetadataTransferDeliveryState) -> &'static str {
     }
 }
 
-fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState> {
+pub(crate) fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState> {
     match value {
         "pending" => Ok(MetadataTransferDeliveryState::Pending),
         "delivered" => Ok(MetadataTransferDeliveryState::Delivered),
@@ -2735,7 +2536,9 @@ fn delivery_ownership_to_sql(ownership: MetadataTransferDeliveryOwnership) -> &'
     }
 }
 
-fn delivery_ownership_from_sql(value: &str) -> Result<MetadataTransferDeliveryOwnership> {
+pub(crate) fn delivery_ownership_from_sql(
+    value: &str,
+) -> Result<MetadataTransferDeliveryOwnership> {
     match value {
         "none" => Ok(MetadataTransferDeliveryOwnership::None),
         "owned" => Ok(MetadataTransferDeliveryOwnership::Owned),
@@ -2758,3 +2561,72 @@ fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn read_transfer_row(
+    conn: &rusqlite::Connection,
+    id: JobId,
+    deletion_requested: bool,
+) -> Result<Option<TransferRow>> {
+    let row = conn
+            .prepare_cached(
+                r#"
+                SELECT download_jobs.id,
+                       lower(hex(known_files.ed2k_hash)), download_jobs.display_name,
+                       download_jobs.expected_size_bytes, download_jobs.part_size_bytes,
+                       download_jobs.completed, download_jobs.md4_hashset_acquired,
+                       download_jobs.aich_hashset_acquired,
+                       CASE
+                           WHEN download_jobs.aich_root IS NULL THEN NULL
+                           ELSE lower(hex(download_jobs.aich_root))
+                       END,
+                       download_jobs.upload_priority, download_jobs.auto_upload_priority,
+                       download_jobs.comment, download_jobs.rating,
+                       download_jobs.category_id, download_jobs.intent, download_jobs.removed_at_s,
+                       delivered_paths.platform, delivered_paths.native_path,
+                       download_jobs.source_fingerprint, download_jobs.payload_fingerprint,
+                       download_jobs.final_rehash_pending, download_jobs.delivery_state,
+                       download_jobs.delivery_ownership,
+                       download_jobs.aich_root_origin,
+                       download_jobs.aich_trust_generation, download_jobs.execution_generation
+                FROM known_files
+                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+                LEFT JOIN local_paths delivered_paths ON delivered_paths.id = download_jobs.delivered_path_id
+                WHERE download_jobs.id = ?1
+                  AND (
+                      (?2 = 0 AND download_jobs.delete_requested_at_s IS NULL)
+                      OR (?2 != 0 AND download_jobs.delete_requested_at_s IS NOT NULL)
+                  )
+                "#,
+            )?
+            .query_row(params![id, bool_to_i64(deletion_requested)], |row| {
+                Ok(TransferRow {
+                    job_id: row.get(0)?,
+                    generation: crate::sql_value::unsigned(row,25)?,
+                    file_hash: row.get(1)?,
+                    display_name: row.get(2)?,
+                    expected_size_bytes: crate::sql_value::optional_unsigned::<u64>(row, 3)?,
+                    piece_size: crate::sql_value::unsigned::<u64>(row, 4)?,
+                    completed: row.get::<_, i64>(5)? != 0,
+                    md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
+                    aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
+                    aich_root: row.get(8)?,
+                    aich_root_origin: row.get(23)?,
+                    aich_trust_generation: crate::sql_value::unsigned::<u64>(row, 24)?,
+                    upload_priority: row.get(9)?,
+                    auto_upload_priority: row.get::<_, i64>(10)? != 0,
+                    comment: row.get(11)?,
+                    rating: row.get::<_, u8>(12)?,
+                    category_id: row.get::<_, Option<i64>>(13)?,
+                    intent: row.get(14)?,
+                    transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+                    delivered_path: optional_path_from_row(row, 16, 17)?,
+                    source_fingerprint: optional_fingerprint_from_row(row, 18)?,
+                    payload_fingerprint: optional_fingerprint_from_row(row, 19)?,
+                    final_rehash_pending: row.get::<_, i64>(20)? != 0,
+                    delivery_state: row.get(21)?,
+                    delivery_ownership: row.get(22)?,
+                })
+            })
+            .optional()?;
+    Ok(row)
+}

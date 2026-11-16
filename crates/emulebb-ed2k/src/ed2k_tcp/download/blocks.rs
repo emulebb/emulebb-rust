@@ -79,6 +79,13 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         .is_some_and(|request| request.queued && request.is_ready())
     {
         let request = pending_part_requests.remove(0);
+        anyhow::ensure!(
+            request
+                .lease
+                .as_ref()
+                .is_none_or(|lease| lease.job_token() == manifest.token),
+            "download block lease belongs to another job generation"
+        );
         // Reserve global download budget for this block's inbound payload before
         // consuming it, so the shared token bucket paces all concurrent transfer
         // tasks together (mirrors the upload side reserving before each payload
@@ -86,7 +93,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         reserve_download_budget(transfer_runtime, request.response_bytes.len()).await;
         record_received_range(
             transfer_runtime,
-            file_hash_hex,
+            manifest.token,
             peer_addr,
             peer_user_hash,
             request.start,
@@ -94,7 +101,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         );
         let (outcome, refreshed_manifest) = transfer_runtime
             .append_or_salvage_block_with_manifest(
-                file_hash_hex,
+                manifest.token,
                 request.piece_index,
                 request.start,
                 request.end,
@@ -108,7 +115,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         if manifest.completed {
             // The oracle frees the blackbox when the part file completes
             // (`m_CorruptionBlackBox.Free()`, PartFile.cpp:3800).
-            transfer_runtime.cbb_free(file_hash_hex);
+            transfer_runtime.cbb_free(manifest.token);
         }
         if let Some(failed_part) = verification_failed_part(outcome) {
             *active_piece_request = None;
@@ -138,9 +145,9 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         if let Some(user_hash) = credit_user_hash {
             transfer_runtime.add_peer_credit_delta(user_hash, 0, downloaded_bytes)?;
         }
-        transfer_runtime.note_download_payload_bytes(file_hash_hex, downloaded_bytes);
+        transfer_runtime.note_download_payload_bytes(manifest.token, downloaded_bytes);
         transfer_runtime.note_download_source_bytes(
-            file_hash_hex,
+            manifest.token,
             peer_addr,
             peer_user_hash,
             peer_connect_options,
@@ -177,20 +184,14 @@ async fn reserve_download_budget(transfer_runtime: &Ed2kTransferRuntime, byte_co
 /// correct sender for each byte range.
 fn record_received_range(
     transfer_runtime: &Ed2kTransferRuntime,
-    file_hash_hex: &str,
+    token: emulebb_metadata::JobToken,
     peer_addr: SocketAddr,
     peer_user_hash: Option<[u8; 16]>,
     start: u64,
     end: u64,
 ) {
     if let SocketAddr::V4(v4) = peer_addr {
-        transfer_runtime.cbb_record_received_data(
-            file_hash_hex,
-            start,
-            end,
-            *v4.ip(),
-            peer_user_hash,
-        );
+        transfer_runtime.cbb_record_received_data(token, start, end, *v4.ip(), peer_user_hash);
     }
 }
 
@@ -288,6 +289,13 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             break;
         }
 
+        anyhow::ensure!(
+            first_request
+                .lease
+                .as_ref()
+                .is_none_or(|lease| lease.job_token() == manifest.token),
+            "buffered download prefix belongs to another job generation"
+        );
         let (piece_index, start, end, bytes, request_complete) = {
             let request = &mut pending_part_requests[0];
             let bytes = std::mem::take(&mut request.response_bytes);
@@ -309,14 +317,14 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
         reserve_download_budget(transfer_runtime, bytes.len()).await;
         record_received_range(
             transfer_runtime,
-            file_hash_hex,
+            manifest.token,
             peer_addr,
             peer_user_hash,
             start,
             end,
         );
         let (outcome, refreshed_manifest) = transfer_runtime
-            .append_piece_block_with_manifest(file_hash_hex, piece_index, start, end, &bytes)
+            .append_piece_block_with_manifest(manifest.token, piece_index, start, end, &bytes)
             .await?;
         *manifest = refreshed_manifest;
         if outcome.is_completed() {
@@ -325,7 +333,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
         if manifest.completed {
             // The oracle frees the blackbox when the part file completes
             // (`m_CorruptionBlackBox.Free()`, PartFile.cpp:3800).
-            transfer_runtime.cbb_free(file_hash_hex);
+            transfer_runtime.cbb_free(manifest.token);
         }
         if let Some(failed_part) = verification_failed_part(outcome) {
             *active_piece_request = None;
@@ -341,9 +349,9 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
         if let Some(user_hash) = credit_user_hash {
             transfer_runtime.add_peer_credit_delta(user_hash, 0, end.saturating_sub(start))?;
         }
-        transfer_runtime.note_download_payload_bytes(file_hash_hex, end.saturating_sub(start));
+        transfer_runtime.note_download_payload_bytes(manifest.token, end.saturating_sub(start));
         transfer_runtime.note_download_source_bytes(
-            file_hash_hex,
+            manifest.token,
             peer_addr,
             peer_user_hash,
             peer_connect_options,
@@ -378,20 +386,24 @@ pub(in crate::ed2k_tcp) async fn reconcile_download_manifest_metadata(
     request_file_identifier: &mut Ed2kFileIdentifier,
     peer_file_identifier: &Ed2kFileIdentifier,
 ) -> Result<()> {
+    anyhow::ensure!(
+        manifest.file_hash == file_hash_hex,
+        "session content differs from captured job"
+    );
     let learned_size = peer_file_identifier.file_size;
     if learned_size.is_none() && peer_file_identifier.aich_root.is_none() {
         return Ok(());
     }
 
-    *manifest = transfer_runtime
-        .reconcile_job_metadata(file_hash_hex, None, learned_size)
+    transfer_runtime
+        .validate_execution_size(manifest.token, learned_size)
         .await?;
     // The AICH root here is network-learned from a single peer, so it must be
     // corroborated before it can authorize salvage (mirrors the master's
     // untrusted-hash accumulation).
     *manifest = transfer_runtime
         .record_network_aich_root(
-            file_hash_hex,
+            manifest.token,
             peer_file_identifier.aich_root,
             peer_addr.ip(),
         )

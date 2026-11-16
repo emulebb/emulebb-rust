@@ -1,11 +1,11 @@
 //! One current-schema compatibility domain for the complete profile database.
 //!
 //! `known_files` owns accepted content identity and its preferred index label;
-//! observations retain their own claims. `transfers` owns download geometry and
+//! observations retain their own claims. `download_jobs` owns download geometry and
 //! presentation, while `verified_local_content` owns verified local evidence.
 //! Paths identify native byte sequences; sort/search keys are derived projections.
 //! Membership authorizes sharing only together with current fingerprint evidence.
-//! Download history deliberately survives removal of content, paths, and transfers.
+//! Download history deliberately survives removal of content, paths, and download_jobs.
 //!
 //! Hashes are fixed-width BLOBs. Sizes and counters use nonnegative signed SQLite
 //! integers; writes reject out-of-range sizes and saturate lifetime counters.
@@ -16,7 +16,7 @@
 //! rejected: this module contains no migration or legacy interpretation.
 
 pub const SCHEMA_ID: &str = "emulebb.metadata";
-pub const SCHEMA_VERSION: i64 = 73;
+pub const SCHEMA_VERSION: i64 = 81;
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 
 #[cfg(test)]

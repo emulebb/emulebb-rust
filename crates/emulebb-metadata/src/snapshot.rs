@@ -75,12 +75,15 @@ impl SnapshotTable {
             .iter()
             .filter(|column| {
                 !self.keys.contains(&column.as_str())
-                    && !matches!(column.as_str(), "first_seen_at_ms" | "created_at_ms")
+                    && !matches!(
+                        column.as_str(),
+                        "first_seen_at_ms" | "created_at_ms" | "first_seen_at_s" | "created_at_s"
+                    )
             })
             .collect::<Vec<_>>();
         let changed = mutable
             .iter()
-            .filter(|column| column.as_str() != "updated_at_ms")
+            .filter(|column| !matches!(column.as_str(), "updated_at_ms" | "updated_at_s"))
             .map(|column| format!("{table}.{column} IS NOT excluded.{column}"))
             .collect::<Vec<_>>();
         let conflict = if changed.is_empty() {

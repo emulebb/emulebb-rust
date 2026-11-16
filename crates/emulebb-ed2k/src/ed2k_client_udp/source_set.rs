@@ -310,17 +310,24 @@ mod tests {
         Ipv4Addr::new(198, 51, 100, last)
     }
 
-    fn source(set: &mut ReaskSourceSet, last: u8, now: Instant) -> (Ipv4Addr, u16) {
+    fn source(
+        set: &mut ReaskSourceSet,
+        job_token: emulebb_metadata::JobToken,
+        last: u8,
+        now: Instant,
+    ) -> (Ipv4Addr, u16) {
         let endpoint = (ip(last), 4672);
-        set.insert(ReaskSource::new(endpoint, hash(), 4, now));
+        set.insert(ReaskSource::new(job_token, endpoint, hash(), 4, now));
         endpoint
     }
 
     #[test]
     fn due_lists_fresh_sources_then_excludes_pending() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let mut set = ReaskSourceSet::new();
-        let (a, pa) = source(&mut set, 1, now);
+        let (a, pa) = source(&mut set, job_token, 1, now);
         // A freshly inserted source reasks immediately.
         assert_eq!(set.due(now), vec![(a, pa)]);
         // Once a reask is outstanding it is no longer "due" (one in-flight reask).
@@ -332,10 +339,12 @@ mod tests {
     #[test]
     fn diagnostic_arm_requires_the_exact_direct_source_identity() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let endpoint = (ip(9), 4672);
         let lease_endpoint = (endpoint.0, 4662);
         let user_hash = [0x55; 16];
-        let source = ReaskSource::new(endpoint, hash(), 4, now)
+        let source = ReaskSource::new(job_token, endpoint, hash(), 4, now)
             .with_lease_endpoint(lease_endpoint)
             .with_obfuscation(user_hash, false);
         let mut set = ReaskSourceSet::new();
@@ -353,8 +362,10 @@ mod tests {
     #[test]
     fn ack_reply_is_gated_then_updates_rank_and_reschedules() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let mut set = ReaskSourceSet::new();
-        let (a, pa) = source(&mut set, 2, now);
+        let (a, pa) = source(&mut set, job_token, 2, now);
         // Unsolicited ack (no pending reask) is dropped.
         assert!(
             set.apply_reply(a, pa, ReaskReply::Ack { rank: 5 }, now)
@@ -374,8 +385,10 @@ mod tests {
     #[test]
     fn file_not_found_drops_the_source() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let mut set = ReaskSourceSet::new();
-        let (a, pa) = source(&mut set, 3, now);
+        let (a, pa) = source(&mut set, job_token, 3, now);
         set.mark_reasked(a, pa, None, now);
         assert_eq!(
             set.apply_reply(a, pa, ReaskReply::FileNotFound, now),
@@ -388,8 +401,10 @@ mod tests {
     #[test]
     fn queue_full_keeps_source_and_is_not_a_failure() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let mut set = ReaskSourceSet::new();
-        let (a, pa) = source(&mut set, 4, now);
+        let (a, pa) = source(&mut set, job_token, 4, now);
         set.mark_reasked(a, pa, None, now);
         assert_eq!(
             set.apply_reply(a, pa, ReaskReply::QueueFull, now),
@@ -404,9 +419,11 @@ mod tests {
     #[test]
     fn timeouts_drain_as_failures_and_eventually_fall_back_to_tcp() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let timeout = Duration::from_secs(20);
         let mut set = ReaskSourceSet::new();
-        let (a, pa) = source(&mut set, 5, now);
+        let (a, pa) = source(&mut set, job_token, 5, now);
 
         // Drive four timed-out reasks; the 4th trips the >3-attempts ratio backoff.
         let mut last_action = None;
@@ -428,12 +445,15 @@ mod tests {
         // GetUDPVersion(): v2 gets hash only, v3 gets hash+complete-count,
         // v4 additionally gets the part status.
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let our_ip = [203, 0, 113, 9];
         let part_status = [true, false, true];
         let mut lens = Vec::new();
         for (index, version) in [2u8, 3, 4].into_iter().enumerate() {
             let mut set = ReaskSourceSet::new();
             set.insert(ReaskSource::new(
+                job_token,
                 (ip(20 + index as u8), 4672),
                 hash(),
                 version,
@@ -453,13 +473,17 @@ mod tests {
         use super::super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let our_ip = [203, 0, 113, 9];
         let peer_hash = [0x55u8; 16];
         let mut set = ReaskSourceSet::new();
 
         // One obfuscation-capable due source.
         let endpoint = (ip(8), 4672);
-        set.insert(ReaskSource::new(endpoint, hash(), 4, now).with_obfuscation(peer_hash, true));
+        set.insert(
+            ReaskSource::new(job_token, endpoint, hash(), 4, now).with_obfuscation(peer_hash, true),
+        );
 
         let datagrams = set.due_datagrams(now, Some(&[true, false, true]), 2, our_ip);
         assert_eq!(datagrams.len(), 1);
@@ -490,7 +514,7 @@ mod tests {
 
         // A TCP-fallback source produces no datagram.
         let tcp_endpoint = (ip(9), 4672);
-        let mut tcp_src = ReaskSource::new(tcp_endpoint, hash(), 4, now);
+        let mut tcp_src = ReaskSource::new(job_token, tcp_endpoint, hash(), 4, now);
         tcp_src.fallback_tcp_only = true;
         set.insert(tcp_src);
         let tcp_dest = SocketAddr::new(tcp_endpoint.0.into(), tcp_endpoint.1);
@@ -506,6 +530,8 @@ mod tests {
         use super::super::codec::{OP_REASKCALLBACKUDP, decode_reask_callback_udp};
 
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let our_ip = [203, 0, 113, 9];
         let mut set = ReaskSourceSet::new();
 
@@ -514,7 +540,7 @@ mod tests {
         let buddy_endpoint = (Ipv4Addr::new(198, 51, 100, 200), 5000);
         let buddy_id = [0x77u8; 16];
         set.insert(
-            ReaskSource::new(source_endpoint, hash(), 4, now).with_buddy(
+            ReaskSource::new(job_token, source_endpoint, hash(), 4, now).with_buddy(
                 true,
                 Some(buddy_endpoint),
                 Some(buddy_id),
@@ -561,11 +587,13 @@ mod tests {
         // A LowID source missing the buddy id (hello-only buddy) cannot originate
         // the MFC callback request and must not fall back to a direct ping.
         let no_id_endpoint = (ip(21), 4672);
-        set.insert(ReaskSource::new(no_id_endpoint, hash(), 4, now).with_buddy(
-            true,
-            Some(buddy_endpoint),
-            None,
-        ));
+        set.insert(
+            ReaskSource::new(job_token, no_id_endpoint, hash(), 4, now).with_buddy(
+                true,
+                Some(buddy_endpoint),
+                None,
+            ),
+        );
         let next = set.due_datagrams(now, None, 0, our_ip);
         assert!(
             next.iter().all(|send| {
@@ -584,8 +612,10 @@ mod tests {
         use super::super::state::FILE_REASK_TIME;
 
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let mut set = ReaskSourceSet::new();
-        let (a, pa) = source(&mut set, 10, now);
+        let (a, pa) = source(&mut set, job_token, 10, now);
         assert!(set.mark_no_needed_parts(a, pa, now));
         let src = set.get(a, pa).unwrap();
         assert!(src.no_needed_parts);
@@ -601,8 +631,10 @@ mod tests {
         use super::super::state::FILE_REASK_TIME;
 
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let mut set = ReaskSourceSet::new();
-        let (ip, port) = source(&mut set, 10, now);
+        let (ip, port) = source(&mut set, job_token, 10, now);
 
         assert!(set.set_no_needed_parts(ip, port, true, now));
         assert!(set.get(ip, port).unwrap().no_needed_parts);
@@ -616,9 +648,11 @@ mod tests {
     #[test]
     fn multiple_sources_are_tracked_independently() {
         let now = Instant::now();
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(hash());
         let mut set = ReaskSourceSet::new();
-        let (a, pa) = source(&mut set, 6, now);
-        let (b, pb) = source(&mut set, 7, now);
+        let (a, pa) = source(&mut set, job_token, 6, now);
+        let (b, pb) = source(&mut set, job_token, 7, now);
         assert_eq!(set.len(), 2);
         // Reask only A; B stays due, A does not.
         set.mark_reasked(a, pa, None, now);

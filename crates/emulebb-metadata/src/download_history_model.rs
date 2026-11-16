@@ -8,8 +8,8 @@ pub struct MetadataDownloadHistoryEntry {
     pub display_name: String,
     pub file_size: u64,
     pub aich_root: Option<String>,
-    pub first_completed_at_ms: i64,
-    pub last_completed_at_ms: i64,
+    pub first_completed_at_s: i64,
+    pub last_completed_at_s: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

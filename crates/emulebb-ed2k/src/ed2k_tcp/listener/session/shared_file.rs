@@ -597,18 +597,27 @@ async fn source_exchange_source_count(
     transfer_runtime: &Ed2kTransferRuntime,
     file_hash: &str,
 ) -> Result<usize> {
-    let manifest = transfer_runtime.manifest(file_hash).await?;
-    let mut endpoints = manifest
-        .sources
+    let Some(token) = transfer_runtime.resolve_protocol_job(file_hash).await? else {
+        return Ok(0);
+    };
+    // Stock throttle only distinguishes <=10, <=50 and >50. Read enough for
+    // that decision without hydrating all persisted or live peer payloads.
+    let page = transfer_runtime
+        .download_source_endpoints_after(token, 0, 51)
+        .await?;
+    let mut endpoints = page
         .iter()
-        .map(|source| (source.ip.clone(), source.tcp_port))
+        .map(|entry| (entry.ip, entry.tcp_port))
         .collect::<HashSet<_>>();
-    endpoints.extend(
-        transfer_runtime
-            .live_download_sources(file_hash)
-            .into_iter()
-            .map(|source| (source.endpoint.ip().to_string(), source.endpoint.port())),
-    );
+    if endpoints.len() > 50 {
+        return Ok(51);
+    }
+    transfer_runtime.visit_live_source_protocol(token, |endpoint, _, _, _| {
+        if let IpAddr::V4(ip) = endpoint.ip() {
+            endpoints.insert((ip, endpoint.port()));
+        }
+        endpoints.len() <= 50
+    });
     Ok(endpoints.len())
 }
 
@@ -694,73 +703,64 @@ async fn source_exchange_peers_excluding(
     requester_part_status: Option<&[bool]>,
 ) -> Result<Vec<SourceExchangePeer>> {
     let requested_hex = requested.to_string();
-    let mut peers: Vec<SourceExchangePeer> = Vec::new();
-    let mut seen: std::collections::HashSet<(Ipv4Addr, u16)> = std::collections::HashSet::new();
-
-    // Prefer live download sources (currently connected, verified direct-dial
-    // peers) over stale persisted manifest hints — these are the sources eMule
-    // would actually offer (`IsLiveSource`). They are deduped by (ip, port).
-    for live in transfer_runtime.live_download_sources(&requested_hex) {
-        let IpAddr::V4(ipv4) = live.endpoint.ip() else {
-            continue;
+    let Some(token) = transfer_runtime
+        .resolve_protocol_job(&requested_hex)
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut peers = Vec::with_capacity(MAX_SOURCE_EXCHANGE_ENTRIES);
+    let mut seen = std::collections::HashSet::<(Ipv4Addr, u16)>::new();
+    transfer_runtime.visit_live_source_protocol(token, |endpoint, user_hash, options, bitmap| {
+        let IpAddr::V4(ip) = endpoint.ip() else {
+            return true;
         };
-        let tcp_port = live.endpoint.port();
-        if !source_exchange_eligible(ipv4, tcp_port, exclude_ipv4) {
-            continue;
+        if !source_exchange_eligible(ip, endpoint.port(), exclude_ipv4)
+            || !seen.insert((ip, endpoint.port()))
+        {
+            return true;
         }
-        // Claim the endpoint before usefulness filtering. Otherwise a live
-        // source known to be useless could re-enter below through its stale
-        // persisted hint, whose part state is necessarily unknown.
-        if !seen.insert((ipv4, tcp_port)) {
-            continue;
-        }
-        if !source_is_useful_to_requester(requester_part_status, live.part_bitmap.as_deref()) {
-            continue;
+        if !source_is_useful_to_requester(requester_part_status, bitmap) {
+            return true;
         }
         peers.push(SourceExchangePeer {
-            ip: ipv4.octets(),
-            tcp_port,
-            server_ip: 0,
-            server_port: 0,
-            user_hash: live.user_hash,
-            connect_options: live.connect_options.unwrap_or(0),
-        });
-        if peers.len() >= MAX_SOURCE_EXCHANGE_ENTRIES {
-            return Ok(peers);
-        }
-    }
-
-    // Fill the remainder from persisted manifest hints, applying the same
-    // non-LowID / non-zero-port eligibility filter and (ip, port) dedup.
-    let manifest = transfer_runtime.serving_view(&requested_hex).await?;
-    for source in &manifest.sources {
-        let Ok(parsed_ip) = source.ip.parse::<Ipv4Addr>() else {
-            continue;
-        };
-        if !source_exchange_eligible(parsed_ip, source.tcp_port, exclude_ipv4) {
-            continue;
-        }
-        if !seen.insert((parsed_ip, source.tcp_port)) {
-            continue;
-        }
-        let user_hash = source
-            .user_hash
-            .as_deref()
-            .and_then(|hash| hex::decode(hash).ok())
-            .and_then(|bytes| bytes.try_into().ok());
-        peers.push(SourceExchangePeer {
-            ip: parsed_ip.octets(),
-            tcp_port: source.tcp_port,
+            ip: ip.octets(),
+            tcp_port: endpoint.port(),
             server_ip: 0,
             server_port: 0,
             user_hash,
-            connect_options: source.connect_options.unwrap_or(0),
+            connect_options: options.unwrap_or(0),
         });
-        if peers.len() >= MAX_SOURCE_EXCHANGE_ENTRIES {
+        peers.len() < MAX_SOURCE_EXCHANGE_ENTRIES
+    });
+    let mut after = 0;
+    while peers.len() < MAX_SOURCE_EXCHANGE_ENTRIES {
+        let page = transfer_runtime
+            .download_source_endpoints_after(token, after, 256)
+            .await?;
+        if page.is_empty() {
             break;
         }
+        for entry in &page {
+            after = entry.id;
+            if !source_exchange_eligible(entry.ip, entry.tcp_port, exclude_ipv4)
+                || !seen.insert((entry.ip, entry.tcp_port))
+            {
+                continue;
+            }
+            peers.push(SourceExchangePeer {
+                ip: entry.ip.octets(),
+                tcp_port: entry.tcp_port,
+                server_ip: 0,
+                server_port: 0,
+                user_hash: entry.user_hash,
+                connect_options: entry.connect_options.unwrap_or(0),
+            });
+            if peers.len() == MAX_SOURCE_EXCHANGE_ENTRIES {
+                break;
+            }
+        }
     }
-
     Ok(peers)
 }
 

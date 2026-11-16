@@ -7,7 +7,7 @@ use emulebb_kad_proto::Ed2kHash;
 use std::str::FromStr;
 
 use super::super::test_support::admit_local_share;
-use super::super::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
+use super::super::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime};
 use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
 use emulebb_metadata::MetadataSharedDirectoryRoot;
@@ -252,7 +252,13 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         .unwrap();
     admit_local_share(&runtime, &source_dir, &source_path).await;
     let file_hash = summary.file_hash.clone();
-    assert!(runtime.manifest(&file_hash).await.is_err());
+    assert!(
+        runtime
+            .metadata
+            .latest_download_job(&file_hash)
+            .unwrap()
+            .is_none()
+    );
     // (1) The read-only protocol view resolves the original verified path.
     let manifest = runtime.serving_view(&file_hash).await.unwrap();
     let cached = runtime
@@ -268,27 +274,15 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         "manifest must record the original on-disk source path",
     );
 
-    // (2) NO copy was made into the internal piece store.
-    let piece_store = runtime
-        .transfer_dir_path(&file_hash)
-        .join(PAYLOAD_FILE_NAME);
-    assert!(
-        !piece_store.exists(),
-        "share-in-place must NOT copy the payload into the piece store ({})",
-        piece_store.display(),
-    );
-    assert!(
-        !runtime.transfer_dir_path(&file_hash).exists(),
-        "share-in-place must not create an empty per-hash transfer directory",
-    );
-
+    // (2) Ingest creates neither a job allocation nor a resident piece store.
     assert!(
         runtime
             .metadata
-            .transfer_manifest_by_hash(&file_hash)
+            .latest_download_job(&file_hash)
             .unwrap()
             .is_none()
     );
+    assert!(runtime.job_storage.lock().unwrap().is_empty());
 
     // (3) The original file is untouched and still its full size.
     assert_eq!(fs::metadata(&source_path).unwrap().len(), size);
@@ -420,7 +414,7 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
     assert!(
         runtime
             .metadata
-            .transfer_manifest_by_hash(&summary.file_hash)
+            .latest_download_job(&summary.file_hash)
             .unwrap()
             .is_none()
     );
@@ -585,7 +579,7 @@ async fn complete_local_file_never_creates_a_transfer() {
         .unwrap();
     assert!(
         metadata
-            .transfer_manifest_by_hash(&summary.file_hash)
+            .latest_download_job(&summary.file_hash)
             .unwrap()
             .is_none()
     );

@@ -51,17 +51,23 @@ pub(crate) fn mark_final_rehash_pending(manifest: &mut Ed2kResumeManifest) -> bo
 impl Ed2kTransferRuntime {
     /// Run a persisted final rehash when the transfer is waiting at the
     /// completion barrier. Returns true only after the whole-file hash matches.
-    pub async fn finalize_pending_transfer(&self, file_hash: &str) -> Result<bool> {
-        self.final_rehash(file_hash, false).await
+    pub async fn finalize_pending_transfer(
+        &self,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<bool> {
+        self.final_rehash(token, false).await
     }
 
     /// Operator-triggered recheck. Complete or fully present payloads use the
     /// final completion authority path; incomplete downloads revalidate every
     /// persisted verified piece without promoting unverified data.
-    pub(super) async fn final_recheck_transfer(&self, file_hash: &str) -> Result<bool> {
-        let manifest = self.manifest(file_hash).await?;
+    pub(super) async fn final_recheck_transfer(
+        &self,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<bool> {
+        let manifest = self.manifest(token).await?;
         if manifest.completed || manifest.is_fully_verified() {
-            self.final_rehash(file_hash, true).await
+            self.final_rehash(token, true).await
         } else {
             self.recheck_verified_partial_pieces(manifest).await
         }
@@ -76,9 +82,10 @@ impl Ed2kTransferRuntime {
             return Ok(false);
         }
         let file_hash = snapshot.file_hash.clone();
-        let payload_path = self.payload_path(&file_hash);
+        let token = snapshot.token;
+        let payload_path = self.payload_path(token.job_id)?;
         let expected_size = snapshot.file_size;
-        self.invalidate_payload_handle(&file_hash);
+        self.invalidate_payload_handle(token);
         let payload_missing = match tokio::fs::symlink_metadata(&payload_path).await {
             Ok(_) => false,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -98,8 +105,8 @@ impl Ed2kTransferRuntime {
         };
         let damaged_parts = damaged_verified_part_indexes(&snapshot, &computation)?;
 
-        let _guard = self.lock_manifest(&file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
+        let _guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_manifest_unlocked(token).await?;
         anyhow::ensure!(
             manifest.file_size == snapshot.file_size
                 && manifest.piece_size == snapshot.piece_size
@@ -141,12 +148,18 @@ impl Ed2kTransferRuntime {
         Ok(false)
     }
 
-    async fn final_rehash(&self, file_hash: &str, force: bool) -> Result<bool> {
-        let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
-        let transfer_dir = self.transfer_dir(file_hash);
+    async fn final_rehash(&self, token: emulebb_metadata::JobToken, force: bool) -> Result<bool> {
+        let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
+        let transfer_dir = self.transfer_dir(token.job_id)?;
+        let file_hash = self.manifest(token).await?.file_hash;
         let (payload_path, expected_size, transfer_dir_id) = {
-            let _guard = self.lock_manifest(file_hash).await;
-            let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+            let _guard = self.lock_manifest(token).await;
+            let mut manifest = self.load_manifest_unlocked(token).await?;
+            if manifest.delivery_state == super::Ed2kDeliveryState::Delivered {
+                // Materialization is durable even before retirement. Verification
+                // of its output is separate and never restarts this job.
+                return Ok(true);
+            }
             if !force && !manifest.final_rehash_pending {
                 return Ok(manifest.completed);
             }
@@ -157,33 +170,15 @@ impl Ed2kTransferRuntime {
             manifest.completed = false;
             manifest.final_rehash_pending = true;
             manifest.payload_fingerprint = None;
-            self.invalidate_payload_handle(file_hash);
+            self.invalidate_payload_handle(token);
             self.store_manifest_unlocked(&manifest).await?;
-            self.remove_verified_catalog_entry(file_hash).await;
+            self.remove_verified_catalog_entry(&file_hash).await;
             let transfer_dir_id =
                 super::payload_reconcile::existing_transfer_directory_identity(&transfer_dir)
                     .await?;
-            let payload_path = self.payload_path(file_hash);
+            let payload_path = self.payload_path(token.job_id)?;
             match tokio::fs::symlink_metadata(&payload_path).await {
                 Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    super::payload_reconcile::ensure_transfer_directory_identity(
-                        &transfer_dir,
-                        &transfer_dir_id,
-                    )
-                    .await?;
-                    super::payload_reconcile::create_empty_payload(&payload_path).await?;
-                    demote_manifest_after_payload_reset(&mut manifest);
-                    self.store_manifest_unlocked(&manifest).await?;
-                    self.upsert_verified_catalog_entry(&manifest).await;
-                    tracing::warn!(
-                        event = "missing_payload_reset",
-                        file_hash,
-                        path = %payload_path.display(),
-                        "reset missing ED2K payload before reopening all pieces"
-                    );
-                    return Ok(false);
-                }
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!("failed to inspect ED2K payload {}", payload_path.display())
@@ -206,8 +201,8 @@ impl Ed2kTransferRuntime {
                 .await
                 .context("ED2K final completion rehash task failed")??;
 
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let _guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_manifest_unlocked(token).await?;
         if !manifest.final_rehash_pending {
             return Ok(manifest.completed);
         }

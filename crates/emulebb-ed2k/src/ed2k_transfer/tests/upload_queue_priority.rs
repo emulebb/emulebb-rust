@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
-    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadSessionStatus, new_transfer_job},
+    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadSessionStatus},
     paths::unique_test_dir,
 };
 
@@ -15,23 +15,24 @@ async fn upload_queue_scores_waiters_with_persisted_file_priority() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let active_file = Ed2kHash::from_bytes([0xA7; 16]);
-    let normal_file = Ed2kHash::from_bytes([0xB8; 16]);
-    let high_file = Ed2kHash::from_bytes([0xC9; 16]);
-
-    runtime
-        .ensure_job(&new_transfer_job(
-            normal_file,
-            "Normal.Priority.bin".to_string(),
-            1024,
-        ))
+    let normal_path = root.join("Normal.Priority.bin");
+    let high_path = root.join("High.Priority.bin");
+    std::fs::write(&normal_path, b"normal priority verified upload").unwrap();
+    std::fs::write(&high_path, b"high priority verified upload").unwrap();
+    let normal = runtime
+        .ingest_local_file(&normal_path, "Normal.Priority.bin")
         .await
         .unwrap();
+    let high = runtime
+        .ingest_local_file(&high_path, "High.Priority.bin")
+        .await
+        .unwrap();
+    super::super::test_support::admit_local_share(&runtime, &root, &normal_path).await;
+    super::super::test_support::admit_local_share(&runtime, &root, &high_path).await;
+    let normal_file = normal.file_hash.parse::<Ed2kHash>().unwrap();
+    let high_file = high.file_hash.parse::<Ed2kHash>().unwrap();
     runtime
-        .ensure_job(&new_transfer_job(
-            high_file,
-            "High.Priority.bin".to_string(),
-            1024,
-        ))
+        .update_shared_file_metadata(&normal.file_hash, Some(("normal", false)), None)
         .await
         .unwrap();
     runtime
@@ -87,7 +88,12 @@ async fn upload_queue_refreshes_waiter_score_after_priority_change() {
         (boosted_file, "Boosted.Priority.bin"),
     ] {
         runtime
-            .ensure_job(&new_transfer_job(file_hash, name.to_string(), 1024))
+            .ensure_job(&crate::ed2k_transfer::test_support::admit_download_job(
+                &runtime,
+                file_hash,
+                name.to_string(),
+                1024,
+            ))
             .await
             .unwrap();
     }

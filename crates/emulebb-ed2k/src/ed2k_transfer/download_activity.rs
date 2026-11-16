@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::Ed2kTransferRuntime;
+use emulebb_metadata::JobToken;
 
 const DOWNLOAD_ACTIVITY_STALE_AFTER: Duration = Duration::from_secs(30);
 /// Retain source protocol knowledge through the stock per-source reask cadence.
@@ -110,16 +111,19 @@ pub struct Ed2kLiveSource {
 }
 
 impl Ed2kTransferRuntime {
-    pub(crate) fn note_download_payload_bytes(&self, file_hash: &str, byte_count: u64) {
-        self.note_download_payload_bytes_at(file_hash, byte_count, Instant::now());
+    pub(crate) fn note_download_payload_bytes(&self, token: JobToken, byte_count: u64) {
+        self.note_download_payload_bytes_at(token, byte_count, Instant::now());
     }
 
     pub(crate) fn note_download_payload_bytes_at(
         &self,
-        file_hash: &str,
+        token: JobToken,
         byte_count: u64,
         now: Instant,
     ) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
         if byte_count == 0 {
             return;
         }
@@ -130,7 +134,7 @@ impl Ed2kTransferRuntime {
             return;
         };
         let entry = activity
-            .entry(file_hash.to_string())
+            .entry(token)
             .or_insert_with(|| Ed2kDownloadActivity {
                 last_seen_at: now,
                 window: DatarateWindow::default(),
@@ -144,11 +148,11 @@ impl Ed2kTransferRuntime {
     /// Total download payload bytes received this session for a file (live,
     /// per-block; resets on restart). Surfaced in the REST transfer so in-flight
     /// progress is visible even before whole parts verify.
-    pub fn downloaded_session_bytes(&self, file_hash: &str) -> u64 {
+    pub fn downloaded_session_bytes(&self, token: JobToken) -> u64 {
         self.download_activity
             .lock()
             .ok()
-            .and_then(|activity| activity.get(file_hash).map(|entry| entry.session_bytes))
+            .and_then(|activity| activity.get(&token).map(|entry| entry.session_bytes))
             .unwrap_or(0)
     }
 
@@ -156,14 +160,14 @@ impl Ed2kTransferRuntime {
     /// Called alongside `note_download_payload_bytes` from the download runtime.
     pub(crate) fn note_download_source_bytes(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer: SocketAddr,
         user_hash: Option<[u8; 16]>,
         connect_options: Option<u8>,
         byte_count: u64,
     ) {
         self.note_download_source_bytes_at(
-            file_hash,
+            token,
             peer,
             user_hash,
             connect_options,
@@ -174,17 +178,20 @@ impl Ed2kTransferRuntime {
 
     pub(crate) fn note_download_source_bytes_at(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer: SocketAddr,
         user_hash: Option<[u8; 16]>,
         connect_options: Option<u8>,
         byte_count: u64,
         now: Instant,
     ) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
         let Ok(mut sources) = self.download_sources.lock() else {
             return;
         };
-        let peers = sources.entry(file_hash.to_string()).or_default();
+        let peers = sources.entry(token).or_default();
         // Opportunistically evict stale peers so a long-running transfer's inner
         // map stays bounded to the live set rather than growing with every
         // endpoint ever observed (entries were previously only freed on transfer
@@ -228,7 +235,7 @@ impl Ed2kTransferRuntime {
                 "sched",
                 "download_payload_accepted",
                 "info",
-                serde_json::json!({ "fileHash": file_hash, "peer": peer.to_string() }),
+                serde_json::json!({ "jobId": token.job_id.to_string(), "generation": token.generation, "peer": peer.to_string() }),
                 serde_json::json!({ "bytes": byte_count, "clientSoftware": software }),
             );
         }
@@ -238,14 +245,14 @@ impl Ed2kTransferRuntime {
     /// Returns whether the live-source registry accepted the update.
     pub(crate) fn note_download_source_part_bitmap(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer: SocketAddr,
         user_hash: Option<[u8; 16]>,
         connect_options: Option<u8>,
         bitmap: Vec<bool>,
     ) -> bool {
         self.note_download_source_part_bitmap_at(
-            file_hash,
+            token,
             peer,
             user_hash,
             connect_options,
@@ -256,17 +263,20 @@ impl Ed2kTransferRuntime {
 
     pub(crate) fn note_download_source_part_bitmap_at(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer: SocketAddr,
         user_hash: Option<[u8; 16]>,
         connect_options: Option<u8>,
         bitmap: Vec<bool>,
         now: Instant,
     ) -> bool {
+        let Some(_session) = self.active_job_session(token) else {
+            return false;
+        };
         let Ok(mut sources) = self.download_sources.lock() else {
             return false;
         };
-        let peers = sources.entry(file_hash.to_string()).or_default();
+        let peers = sources.entry(token).or_default();
         evict_stale_sources(peers, now);
         let entry = peers
             .entry(peer.to_string())
@@ -297,13 +307,13 @@ impl Ed2kTransferRuntime {
     /// This deliberately outlives the 30-second activity view: stock includes
     /// queued, TCP-detached sources in the complete-source count carried by the
     /// next client-UDP reask.
-    pub(crate) fn known_complete_source_count(&self, file_hash: &str, total_parts: usize) -> u16 {
-        self.known_complete_source_count_at(file_hash, total_parts, Instant::now())
+    pub(crate) fn known_complete_source_count(&self, token: JobToken, total_parts: usize) -> u16 {
+        self.known_complete_source_count_at(token, total_parts, Instant::now())
     }
 
     pub(crate) fn known_complete_source_count_at(
         &self,
-        file_hash: &str,
+        token: JobToken,
         total_parts: usize,
         now: Instant,
     ) -> u16 {
@@ -313,7 +323,7 @@ impl Ed2kTransferRuntime {
         let Ok(sources) = self.download_sources.lock() else {
             return 0;
         };
-        let Some(peers) = sources.get(file_hash) else {
+        let Some(peers) = sources.get(&token) else {
             return 0;
         };
         peers
@@ -334,15 +344,18 @@ impl Ed2kTransferRuntime {
     /// Returns whether the live-source registry accepted the update.
     pub(crate) fn note_download_source_queue_rank(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer: SocketAddr,
         rank: u32,
     ) -> bool {
+        let Some(_session) = self.active_job_session(token) else {
+            return false;
+        };
         let now = Instant::now();
         let Ok(mut sources) = self.download_sources.lock() else {
             return false;
         };
-        let peers = sources.entry(file_hash.to_string()).or_default();
+        let peers = sources.entry(token).or_default();
         evict_stale_sources(peers, now);
         let entry = peers
             .entry(peer.to_string())
@@ -366,15 +379,18 @@ impl Ed2kTransferRuntime {
     /// the REST source list can show which client each source runs.
     pub(crate) fn note_download_source_software(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer: SocketAddr,
         software: String,
     ) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
         let now = Instant::now();
         let Ok(mut sources) = self.download_sources.lock() else {
             return;
         };
-        let peers = sources.entry(file_hash.to_string()).or_default();
+        let peers = sources.entry(token).or_default();
         evict_stale_sources(peers, now);
         let entry = peers
             .entry(peer.to_string())
@@ -399,32 +415,61 @@ impl Ed2kTransferRuntime {
             "sched",
             "download_source_software",
             "info",
-            serde_json::json!({ "fileHash": file_hash, "peer": peer.to_string() }),
+            serde_json::json!({ "jobId": token.job_id.to_string(), "generation": token.generation, "peer": peer.to_string() }),
             serde_json::json!({ "clientSoftware": diagnostic_software }),
         );
     }
 
     /// Drop the live-source registry for a file (e.g. on transfer removal).
-    pub(crate) fn clear_download_sources(&self, file_hash: &str) {
+    pub(crate) fn clear_download_sources(&self, token: JobToken) {
         if let Ok(mut sources) = self.download_sources.lock() {
-            sources.remove(file_hash);
+            sources.remove(&token);
+        }
+    }
+
+    /// Borrow protocol evidence while constructing one bounded outgoing list.
+    /// The visitor performs no I/O, awaits or reentry and returns false to stop.
+    pub(crate) fn visit_live_source_protocol(
+        &self,
+        token: JobToken,
+        mut visit: impl FnMut(SocketAddr, Option<[u8; 16]>, Option<u8>, Option<&[bool]>) -> bool,
+    ) {
+        let Ok(sources) = self.download_sources.lock() else {
+            return;
+        };
+        let Some(peers) = sources.get(&token) else {
+            return;
+        };
+        let now = Instant::now();
+        for peer in peers
+            .values()
+            .filter(|peer| !is_activity_stale(peer.last_seen_at, now))
+        {
+            if !visit(
+                peer.endpoint,
+                peer.user_hash,
+                peer.connect_options,
+                peer.part_bitmap.as_deref(),
+            ) {
+                break;
+            }
         }
     }
 
     /// Live sources currently known for a file, pruned of stale entries.
-    pub fn live_download_sources(&self, file_hash: &str) -> Vec<Ed2kLiveSource> {
-        self.live_download_sources_at(file_hash, Instant::now())
+    pub fn live_download_sources(&self, token: JobToken) -> Vec<Ed2kLiveSource> {
+        self.live_download_sources_at(token, Instant::now())
     }
 
     pub(crate) fn live_download_sources_at(
         &self,
-        file_hash: &str,
+        token: JobToken,
         now: Instant,
     ) -> Vec<Ed2kLiveSource> {
         let Ok(sources) = self.download_sources.lock() else {
             return Vec::new();
         };
-        let Some(peers) = sources.get(file_hash) else {
+        let Some(peers) = sources.get(&token) else {
             return Vec::new();
         };
         peers
@@ -449,15 +494,15 @@ impl Ed2kTransferRuntime {
     }
 
     /// Number of sources actively transferring payload for a file.
-    pub fn transferring_source_count(&self, file_hash: &str) -> u32 {
-        self.transferring_source_count_at(file_hash, Instant::now())
+    pub fn transferring_source_count(&self, token: JobToken) -> u32 {
+        self.transferring_source_count_at(token, Instant::now())
     }
 
-    pub(crate) fn transferring_source_count_at(&self, file_hash: &str, now: Instant) -> u32 {
+    pub(crate) fn transferring_source_count_at(&self, token: JobToken, now: Instant) -> u32 {
         let Ok(sources) = self.download_sources.lock() else {
             return 0;
         };
-        let Some(peers) = sources.get(file_hash) else {
+        let Some(peers) = sources.get(&token) else {
             return 0;
         };
         peers
@@ -467,13 +512,13 @@ impl Ed2kTransferRuntime {
     }
 
     /// Per-part count of live sources advertising each part (index 0..part_total).
-    pub fn available_sources_per_part(&self, file_hash: &str, part_total: u32) -> Vec<u32> {
-        self.available_sources_per_part_at(file_hash, part_total, Instant::now())
+    pub fn available_sources_per_part(&self, token: JobToken, part_total: u32) -> Vec<u32> {
+        self.available_sources_per_part_at(token, part_total, Instant::now())
     }
 
     pub(crate) fn available_sources_per_part_at(
         &self,
-        file_hash: &str,
+        token: JobToken,
         part_total: u32,
         now: Instant,
     ) -> Vec<u32> {
@@ -481,7 +526,7 @@ impl Ed2kTransferRuntime {
         let Ok(sources) = self.download_sources.lock() else {
             return counts;
         };
-        let Some(peers) = sources.get(file_hash) else {
+        let Some(peers) = sources.get(&token) else {
             return counts;
         };
         for peer in peers.values() {
@@ -501,15 +546,15 @@ impl Ed2kTransferRuntime {
     }
 
     /// Number of parts available from at least one live source.
-    pub fn available_part_count(&self, file_hash: &str, part_total: u32) -> u32 {
-        self.available_sources_per_part(file_hash, part_total)
+    pub fn available_part_count(&self, token: JobToken, part_total: u32) -> u32 {
+        self.available_sources_per_part(token, part_total)
             .into_iter()
             .filter(|count| *count > 0)
             .count() as u32
     }
 
-    pub fn download_speed_bytes_per_sec(&self, file_hash: &str) -> u64 {
-        self.download_speed_bytes_per_sec_at(file_hash, Instant::now())
+    pub fn download_speed_bytes_per_sec(&self, token: JobToken) -> u64 {
+        self.download_speed_bytes_per_sec_at(token, Instant::now())
     }
 
     /// Aggregate live download rate across every active file (oracle
@@ -555,11 +600,11 @@ impl Ed2kTransferRuntime {
             .fetch_add(byte_count, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub(crate) fn download_speed_bytes_per_sec_at(&self, file_hash: &str, now: Instant) -> u64 {
+    pub(crate) fn download_speed_bytes_per_sec_at(&self, token: JobToken, now: Instant) -> u64 {
         let Ok(activity) = self.download_activity.lock() else {
             return 0;
         };
-        let Some(entry) = activity.get(file_hash) else {
+        let Some(entry) = activity.get(&token) else {
             return 0;
         };
         if now.saturating_duration_since(entry.last_seen_at) > DOWNLOAD_ACTIVITY_STALE_AFTER {

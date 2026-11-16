@@ -15,6 +15,7 @@ struct LiveImportBinding {
     fingerprint: Vec<u8>,
     size: i64,
     aich_root: Option<Vec<u8>>,
+    secondary_identity: Option<crate::NativeFileIdentity>,
 }
 
 impl MetadataStore {
@@ -24,13 +25,13 @@ impl MetadataStore {
         let hash = decode_fixed_hex(&entry.file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let row = conn.query_row(
-            "SELECT p.platform,p.native_path,i.verified_fingerprint,f.size_bytes,f.aich_root FROM known_files f JOIN verified_local_content c ON c.known_file_id=f.id JOIN local_file_instances i ON i.known_file_id=f.id JOIN local_paths p ON p.id=i.path_id WHERE f.ed2k_hash=?1 LIMIT 1",
+            "SELECT p.platform,p.native_path,i.verified_fingerprint,f.size_bytes,f.aich_root,i.secondary_identity FROM known_files f JOIN verified_local_content c ON c.known_file_id=f.id JOIN local_file_instances i ON i.known_file_id=f.id JOIN local_paths p ON p.id=i.path_id WHERE f.ed2k_hash=?1 LIMIT 1",
             [hash.clone()], |row| Ok(LiveImportBinding {
                 platform: row.get(0)?,
                 native_path: row.get(1)?,
                 fingerprint: row.get(2)?,
                 size: row.get(3)?,
-                aich_root: row.get(4)?,
+                aich_root: row.get(4)?,secondary_identity:crate::native_file::optional_identity_from_row(row,5)?,
             }),
         ).optional()?;
         let Some(binding) = row else {
@@ -61,6 +62,7 @@ impl MetadataStore {
         Self::upsert_verified_local_content_with_origin_tx(
             &tx,
             &MetadataVerifiedLocalContent {
+                secondary_identity: binding.secondary_identity,
                 file_hash: entry.file_hash.clone(),
                 display_name: entry.display_name.clone(),
                 file_size: entry.file_size,
@@ -91,7 +93,12 @@ impl MetadataStore {
     /// target-native fingerprint from an opened regular file.
     pub fn accept_imported_local_files(
         &self,
-        files: &[(MetadataFileImportRecord, PathBuf, NativeFileFingerprint)],
+        files: &[(
+            MetadataFileImportRecord,
+            PathBuf,
+            NativeFileFingerprint,
+            crate::NativeFileIdentityEvidence,
+        )],
     ) -> Result<()> {
         if files.is_empty() {
             return Ok(());
@@ -99,7 +106,8 @@ impl MetadataStore {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let now = unix_ms();
-        for (entry, path, fingerprint) in files {
+        for (entry, path, fingerprint, evidence) in files {
+            evidence.validate_fingerprint(fingerprint)?;
             anyhow::ensure!(
                 entry.file_size == fingerprint.size_bytes
                     && entry.modified_s == fingerprint.modified.seconds,
@@ -138,6 +146,7 @@ impl MetadataStore {
             Self::upsert_verified_local_content_with_origin_tx(
                 &tx,
                 &MetadataVerifiedLocalContent {
+                    secondary_identity: evidence.secondary(),
                     file_hash: entry.file_hash.clone(),
                     display_name: entry.display_name.clone(),
                     file_size: entry.file_size,
@@ -217,14 +226,15 @@ mod tests {
             modified: crate::NativeFileTimestamp::new(file.modified_s, 0).unwrap(),
             changed: None,
         };
+        let evidence = crate::NativeFileIdentityEvidence::new(fingerprint.identity, None).unwrap();
         let mut changed = fingerprint.clone();
         changed.size_bytes += 1;
         let path = std::env::temp_dir().join("stock-cache-sample.bin");
         assert!(
             store
                 .accept_imported_local_files(&[
-                    (file.clone(), path.clone(), fingerprint.clone()),
-                    (file.clone(), path.clone(), changed),
+                    (file.clone(), path.clone(), fingerprint.clone(), evidence),
+                    (file.clone(), path.clone(), changed, evidence),
                 ])
                 .is_err()
         );
@@ -232,12 +242,22 @@ mod tests {
         // No file at this synthetic path is needed: the caller supplies stat
         // evidence and the metadata layer never opens the payload.
         store
-            .accept_imported_local_files(&[(file.clone(), path.clone(), fingerprint.clone())])
+            .accept_imported_local_files(&[(
+                file.clone(),
+                path.clone(),
+                fingerprint.clone(),
+                evidence,
+            )])
             .unwrap();
         let mut enriched = file.clone();
         enriched.aich_root = Some("11".repeat(20));
         store
-            .accept_imported_local_files(&[(enriched.clone(), path.clone(), fingerprint.clone())])
+            .accept_imported_local_files(&[(
+                enriched.clone(),
+                path.clone(),
+                fingerprint.clone(),
+                evidence,
+            )])
             .unwrap();
         let origin: String = store
             .connection()
@@ -250,10 +270,10 @@ mod tests {
         enriched.aich_root = Some("22".repeat(20));
         assert!(
             store
-                .accept_imported_local_files(&[(enriched, path, fingerprint)])
+                .accept_imported_local_files(&[(enriched, path, fingerprint, evidence)])
                 .is_err()
         );
         assert_eq!(store.table_count("local_file_instances").unwrap(), 1);
-        assert_eq!(store.table_count("transfers").unwrap(), 0);
+        assert_eq!(store.table_count("download_jobs").unwrap(), 0);
     }
 }

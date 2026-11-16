@@ -137,12 +137,18 @@ pub enum ReaskCommand {
     /// carrying its endpoint + buddy knowledge ([`ReaskDetachArgs`]).
     Register(ReaskDetachArgs),
     /// Drop a source by endpoint (transfer completed / no longer wanted).
-    Remove { endpoint: (Ipv4Addr, u16) },
+    Remove {
+        job_token: emulebb_metadata::JobToken,
+        endpoint: (Ipv4Addr, u16),
+    },
     /// Flag a source as No Needed Parts by endpoint (a TCP session just learned
     /// the peer serves no part we still need, oracle `DS_NONEEDEDPARTS`): its
     /// reask cadence doubles to `FILEREASKTIME * 2` (oracle `GetTimeUntilReask`,
     /// DownloadClient.cpp:2425-2431). Unknown endpoints are a no-op.
-    MarkNoNeededParts { endpoint: (Ipv4Addr, u16) },
+    MarkNoNeededParts {
+        job_token: emulebb_metadata::JobToken,
+        endpoint: (Ipv4Addr, u16),
+    },
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the firewalled
     /// *source*): answer the downloader at `dest` like an inbound `OP_REASKFILEPING`
     /// (oracle ListenSocket.cpp). The buddy-forwarded request body is retained so
@@ -172,6 +178,7 @@ pub type ReaskCommandReceiver = mpsc::Receiver<ReaskCommand>;
 /// download session from the connected source's hello profile.
 #[derive(Debug, Clone)]
 pub struct ReaskDetachArgs {
+    pub job_token: emulebb_metadata::JobToken,
     pub file_hash: Ed2kHash,
     pub endpoint: (Ipv4Addr, u16),
     /// The source's eD2k **TCP** port. Core's lease bookkeeping
@@ -271,8 +278,11 @@ impl ReaskSourceHandle {
     }
 
     /// Drop a source from reask state by endpoint. Best-effort.
-    pub(crate) fn remove(&self, endpoint: (Ipv4Addr, u16)) {
-        let _ = self.0.try_send(ReaskCommand::Remove { endpoint });
+    pub(crate) fn remove(&self, job_token: emulebb_metadata::JobToken, endpoint: (Ipv4Addr, u16)) {
+        let _ = self.0.try_send(ReaskCommand::Remove {
+            job_token,
+            endpoint,
+        });
     }
 
     /// Flag a detached source as No Needed Parts (oracle `DS_NONEEDEDPARTS`):
@@ -280,10 +290,15 @@ impl ReaskSourceHandle {
     /// `GetTimeUntilReask`, DownloadClient.cpp:2425-2431). Best-effort: a
     /// full/closed channel or an unknown endpoint silently no-ops (the source
     /// keeps its normal cadence).
-    pub fn mark_no_needed_parts(&self, endpoint: (Ipv4Addr, u16)) {
-        let _ = self
-            .0
-            .try_send(ReaskCommand::MarkNoNeededParts { endpoint });
+    pub fn mark_no_needed_parts(
+        &self,
+        job_token: emulebb_metadata::JobToken,
+        endpoint: (Ipv4Addr, u16),
+    ) {
+        let _ = self.0.try_send(ReaskCommand::MarkNoNeededParts {
+            job_token,
+            endpoint,
+        });
     }
 
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the source).
@@ -322,7 +337,10 @@ pub enum ReaskEvent {
     /// `endpoint` is the source's **TCP** endpoint (`ReaskDetachArgs::tcp_port`) —
     /// the key core leased it under — NOT the UDP endpoint the loop routes on;
     /// core matches it directly against its TCP-keyed lease sets.
-    SourceReleased { endpoint: (Ipv4Addr, u16) },
+    SourceReleased {
+        job_token: emulebb_metadata::JobToken,
+        endpoint: (Ipv4Addr, u16),
+    },
     /// A detached source UDP-answered `OP_FILENOTFOUND` for `file_hash` (oracle
     /// `CUpDownClient::UDPReaskFNF`, `DownloadClient.cpp:1774-1795`): besides the
     /// `SourceReleased` that follows, core dead-lists the (source, file) pair for
@@ -330,6 +348,7 @@ pub enum ReaskEvent {
     /// The loop carries the exact TCP lease endpoint and the user hash captured
     /// before `DropSource` removes its reask state, so core never guesses by IP.
     SourceDead {
+        job_token: emulebb_metadata::JobToken,
         file_hash: Ed2kHash,
         source_tcp_endpoint: (Ipv4Addr, u16),
         source_user_hash: Option<[u8; 16]>,
@@ -337,7 +356,10 @@ pub enum ReaskEvent {
     /// A queued source for `file_hash` reported a queue rank at/under the re-engage
     /// threshold: a slot is imminent, so core reconnects over TCP now. The loop has
     /// already removed the source + released its lease via a preceding `SourceReleased`.
-    SourceReady { file_hash: Ed2kHash },
+    SourceReady {
+        job_token: emulebb_metadata::JobToken,
+        file_hash: Ed2kHash,
+    },
     /// An inbound `OP_DIRECTCALLBACKREQ` arrived: a peer that cannot reach us over
     /// TCP (we are the firewalled LowID side that advertised direct UDP callback)
     /// asks us to connect out to it. Core verifies the firewalled gate
@@ -583,6 +605,7 @@ async fn process_answer_callback_tcp(
 /// core frees the held UDP lease before the re-engage attempt re-acquires it
 /// (else `acquire_direct_download_source_leases` defers it forever — the B1 leak).
 fn routed_reply_events(
+    job_token: emulebb_metadata::JobToken,
     action: ReaskAction,
     file_hash: Ed2kHash,
     lease_endpoint: (Ipv4Addr, u16),
@@ -594,9 +617,13 @@ fn routed_reply_events(
         // (core's lease sets are TCP-keyed; RUST-PAR-017 DL-11).
         ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD => vec![
             ReaskEvent::SourceReleased {
+                job_token,
                 endpoint: lease_endpoint,
             },
-            ReaskEvent::SourceReady { file_hash },
+            ReaskEvent::SourceReady {
+                job_token,
+                file_hash,
+            },
         ],
         // Uploader no longer has the file (OP_FILENOTFOUND): dead-list it first
         // (oracle UDPReaskFNF AddDeadSource, DownloadClient.cpp:1781), then free
@@ -606,11 +633,13 @@ fn routed_reply_events(
         // ambiguous IP-only lookup in core.
         ReaskAction::DropSource => vec![
             ReaskEvent::SourceDead {
+                job_token,
                 file_hash,
                 source_tcp_endpoint: lease_endpoint,
                 source_user_hash,
             },
             ReaskEvent::SourceReleased {
+                job_token,
                 endpoint: lease_endpoint,
             },
         ],
@@ -735,6 +764,7 @@ async fn handle_inbound_datagram(
         let outcome = service.handle_inbound(data, from, received_at);
         match outcome {
             ReaskInboundOutcome::RoutedReply {
+                job_token,
                 file_hash,
                 endpoint,
                 lease_endpoint,
@@ -767,7 +797,7 @@ async fn handle_inbound_datagram(
                 if let ReaskAction::UpdatedRank(rank) = action {
                     let peer = SocketAddr::new(lease_endpoint.0.into(), lease_endpoint.1);
                     let _queue_rank_applied = transfer_runtime.note_download_source_queue_rank(
-                        &file_hash.to_string(),
+                        job_token,
                         peer,
                         u32::from(rank),
                     );
@@ -788,7 +818,7 @@ async fn handle_inbound_datagram(
                         let diagnostic_source_bitmap = source_bitmap.clone();
                         let part_status_applied = transfer_runtime
                             .note_download_source_part_bitmap(
-                                &file_hash.to_string(),
+                                job_token,
                                 peer,
                                 None,
                                 None,
@@ -844,10 +874,14 @@ async fn handle_inbound_datagram(
                 }
                 // Emit loop->core events (lease release ordered before any re-engage).
                 let mut delivered = true;
-                for event in
-                    routed_reply_events(action, file_hash, lease_endpoint, source_user_hash)
-                {
-                    if let ReaskEvent::SourceReady { file_hash } = &event {
+                for event in routed_reply_events(
+                    job_token,
+                    action,
+                    file_hash,
+                    lease_endpoint,
+                    source_user_hash,
+                ) {
+                    if let ReaskEvent::SourceReady { file_hash, .. } = &event {
                         trace!("ed2k udp reask: re-engage SourceReady for {file_hash}");
                     }
                     delivered &= events.send(event).is_ok();
@@ -1091,6 +1125,7 @@ fn apply_reask_command(
     match command {
         ReaskCommand::Register(args) => {
             let ReaskDetachArgs {
+                job_token,
                 file_hash,
                 endpoint,
                 tcp_port,
@@ -1103,7 +1138,7 @@ fn apply_reask_command(
                 buddy_id,
             } = args;
             let now = Instant::now();
-            let mut source = ReaskSource::new(endpoint, file_hash, udp_version, now)
+            let mut source = ReaskSource::new(job_token, endpoint, file_hash, udp_version, now)
                 .with_lease_endpoint((endpoint.0, tcp_port));
             source.next_reask = now + initial_reask_delay;
             if let Some(hash) = user_hash {
@@ -1120,18 +1155,32 @@ fn apply_reask_command(
             #[cfg(feature = "packet-diagnostics")]
             super::sched_diag::udp_reask_source_registered(file_hash, diagnostic_identity);
         }
-        ReaskCommand::Remove { endpoint } => {
+        ReaskCommand::Remove {
+            job_token,
+            endpoint,
+        } => {
+            if service.source_token(endpoint) != Some(job_token) {
+                return;
+            }
             // Only release the lease if this endpoint was a detached source we held;
             // a Remove for an unknown endpoint must not free a lease core never gave
             // us. The release carries the source's TCP lease key, not the UDP
             // routing endpoint (core's lease sets are TCP-keyed).
-            if let Some(lease_endpoint) = service.remove_source(endpoint.0, endpoint.1) {
+            if let Some((job_token, lease_endpoint)) = service.remove_source(endpoint.0, endpoint.1)
+            {
                 let _ = events.send(ReaskEvent::SourceReleased {
+                    job_token,
                     endpoint: lease_endpoint,
                 });
             }
         }
-        ReaskCommand::MarkNoNeededParts { endpoint } => {
+        ReaskCommand::MarkNoNeededParts {
+            job_token,
+            endpoint,
+        } => {
+            if service.source_token(endpoint) != Some(job_token) {
+                return;
+            }
             // NNP flag (oracle DS_NONEEDEDPARTS): double the source's reask
             // cadence. No event owed — the lease/registry hold is core-side.
             service.mark_no_needed_parts(endpoint.0, endpoint.1, Instant::now());
@@ -1217,8 +1266,10 @@ async fn drive_reask_tick(
             && let SocketAddr::V4(v4) = addr
         {
             let endpoint = (*v4.ip(), v4.port());
-            if let Some(lease_endpoint) = service.remove_source(endpoint.0, endpoint.1) {
+            if let Some((job_token, lease_endpoint)) = service.remove_source(endpoint.0, endpoint.1)
+            {
                 let _ = events.send(ReaskEvent::SourceReleased {
+                    job_token,
                     endpoint: lease_endpoint,
                 });
             }

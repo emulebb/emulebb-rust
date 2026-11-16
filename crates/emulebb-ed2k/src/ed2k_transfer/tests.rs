@@ -1,4 +1,5 @@
 use super::piece_store::Ed2kIncompletePayloadFailure;
+use super::test_support::admit_download_job;
 use super::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState,
     LocalIngestProgressStage, PAYLOAD_FILE_NAME, is_unresolved_ed2k_display_name, new_transfer_job,
@@ -82,7 +83,14 @@ async fn download_activity_reports_average_speed_until_stale() {
     let root = unique_test_dir("ed2k-transfer-download-activity");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let now = Instant::now();
-    let file_hash = "00112233445566778899aabbccddeeff";
+    let job = admit_download_job(
+        &runtime,
+        Ed2kHash::from_str("00112233445566778899aabbccddeeff").unwrap(),
+        "activity.bin".to_owned(),
+        8,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    let file_hash = job.token;
 
     runtime.note_download_payload_bytes_at(file_hash, 65_536, now + Duration::from_secs(1));
     runtime.note_download_payload_bytes_at(file_hash, 32_768, now + Duration::from_secs(3));
@@ -124,7 +132,14 @@ async fn source_protocol_state_outlives_activity_and_is_eventually_evicted() {
     let root = unique_test_dir("ed2k-transfer-source-eviction");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let now = Instant::now();
-    let file_hash = "00112233445566778899aabbccddeeff";
+    let job = admit_download_job(
+        &runtime,
+        Ed2kHash::from_str("00112233445566778899aabbccddeeff").unwrap(),
+        "activity.bin".to_owned(),
+        8,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    let file_hash = job.token;
 
     let stale_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 4662));
     let fresh_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 4662));
@@ -139,7 +154,7 @@ async fn source_protocol_state_outlives_activity_and_is_eventually_evicted() {
     );
     {
         let sources = runtime.download_sources.lock().unwrap();
-        assert_eq!(sources.get(file_hash).map(|peers| peers.len()), Some(1));
+        assert_eq!(sources.get(&file_hash).map(|peers| peers.len()), Some(1));
     }
 
     // A write past the activity window retains the old protocol entry while the
@@ -155,7 +170,7 @@ async fn source_protocol_state_outlives_activity_and_is_eventually_evicted() {
     );
     {
         let sources = runtime.download_sources.lock().unwrap();
-        let peers = sources.get(file_hash).expect("file entry present");
+        let peers = sources.get(&file_hash).expect("file entry present");
         assert_eq!(
             peers.len(),
             2,
@@ -185,18 +200,25 @@ async fn source_protocol_state_outlives_activity_and_is_eventually_evicted() {
         after_protocol_expiry,
     );
     let sources = runtime.download_sources.lock().unwrap();
-    let peers = sources.get(file_hash).expect("file entry present");
+    let peers = sources.get(&file_hash).expect("file entry present");
     assert!(!peers.contains_key(&stale_peer.to_string()));
     assert!(peers.contains_key(&fresh_peer.to_string()));
     assert!(peers.contains_key(&newest_peer.to_string()));
 }
 
-#[test]
-fn complete_source_protocol_count_survives_until_the_stock_reask_window() {
+#[tokio::test]
+async fn complete_source_protocol_count_survives_until_the_stock_reask_window() {
     let root = unique_test_dir("ed2k-transfer-complete-source-retention");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let now = Instant::now();
-    let file_hash = "10112233445566778899aabbccddeeff";
+    let job = admit_download_job(
+        &runtime,
+        Ed2kHash::from_str("10112233445566778899aabbccddeeff").unwrap(),
+        "activity.bin".to_owned(),
+        8,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    let file_hash = job.token;
     let complete_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 4), 4662));
     let partial_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 4662));
 
@@ -245,7 +267,14 @@ async fn download_speed_tracks_sliding_window_not_whole_transfer() {
     let root = unique_test_dir("ed2k-transfer-sliding-window");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let now = Instant::now();
-    let file_hash = "0011223344556677889900aabbccddee";
+    let job = admit_download_job(
+        &runtime,
+        Ed2kHash::from_str("0011223344556677889900aabbccddee").unwrap(),
+        "activity.bin".to_owned(),
+        8,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    let file_hash = job.token;
 
     // A small early sample, then a long gap, then a recent burst.
     runtime.note_download_payload_bytes_at(file_hash, 1_000, now);
@@ -270,8 +299,22 @@ async fn aggregate_download_speed_and_session_counters_roll_up() {
     let root = unique_test_dir("ed2k-transfer-aggregate-speed");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let now = Instant::now();
-    let file_a = "00112233445566778899aabbccddeeff";
-    let file_b = "ffeeddccbbaa99887766554433221100";
+    let job_a = admit_download_job(
+        &runtime,
+        Ed2kHash::from_str("00112233445566778899aabbccddeeff").unwrap(),
+        "a.bin".to_owned(),
+        8,
+    );
+    let job_b = admit_download_job(
+        &runtime,
+        Ed2kHash::from_str("ffeeddccbbaa99887766554433221100").unwrap(),
+        "b.bin".to_owned(),
+        8,
+    );
+    runtime.ensure_job(&job_a).await.unwrap();
+    runtime.ensure_job(&job_b).await.unwrap();
+    let file_a = job_a.token;
+    let file_b = job_b.token;
 
     // Two files each averaging 49_152 B/s over 3s -> aggregate 98_304 B/s.
     runtime.note_download_payload_bytes_at(file_a, 65_536, now + Duration::from_secs(1));
@@ -311,7 +354,8 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "ubuntu-linux.iso".to_string(),
         ED2K_PART_SIZE + 7,
@@ -319,12 +363,12 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
     let manifest = runtime.ensure_job(&job).await.unwrap();
     assert_eq!(manifest.pieces.len(), 2);
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
 
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
     let partial = runtime.ensure_job(&job).await.unwrap();
@@ -335,7 +379,7 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
     assert_eq!(partial.verified_ranges[0].end, ED2K_PART_SIZE);
 
     runtime
-        .store_piece_data(&job.file_hash, 1, &last_piece)
+        .store_piece_data(job.token, 1, &last_piece)
         .await
         .unwrap();
     let complete = runtime.ensure_job(&job).await.unwrap();
@@ -356,38 +400,47 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
 }
 
 #[tokio::test]
-async fn ensure_job_reclaims_only_an_empty_unmanaged_transfer_directory() {
+async fn ensure_job_preserves_an_empty_unmanaged_transfer_directory() {
     let root = unique_test_dir("ed2k-transfer-empty-unmanaged-directory");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         Ed2kHash::from_bytes([0x51; 16]),
         "empty-orphan.bin".to_string(),
         8,
     );
-    let transfer_dir = runtime.transfer_dir_path(&job.file_hash);
+    let transfer_dir = runtime
+        .metadata
+        .download_job(job.token.job_id)
+        .unwrap()
+        .unwrap()
+        .storage
+        .unwrap()
+        .path;
     fs::create_dir_all(&transfer_dir).unwrap();
-
-    runtime
-        .prepare_new_download_directory(&job.file_hash)
-        .await
-        .unwrap();
-    assert!(!transfer_dir.exists());
-
-    runtime.ensure_job(&job).await.unwrap();
+    assert!(runtime.ensure_job(&job).await.is_err());
     assert!(transfer_dir.is_dir());
-    assert!(runtime.manifest(&job.file_hash).await.is_ok());
+    assert!(fs::read_dir(&transfer_dir).unwrap().next().is_none());
 }
 
 #[tokio::test]
 async fn ensure_job_rejects_nonempty_unmanaged_transfer_directory_without_touching_bytes() {
     let root = unique_test_dir("ed2k-transfer-nonempty-unmanaged-directory");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         Ed2kHash::from_bytes([0x52; 16]),
         "occupied-orphan.bin".to_string(),
         8,
     );
-    let transfer_dir = runtime.transfer_dir_path(&job.file_hash);
+    let transfer_dir = runtime
+        .metadata
+        .download_job(job.token.job_id)
+        .unwrap()
+        .unwrap()
+        .storage
+        .unwrap()
+        .path;
     let payload_path = transfer_dir.join(PAYLOAD_FILE_NAME);
     let foreign_bytes = b"unmanaged payload bytes";
     fs::create_dir_all(&transfer_dir).unwrap();
@@ -395,75 +448,128 @@ async fn ensure_job_rejects_nonempty_unmanaged_transfer_directory_without_touchi
 
     let error = runtime.ensure_job(&job).await.unwrap_err().to_string();
 
-    assert!(error.contains("unmanaged directory"));
-    assert!(error.contains("is not empty"));
+    assert!(error.contains("exclusive job directory allocation failed"));
     assert_eq!(fs::read(&payload_path).unwrap(), foreign_bytes);
-    assert!(runtime.manifest(&job.file_hash).await.is_err());
+    assert!(
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .storage
+            .unwrap()
+            .identity
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn ensure_job_rejects_unmanaged_file_at_transfer_directory_path() {
     let root = unique_test_dir("ed2k-transfer-unmanaged-file");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         Ed2kHash::from_bytes([0x53; 16]),
         "occupied-path.bin".to_string(),
         8,
     );
-    let transfer_path = runtime.transfer_dir_path(&job.file_hash);
+    let transfer_path = runtime
+        .metadata
+        .download_job(job.token.job_id)
+        .unwrap()
+        .unwrap()
+        .storage
+        .unwrap()
+        .path;
     let foreign_bytes = b"unmanaged path bytes";
     fs::write(&transfer_path, foreign_bytes).unwrap();
 
     let error = runtime.ensure_job(&job).await.unwrap_err().to_string();
 
-    assert!(error.contains("unmanaged path"));
-    assert!(error.contains("is not a directory"));
+    assert!(error.contains("exclusive job directory allocation failed"));
     assert_eq!(fs::read(&transfer_path).unwrap(), foreign_bytes);
-    assert!(runtime.manifest(&job.file_hash).await.is_err());
+    assert!(
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .storage
+            .unwrap()
+            .identity
+            .is_none()
+    );
 }
 
 #[tokio::test]
-async fn startup_transfer_root_reconciliation_reclaims_safe_residue_and_preserves_collisions() {
+async fn startup_storage_reconciliation_preserves_unowned_selected_paths() {
     let root = unique_test_dir("ed2k-transfer-root-reconciliation");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let owned_job = new_transfer_job(Ed2kHash::from_bytes([0x61; 16]), "owned.bin".to_string(), 8);
-    runtime.ensure_job(&owned_job).await.unwrap();
-    let owned_dir = runtime.transfer_dir_path(&owned_job.file_hash);
-
-    let empty_hash = Ed2kHash::from_bytes([0x62; 16]).to_string();
-    let empty_dir = runtime.transfer_dir_path(&empty_hash);
+    let owned = admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes([0x61; 16]),
+        "owned.bin".to_owned(),
+        8,
+    );
+    runtime.ensure_job(&owned).await.unwrap();
+    let owned_dir = runtime.transfer_dir_path(owned.token.job_id).unwrap();
+    let empty = admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes([0x62; 16]),
+        "empty.bin".to_owned(),
+        8,
+    );
+    let unowned = admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes([0x63; 16]),
+        "unowned.bin".to_owned(),
+        8,
+    );
+    let occupied = admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes([0x64; 16]),
+        "occupied.bin".to_owned(),
+        8,
+    );
+    let file = admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes([0x65; 16]),
+        "file.bin".to_owned(),
+        8,
+    );
+    let selected = |job: &super::Ed2kTransferJob| {
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .storage
+            .unwrap()
+            .path
+    };
+    let empty_dir = selected(&empty);
+    let unowned_dir = selected(&unowned);
+    let occupied_dir = selected(&occupied);
+    let occupied_file = selected(&file);
     fs::create_dir_all(&empty_dir).unwrap();
-
-    let unowned_hash = Ed2kHash::from_bytes([0x63; 16]).to_string();
-    let unowned_dir = runtime.transfer_dir_path(&unowned_hash);
     fs::create_dir_all(&unowned_dir).unwrap();
     fs::write(unowned_dir.join("unexpected-file.bin"), b"preserve me").unwrap();
-
-    let occupied_hash = Ed2kHash::from_bytes([0x64; 16]).to_string();
-    let occupied_dir = runtime.transfer_dir_path(&occupied_hash);
-    let occupied_payload = occupied_dir.join(PAYLOAD_FILE_NAME);
     fs::create_dir_all(&occupied_dir).unwrap();
+    let occupied_payload = occupied_dir.join(PAYLOAD_FILE_NAME);
     fs::write(&occupied_payload, b"preserve me").unwrap();
-
-    let file_hash = Ed2kHash::from_bytes([0x65; 16]).to_string();
-    let occupied_file = runtime.transfer_dir_path(&file_hash);
     fs::write(&occupied_file, b"preserve this path").unwrap();
-
-    let noncanonical_dir = Path::new(&root).join("operator-notes");
-    fs::create_dir_all(&noncanonical_dir).unwrap();
-    fs::write(noncanonical_dir.join("notes.txt"), b"not runtime state").unwrap();
-
-    let reconciliation = runtime.reconcile_transfer_root().await.unwrap();
-
-    assert_eq!(
-        reconciliation,
-        super::Ed2kTransferRootReconciliation {
-            reclaimed_paths: 1,
-            preserved_collisions: 3,
-        }
-    );
+    let notes = Path::new(&root).join("operator-notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(notes.join("notes.txt"), b"not runtime state").unwrap();
+    runtime
+        .reconcile_download_storage(owned.token)
+        .await
+        .unwrap();
+    for job in [&empty, &unowned, &occupied, &file] {
+        assert!(runtime.reconcile_download_storage(job.token).await.is_err());
+    }
     assert!(owned_dir.is_dir());
-    assert!(!empty_dir.exists());
+    assert!(empty_dir.is_dir());
     assert_eq!(
         fs::read(unowned_dir.join("unexpected-file.bin")).unwrap(),
         b"preserve me"
@@ -471,7 +577,7 @@ async fn startup_transfer_root_reconciliation_reclaims_safe_residue_and_preserve
     assert_eq!(fs::read(&occupied_payload).unwrap(), b"preserve me");
     assert_eq!(fs::read(&occupied_file).unwrap(), b"preserve this path");
     assert_eq!(
-        fs::read(noncanonical_dir.join("notes.txt")).unwrap(),
+        fs::read(notes.join("notes.txt")).unwrap(),
         b"not runtime state"
     );
 }
@@ -493,30 +599,35 @@ async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(file_hash, "recheck.iso".to_string(), ED2K_PART_SIZE + 11);
+    let job = admit_download_job(
+        &runtime,
+        file_hash,
+        "recheck.iso".to_string(),
+        ED2K_PART_SIZE + 11,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 1, &last_piece)
+        .store_piece_data(job.token, 1, &last_piece)
         .await
         .unwrap();
-    let complete = runtime.manifest(&job.file_hash).await.unwrap();
+    let complete = runtime.manifest(job.token).await.unwrap();
     assert!(complete.completed);
 
     // A recheck of the intact file leaves it complete (both parts re-verify).
-    assert!(runtime.recheck_transfer(&job.file_hash).await.unwrap());
-    let after_clean = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(runtime.recheck_transfer(job.token).await.unwrap());
+    let after_clean = runtime.manifest(job.token).await.unwrap();
     assert!(after_clean.completed);
 
     // Corrupt the on-disk bytes of part 1 (the trailing short part).
-    let payload_path = runtime.payload_path(&job.file_hash);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -529,8 +640,8 @@ async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
 
     // Recheck must now detect the corruption: not complete, part 1 demoted to
     // Missing (re-download), part 0 still Verified.
-    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
-    let after = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(!runtime.recheck_transfer(job.token).await.unwrap());
+    let after = runtime.manifest(job.token).await.unwrap();
     assert!(!after.completed);
     assert_eq!(after.pieces[0].state, Ed2kTransferState::Verified);
     assert_eq!(after.pieces[1].state, Ed2kTransferState::Missing);
@@ -540,18 +651,18 @@ async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
     assert_eq!(after.verified_ranges[0].start, 0);
     assert_eq!(after.verified_ranges[0].end, ED2K_PART_SIZE);
 
-    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
-    let intact_partial = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(!runtime.recheck_transfer(job.token).await.unwrap());
+    let intact_partial = runtime.manifest(job.token).await.unwrap();
     assert_eq!(intact_partial.pieces[0].state, Ed2kTransferState::Verified);
 
     fs::remove_file(&payload_path).unwrap();
-    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
-    let missing_partial = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(!runtime.recheck_transfer(job.token).await.unwrap());
+    let missing_partial = runtime.manifest(job.token).await.unwrap();
     assert_eq!(missing_partial.pieces[0].state, Ed2kTransferState::Missing);
     assert!(!missing_partial.pieces[0].ich_corrupted);
 
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
 
@@ -565,8 +676,8 @@ async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
         file.flush().unwrap();
     }
 
-    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
-    let fully_damaged = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(!runtime.recheck_transfer(job.token).await.unwrap());
+    let fully_damaged = runtime.manifest(job.token).await.unwrap();
     assert!(fully_damaged.verified_ranges.is_empty());
     assert!(
         fully_damaged
@@ -597,14 +708,14 @@ async fn partfile_serves_complete_parts_while_downloading() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(file_hash, "partfile.iso".to_string(), file_size);
+    let job = admit_download_job(&runtime, file_hash, "partfile.iso".to_string(), file_size);
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
 
@@ -640,7 +751,7 @@ async fn partfile_serves_complete_parts_while_downloading() {
     // Once the file completes it becomes fully servable and the part-status
     // answer collapses to the master complete sentinel (WriteUInt16(0)).
     runtime
-        .store_piece_data(&job.file_hash, 1, &last_piece)
+        .store_piece_data(job.token, 1, &last_piece)
         .await
         .unwrap();
     let complete = runtime.local_entry(&file_hash).await.unwrap().unwrap();
@@ -673,18 +784,18 @@ async fn partfile_rehashes_verified_part_before_serving_replaced_bytes() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(file_hash, "partfile.iso".to_string(), file_size);
+    let job = admit_download_job(&runtime, file_hash, "partfile.iso".to_string(), file_size);
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
 
-    let payload_path = runtime.payload_path(&job.file_hash);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     let detached_path = payload_path.with_extension("detached");
     fs::rename(&payload_path, &detached_path).unwrap();
     fs::write(&payload_path, vec![0xff; first_piece.len()]).unwrap();
@@ -698,7 +809,7 @@ async fn partfile_rehashes_verified_part_before_serving_replaced_bytes() {
             .to_string()
             .contains("verified ED2K part 0 changed before upload serving")
     );
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, 0);
     assert!(manifest.pieces[0].ich_corrupted);
@@ -706,7 +817,7 @@ async fn partfile_rehashes_verified_part_before_serving_replaced_bytes() {
     assert_eq!(runtime.shared_catalog_count().await, 0);
 
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
     assert_eq!(
@@ -729,22 +840,23 @@ async fn missing_incomplete_payload_requeues_every_advertised_part() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "missing-partfile.iso".to_string(),
         first_piece.len() as u64 + last_piece.len() as u64,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
-    runtime.invalidate_payload_handle(&job.file_hash);
-    fs::remove_file(runtime.payload_path(&job.file_hash)).unwrap();
+    runtime.invalidate_payload_handle(job.token);
+    fs::remove_file(runtime.payload_path(job.token.job_id).unwrap()).unwrap();
 
     assert!(
         runtime
@@ -753,7 +865,7 @@ async fn missing_incomplete_payload_requeues_every_advertised_part() {
             .unwrap()
             .is_none()
     );
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert!(!manifest.pieces[0].ich_corrupted);
     assert!(manifest.verified_ranges.is_empty());
@@ -773,25 +885,27 @@ async fn stale_missing_payload_failure_preserves_restored_verified_parts() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "restored-partfile.iso".to_string(),
         first_piece.len() as u64 + last_piece.len() as u64,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
 
-    let payload_path = runtime.payload_path(&job.file_hash);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     let temporary_path = payload_path.with_extension("temporarily-missing");
     fs::rename(&payload_path, &temporary_path).unwrap();
     let stale_failure = Ed2kIncompletePayloadFailure {
+        token: job.token,
         file_hash: job.file_hash.clone(),
         piece_index: None,
         reason: "was temporarily unavailable".to_string(),
@@ -802,7 +916,7 @@ async fn stale_missing_payload_failure_preserves_restored_verified_parts() {
         .await
         .unwrap();
 
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     assert_eq!(manifest.verified_ranges.len(), 1);
     assert_eq!(runtime.shared_catalog_count().await, 1);
@@ -820,7 +934,8 @@ async fn completed_manifest_persists_and_reloads_truthful_aich_hashset() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "captured-aich.iso".to_string(),
         u64::try_from(first_piece.len() + last_piece.len()).unwrap(),
@@ -828,19 +943,19 @@ async fn completed_manifest_persists_and_reloads_truthful_aich_hashset() {
 
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 1, &last_piece)
+        .store_piece_data(job.token, 1, &last_piece)
         .await
         .unwrap();
 
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert!(manifest.completed);
     assert!(manifest.aich_hashset_acquired);
     assert_eq!(manifest.aich_hashset.len(), 2);
@@ -875,7 +990,8 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "captured-remote-aich.iso".to_string(),
         u64::try_from(first_piece.len() + last_piece.len()).unwrap(),
@@ -883,7 +999,7 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
 
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
 
@@ -904,24 +1020,24 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
         ],
     };
     runtime
-        .reconcile_aich_root(&job.file_hash, Some(remote_aich.master_hash))
+        .reconcile_aich_root(job.token, Some(remote_aich.master_hash))
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&job.file_hash, remote_aich.clone())
+        .store_aich_hashset(job.token, remote_aich.clone())
         .await
         .unwrap();
 
     runtime
-        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 1, &last_piece)
+        .store_piece_data(job.token, 1, &last_piece)
         .await
         .unwrap();
 
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert!(manifest.completed);
     assert!(manifest.aich_hashset_acquired);
     assert_eq!(
@@ -936,7 +1052,7 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
         ]
     );
 
-    let transfer_dir = Path::new(&root).join(job.file_hash.as_str());
+    let transfer_dir = runtime.transfer_dir_path(job.token.job_id).unwrap();
     let rebuilt = super::build_aich_hashset_from_payload(
         &transfer_dir.join(super::PAYLOAD_FILE_NAME),
         manifest.file_size,
@@ -1125,7 +1241,7 @@ async fn ingest_local_file_marks_payload_complete_with_stock_aich_identity() {
     assert!(
         runtime
             .metadata
-            .transfer_manifest_by_hash(&summary.file_hash)
+            .latest_download_job(&summary.file_hash)
             .unwrap()
             .is_none()
     );
@@ -1208,7 +1324,13 @@ async fn ingest_local_file_rejects_source_path_replaced_while_hashing() {
 
     assert!(replaced.load(Ordering::Acquire));
     assert!(result.is_err());
-    assert!(runtime.manifests().await.unwrap().is_empty());
+    assert!(
+        runtime
+            .metadata
+            .download_jobs_after(None, 1, false)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(runtime.shared_catalog_count().await, 0);
     assert_eq!(fs::read(retained_path).unwrap(), vec![0x31; 8192]);
     assert_eq!(fs::read(source_path).unwrap(), vec![0x72; 8192]);
@@ -1234,7 +1356,13 @@ async fn ingest_local_file_rejects_source_held_open_for_writing() {
             .await
             .is_err()
     );
-    assert!(runtime.manifests().await.unwrap().is_empty());
+    assert!(
+        runtime
+            .metadata
+            .download_jobs_after(None, 1, false)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(runtime.shared_catalog_count().await, 0);
     drop(writer);
 }
@@ -1260,7 +1388,13 @@ async fn ingest_local_file_rejects_symlink_without_reading_target() {
             .is_err()
     );
     assert_eq!(fs::read(target_path).unwrap(), b"foreign payload");
-    assert!(runtime.manifests().await.unwrap().is_empty());
+    assert!(
+        runtime
+            .metadata
+            .download_jobs_after(None, 1, false)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(runtime.shared_catalog_count().await, 0);
 }
 
@@ -1269,7 +1403,8 @@ async fn store_aich_hashset_rejects_internally_inconsistent_root() {
     let root = unique_test_dir("ed2k-transfer-invalid-aich");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let file_hash = Ed2kHash::from_bytes([0x61; 16]);
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "invalid-aich.iso".to_string(),
         ED2K_PART_SIZE + 7,
@@ -1278,7 +1413,7 @@ async fn store_aich_hashset_rejects_internally_inconsistent_root() {
 
     let error = runtime
         .store_aich_hashset(
-            &job.file_hash,
+            job.token,
             super::Ed2kAichHashset {
                 master_hash: [0x44; 20],
                 part_hashes: vec![[0x11; 20], [0x22; 20]],
@@ -1290,24 +1425,42 @@ async fn store_aich_hashset_rejects_internally_inconsistent_root() {
 }
 
 #[tokio::test]
-async fn reconcile_job_metadata_adopts_unknown_size_and_name() {
+async fn unknown_size_job_learns_size_without_rewriting_chosen_name() {
     let root = unique_test_dir("ed2k-transfer-reconcile-metadata");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let file_hash = Ed2kHash::from_bytes([0x61; 16]);
-    let placeholder_job = new_transfer_job(file_hash, "ed2k-placeholder.bin".to_string(), 0);
-    let initial = runtime.ensure_job(&placeholder_job).await.unwrap();
-    assert_eq!(initial.file_size, 0);
-    assert!(initial.pieces.is_empty());
-
-    let updated = runtime
-        .reconcile_job_metadata(
-            &placeholder_job.file_hash,
-            Some("ubuntu-live.iso"),
-            Some(ED2K_PART_SIZE + 7),
-        )
-        .await
+    let hash = Ed2kHash::from_bytes([0x61; 16]);
+    let original = runtime
+        .metadata
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: hash.to_string(),
+            display_name: "ed2k-placeholder.bin".to_owned(),
+            expected_size_bytes: None,
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Stopped,
+            piece_size: ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    assert_eq!(original.expected_size_bytes, None);
+    assert!(
+        runtime
+            .metadata
+            .learn_download_job_size(original.token, ED2K_PART_SIZE + 7)
+            .unwrap()
+    );
+    let started = runtime
+        .metadata
+        .start_download_job(original.token, Path::new(&root))
+        .unwrap()
         .unwrap();
-    assert_eq!(updated.display_name, "ubuntu-live.iso");
+    let job = new_transfer_job(
+        started.token,
+        hash,
+        started.display_name,
+        ED2K_PART_SIZE + 7,
+    );
+    let updated = runtime.ensure_job(&job).await.unwrap();
+    assert_eq!(updated.display_name, "ed2k-placeholder.bin");
     assert_eq!(updated.file_size, ED2K_PART_SIZE + 7);
     assert_eq!(updated.pieces.len(), 2);
     assert!(
@@ -1324,12 +1477,17 @@ async fn dropping_block_lease_preserves_partial_piece_progress() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5Au8; 32_768];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let job = new_transfer_job(file_hash, "resume.bin".to_string(), payload.len() as u64);
+    let job = admit_download_job(
+        &runtime,
+        file_hash,
+        "resume.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
 
     let lease = runtime
         .lease_next_download_block(
-            &job.file_hash,
+            job.token,
             "127.0.0.1:4662".parse().unwrap(),
             None,
             None,
@@ -1343,21 +1501,21 @@ async fn dropping_block_lease_preserves_partial_piece_progress() {
 
     let split = 8_192usize;
     let completed = runtime
-        .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
+        .append_piece_block(job.token, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
     assert!(!completed.is_completed());
 
     drop(lease);
-    assert_eq!(runtime.active_download_block_lease_count(&job.file_hash), 0);
+    assert_eq!(runtime.active_download_block_lease_count(job.token), 0);
 
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, split as u64);
 
     let reclaimed = runtime
         .lease_next_download_block(
-            &job.file_hash,
+            job.token,
             "127.0.0.2:4662".parse().unwrap(),
             None,
             None,
@@ -1374,7 +1532,8 @@ async fn dropping_block_lease_preserves_partial_piece_progress() {
 async fn two_peers_lease_distinct_blocks_from_the_same_part() {
     let root = unique_test_dir("ed2k-transfer-multi-peer-same-part");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         Ed2kHash::from_bytes([0x42; 16]),
         "same-part.bin".to_string(),
         ED2K_EMBLOCK_SIZE * 3,
@@ -1383,7 +1542,7 @@ async fn two_peers_lease_distinct_blocks_from_the_same_part() {
 
     let first = runtime
         .lease_next_download_block(
-            &job.file_hash,
+            job.token,
             "127.0.0.1:4662".parse().unwrap(),
             None,
             None,
@@ -1394,7 +1553,7 @@ async fn two_peers_lease_distinct_blocks_from_the_same_part() {
         .unwrap();
     let second = runtime
         .lease_next_download_block(
-            &job.file_hash,
+            job.token,
             "127.0.0.2:4662".parse().unwrap(),
             None,
             Some(0),
@@ -1411,12 +1570,12 @@ async fn two_peers_lease_distinct_blocks_from_the_same_part() {
         (second.start(), second.end()),
         (ED2K_EMBLOCK_SIZE, ED2K_EMBLOCK_SIZE * 2)
     );
-    assert_eq!(runtime.active_download_block_lease_count(&job.file_hash), 2);
+    assert_eq!(runtime.active_download_block_lease_count(job.token), 2);
     assert_eq!(
-        runtime.requested_download_parts(&job.file_hash),
+        runtime.requested_download_parts(job.token),
         std::collections::HashSet::from([0])
     );
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
 }
 
@@ -1426,29 +1585,30 @@ async fn append_piece_block_keeps_subblock_progress_in_memory_until_checkpoint()
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5Au8; 65_536];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "cached-progress.bin".to_string(),
         payload.len() as u64,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     let split = 8_192usize;
     let piece_completed = runtime
-        .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
+        .append_piece_block(job.token, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
     assert!(!piece_completed.is_completed());
 
-    let cached_manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let cached_manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(cached_manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(cached_manifest.pieces[0].bytes_written, split as u64);
 
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
-    let persisted_manifest = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    let persisted_manifest = reloaded_runtime.manifest(job.token).await.unwrap();
     assert_eq!(
         persisted_manifest.pieces[0].state,
         Ed2kTransferState::Missing
@@ -1463,7 +1623,8 @@ async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() 
     let block = usize::try_from(ED2K_EMBLOCK_SIZE).unwrap();
     let payload = vec![0x3Cu8; block * 9 + 1024];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "piece-row-checkpoint.bin".to_string(),
         payload.len() as u64,
@@ -1476,13 +1637,7 @@ async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() 
         let start = index * block;
         let end = start + block;
         let outcome = runtime
-            .append_piece_block(
-                &job.file_hash,
-                0,
-                start as u64,
-                end as u64,
-                &payload[start..end],
-            )
+            .append_piece_block(job.token, 0, start as u64, end as u64, &payload[start..end])
             .await
             .unwrap();
         assert!(!outcome.is_completed());
@@ -1493,7 +1648,7 @@ async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() 
     // least the first block is durable even if a slow run trips the interval
     // checkpoint before the byte threshold.
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
-    let persisted = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    let persisted = reloaded_runtime.manifest(job.token).await.unwrap();
     assert_eq!(persisted.pieces[0].state, Ed2kTransferState::Missing);
     assert!(
         persisted.pieces[0].bytes_written >= ED2K_EMBLOCK_SIZE,
@@ -1508,25 +1663,21 @@ async fn final_shutdown_checkpoint_persists_acknowledged_progress_for_restart() 
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let block = vec![0xA5; usize::try_from(ED2K_EMBLOCK_SIZE).unwrap()];
     let file_hash = Ed2kHash::from_bytes([0x42; 16]);
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "shutdown-progress.bin".to_string(),
         ED2K_EMBLOCK_SIZE * 2,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .append_piece_block(&job.file_hash, 0, 0, ED2K_EMBLOCK_SIZE, &block)
+        .append_piece_block(job.token, 0, 0, ED2K_EMBLOCK_SIZE, &block)
         .await
         .unwrap();
 
     let before_shutdown = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     assert_eq!(
-        before_shutdown
-            .manifest(&job.file_hash)
-            .await
-            .unwrap()
-            .pieces[0]
-            .bytes_written,
+        before_shutdown.manifest(job.token).await.unwrap().pieces[0].bytes_written,
         0,
         "sub-threshold acknowledged progress should still be cache-only"
     );
@@ -1538,7 +1689,7 @@ async fn final_shutdown_checkpoint_persists_acknowledged_progress_for_restart() 
 
     let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     assert_eq!(
-        restarted.manifest(&job.file_hash).await.unwrap().pieces[0].bytes_written,
+        restarted.manifest(job.token).await.unwrap().pieces[0].bytes_written,
         ED2K_EMBLOCK_SIZE
     );
     assert_eq!(
@@ -1555,7 +1706,8 @@ async fn batched_checkpoint_persists_pieces_dirtied_by_other_appends() {
     let part = usize::try_from(ED2K_PART_SIZE).unwrap();
     let payload = vec![0x7Du8; part + block * 8 + 1024];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "dirty-piece-tracking.bin".to_string(),
         payload.len() as u64,
@@ -1564,7 +1716,7 @@ async fn batched_checkpoint_persists_pieces_dirtied_by_other_appends() {
 
     // One cache-only block into piece 0 (below the batch threshold).
     runtime
-        .append_piece_block(&job.file_hash, 0, 0, block as u64, &payload[..block])
+        .append_piece_block(job.token, 0, 0, block as u64, &payload[..block])
         .await
         .unwrap();
     // Blocks into piece 1 until the batched checkpoint trips. The checkpoint
@@ -1574,19 +1726,13 @@ async fn batched_checkpoint_persists_pieces_dirtied_by_other_appends() {
         let start = part + index * block;
         let end = start + block;
         runtime
-            .append_piece_block(
-                &job.file_hash,
-                1,
-                start as u64,
-                end as u64,
-                &payload[start..end],
-            )
+            .append_piece_block(job.token, 1, start as u64, end as u64, &payload[start..end])
             .await
             .unwrap();
     }
 
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
-    let persisted = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    let persisted = reloaded_runtime.manifest(job.token).await.unwrap();
     assert_eq!(
         persisted.pieces[0].bytes_written, ED2K_EMBLOCK_SIZE,
         "a checkpoint triggered by piece 1 must persist piece 0's dirty progress"
@@ -1599,12 +1745,17 @@ async fn restart_keeps_partial_progress_without_persisted_network_claims() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x6Bu8; 32_768];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let job = new_transfer_job(file_hash, "resume.bin".to_string(), payload.len() as u64);
+    let job = admit_download_job(
+        &runtime,
+        file_hash,
+        "resume.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
 
     let split = 8_192usize;
     runtime
-        .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
+        .append_piece_block(job.token, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
     assert_eq!(
@@ -1613,7 +1764,7 @@ async fn restart_keeps_partial_progress_without_persisted_network_claims() {
     );
     drop(runtime);
     let reloaded = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let manifest = reloaded.manifest(&job.file_hash).await.unwrap();
+    let manifest = reloaded.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, split as u64);
 }
@@ -1624,26 +1775,27 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x6Bu8; 65_536];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let job = new_transfer_job(
+    let job = admit_download_job(
+        &runtime,
         file_hash,
         "completion-checkpoint.bin".to_string(),
         payload.len() as u64,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     let split = 8_192usize;
     let first_completed = runtime
-        .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
+        .append_piece_block(job.token, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
     assert!(!first_completed.is_completed());
 
     let final_completed = runtime
         .append_piece_block(
-            &job.file_hash,
+            job.token,
             0,
             split as u64,
             payload.len() as u64,
@@ -1653,7 +1805,7 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
         .unwrap();
     assert!(final_completed.is_completed());
 
-    let persisted_manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let persisted_manifest = runtime.manifest(job.token).await.unwrap();
     assert!(persisted_manifest.completed);
     assert_eq!(
         persisted_manifest.pieces[0].state,
@@ -1665,7 +1817,7 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
     );
 
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
-    let reloaded_manifest = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    let reloaded_manifest = reloaded_runtime.manifest(job.token).await.unwrap();
     assert!(reloaded_manifest.completed);
     assert_eq!(
         reloaded_manifest.pieces[0].state,
@@ -1683,14 +1835,19 @@ async fn replace_catalog_hints_preserves_verified_entries() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = [9u8, 8, 7, 6];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(payload).into());
-    let job = new_transfer_job(file_hash, "verified.bin".to_string(), payload.len() as u64);
+    let job = admit_download_job(
+        &runtime,
+        file_hash,
+        "verified.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &payload)
+        .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
 

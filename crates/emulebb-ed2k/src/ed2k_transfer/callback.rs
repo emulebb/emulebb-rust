@@ -1296,11 +1296,28 @@ mod tests {
     use super::*;
     use crate::{ed2k_transfer::Ed2kSourceHint, paths::unique_test_dir};
 
-    fn download(hash_byte: u8) -> Ed2kCallbackDownload {
+    fn download_for_hash(
+        metadata: &emulebb_metadata::MetadataStore,
+        hash: emulebb_kad_proto::Ed2kHash,
+        name: String,
+        size: u64,
+    ) -> Ed2kCallbackDownload {
+        let job = metadata
+            .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+                file_hash: hash.to_string(),
+                display_name: name.clone(),
+                expected_size_bytes: Some(size),
+                category_id: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                piece_size: super::super::ED2K_PART_SIZE,
+            })
+            .unwrap()
+            .job;
         Ed2kCallbackDownload {
-            file_hash: emulebb_kad_proto::Ed2kHash::from_bytes([hash_byte; 16]),
-            display_name: format!("{hash_byte}.bin"),
-            file_size: u64::from(hash_byte),
+            job_token: job.token,
+            file_hash: hash,
+            display_name: name,
+            file_size: size,
             source: Ed2kSourceHint {
                 ip: "192.0.2.1".to_string(),
                 tcp_port: 4662,
@@ -1311,17 +1328,30 @@ mod tests {
             },
         }
     }
-
-    fn indexed_download(index: u16) -> Ed2kCallbackDownload {
-        let mut value = download(index as u8);
+    fn download(metadata: &emulebb_metadata::MetadataStore, hash_byte: u8) -> Ed2kCallbackDownload {
+        download_for_hash(
+            metadata,
+            emulebb_kad_proto::Ed2kHash::from_bytes([hash_byte; 16]),
+            format!("{hash_byte}.bin"),
+            u64::from(hash_byte).max(1),
+        )
+    }
+    fn indexed_download(
+        metadata: &emulebb_metadata::MetadataStore,
+        index: u16,
+    ) -> Ed2kCallbackDownload {
         let mut hash = [0; 16];
         hash[..2].copy_from_slice(&index.to_le_bytes());
-        value.file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(hash);
-        value.display_name = format!("{index}.bin");
-        value
+        download_for_hash(
+            metadata,
+            emulebb_kad_proto::Ed2kHash::from_bytes(hash),
+            format!("{index}.bin"),
+            u64::from(index).max(1),
+        )
     }
 
     fn server_request(
+        metadata: &emulebb_metadata::MetadataStore,
         server: SocketAddr,
         client_id: u32,
         hash_byte: u8,
@@ -1331,13 +1361,14 @@ mod tests {
             client_id,
             None,
             4662,
-            download(hash_byte),
+            download(&metadata, hash_byte),
             Duration::from_secs(45),
         )
         .unwrap()
     }
 
     fn direct_request(
+        metadata: &emulebb_metadata::MetadataStore,
         source_endpoint: SocketAddr,
         user_hash: [u8; 16],
         hash_byte: u8,
@@ -1347,7 +1378,7 @@ mod tests {
             17,
             user_hash,
             4662,
-            download(hash_byte),
+            download(&metadata, hash_byte),
             Duration::from_secs(45),
         )
         .unwrap()
@@ -1382,15 +1413,16 @@ mod tests {
             "ed2k-callback-ticket-server-scope",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server_a = "192.0.2.10:4661".parse().unwrap();
         let server_b = "192.0.2.20:4661".parse().unwrap();
         runtime
-            .reserve_callback_ticket_at(server_request(server_a, 17, 1), now)
+            .reserve_callback_ticket_at(server_request(&metadata, server_a, 17, 1), now)
             .await
             .unwrap();
         runtime
-            .reserve_callback_ticket_at(server_request(server_b, 17, 2), now)
+            .reserve_callback_ticket_at(server_request(&metadata, server_b, 17, 2), now)
             .await
             .unwrap();
 
@@ -1407,7 +1439,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claim.downloads, vec![download(2)]);
+        assert_eq!(claim.downloads, vec![download(&metadata, 2)]);
         assert!(
             runtime
                 .commit_callback_claim_at(&claim.token, now)
@@ -1420,7 +1452,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(remaining.downloads, vec![download(1)]);
+        assert_eq!(remaining.downloads, vec![download(&metadata, 1)]);
     }
 
     #[tokio::test]
@@ -1429,9 +1461,10 @@ mod tests {
             "ed2k-callback-ticket-hash-first",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server: SocketAddr = "192.0.2.10:4661".parse().unwrap();
-        let mut request = server_request(server, 17, 1);
+        let mut request = server_request(&metadata, server, 17, 1);
         request.peer.expected_user_hash = Some([0x44; 16]);
         runtime
             .reserve_callback_ticket_at(request, now)
@@ -1450,7 +1483,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claim.downloads, vec![download(1)]);
+        assert_eq!(claim.downloads, vec![download(&metadata, 1)]);
     }
 
     #[tokio::test]
@@ -1458,15 +1491,16 @@ mod tests {
         let runtime =
             Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-callback-ticket-a4af"))
                 .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let first = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
                 .await
                 .unwrap(),
         );
-        let mut second_request = server_request(server, 17, 2);
+        let mut second_request = server_request(&metadata, server, 17, 2);
         second_request.peer.source_tcp_port = 4663;
         let second = runtime
             .reserve_callback_ticket_at(second_request, now + Duration::from_secs(30))
@@ -1500,18 +1534,19 @@ mod tests {
         let runtime =
             Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-callback-ticket-cancel"))
                 .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server_a = "192.0.2.10:4661".parse().unwrap();
         let server_b = "192.0.2.20:4661".parse().unwrap();
         let cancelled = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server_a, 17, 1), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server_a, 17, 1), now)
                 .await
                 .unwrap(),
         );
         let surviving = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server_b, 17, 2), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server_b, 17, 2), now)
                 .await
                 .unwrap(),
         );
@@ -1528,26 +1563,27 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claim.downloads, vec![download(2)]);
+        assert_eq!(claim.downloads, vec![download(&metadata, 2)]);
     }
 
     #[test]
     fn bounded_store_rejects_without_evicting_and_expiry_frees_capacity() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server_a = "192.0.2.10:4661".parse().unwrap();
         let server_b = "192.0.2.20:4661".parse().unwrap();
         let mut store = CallbackTicketStore::new(1, 1);
-        let mut first = server_request(server_a, 17, 1);
+        let mut first = server_request(&metadata, server_a, 17, 1);
         first.valid_for = Duration::from_secs(1);
         store.reserve(first, now).unwrap();
         assert_eq!(
-            store.reserve(server_request(server_b, 17, 2), now),
+            store.reserve(server_request(&metadata, server_b, 17, 2), now),
             Err(Ed2kCallbackTicketError::TicketCapacity)
         );
         assert!(
             store
                 .reserve(
-                    server_request(server_b, 17, 2),
+                    server_request(&metadata, server_b, 17, 2),
                     now + Duration::from_secs(1),
                 )
                 .is_ok()
@@ -1556,38 +1592,47 @@ mod tests {
 
     #[test]
     fn direct_udp_ticket_joins_a4af_only_on_the_same_route_and_peer_hash() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let source_a: SocketAddr = "192.0.2.1:4672".parse().unwrap();
         let source_b: SocketAddr = "192.0.2.1:4673".parse().unwrap();
         let mut store = CallbackTicketStore::default();
 
         assert!(matches!(
-            store.reserve(direct_request(source_a, [0x44; 16], 1), now),
+            store.reserve(direct_request(&metadata, source_a, [0x44; 16], 1), now),
             Ok(Ed2kCallbackReservation::Dispatch(_))
         ));
         assert!(matches!(
-            store.reserve(direct_request(source_a, [0x44; 16], 2), now),
+            store.reserve(direct_request(&metadata, source_a, [0x44; 16], 2), now),
             Ok(Ed2kCallbackReservation::Joined { .. })
         ));
         assert!(matches!(
-            store.reserve(direct_request(source_b, [0x44; 16], 3), now),
+            store.reserve(direct_request(&metadata, source_b, [0x44; 16], 3), now),
             Ok(Ed2kCallbackReservation::Dispatch(_))
         ));
         assert!(matches!(
-            store.reserve(direct_request(source_a, [0x55; 16], 4), now),
+            store.reserve(direct_request(&metadata, source_a, [0x55; 16], 4), now),
             Ok(Ed2kCallbackReservation::Dispatch(_))
         ));
 
         assert_eq!(store.tickets.len(), 3);
-        assert_eq!(store.tickets[0].downloads, vec![download(1), download(2)]);
+        assert_eq!(
+            store.tickets[0].downloads,
+            vec![download(&metadata, 1), download(&metadata, 2)]
+        );
     }
 
     #[test]
     fn dispatching_ticket_survives_its_queue_deadline_then_arms_from_settlement_time() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let mut store = CallbackTicketStore::default();
-        let permit = dispatch_permit(store.reserve(server_request(server, 17, 1), now).unwrap());
+        let permit = dispatch_permit(
+            store
+                .reserve(server_request(&metadata, server, 17, 1), now)
+                .unwrap(),
+        );
         assert_eq!(permit.expires_at(), now + Duration::from_secs(45));
         assert!(store.begin_dispatch(&permit, now));
 
@@ -1610,10 +1655,11 @@ mod tests {
             "ed2k-callback-ticket-dispatch-guard-drop",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let server = "192.0.2.10:4661".parse().unwrap();
         let permit = dispatch_permit(
             runtime
-                .reserve_callback_ticket(server_request(server, 17, 1))
+                .reserve_callback_ticket(server_request(&metadata, server, 17, 1))
                 .await
                 .unwrap(),
         );
@@ -1625,7 +1671,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claim.downloads, vec![download(1)]);
+        assert_eq!(claim.downloads, vec![download(&metadata, 1)]);
     }
 
     #[tokio::test]
@@ -1634,10 +1680,11 @@ mod tests {
             "ed2k-callback-ticket-settlement",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         runtime
-            .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+            .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
             .await
             .unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
@@ -1679,10 +1726,11 @@ mod tests {
             "ed2k-callback-ticket-stale-lease",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         runtime
-            .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+            .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
             .await
             .unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
@@ -1718,11 +1766,12 @@ mod tests {
             "ed2k-callback-ticket-cancel-race",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let permit = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
                 .await
                 .unwrap(),
         );
@@ -1747,11 +1796,12 @@ mod tests {
             "ed2k-callback-ticket-release-reserved",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let permit = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
                 .await
                 .unwrap(),
         );
@@ -1773,11 +1823,12 @@ mod tests {
         let runtime =
             Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-callback-ticket-fast-arm"))
                 .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let permit = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
                 .await
                 .unwrap(),
         );
@@ -1809,11 +1860,12 @@ mod tests {
             "ed2k-callback-ticket-expired-reserved",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let permit = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
                 .await
                 .unwrap(),
         );
@@ -1842,9 +1894,10 @@ mod tests {
             "ed2k-callback-ticket-release-expired",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
-        let mut request = server_request(server, 17, 1);
+        let mut request = server_request(&metadata, server, 17, 1);
         request.valid_for = Duration::from_secs(1);
         runtime
             .reserve_callback_ticket_at(request, now)
@@ -1878,17 +1931,18 @@ mod tests {
             "ed2k-callback-session-drop-a4af",
         ))
         .unwrap();
+        let metadata = runtime.metadata.clone();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let permit = dispatch_permit(
             runtime
-                .reserve_callback_ticket_at(server_request(server, 17, 1), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server, 17, 1), now)
                 .await
                 .unwrap(),
         );
         assert!(matches!(
             runtime
-                .reserve_callback_ticket_at(server_request(server, 17, 2), now)
+                .reserve_callback_ticket_at(server_request(&metadata, server, 17, 2), now)
                 .await
                 .unwrap(),
             Ed2kCallbackReservation::Joined { .. }
@@ -1904,24 +1958,27 @@ mod tests {
             .claim_callback_session_at(hello(Some(server), 17, [0x55; 16]), now)
             .unwrap()
             .unwrap();
-        assert_eq!(claim.current().unwrap(), Some(download(1)));
+        assert_eq!(claim.current().unwrap(), Some(download(&metadata, 1)));
         claim.acknowledge_current().unwrap();
-        assert_eq!(claim.current().unwrap(), Some(download(2)));
+        assert_eq!(claim.current().unwrap(), Some(download(&metadata, 2)));
         drop(claim);
 
         let tickets = runtime.callback_tickets.lock().unwrap();
         assert_eq!(tickets.tickets.len(), 1);
         assert_eq!(tickets.tickets[0].state, CallbackTicketState::NeedsDispatch);
-        assert_eq!(tickets.tickets[0].downloads, vec![download(2)]);
+        assert_eq!(tickets.tickets[0].downloads, vec![download(&metadata, 2)]);
     }
 
     #[test]
     fn session_owned_work_cannot_be_reaped_or_reclaimed_after_the_short_lease() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
         let mut store = CallbackTicketStore::default();
-        store.reserve(server_request(server, 17, 1), now).unwrap();
+        store
+            .reserve(server_request(&metadata, server, 17, 1), now)
+            .unwrap();
         let token = store.claim_session(observed, now).unwrap().unwrap();
 
         assert!(
@@ -1932,18 +1989,19 @@ mod tests {
         );
         assert_eq!(
             store.session_current(&token, now + CALLBACK_CLAIM_LEASE),
-            Ok(Some(download(1)))
+            Ok(Some(download(&metadata, 1)))
         );
     }
 
     #[test]
     fn acknowledging_a_duplicate_hash_consumes_every_selected_ticket_copy() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server_a = "192.0.2.10:4661".parse().unwrap();
         let server_b = "192.0.2.20:4661".parse().unwrap();
-        let mut first = server_request(server_a, 17, 1);
+        let mut first = server_request(&metadata, server_a, 17, 1);
         first.peer.expected_user_hash = Some([0x44; 16]);
-        let mut second = server_request(server_b, 23, 1);
+        let mut second = server_request(&metadata, server_b, 23, 1);
         second.peer.expected_user_hash = Some([0x44; 16]);
         let mut store = CallbackTicketStore::default();
         store.reserve(first, now).unwrap();
@@ -1960,25 +2018,34 @@ mod tests {
 
     #[test]
     fn work_joined_during_a_session_is_returned_for_fresh_dispatch() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
         let mut store = CallbackTicketStore::default();
-        store.reserve(server_request(server, 17, 1), now).unwrap();
+        store
+            .reserve(server_request(&metadata, server, 17, 1), now)
+            .unwrap();
         let token = store.claim_session(observed, now).unwrap().unwrap();
         store.acknowledge_session_current(&token, now).unwrap();
 
         assert!(matches!(
-            store.reserve(server_request(server, 17, 2), now),
+            store.reserve(server_request(&metadata, server, 17, 2), now),
             Ok(Ed2kCallbackReservation::Joined { .. })
         ));
-        assert_eq!(store.session_current(&token, now), Ok(Some(download(2))));
+        assert_eq!(
+            store.session_current(&token, now),
+            Ok(Some(download(&metadata, 2)))
+        );
         store.finish_session(&token, now).unwrap();
         let previous_ticket_id = store.tickets[0].id;
         assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
         let permit = dispatch_permit(
             store
-                .reserve(server_request(server, 17, 2), now + Duration::from_secs(1))
+                .reserve(
+                    server_request(&metadata, server, 17, 2),
+                    now + Duration::from_secs(1),
+                )
                 .unwrap(),
         );
         assert_ne!(permit.ticket_id, previous_ticket_id);
@@ -1986,6 +2053,7 @@ mod tests {
 
     #[test]
     fn stale_permits_cannot_mutate_a_fresh_redispatch_epoch() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
@@ -1993,14 +2061,14 @@ mod tests {
         let mut mark_store = CallbackTicketStore::default();
         let stale_mark = dispatch_permit(
             mark_store
-                .reserve(server_request(server, 17, 1), now)
+                .reserve(server_request(&metadata, server, 17, 1), now)
                 .unwrap(),
         );
         let owner = mark_store.claim_session(observed, now).unwrap().unwrap();
         mark_store.finish_session(&owner, now).unwrap();
         let fresh_mark = dispatch_permit(
             mark_store
-                .reserve(server_request(server, 17, 1), now)
+                .reserve(server_request(&metadata, server, 17, 1), now)
                 .unwrap(),
         );
         assert_ne!(stale_mark.ticket_id, fresh_mark.ticket_id);
@@ -2016,14 +2084,14 @@ mod tests {
         let mut cancel_store = CallbackTicketStore::default();
         let stale_cancel = dispatch_permit(
             cancel_store
-                .reserve(server_request(server, 17, 1), now)
+                .reserve(server_request(&metadata, server, 17, 1), now)
                 .unwrap(),
         );
         let owner = cancel_store.claim_session(observed, now).unwrap().unwrap();
         cancel_store.finish_session(&owner, now).unwrap();
         let fresh_cancel = dispatch_permit(
             cancel_store
-                .reserve(server_request(server, 17, 1), now)
+                .reserve(server_request(&metadata, server, 17, 1), now)
                 .unwrap(),
         );
         assert_ne!(stale_cancel.ticket_id, fresh_cancel.ticket_id);
@@ -2033,34 +2101,44 @@ mod tests {
 
     #[test]
     fn cancelled_residual_dispatch_preserves_the_complete_retry_set() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
         let mut store = CallbackTicketStore::default();
-        store.reserve(server_request(server, 17, 1), now).unwrap();
-        store.reserve(server_request(server, 17, 2), now).unwrap();
+        store
+            .reserve(server_request(&metadata, server, 17, 1), now)
+            .unwrap();
+        store
+            .reserve(server_request(&metadata, server, 17, 2), now)
+            .unwrap();
         let owner = store.claim_session(observed, now).unwrap().unwrap();
         store.acknowledge_session_current(&owner, now).unwrap();
         store.finish_session(&owner, now).unwrap();
 
-        let failed = dispatch_permit(store.reserve(server_request(server, 17, 2), now).unwrap());
+        let failed = dispatch_permit(
+            store
+                .reserve(server_request(&metadata, server, 17, 2), now)
+                .unwrap(),
+        );
         assert!(store.cancel(failed, now));
         assert_eq!(store.tickets.len(), 1);
         assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
-        assert_eq!(store.tickets[0].downloads, vec![download(2)]);
+        assert_eq!(store.tickets[0].downloads, vec![download(&metadata, 2)]);
 
         assert!(matches!(
-            store.reserve(server_request(server, 17, 2), now),
+            store.reserve(server_request(&metadata, server, 17, 2), now),
             Ok(Ed2kCallbackReservation::Dispatch(_))
         ));
     }
 
     #[test]
     fn same_hash_work_from_another_route_joins_the_active_peer_session() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let user_hash = [0x44; 16];
-        let mut first = server_request(server, 17, 1);
+        let mut first = server_request(&metadata, server, 17, 1);
         first.peer.expected_user_hash = Some(user_hash);
         let mut store = CallbackTicketStore::default();
         store.reserve(first, now).unwrap();
@@ -2076,7 +2154,7 @@ mod tests {
             user_hash,
             Ipv4Addr::new(192, 0, 2, 1),
             4662,
-            download(2),
+            download(&metadata, 2),
             Duration::from_secs(45),
         )
         .unwrap();
@@ -2084,9 +2162,15 @@ mod tests {
             store.reserve(joined, now),
             Ok(Ed2kCallbackReservation::Joined { .. })
         ));
-        assert_eq!(store.session_current(&owner, now), Ok(Some(download(1))));
+        assert_eq!(
+            store.session_current(&owner, now),
+            Ok(Some(download(&metadata, 1)))
+        );
         store.acknowledge_session_current(&owner, now).unwrap();
-        assert_eq!(store.session_current(&owner, now), Ok(Some(download(2))));
+        assert_eq!(
+            store.session_current(&owner, now),
+            Ok(Some(download(&metadata, 2)))
+        );
         store.finish_session(&owner, now).unwrap();
 
         assert_eq!(store.tickets.len(), 1);
@@ -2095,19 +2179,20 @@ mod tests {
             Ed2kCallbackRoute::KadBuddy { .. }
         ));
         assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
-        assert_eq!(store.tickets[0].downloads, vec![download(2)]);
+        assert_eq!(store.tickets[0].downloads, vec![download(&metadata, 2)]);
     }
 
     #[test]
     fn same_route_join_cannot_bypass_the_live_session_file_bound() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let user_hash = [0x44; 16];
         let mut store = CallbackTicketStore::default();
         for index in 0..128u16 {
-            let mut request = server_request(server, 17, 1);
+            let mut request = server_request(&metadata, server, 17, 1);
             request.peer.expected_user_hash = Some(user_hash);
-            request.download = indexed_download(index);
+            request.download = indexed_download(&metadata, index);
             store.reserve(request, now).unwrap();
         }
         for index in 128..256u16 {
@@ -2118,7 +2203,7 @@ mod tests {
                 user_hash,
                 Ipv4Addr::new(192, 0, 2, 1),
                 4662,
-                indexed_download(index),
+                indexed_download(&metadata, index),
                 Duration::from_secs(45),
             )
             .unwrap();
@@ -2139,9 +2224,9 @@ mod tests {
             CALLBACK_CLAIM_DOWNLOAD_CAPACITY
         );
 
-        let mut overflow = server_request(server, 17, 1);
+        let mut overflow = server_request(&metadata, server, 17, 1);
         overflow.peer.expected_user_hash = Some(user_hash);
-        overflow.download = indexed_download(256);
+        overflow.download = indexed_download(&metadata, 256);
         assert!(matches!(
             store.reserve(overflow, now),
             Ok(Ed2kCallbackReservation::Dispatch(_))
@@ -2161,14 +2246,15 @@ mod tests {
 
     #[test]
     fn live_session_cannot_absorb_an_oversized_residual_ticket() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let user_hash = [0x44; 16];
         let mut store = CallbackTicketStore::default();
         for index in 0..200u16 {
-            let mut request = server_request(server, 17, 1);
+            let mut request = server_request(&metadata, server, 17, 1);
             request.peer.expected_user_hash = Some(user_hash);
-            request.download = indexed_download(index);
+            request.download = indexed_download(&metadata, index);
             store.reserve(request, now).unwrap();
         }
         for index in 200..300u16 {
@@ -2179,7 +2265,7 @@ mod tests {
                 user_hash,
                 Ipv4Addr::new(192, 0, 2, 1),
                 4662,
-                indexed_download(index),
+                indexed_download(&metadata, index),
                 Duration::from_secs(45),
             )
             .unwrap();
@@ -2203,7 +2289,7 @@ mod tests {
             user_hash,
             Ipv4Addr::new(192, 0, 2, 1),
             4662,
-            indexed_download(200),
+            indexed_download(&metadata, 200),
             Duration::from_secs(45),
         )
         .unwrap();
@@ -2231,11 +2317,14 @@ mod tests {
 
     #[test]
     fn fallback_admission_pins_the_observed_hash_before_concurrent_joins() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let admitted_hash = [0x44; 16];
         let mut store = CallbackTicketStore::default();
-        store.reserve(server_request(server, 17, 1), now).unwrap();
+        store
+            .reserve(server_request(&metadata, server, 17, 1), now)
+            .unwrap();
         let owner = store
             .claim_session(hello(Some(server), 17, admitted_hash), now)
             .unwrap()
@@ -2245,22 +2334,30 @@ mod tests {
             Some(admitted_hash)
         );
 
-        let mut conflicting = server_request(server, 17, 2);
+        let mut conflicting = server_request(&metadata, server, 17, 2);
         conflicting.peer.expected_user_hash = Some([0x45; 16]);
         assert!(matches!(
             store.reserve(conflicting, now),
             Ok(Ed2kCallbackReservation::Dispatch(_))
         ));
-        assert_eq!(store.session_current(&owner, now), Ok(Some(download(1))));
+        assert_eq!(
+            store.session_current(&owner, now),
+            Ok(Some(download(&metadata, 1)))
+        );
     }
 
     #[test]
     fn late_dispatch_mark_after_complete_session_is_explicitly_settled() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
         let mut store = CallbackTicketStore::default();
-        let permit = dispatch_permit(store.reserve(server_request(server, 17, 1), now).unwrap());
+        let permit = dispatch_permit(
+            store
+                .reserve(server_request(&metadata, server, 17, 1), now)
+                .unwrap(),
+        );
         let owner = store.claim_session(observed, now).unwrap().unwrap();
         store.acknowledge_session_current(&owner, now).unwrap();
         store.finish_session(&owner, now).unwrap();
@@ -2273,18 +2370,22 @@ mod tests {
 
     #[test]
     fn session_residuals_receive_a_fresh_bounded_redispatch_deadline() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let after_original_expiry = now + Duration::from_secs(2);
         let server = "192.0.2.10:4661".parse().unwrap();
         let observed = hello(Some(server), 17, [0x55; 16]);
-        let mut first = server_request(server, 17, 1);
+        let mut first = server_request(&metadata, server, 17, 1);
         first.valid_for = Duration::from_secs(1);
         let mut store = CallbackTicketStore::default();
         store.reserve(first, now).unwrap();
         let owner = store.claim_session(observed, now).unwrap().unwrap();
 
         assert!(matches!(
-            store.reserve(server_request(server, 17, 2), after_original_expiry),
+            store.reserve(
+                server_request(&metadata, server, 17, 2),
+                after_original_expiry
+            ),
             Ok(Ed2kCallbackReservation::Joined { .. })
         ));
         store
@@ -2293,7 +2394,7 @@ mod tests {
         store.finish_session(&owner, after_original_expiry).unwrap();
 
         assert_eq!(store.tickets.len(), 1);
-        assert_eq!(store.tickets[0].downloads, vec![download(2)]);
+        assert_eq!(store.tickets[0].downloads, vec![download(&metadata, 2)]);
         assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
         assert_eq!(
             store.tickets[0].expires_at,
@@ -2303,12 +2404,15 @@ mod tests {
 
     #[test]
     fn capacity_failure_does_not_partially_strengthen_ticket_identity() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let mut store = CallbackTicketStore::new(2, 1);
-        store.reserve(server_request(server, 17, 1), now).unwrap();
+        store
+            .reserve(server_request(&metadata, server, 17, 1), now)
+            .unwrap();
         let original = store.tickets[0].clone();
-        let mut rejected = server_request(server, 17, 2);
+        let mut rejected = server_request(&metadata, server, 17, 2);
         rejected.peer.expected_user_hash = Some([0x44; 16]);
 
         assert_eq!(
@@ -2320,10 +2424,15 @@ mod tests {
 
     #[test]
     fn fast_dispatch_completion_is_recorded_while_the_session_owns_the_ticket() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server = "192.0.2.10:4661".parse().unwrap();
         let mut store = CallbackTicketStore::default();
-        let permit = dispatch_permit(store.reserve(server_request(server, 17, 1), now).unwrap());
+        let permit = dispatch_permit(
+            store
+                .reserve(server_request(&metadata, server, 17, 1), now)
+                .unwrap(),
+        );
         let token = store
             .claim_session(hello(Some(server), 17, [0x55; 16]), now)
             .unwrap()
@@ -2346,13 +2455,14 @@ mod tests {
 
     #[test]
     fn ticket_constructors_reject_unclaimable_protocol_identity() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let server: SocketAddr = "192.0.2.10:4661".parse().unwrap();
         let normalized = Ed2kCallbackTicketRequest::server(
             server,
             17,
             Some([0; 16]),
             4662,
-            download(1),
+            download(&metadata, 1),
             Duration::from_secs(45),
         )
         .unwrap();
@@ -2363,7 +2473,7 @@ mod tests {
                 17,
                 None,
                 0,
-                download(1),
+                download(&metadata, 1),
                 Duration::from_secs(45),
             ),
             Err(Ed2kCallbackTicketError::ZeroTcpPort)
@@ -2374,7 +2484,7 @@ mod tests {
                 17,
                 None,
                 4662,
-                download(1),
+                download(&metadata, 1),
                 ED2K_CALLBACK_TICKET_MAX_LIFETIME + Duration::from_secs(1),
             ),
             Err(Ed2kCallbackTicketError::LifetimeTooLong)
@@ -2387,7 +2497,7 @@ mod tests {
                 [0x33; 16],
                 Ipv4Addr::new(192, 0, 2, 1),
                 4662,
-                download(1),
+                download(&metadata, 1),
                 Duration::from_secs(45),
             ),
             Err(Ed2kCallbackTicketError::InvalidBuddyId)
@@ -2400,7 +2510,7 @@ mod tests {
                 [0; 16],
                 Ipv4Addr::new(192, 0, 2, 1),
                 4662,
-                download(1),
+                download(&metadata, 1),
                 Duration::from_secs(45),
             ),
             Err(Ed2kCallbackTicketError::MissingUserHash)
@@ -2411,7 +2521,7 @@ mod tests {
                 17,
                 [0x33; 16],
                 4662,
-                download(1),
+                download(&metadata, 1),
                 Duration::from_secs(45),
             ),
             Err(Ed2kCallbackTicketError::InvalidDirectEndpoint)
@@ -2420,12 +2530,18 @@ mod tests {
 
     #[test]
     fn oversized_hash_first_work_is_split_across_bounded_claims() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let now = Instant::now();
         let server_a: SocketAddr = "192.0.2.10:4661".parse().unwrap();
         let server_b: SocketAddr = "192.0.2.20:4661".parse().unwrap();
         let mut store = CallbackTicketStore::default();
         for index in 0..258u16 {
-            let mut request = server_request(if index < 129 { server_a } else { server_b }, 17, 1);
+            let mut request = server_request(
+                &metadata,
+                if index < 129 { server_a } else { server_b },
+                17,
+                1,
+            );
             request.peer.expected_user_hash = Some([0x44; 16]);
             let mut hash = [0; 16];
             hash[..2].copy_from_slice(&index.to_le_bytes());

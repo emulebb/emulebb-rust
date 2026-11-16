@@ -25,6 +25,7 @@ const AICH_ANSWER_HEADER_LEN: usize = 38;
 /// answer carries a recovery body for a part we are downloading.
 pub(super) async fn handle_aich_recovery_answer(
     transfer_runtime: &Ed2kTransferRuntime,
+    token: emulebb_metadata::JobToken,
     file_hash_hex: &str,
     answer: &AichRecoveryAnswer,
     packet_payload: &[u8],
@@ -53,7 +54,7 @@ pub(super) async fn handle_aich_recovery_answer(
     let recovery_body = &packet_payload[AICH_ANSWER_HEADER_LEN..];
 
     match transfer_runtime
-        .begin_part_salvage(file_hash_hex, part, master_hash, recovery_body)
+        .begin_part_salvage(token, part, master_hash, recovery_body)
         .await
     {
         Ok(Some(outcome)) => {

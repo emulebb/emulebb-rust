@@ -62,35 +62,43 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(
         Md4::digest(md4_hashset.iter().flatten().copied().collect::<Vec<u8>>()).into(),
     );
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "captured.iso".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "captured.iso".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
     let source_root = unique_test_dir("ed2k-large-file-secure-ident-order-source");
     let source_runtime = Ed2kTransferRuntime::load_or_create(&source_root).unwrap();
+    let source_file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &source_runtime,
+        file_hash,
+        "captured.iso".to_string(),
+        payload.len() as u64,
+    );
     source_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "captured.iso".to_string(),
-            payload.len() as u64,
-        ))
+        .ensure_job(&source_file_hash_job)
         .await
         .unwrap();
     source_runtime
-        .store_md4_hashset(&file_hash_hex, md4_hashset.clone())
+        .store_md4_hashset(source_file_hash_job.token, md4_hashset.clone())
         .await
         .unwrap();
     source_runtime
-        .store_piece_data(&file_hash_hex, 0, &payload[..ED2K_PART_SIZE as usize])
+        .store_piece_data(
+            source_file_hash_job.token,
+            0,
+            &payload[..ED2K_PART_SIZE as usize],
+        )
         .await
         .unwrap();
     source_runtime
-        .store_piece_data(&file_hash_hex, 1, &payload[ED2K_PART_SIZE as usize..])
+        .store_piece_data(
+            source_file_hash_job.token,
+            1,
+            &payload[ED2K_PART_SIZE as usize..],
+        )
         .await
         .unwrap();
     let mut source_aich = source_runtime
@@ -115,7 +123,7 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
     let advertised_root = source_aich.master_hash;
     if operator_root {
         transfer_runtime
-            .reconcile_aich_root(&file_hash_hex, Some(advertised_root))
+            .reconcile_aich_root(file_hash_job.token, Some(advertised_root))
             .await
             .unwrap();
     } else if consensus_root {
@@ -128,13 +136,13 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
             })
             .collect::<Vec<_>>();
         transfer_runtime
-            .record_network_aich_observations(&file_hash_hex, &observations)
+            .record_network_aich_observations(file_hash_job.token, &observations)
             .await
             .unwrap();
     }
     if md4_preseeded {
         transfer_runtime
-            .store_md4_hashset(&file_hash_hex, md4_hashset.clone())
+            .store_md4_hashset(file_hash_job.token, md4_hashset.clone())
             .await
             .unwrap();
     }
@@ -212,7 +220,7 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
         let mut expected_generation = None;
         if consensus_root {
             let requested = observed_runtime
-                .manifest(&file_hash.to_string())
+                .manifest(file_hash_job.token)
                 .await
                 .unwrap();
             assert_eq!(requested.aich_root, Some(hex::encode(advertised_root)));
@@ -230,7 +238,7 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
                 dissenting_root[0] ^= 0x80;
                 let demoted = observed_runtime
                     .record_network_aich_root(
-                        &file_hash.to_string(),
+                        file_hash_job.token,
                         Some(dissenting_root),
                         IpAddr::V4(std::net::Ipv4Addr::new(198, 0, 0, 1)),
                     )
@@ -240,7 +248,7 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
                 assert!(demoted.aich_trust_generation > requested.aich_trust_generation);
                 let renewed = observed_runtime
                     .record_network_aich_observations(
-                        &file_hash.to_string(),
+                        file_hash_job.token,
                         &[10, 11].map(|signer| {
                             (
                                 advertised_root,
@@ -287,7 +295,7 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
         // Observe before supplying any payload: a later local completion pass
         // must not hide the single-peer acquisition bypass.
         let before_payload = observed_runtime
-            .manifest(&file_hash.to_string())
+            .manifest(file_hash_job.token)
             .await
             .unwrap();
         assert!(before_payload.md4_hashset_acquired);
@@ -417,7 +425,10 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
     .unwrap();
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(manifest.completed);
     assert!(manifest.aich_hashset_acquired);
     assert_eq!(

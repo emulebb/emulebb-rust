@@ -12,9 +12,7 @@ use std::fs;
 use std::net::Ipv4Addr;
 
 use super::super::aich_recovery::AichRecoveryHashSet;
-use super::super::{
-    ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kTransferRuntime, PAYLOAD_FILE_NAME, new_transfer_job,
-};
+use super::super::{ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
 use crate::paths::unique_test_dir;
 use emulebb_kad_proto::Ed2kHash;
 
@@ -25,8 +23,16 @@ const HASH_A: [u8; 16] = [0xAA; 16];
 
 const BLOCK: u64 = ED2K_EMBLOCK_SIZE;
 
-fn runtime(tag: &str) -> Ed2kTransferRuntime {
-    Ed2kTransferRuntime::load_or_create(&unique_test_dir(tag)).unwrap()
+async fn runtime(tag: &str) -> (Ed2kTransferRuntime, emulebb_metadata::JobToken) {
+    let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(tag)).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        FILE_A.parse().unwrap(),
+        "blackbox.bin".to_owned(),
+        ED2K_PART_SIZE,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    (runtime, job.token)
 }
 
 /// An MD4 part-hash failure alone must never ban the sender: the download path
@@ -34,11 +40,11 @@ fn runtime(tag: &str) -> Ed2kTransferRuntime {
 /// without corrupted records finds no guilty sender.
 #[tokio::test]
 async fn md4_failure_alone_does_not_ban_sender() {
-    let runtime = runtime("ed2k-cbb-md4-no-ban");
-    runtime.cbb_record_received_data(FILE_A, 0, ED2K_PART_SIZE, IP_A, Some(HASH_A));
+    let (runtime, token) = runtime("ed2k-cbb-md4-no-ban").await;
+    runtime.cbb_record_received_data(token, 0, ED2K_PART_SIZE, IP_A, Some(HASH_A));
     // The MD4 failure path records nothing further (no VerifiedData /
     // CorruptedData); even an evaluation pass has no corrupted record to act on.
-    runtime.cbb_evaluate_part(FILE_A, 0);
+    runtime.cbb_evaluate_part(token, 0);
     assert!(!runtime.is_client_banned(Some(IP_A), Some(&HASH_A)));
 }
 
@@ -46,12 +52,12 @@ async fn md4_failure_alone_does_not_ban_sender() {
 /// threshold and ban it by both keys (IP and last-known user hash).
 #[tokio::test]
 async fn aich_corrupt_share_over_threshold_bans_ip_and_hash() {
-    let runtime = runtime("ed2k-cbb-over-threshold");
-    runtime.cbb_record_received_data(FILE_A, 0, BLOCK, IP_A, Some(HASH_A));
-    runtime.cbb_record_received_data(FILE_A, BLOCK, 2 * BLOCK, IP_A, Some(HASH_A));
-    runtime.cbb_record_corrupted_data(FILE_A, 0, BLOCK);
-    runtime.cbb_record_corrupted_data(FILE_A, BLOCK, 2 * BLOCK);
-    runtime.cbb_evaluate_part(FILE_A, 0);
+    let (runtime, token) = runtime("ed2k-cbb-over-threshold").await;
+    runtime.cbb_record_received_data(token, 0, BLOCK, IP_A, Some(HASH_A));
+    runtime.cbb_record_received_data(token, BLOCK, 2 * BLOCK, IP_A, Some(HASH_A));
+    runtime.cbb_record_corrupted_data(token, 0, BLOCK);
+    runtime.cbb_record_corrupted_data(token, BLOCK, 2 * BLOCK);
+    runtime.cbb_evaluate_part(token, 0);
     // Banned by IP alone and by user hash alone (both ban keys covered).
     assert!(runtime.is_client_banned(Some(IP_A), None));
     assert!(runtime.is_client_banned(None, Some(&HASH_A)));
@@ -62,21 +68,27 @@ async fn aich_corrupt_share_over_threshold_bans_ip_and_hash() {
 /// (the oracle comparison is strictly greater than `CBB_BANTHRESHOLD`).
 #[tokio::test]
 async fn verified_credit_keeps_sender_below_threshold() {
-    let runtime = runtime("ed2k-cbb-below-threshold");
+    let (runtime, token) = runtime("ed2k-cbb-below-threshold").await;
     // Whole part from IP_A; AICH says one block bad, the rest good.
-    runtime.cbb_record_received_data(FILE_A, 0, ED2K_PART_SIZE, IP_A, Some(HASH_A));
-    runtime.cbb_record_corrupted_data(FILE_A, 0, BLOCK);
-    runtime.cbb_record_verified_data(FILE_A, BLOCK, ED2K_PART_SIZE);
-    runtime.cbb_evaluate_part(FILE_A, 0);
+    runtime.cbb_record_received_data(token, 0, ED2K_PART_SIZE, IP_A, Some(HASH_A));
+    runtime.cbb_record_corrupted_data(token, 0, BLOCK);
+    runtime.cbb_record_verified_data(token, BLOCK, ED2K_PART_SIZE);
+    runtime.cbb_evaluate_part(token, 0);
     assert!(!runtime.is_client_banned(Some(IP_A), Some(&HASH_A)));
 
     // Exactly 32%: corrupt = 184320, verified = 391680 -> 184320*100/576000
     // == 32, not > 32, so still no ban.
-    let file_b = "ffeeddccbbaa99887766554433221100";
-    runtime.cbb_record_received_data(file_b, 0, BLOCK + 391_680, IP_B, None);
-    runtime.cbb_record_corrupted_data(file_b, 0, BLOCK);
-    runtime.cbb_record_verified_data(file_b, BLOCK, BLOCK + 391_680);
-    runtime.cbb_evaluate_part(file_b, 0);
+    let job_b = super::super::test_support::admit_download_job(
+        &runtime,
+        "ffeeddccbbaa99887766554433221100".parse().unwrap(),
+        "blackbox-b.bin".to_owned(),
+        ED2K_PART_SIZE,
+    );
+    runtime.ensure_job(&job_b).await.unwrap();
+    runtime.cbb_record_received_data(job_b.token, 0, BLOCK + 391_680, IP_B, None);
+    runtime.cbb_record_corrupted_data(job_b.token, 0, BLOCK);
+    runtime.cbb_record_verified_data(job_b.token, BLOCK, BLOCK + 391_680);
+    runtime.cbb_evaluate_part(job_b.token, 0);
     assert!(!runtime.is_client_banned(Some(IP_B), None));
 }
 
@@ -85,13 +97,13 @@ async fn verified_credit_keeps_sender_below_threshold() {
 /// threshold against a modest verified credit.
 #[tokio::test]
 async fn small_corrupt_range_counts_as_full_block() {
-    let runtime = runtime("ed2k-cbb-min-block-counting");
-    runtime.cbb_record_received_data(FILE_A, 0, 300_100, IP_A, Some(HASH_A));
+    let (runtime, token) = runtime("ed2k-cbb-min-block-counting").await;
+    runtime.cbb_record_received_data(token, 0, 300_100, IP_A, Some(HASH_A));
     // 100 corrupt bytes count as 184320; 300000 verified.
     // 184320*100/484320 = 38% > 32% -> ban.
-    runtime.cbb_record_corrupted_data(FILE_A, 0, 100);
-    runtime.cbb_record_verified_data(FILE_A, 100, 300_100);
-    runtime.cbb_evaluate_part(FILE_A, 0);
+    runtime.cbb_record_corrupted_data(token, 0, 100);
+    runtime.cbb_record_verified_data(token, 100, 300_100);
+    runtime.cbb_evaluate_part(token, 0);
     assert!(runtime.is_client_banned(Some(IP_A), Some(&HASH_A)));
 }
 
@@ -100,12 +112,12 @@ async fn small_corrupt_range_counts_as_full_block() {
 /// wrote that block and never the peer that completed the part.
 #[tokio::test]
 async fn mixed_writers_attribute_ranges_per_actual_writer() {
-    let runtime = runtime("ed2k-cbb-mixed-writers");
-    runtime.cbb_record_received_data(FILE_A, 0, BLOCK, IP_A, None);
-    runtime.cbb_record_received_data(FILE_A, BLOCK, 2 * BLOCK, IP_B, None);
-    runtime.cbb_record_corrupted_data(FILE_A, 0, BLOCK);
-    runtime.cbb_record_verified_data(FILE_A, BLOCK, 2 * BLOCK);
-    runtime.cbb_evaluate_part(FILE_A, 0);
+    let (runtime, token) = runtime("ed2k-cbb-mixed-writers").await;
+    runtime.cbb_record_received_data(token, 0, BLOCK, IP_A, None);
+    runtime.cbb_record_received_data(token, BLOCK, 2 * BLOCK, IP_B, None);
+    runtime.cbb_record_corrupted_data(token, 0, BLOCK);
+    runtime.cbb_record_verified_data(token, BLOCK, 2 * BLOCK);
+    runtime.cbb_evaluate_part(token, 0);
     assert!(runtime.is_client_banned(Some(IP_A), None));
     assert!(!runtime.is_client_banned(Some(IP_B), None));
 }
@@ -114,11 +126,11 @@ async fn mixed_writers_attribute_ranges_per_actual_writer() {
 /// pending records), so the rewriting peer takes the corrupt verdict.
 #[tokio::test]
 async fn rewritten_range_attributes_to_last_writer() {
-    let runtime = runtime("ed2k-cbb-rewrite");
-    runtime.cbb_record_received_data(FILE_A, 0, BLOCK, IP_A, None);
-    runtime.cbb_record_received_data(FILE_A, 0, BLOCK, IP_B, None);
-    runtime.cbb_record_corrupted_data(FILE_A, 0, BLOCK);
-    runtime.cbb_evaluate_part(FILE_A, 0);
+    let (runtime, token) = runtime("ed2k-cbb-rewrite").await;
+    runtime.cbb_record_received_data(token, 0, BLOCK, IP_A, None);
+    runtime.cbb_record_received_data(token, 0, BLOCK, IP_B, None);
+    runtime.cbb_record_corrupted_data(token, 0, BLOCK);
+    runtime.cbb_evaluate_part(token, 0);
     assert!(!runtime.is_client_banned(Some(IP_A), None));
     assert!(runtime.is_client_banned(Some(IP_B), None));
 }
@@ -169,18 +181,23 @@ async fn salvage_verdicts_ban_only_the_corrupt_block_writer() {
     let aich =
         super::super::build_aich_hashset_from_payload(&aich_path, data.len() as u64).unwrap();
 
-    let job = new_transfer_job(file_hash, "attribution.bin".to_string(), data.len() as u64);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "attribution.bin".to_string(),
+        data.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, part_hashes)
+        .store_md4_hashset(job.token, part_hashes)
         .await
         .unwrap();
     runtime
-        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .reconcile_aich_root(job.token, Some(aich.master_hash))
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&job.file_hash, aich.clone())
+        .store_aich_hashset(job.token, aich.clone())
         .await
         .unwrap();
 
@@ -193,21 +210,22 @@ async fn salvage_verdicts_ban_only_the_corrupt_block_writer() {
         *byte ^= 0xFF;
     }
     let payload_path = runtime
-        .transfer_dir_path(&job.file_hash)
+        .transfer_dir_path(job.token.job_id)
+        .unwrap()
         .join(PAYLOAD_FILE_NAME);
     fs::write(&payload_path, &on_disk).unwrap();
 
     // IP_B supplied the whole part, then IP_A rewrote exactly the corrupt block
     // (a resumed part with mixed writers).
-    runtime.cbb_record_received_data(&job.file_hash, 0, ED2K_PART_SIZE, IP_B, None);
-    runtime.cbb_record_received_data(&job.file_hash, cb_start, cb_end, IP_A, Some(HASH_A));
+    runtime.cbb_record_received_data(job.token, 0, ED2K_PART_SIZE, IP_B, None);
+    runtime.cbb_record_received_data(job.token, cb_start, cb_end, IP_A, Some(HASH_A));
 
     // Salvage: the recovery answer marks block 10 corrupt, everything else good.
     let mut sharer = AichRecoveryHashSet::new(data.len() as u64);
     sharer.build_from_data(&data).unwrap();
     let body = sharer.create_part_recovery_data(0).unwrap();
     let outcome = runtime
-        .begin_part_salvage(&job.file_hash, 0, aich.master_hash, &body)
+        .begin_part_salvage(job.token, 0, aich.master_hash, &body)
         .await
         .unwrap()
         .expect("salvage should start");

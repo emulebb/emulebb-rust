@@ -38,6 +38,7 @@ use super::session::{
 /// queue-oriented peers are not discarded prematurely.
 /// Inputs for one outbound native ED2K peer download attempt.
 pub struct Ed2kPeerDownloadOptions<'a> {
+    pub job_token: emulebb_metadata::JobToken,
     pub bind_ip: Ipv4Addr,
     pub egress_route: crate::networking::EgressRoute,
     pub peer: &'a Ed2kFoundSource,
@@ -65,6 +66,7 @@ pub struct Ed2kPeerDownloadOptions<'a> {
 /// instead of reconnecting merely to ask the same peer for another file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kPeerDownloadFile {
+    pub job_token: emulebb_metadata::JobToken,
     pub file_hash: Ed2kHash,
     pub display_name: String,
     pub file_size: u64,
@@ -73,6 +75,7 @@ pub struct Ed2kPeerDownloadFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kPeerFileDownloadOutcome {
+    pub job_token: emulebb_metadata::JobToken,
     pub file_hash: Ed2kHash,
     pub outcome: Ed2kPeerDownloadOutcome,
 }
@@ -90,9 +93,17 @@ pub struct Ed2kPeerDownloadReport {
 
 impl Ed2kPeerDownloadReport {
     #[must_use]
-    pub fn single(file_hash: Ed2kHash, outcome: Ed2kPeerDownloadOutcome) -> Self {
+    pub fn single(
+        job_token: emulebb_metadata::JobToken,
+        file_hash: Ed2kHash,
+        outcome: Ed2kPeerDownloadOutcome,
+    ) -> Self {
         Self {
-            file_outcomes: vec![Ed2kPeerFileDownloadOutcome { file_hash, outcome }],
+            file_outcomes: vec![Ed2kPeerFileDownloadOutcome {
+                job_token,
+                file_hash,
+                outcome,
+            }],
             terminal_error: None,
         }
     }
@@ -114,6 +125,7 @@ pub async fn download_files_from_peer(
     alternate_files: Vec<Ed2kPeerDownloadFile>,
 ) -> Result<Ed2kPeerDownloadReport> {
     let Ed2kPeerDownloadOptions {
+        job_token,
         bind_ip,
         egress_route,
         peer,
@@ -132,6 +144,7 @@ pub async fn download_files_from_peer(
     let first_file_hash_hex = first_file_hash.to_string();
     let mut files = Vec::with_capacity(alternate_files.len().saturating_add(1));
     files.push(Ed2kPeerDownloadFile {
+        job_token,
         file_hash: first_file_hash,
         display_name,
         file_size,
@@ -139,12 +152,16 @@ pub async fn download_files_from_peer(
     });
     files.extend(alternate_files);
     for file in &files {
-        let file_hash_hex = file.file_hash.to_string();
-        let job = new_transfer_job(file.file_hash, file.display_name.clone(), file.file_size);
+        let job = new_transfer_job(
+            file.job_token,
+            file.file_hash,
+            file.display_name.clone(),
+            file.file_size,
+        );
         transfer_runtime.ensure_job(&job).await?;
         transfer_runtime
             .remember_source(
-                &file_hash_hex,
+                file.job_token,
                 Ed2kSourceHint {
                     ip: peer.ip.to_string(),
                     tcp_port: peer.tcp_port,
@@ -211,7 +228,7 @@ pub async fn download_files_from_peer(
             let file_hash_hex = file.file_hash.to_string();
             let source_exchange_allowed = transfer_runtime
                 .should_request_source_exchange(
-                    &file_hash_hex,
+                    file.job_token,
                     peer_addr,
                     peer.user_hash,
                     file.current_source_count,
@@ -227,6 +244,7 @@ pub async fn download_files_from_peer(
                 );
             }
             let session_result = drive_download_session(DownloadSessionOptions {
+                job_token: file.job_token,
                 dispatcher: &mut transport,
                 peer_addr,
                 hello_identity,
@@ -289,6 +307,7 @@ pub async fn download_files_from_peer(
             match session_result {
                 Ok(outcome) => {
                     report.file_outcomes.push(Ed2kPeerFileDownloadOutcome {
+                        job_token: file.job_token,
                         file_hash: file.file_hash,
                         outcome,
                     });

@@ -54,13 +54,14 @@ impl Ed2kTransferRuntime {
     /// trusted AICH root, or the recovery data fails verification.
     pub(crate) async fn begin_part_salvage(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         part: u16,
         master_hash: [u8; 20],
         recovery_body: &[u8],
     ) -> Result<Option<PartSalvageOutcome>> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
+        let _guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
+        let file_hash = manifest.file_hash.clone();
 
         // Need a trusted AICH root that matches the answer's master hash.
         let Some(root_hex) = manifest.aich_root.as_deref() else {
@@ -102,7 +103,7 @@ impl Ed2kTransferRuntime {
         // WHY: reject untrusted recovery proofs before any raw payload read;
         // proof validation depends only on geometry and the trusted root.
         let part_bytes = self
-            .read_part_raw_unlocked(file_hash, part_start, part_len)
+            .read_part_raw_unlocked(token, part_start, part_len)
             .await?;
         let recovery = compute_part_recovery(
             manifest.file_size,
@@ -118,12 +119,12 @@ impl Ed2kTransferRuntime {
         // `VerifiedData`/`CorruptedData` per block + `EvaluateData`,
         // PartFile.cpp:6555-6566).
         for (block_start, block_end) in &recovery.recovered_ranges {
-            self.cbb_record_verified_data(file_hash, *block_start, *block_end);
+            self.cbb_record_verified_data(token, *block_start, *block_end);
         }
         for (block_start, block_end) in &recovery.corrupt_ranges {
-            self.cbb_record_corrupted_data(file_hash, *block_start, *block_end);
+            self.cbb_record_corrupted_data(token, *block_start, *block_end);
         }
-        self.cbb_evaluate_part(file_hash, part);
+        self.cbb_evaluate_part(token, part);
 
         // Build the per-part bitmap from the good/bad verdict: good blocks become
         // present, corrupt blocks become missing/needed.
@@ -163,31 +164,32 @@ impl Ed2kTransferRuntime {
     /// `CPartFile::AICHRecoveryDataAvailable`.
     pub(crate) async fn write_salvage_block(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         part: u16,
         start: u64,
         end: u64,
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
         let outcome = self
-            .write_salvage_block_unfinalized(file_hash, part, start, end, data)
+            .write_salvage_block_unfinalized(token, part, start, end, data)
             .await?;
-        if self.manifest(file_hash).await?.final_rehash_pending {
-            self.finalize_pending_transfer(file_hash).await?;
+        if self.manifest(token).await?.final_rehash_pending {
+            self.finalize_pending_transfer(token).await?;
         }
         Ok(outcome)
     }
 
     async fn write_salvage_block_unfinalized(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         part: u16,
         start: u64,
         end: u64,
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let _guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let file_hash = manifest.file_hash.clone();
         let part_index = u32::from(part);
         let piece_size = manifest.piece_size;
         let part_start = u64::from(part_index) * piece_size;
@@ -229,7 +231,7 @@ impl Ed2kTransferRuntime {
         }
 
         // Write the block bytes at their absolute offset (out of order is fine).
-        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
+        let payload_path = self.transfer_dir(token.job_id)?.join(PAYLOAD_FILE_NAME);
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -265,7 +267,7 @@ impl Ed2kTransferRuntime {
         if bitmap.all_present() {
             // Every block present: MD4 re-verify the whole part.
             let part_bytes = self
-                .read_part_raw_unlocked(file_hash, part_start, part_len)
+                .read_part_raw_unlocked(token, part_start, part_len)
                 .await?;
             verified = verify_piece_against_manifest(&manifest, part_index, &part_bytes)?;
         }
@@ -285,7 +287,7 @@ impl Ed2kTransferRuntime {
             // Credit every recorded sender of the ICH-saved part (oracle
             // `HashSinglePart` success on a corrupted part ->
             // `m_CorruptionBlackBox.VerifiedData`, PartFile.cpp:5225).
-            self.cbb_record_verified_data(file_hash, part_start, part_end);
+            self.cbb_record_verified_data(token, part_start, part_end);
         } else {
             piece.apply_block_bitmap(&bitmap);
             piece.state = if bitmap.all_present() {
@@ -344,17 +346,17 @@ impl Ed2kTransferRuntime {
     /// can drive orchestration identically for both paths.
     pub(crate) async fn append_or_salvage_block_with_manifest(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         piece_index: u32,
         start: u64,
         end: u64,
         data: &[u8],
     ) -> Result<(PieceWriteOutcome, super::Ed2kResumeManifest)> {
         let is_salvage = {
-            let _guard = self.lock_manifest(file_hash).await;
+            let _guard = self.lock_manifest(token).await;
             // Cache-hit probe: checking one piece's bitmap flag must not clone
             // the whole manifest on every accepted block.
-            self.probe_manifest_unlocked(file_hash, |manifest| {
+            self.probe_manifest_unlocked(token, |manifest| {
                 manifest
                     .pieces
                     .iter()
@@ -368,12 +370,12 @@ impl Ed2kTransferRuntime {
             let part = u16::try_from(piece_index)
                 .map_err(|_| anyhow::anyhow!("salvage part index {piece_index} exceeds u16"))?;
             let outcome = self
-                .write_salvage_block(file_hash, part, start, end, data)
+                .write_salvage_block(token, part, start, end, data)
                 .await?;
-            let manifest = self.manifest(file_hash).await?;
+            let manifest = self.manifest(token).await?;
             Ok((outcome, manifest))
         } else {
-            self.append_piece_block_with_manifest(file_hash, piece_index, start, end, data)
+            self.append_piece_block_with_manifest(token, piece_index, start, end, data)
                 .await
         }
     }
@@ -382,14 +384,14 @@ impl Ed2kTransferRuntime {
     /// re-hash a not-yet-verified (corrupt) part for salvage.
     async fn read_part_raw_unlocked(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         start: u64,
         len: u64,
     ) -> Result<Vec<u8>> {
         #[cfg(test)]
         self.raw_part_read_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
+        let payload_path = self.transfer_dir(token.job_id)?.join(PAYLOAD_FILE_NAME);
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)
             .open(&payload_path)

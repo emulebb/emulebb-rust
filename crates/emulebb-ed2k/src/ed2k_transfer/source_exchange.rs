@@ -5,7 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::Mutex;
+use emulebb_metadata::JobToken;
+use std::sync::Mutex;
 
 const SOURCE_EXCHANGE_REASK_INTERVAL: Duration = Duration::from_secs(40 * 60);
 const SOURCE_EXCHANGE_COMMON_REASK_INTERVAL: Duration = Duration::from_secs(160 * 60);
@@ -16,21 +17,20 @@ const SOURCE_EXCHANGE_VERY_RARE_FILE: usize = SOURCE_EXCHANGE_RARE_FILE / 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SourceExchangeRequestKey {
-    file_hash: String,
     peer_addr: SocketAddr,
     user_hash: Option<[u8; 16]>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct SourceExchangeState {
-    requests: Arc<Mutex<HashMap<SourceExchangeRequestKey, Instant>>>,
-    file_answers: Arc<Mutex<HashMap<String, Instant>>>,
+    requests: Arc<Mutex<HashMap<JobToken, HashMap<SourceExchangeRequestKey, Instant>>>>,
+    file_answers: Arc<Mutex<HashMap<JobToken, Instant>>>,
 }
 
 impl SourceExchangeState {
-    pub(super) async fn should_request(
+    pub(super) fn should_request(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer_addr: SocketAddr,
         user_hash: Option<[u8; 16]>,
         current_source_count: usize,
@@ -38,8 +38,8 @@ impl SourceExchangeState {
     ) -> bool {
         let file_answer_interval = file_answer_interval(current_source_count);
         if !file_answer_interval.is_zero() {
-            let answers = self.file_answers.lock().await;
-            if answers.get(file_hash).is_some_and(|last_answered| {
+            let answers = self.file_answers.lock().unwrap();
+            if answers.get(&token).is_some_and(|last_answered| {
                 now.duration_since(*last_answered) <= file_answer_interval
             }) {
                 return false;
@@ -48,11 +48,11 @@ impl SourceExchangeState {
 
         let reask_interval = reask_interval(current_source_count);
         let key = SourceExchangeRequestKey {
-            file_hash: file_hash.to_string(),
             peer_addr,
             user_hash,
         };
-        let mut requests = self.requests.lock().await;
+        let mut jobs = self.requests.lock().unwrap();
+        let requests = jobs.entry(token).or_default();
         let allowed = requests
             .get(&key)
             .is_none_or(|last_requested| now.duration_since(*last_requested) > reask_interval);
@@ -62,11 +62,13 @@ impl SourceExchangeState {
         allowed
     }
 
-    pub(super) async fn note_answer(&self, file_hash: &str, now: Instant) {
-        self.file_answers
-            .lock()
-            .await
-            .insert(file_hash.to_string(), now);
+    pub(super) fn clear(&self, token: JobToken) {
+        self.requests.lock().unwrap().remove(&token);
+        self.file_answers.lock().unwrap().remove(&token);
+    }
+
+    pub(super) fn note_answer(&self, token: JobToken, now: Instant) {
+        self.file_answers.lock().unwrap().insert(token, now);
     }
 }
 
