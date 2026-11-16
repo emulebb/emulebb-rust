@@ -254,6 +254,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.table_count("local_file_instances").unwrap(), 1);
-        assert_eq!(store.table_count("transfers").unwrap(), 0);
+        assert_eq!(store.table_count("download_jobs").unwrap(), 0);
     }
 }

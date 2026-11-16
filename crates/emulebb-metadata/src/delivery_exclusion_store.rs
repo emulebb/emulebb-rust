@@ -9,17 +9,23 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::{MetadataStore, NativePath};
+use crate::{
+    JobId, JobToken, MetadataDeliveryOutputReservation, MetadataStore,
+    MetadataTransferDeliveryAttempt, NativePath,
+};
 
 fn exclusion_path(path: &Path) -> Result<PathBuf> {
+    crate::download_job_store::validate_job_path(path)?;
     let parent = path.parent().context("delivery path has no parent")?;
     let name = path.file_name().context("delivery path has no filename")?;
-    Ok(std::fs::canonicalize(parent)?.join(name))
+    let normalized = std::fs::canonicalize(parent)?.join(name);
+    crate::download_job_store::validate_job_path(&normalized)?;
+    Ok(normalized)
 }
 
 pub(crate) fn is_excluded(conn: &Connection, path: &Path) -> Result<bool> {
     let any: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM delivery_exclusions)",
+        "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions)",
         [],
         |row| row.get(0),
     )?;
@@ -35,7 +41,7 @@ pub(crate) fn is_excluded(conn: &Connection, path: &Path) -> Result<bool> {
     let native = NativePath::from(normalized.as_path());
     Ok(conn
         .query_row(
-            "SELECT 1 FROM delivery_exclusions WHERE platform = ?1 AND native_path = ?2",
+            "SELECT 1 FROM download_delivery_exclusions WHERE platform = ?1 AND native_path = ?2",
             params![NativePath::platform(), native.storage_bytes()],
             |_| Ok(()),
         )
@@ -44,15 +50,42 @@ pub(crate) fn is_excluded(conn: &Connection, path: &Path) -> Result<bool> {
 }
 
 impl MetadataStore {
-    /// Reserve a final name before exclusive creation; exclusions outlive transfers.
-    pub fn reserve_delivery_output(&self, path: &Path, id: Uuid) -> Result<bool> {
+    /// Reserve an exact live attempt's final name before exclusive creation.
+    /// Exclusions outlive jobs. Alias withdrawal below still scans the library
+    /// and resolves parent paths under this transaction; it is not byte-bounded
+    /// and must move to tracked incremental work in the runtime reservation cut.
+    pub fn reserve_delivery_output(&self, token: JobToken, path: &Path, id: Uuid) -> Result<bool> {
+        let job_id = token.job_id;
         let normalized = exclusion_path(path)?;
         let native = NativePath::from(normalized.as_path());
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let requested = NativePath::from(path);
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_jobs j
+             JOIN download_delivery_attempts a ON a.job_id=j.id
+             JOIN local_paths p ON p.id=a.target_path_id
+             WHERE j.id=?1 AND j.execution_generation=?2 AND j.intent='started'
+               AND j.removed_at_s IS NULL AND j.delete_requested_at_s IS NULL
+               AND j.terminal_completed_at_s IS NULL AND j.completed=1 AND j.final_rehash_pending=0
+               AND j.delivery_state='pending' AND j.delivered_path_id IS NULL
+               AND a.attempt_id=?3 AND a.phase IN ('prepared','staged')
+               AND p.platform=?4 AND p.native_path=?5)",
+            params![
+                job_id,
+                i64::try_from(token.generation)?,
+                id.to_string(),
+                NativePath::platform(),
+                requested.storage_bytes()
+            ],
+            |row| row.get(0),
+        )?;
+        if !current {
+            return Ok(false);
+        }
         let inserted = tx.execute(
-            "INSERT OR IGNORE INTO delivery_exclusions(platform, native_path, reservation_id) VALUES (?1, ?2, ?3)",
-            params![NativePath::platform(), native.storage_bytes(), id.to_string()],
+            "INSERT OR IGNORE INTO download_delivery_exclusions(platform, native_path, reservation_id,originating_job_id) VALUES (?1, ?2, ?3, ?4)",
+            params![NativePath::platform(), native.storage_bytes(), id.to_string(),job_id],
         )? == 1;
         if inserted {
             // WHY: an old session may still advertise a removed file under an
@@ -95,13 +128,93 @@ impl MetadataStore {
         Ok(inserted)
     }
 
-    /// Release only a reservation whose exclusive creation did not succeed.
-    pub fn release_delivery_output(&self, id: Uuid) -> Result<()> {
-        self.connection()?.execute(
-            "DELETE FROM delivery_exclusions WHERE reservation_id = ?1",
-            [id.to_string()],
-        )?;
-        Ok(())
+    /// Capture exact immutable reservation authority before cleanup I/O.
+    pub fn delivery_output_reservation(
+        &self,
+        job_id: JobId,
+        id: Uuid,
+    ) -> Result<Option<MetadataDeliveryOutputReservation>> {
+        let conn = self.connection()?;
+        reservation_by_id(&conn, job_id, id)
+    }
+
+    /// A live callback must retain both snapshots and the executing token.
+    pub fn release_delivery_output(
+        &self,
+        token: JobToken,
+        reservation: &MetadataDeliveryOutputReservation,
+        attempt: &MetadataTransferDeliveryAttempt,
+    ) -> Result<bool> {
+        self.release_existing_job_output(token, reservation, Some(attempt), true)
+    }
+
+    /// Recovery captures the current token and both snapshots under exclusive
+    /// lifecycle ownership before I/O; it must never refresh them after I/O.
+    /// An absent attempt snapshot is permitted only while no attempt exists,
+    /// so an independently retained exclusion can settle without erasing a
+    /// reservation underneath an unmatched active attempt.
+    pub fn release_recovered_delivery_output(
+        &self,
+        token: JobToken,
+        reservation: &MetadataDeliveryOutputReservation,
+        attempt: Option<&MetadataTransferDeliveryAttempt>,
+    ) -> Result<bool> {
+        self.release_existing_job_output(token, reservation, attempt, false)
+    }
+
+    fn release_existing_job_output(
+        &self,
+        token: JobToken,
+        reservation: &MetadataDeliveryOutputReservation,
+        attempt: Option<&MetadataTransferDeliveryAttempt>,
+        live: bool,
+    ) -> Result<bool> {
+        crate::download_job_store::validate_job_path(&reservation.path)?;
+        if reservation.originating_job_id != token.job_id
+            || attempt.is_some_and(|attempt| {
+                attempt.job_id != token.job_id || attempt.attempt_id != reservation.reservation_id
+            })
+        {
+            return Ok(false);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND execution_generation=?2
+            AND (?3=0 OR (intent='started' AND removed_at_s IS NULL AND delete_requested_at_s IS NULL AND terminal_completed_at_s IS NULL)))",
+            params![token.job_id,i64::try_from(token.generation)?,live],|row|row.get(0))?;
+        if !current
+            || crate::transfer_store::delivery_attempt_by_job(&tx, token.job_id)?.as_ref()
+                != attempt
+            || reservation_by_id(&tx, token.job_id, reservation.reservation_id)?.as_ref()
+                != Some(reservation)
+        {
+            return Ok(false);
+        }
+        let changed=tx.execute("DELETE FROM download_delivery_exclusions WHERE originating_job_id=?1 AND reservation_id=?2",
+            params![token.job_id,reservation.reservation_id.to_string()])?;
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+
+    /// Orphan cleanup cannot impersonate recovery for a job which still exists.
+    /// Its exact persisted path and UUID authority must have been captured before I/O.
+    pub fn release_orphaned_delivery_output(
+        &self,
+        reservation: &MetadataDeliveryOutputReservation,
+    ) -> Result<bool> {
+        crate::download_job_store::validate_job_path(&reservation.path)?;
+        let path = NativePath::from(reservation.path.as_path());
+        Ok(self.connection()?.execute(
+            "DELETE FROM download_delivery_exclusions
+            WHERE originating_job_id=?1 AND reservation_id=?2 AND platform=?3 AND native_path=?4
+            AND NOT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1)",
+            params![
+                reservation.originating_job_id,
+                reservation.reservation_id.to_string(),
+                NativePath::platform(),
+                path.storage_bytes()
+            ],
+        )? != 0)
     }
 
     /// Return whether a path is barred from local sharing.
@@ -111,13 +224,27 @@ impl MetadataStore {
     }
 
     /// A retained reservation indicates an interrupted direct-copy attempt.
-    pub fn has_delivery_reservation(&self, id: Uuid) -> Result<bool> {
+    pub fn has_delivery_reservation(&self, job_id: JobId, id: Uuid) -> Result<bool> {
         Ok(self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM delivery_exclusions WHERE reservation_id = ?1)",
-            [id.to_string()],
+            "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE reservation_id = ?1 AND originating_job_id=?2)",
+            params![id.to_string(),job_id],
             |row| row.get(0),
         )?)
     }
+}
+
+fn reservation_by_id(
+    conn: &Connection,
+    job_id: JobId,
+    id: Uuid,
+) -> Result<Option<MetadataDeliveryOutputReservation>> {
+    Ok(conn.query_row("SELECT platform,CASE WHEN length(native_path)<=65536 THEN native_path END,length(native_path)
+        FROM download_delivery_exclusions WHERE originating_job_id=?1 AND reservation_id=?2",
+        params![job_id,id.to_string()],|row| {
+            crate::download_job_store::bounded_row_bytes(row,&[(2,65536,4)])?;
+            Ok(MetadataDeliveryOutputReservation {originating_job_id:job_id,reservation_id:id,
+                path:crate::native_path::path_from_row(row,0,1)?})
+        }).optional()?)
 }
 
 pub(crate) fn ensure_not_excluded(conn: &Connection, path: &Path) -> Result<()> {
@@ -131,6 +258,214 @@ pub(crate) fn ensure_not_excluded(conn: &Connection, path: &Path) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn prepared_job(store: &MetadataStore, target: &Path, attempt: Uuid) -> JobToken {
+        let token = store
+            .admit_download_job(&crate::DownloadJobRequest {
+                file_hash: "11".repeat(16),
+                display_name: "reserved.bin".into(),
+                expected_size_bytes: Some(1),
+                category_id: None,
+                intent: crate::DownloadIntent::Started,
+                piece_size: 1,
+            })
+            .unwrap()
+            .job
+            .token;
+        let mut manifest = store.download_job_manifest(token.job_id).unwrap().unwrap();
+        manifest.completed = true;
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        store
+            .begin_transfer_delivery_attempt(
+                token,
+                attempt,
+                target,
+                &target
+                    .parent()
+                    .unwrap()
+                    .join(format!(".emulebb-delivery-{attempt}.tmp")),
+            )
+            .unwrap();
+        token
+    }
+
+    #[test]
+    fn reservation_requires_current_started_token_and_exact_attempt_target() {
+        let root = std::env::temp_dir().join(format!("emulebb-exclusion-fence-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.bin");
+        let mut store = MetadataStore::in_memory().unwrap();
+        let attempt = Uuid::new_v4();
+        let token = prepared_job(&store, &target, attempt);
+        let proof = crate::NativeFileFingerprint {
+            identity: crate::NativeFileIdentity::Unix {
+                device_id: 1,
+                inode_number: 2,
+            },
+            size_bytes: 1,
+            modified: crate::NativeFileTimestamp::new(1, 0).unwrap(),
+            changed: None,
+        };
+        store
+            .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+                path: root.to_string_lossy().into_owned(),
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }])
+            .unwrap();
+        store
+            .upsert_verified_local_content(&crate::MetadataVerifiedLocalContent {
+                file_hash: "22".repeat(16),
+                display_name: "target.bin".into(),
+                file_size: 1,
+                part_size: 1,
+                md4_hashset: Vec::new(),
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                path: target.clone(),
+                fingerprint: proof.clone(),
+                upload_priority: "normal".into(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+            })
+            .unwrap();
+        assert!(
+            store
+                .admit_local_path_to_root(&root, &target, Path::new("target.bin"), &proof)
+                .unwrap()
+        );
+        let live_members = || {
+            store
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM shared_file_memberships WHERE removed_at_ms IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(live_members(), 1);
+        assert!(store.stop_download_job(token).unwrap());
+        assert!(
+            !store
+                .reserve_delivery_output(token, &target, attempt)
+                .unwrap()
+        );
+        let stopped = store.download_job(token.job_id).unwrap().unwrap();
+        assert!(
+            !store
+                .reserve_delivery_output(stopped.token, &target, attempt)
+                .unwrap()
+        );
+        let restarted = store
+            .start_download_job(stopped.token, &root)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .reserve_delivery_output(token, &target, attempt)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .reserve_delivery_output(restarted.token, &root.join("wrong.bin"), attempt)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .reserve_delivery_output(restarted.token, &target, Uuid::new_v4())
+                .unwrap()
+        );
+        assert_eq!(live_members(), 1);
+        assert!(
+            !store
+                .has_delivery_reservation(token.job_id, attempt)
+                .unwrap()
+        );
+        assert!(
+            store
+                .reserve_delivery_output(restarted.token, &target, attempt)
+                .unwrap()
+        );
+        assert_eq!(live_members(), 0);
+        assert!(
+            !store
+                .reserve_delivery_output(restarted.token, &target, attempt)
+                .unwrap()
+        );
+        let live_reservation = store
+            .delivery_output_reservation(token.job_id, attempt)
+            .unwrap()
+            .unwrap();
+        let live_snapshot = store
+            .download_job_delivery_attempt(token.job_id)
+            .unwrap()
+            .unwrap();
+        let mut wrong_reservation = live_reservation.clone();
+        wrong_reservation.path = root.join("wrong.bin");
+        assert!(
+            !store
+                .release_delivery_output(restarted.token, &wrong_reservation, &live_snapshot)
+                .unwrap()
+        );
+        let mut wrong_attempt = live_snapshot.clone();
+        wrong_attempt.attempt_id = Uuid::new_v4();
+        assert!(
+            !store
+                .release_delivery_output(restarted.token, &live_reservation, &wrong_attempt)
+                .unwrap()
+        );
+        assert!(
+            store
+                .release_delivery_output(restarted.token, &live_reservation, &live_snapshot)
+                .unwrap()
+        );
+        assert!(
+            store
+                .reserve_delivery_output(restarted.token, &target, attempt)
+                .unwrap()
+        );
+        assert!(store.request_transfer_deletion(token.job_id, None).unwrap());
+        let deleting = store.download_job(token.job_id).unwrap().unwrap();
+        let reservation = store
+            .delivery_output_reservation(token.job_id, attempt)
+            .unwrap()
+            .unwrap();
+        let snapshot = store
+            .download_job_delivery_attempt(token.job_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .release_orphaned_delivery_output(&reservation)
+                .unwrap()
+        );
+        assert!(
+            store
+                .release_recovered_delivery_output(deleting.token, &reservation, Some(&snapshot))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .reserve_delivery_output(restarted.token, &target, attempt)
+                .unwrap()
+        );
+        let deleting = store.download_job(token.job_id).unwrap().unwrap();
+        assert!(
+            !store
+                .reserve_delivery_output(deleting.token, &target, attempt)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_delivery_reservation(token.job_id, attempt)
+                .unwrap()
+        );
+        drop(store);
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn reservations_are_independent_and_prevent_duplicate_claims() {
@@ -139,14 +474,100 @@ mod tests {
         let path = root.join("sample.bin");
         let store = MetadataStore::in_memory().unwrap();
         let first = Uuid::new_v4();
+        let token = prepared_job(&store, &path, first);
+        let job_id = token.job_id;
         let second = Uuid::new_v4();
-        assert!(store.reserve_delivery_output(&path, first).unwrap());
+        assert!(store.reserve_delivery_output(token, &path, first).unwrap());
         assert!(store.delivery_output_is_excluded(&path).unwrap());
-        assert!(!store.reserve_delivery_output(&path, second).unwrap());
-        store.release_delivery_output(second).unwrap();
+        let reservation = store
+            .delivery_output_reservation(job_id, first)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .release_orphaned_delivery_output(&reservation)
+                .unwrap()
+        );
+        let recovery = store
+            .download_job_delivery_attempt(job_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .settle_recovered_delivery_attempt(token, &recovery)
+                .unwrap()
+        );
+        assert!(store.delete_transfer_manifest(job_id).unwrap());
+        assert!(!store.reserve_delivery_output(token, &path, second).unwrap());
+        let mut wrong = reservation.clone();
+        wrong.reservation_id = second;
+        assert!(!store.release_orphaned_delivery_output(&wrong).unwrap());
+        wrong = reservation.clone();
+        wrong.path = root.join("wrong.bin");
+        assert!(!store.release_orphaned_delivery_output(&wrong).unwrap());
         assert!(store.delivery_output_is_excluded(&path).unwrap());
-        store.release_delivery_output(first).unwrap();
+        assert!(
+            store
+                .release_orphaned_delivery_output(&reservation)
+                .unwrap()
+        );
         assert!(!store.delivery_output_is_excluded(&path).unwrap());
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn retained_exclusion_can_settle_after_its_attempt_without_impersonating_an_orphan() {
+        let root =
+            std::env::temp_dir().join(format!("emulebb-exclusion-settled-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = MetadataStore::in_memory().unwrap();
+        let path = root.join("target.bin");
+        let attempt = Uuid::new_v4();
+        let token = prepared_job(&store, &path, attempt);
+        assert!(
+            store
+                .reserve_delivery_output(token, &path, attempt)
+                .unwrap()
+        );
+        let reservation = store
+            .delivery_output_reservation(token.job_id, attempt)
+            .unwrap()
+            .unwrap();
+        let snapshot = store
+            .download_job_delivery_attempt(token.job_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .release_recovered_delivery_output(token, &reservation, None)
+                .unwrap()
+        );
+        assert!(
+            store
+                .settle_recovered_delivery_attempt(token, &snapshot)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .release_orphaned_delivery_output(&reservation)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .release_recovered_delivery_output(token, &reservation, Some(&snapshot))
+                .unwrap()
+        );
+        assert!(
+            store
+                .release_recovered_delivery_output(token, &reservation, None)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_delivery_reservation(token.job_id, attempt)
+                .unwrap()
+        );
+        drop(store);
         std::fs::remove_dir(root).unwrap();
     }
 
@@ -158,12 +579,15 @@ mod tests {
         let database = root.join("profile.db");
         let target = root.join("partial.bin");
         let id = Uuid::new_v4();
+        let job_id;
         {
             let store = MetadataStore::open(&database).unwrap();
-            assert!(store.reserve_delivery_output(&target, id).unwrap());
+            let token = prepared_job(&store, &target, id);
+            job_id = token.job_id;
+            assert!(store.reserve_delivery_output(token, &target, id).unwrap());
         }
         let store = MetadataStore::open(&database).unwrap();
-        assert!(store.has_delivery_reservation(id).unwrap());
+        assert!(store.has_delivery_reservation(job_id, id).unwrap());
         assert!(store.delivery_output_is_excluded(&target).unwrap());
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
@@ -180,17 +604,20 @@ mod tests {
         let canonical_target = root.join("real").join("partial.bin");
         let alias_target = root.join("alias").join("partial.bin");
         let id = Uuid::new_v4();
+        let job_id;
         {
             let store = MetadataStore::open(&database).unwrap();
+            let token = prepared_job(&store, &canonical_target, id);
+            job_id = token.job_id;
             assert!(
                 store
-                    .reserve_delivery_output(&canonical_target, id)
+                    .reserve_delivery_output(token, &canonical_target, id)
                     .unwrap()
             );
             assert!(store.delivery_output_is_excluded(&alias_target).unwrap());
         }
         let store = MetadataStore::open(&database).unwrap();
-        assert!(store.has_delivery_reservation(id).unwrap());
+        assert!(store.has_delivery_reservation(job_id, id).unwrap());
         assert!(store.delivery_output_is_excluded(&alias_target).unwrap());
         drop(store);
         std::fs::remove_dir_all(root).unwrap();

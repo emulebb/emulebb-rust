@@ -68,7 +68,8 @@ CREATE TABLE friends (
 CREATE TABLE known_files (
     id INTEGER PRIMARY KEY,
     ed2k_hash BLOB NOT NULL UNIQUE CHECK(length(ed2k_hash) = 16),
-    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+    size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
+    latest_download_job_id INTEGER REFERENCES download_jobs(id) ON DELETE SET NULL,
     display_name TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
@@ -118,8 +119,8 @@ CREATE TABLE download_history (
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     display_name TEXT NOT NULL,
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
-    first_completed_at_ms INTEGER NOT NULL CHECK(first_completed_at_ms >= 0),
-    last_completed_at_ms INTEGER NOT NULL CHECK(last_completed_at_ms >= first_completed_at_ms)
+    first_completed_at_s INTEGER NOT NULL CHECK(first_completed_at_s >= 0),
+    last_completed_at_s INTEGER NOT NULL CHECK(last_completed_at_s >= first_completed_at_s)
 ) STRICT;
 
 CREATE TABLE file_names (
@@ -170,18 +171,18 @@ WHEN old.name IS NOT new.name OR old.normalized_name IS NOT new.normalized_name 
     VALUES (new.id, new.name, new.normalized_name);
 END;
 
-CREATE TABLE transfer_md4_part_hashes (
-    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+CREATE TABLE download_job_md4_part_hashes (
+    job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
-    PRIMARY KEY(transfer_id, part_index)
+    PRIMARY KEY(job_id, part_index)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE transfer_aich_part_hashes (
-    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+CREATE TABLE download_job_aich_part_hashes (
+    job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     part_index INTEGER NOT NULL CHECK(part_index BETWEEN 0 AND 4294967295),
     aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
-    PRIMARY KEY(transfer_id, part_index)
+    PRIMARY KEY(job_id, part_index)
 ) STRICT, WITHOUT ROWID;
 
 -- Verified complete content is independent of a download for the same hash.
@@ -231,13 +232,13 @@ CREATE TABLE verified_local_aich_hashes (
     PRIMARY KEY(known_file_id, part_index)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE verified_ranges (
-    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+CREATE TABLE download_job_verified_ranges (
+    job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
     end_offset INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
     CHECK(end_offset >= start_offset),
-    PRIMARY KEY(transfer_id, start_offset, end_offset)
+    PRIMARY KEY(job_id, start_offset, end_offset)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE local_paths (
@@ -324,9 +325,14 @@ CREATE TABLE shared_file_memberships (
 CREATE INDEX shared_file_memberships_root_content_idx
     ON shared_file_memberships(root_id, known_file_id, path_id);
 
-CREATE TABLE transfers (
-    id INTEGER PRIMARY KEY,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+CREATE TABLE download_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE RESTRICT,
+    expected_size_bytes INTEGER CHECK(expected_size_bytes IS NULL OR expected_size_bytes >= 0),
+    execution_generation INTEGER NOT NULL DEFAULT 0 CHECK(execution_generation >= 0),
+    selected_temp_path_id INTEGER REFERENCES local_paths(id),
+    terminal_completed_at_s INTEGER CHECK(terminal_completed_at_s IS NULL OR terminal_completed_at_s >= 0),
+    internal_storage_retired INTEGER NOT NULL DEFAULT 0 CHECK(internal_storage_retired IN (0, 1)),
     display_name TEXT NOT NULL,
     part_size_bytes INTEGER NOT NULL CHECK(part_size_bytes > 0),
     part_count INTEGER NOT NULL CHECK(part_count BETWEEN 0 AND 4294967295),
@@ -349,8 +355,8 @@ CREATE TABLE transfers (
     -- whole-file ED2K MD4 completion rehash succeeds or demotes bad parts.
     final_rehash_pending INTEGER NOT NULL DEFAULT 0
         CHECK(final_rehash_pending IN (0, 1)),
-    control_state TEXT CHECK(control_state IS NULL OR control_state IN ('paused', 'stopped')),
-    category_id INTEGER REFERENCES categories(id),
+    intent TEXT NOT NULL DEFAULT 'started' CHECK(intent IN ('started', 'stopped')),
+    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     -- Downloads remain pending until a verified output path is committed.
     delivery_state TEXT NOT NULL
         CHECK(delivery_state IN ('pending', 'delivered')),
@@ -364,30 +370,30 @@ CREATE TABLE transfers (
     -- Versioned identity baseline for the canonical internal pieces.bin after
     -- successful whole-file verification. NULL forces a startup ED2K rehash.
     payload_fingerprint BLOB,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
-    removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
+    completed_at_s INTEGER CHECK(completed_at_s IS NULL OR completed_at_s >= 0),
+    removed_at_s INTEGER CHECK(removed_at_s IS NULL OR removed_at_s >= 0),
     -- Terminal destructive-delete intent. Once set, active selectors suppress
     -- the transfer until cleanup removes the row; ordinary manifest upserts
     -- deliberately preserve the marker.
-    delete_requested_at_ms INTEGER
-        CHECK(delete_requested_at_ms IS NULL OR delete_requested_at_ms >= 0),
+    delete_requested_at_s INTEGER
+        CHECK(delete_requested_at_s IS NULL OR delete_requested_at_s >= 0),
     -- Stable identity of the owned transfer directory captured before it is
     -- renamed to the deletion tombstone. Recovery must never recursively
     -- delete a path whose identity differs from this durable authority.
-    transfer_directory_tombstone_identity BLOB,
+    storage_directory_identity BLOB,
     -- Random marker created inside the owned directory before deletion intent
     -- commits. Native identities can be reused after deletion, so recovery
     -- requires both this marker and the native identity.
-    transfer_directory_tombstone_marker_id TEXT,
+    storage_directory_marker_id TEXT,
     CHECK(
-        (transfer_directory_tombstone_identity IS NULL AND transfer_directory_tombstone_marker_id IS NULL)
+        (storage_directory_identity IS NULL AND storage_directory_marker_id IS NULL)
         OR (
-            transfer_directory_tombstone_identity IS NOT NULL
-            AND transfer_directory_tombstone_marker_id IS NOT NULL
-            AND length(trim(transfer_directory_tombstone_marker_id)) > 0
-            AND delete_requested_at_ms IS NOT NULL
+            storage_directory_identity IS NOT NULL
+            AND storage_directory_marker_id IS NOT NULL
+            AND length(trim(storage_directory_marker_id)) > 0
+            AND delete_requested_at_s IS NOT NULL
         )
     ),
     CHECK(
@@ -399,13 +405,55 @@ CREATE TABLE transfers (
     CHECK(aich_hashset_acquired = 0 OR aich_root IS NOT NULL),
     CHECK((completed = 1) = (visible_state = 'completed')),
     CHECK(payload_fingerprint IS NULL OR (completed = 1 AND final_rehash_pending = 0)),
-    UNIQUE(known_file_id)
+    CHECK(terminal_completed_at_s IS NULL OR (completed = 1 AND final_rehash_pending = 0 AND delivery_state = 'delivered')),
+    CHECK(internal_storage_retired = 0 OR terminal_completed_at_s IS NOT NULL)
 ) STRICT;
 
--- A delivered download is hidden while its owned piece directory is safely
--- reclaimed. The output has already become independent verified local content.
-CREATE TABLE transfer_retirements (
-    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
+-- A logically removed job with pending cleanup does not own future admission.
+CREATE UNIQUE INDEX download_jobs_unremoved_unfinished_content_idx
+ON download_jobs(known_file_id)
+WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
+CREATE INDEX download_jobs_visible_page_idx ON download_jobs(id) WHERE removed_at_s IS NULL;
+CREATE INDEX download_jobs_work_page_idx ON download_jobs(intent, id)
+WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
+CREATE INDEX download_jobs_content_history_idx ON download_jobs(known_file_id, id);
+CREATE TRIGGER download_jobs_fixed_storage BEFORE UPDATE OF selected_temp_path_id ON download_jobs
+WHEN old.selected_temp_path_id IS NOT NULL AND new.selected_temp_path_id IS NOT old.selected_temp_path_id
+BEGIN SELECT RAISE(ABORT, 'download job storage is immutable once selected'); END;
+
+CREATE TRIGGER download_jobs_terminal_history BEFORE UPDATE ON download_jobs
+WHEN old.terminal_completed_at_s IS NOT NULL AND (
+    new.terminal_completed_at_s IS NOT old.terminal_completed_at_s OR new.completed != 1
+    OR new.final_rehash_pending != 0 OR new.delivery_state != 'delivered')
+BEGIN SELECT RAISE(ABORT, 'terminal download completion is immutable'); END;
+
+CREATE TRIGGER known_files_accepted_size_immutable BEFORE UPDATE OF size_bytes ON known_files
+WHEN old.size_bytes IS NOT NULL AND new.size_bytes IS NOT old.size_bytes
+BEGIN SELECT RAISE(ABORT, 'accepted content size is immutable'); END;
+
+CREATE INDEX known_files_latest_job_idx ON known_files(latest_download_job_id);
+
+CREATE TRIGGER download_jobs_identity_immutable
+BEFORE UPDATE OF id, known_file_id ON download_jobs
+WHEN new.id != old.id OR new.known_file_id != old.known_file_id
+BEGIN SELECT RAISE(ABORT, 'download job identity is immutable'); END;
+
+CREATE TRIGGER known_files_latest_job_same_content_insert
+BEFORE INSERT ON known_files
+WHEN new.latest_download_job_id IS NOT NULL
+AND NOT EXISTS(SELECT 1 FROM download_jobs WHERE id=new.latest_download_job_id AND known_file_id=new.id)
+BEGIN SELECT RAISE(ABORT, 'latest download job belongs to another content'); END;
+
+CREATE TRIGGER known_files_latest_job_same_content_update
+BEFORE UPDATE OF latest_download_job_id ON known_files
+WHEN new.latest_download_job_id IS NOT NULL
+AND NOT EXISTS(SELECT 1 FROM download_jobs WHERE id=new.latest_download_job_id AND known_file_id=new.id)
+BEGIN SELECT RAISE(ABORT, 'latest download job belongs to another content'); END;
+
+-- A terminal job remains history while its owned piece directory is reclaimed.
+-- The output has already become independent verified local content.
+CREATE TABLE download_retirements (
+    job_id INTEGER PRIMARY KEY REFERENCES download_jobs(id) ON DELETE RESTRICT,
     directory_identity BLOB,
     directory_marker_id TEXT,
     CHECK (
@@ -417,23 +465,28 @@ CREATE TABLE transfer_retirements (
 
 -- WHY: A crash can leave an exclusively created but incomplete final name.
 -- Its sharing exclusion must outlive both the attempt and transfer deletion.
-CREATE TABLE delivery_exclusions (
+CREATE TABLE download_delivery_exclusions (
     platform TEXT NOT NULL,
     native_path BLOB NOT NULL,
-    reservation_id TEXT NOT NULL UNIQUE,
+    reservation_id TEXT NOT NULL UNIQUE CHECK(length(reservation_id)=36),
+    originating_job_id INTEGER NOT NULL CHECK(originating_job_id > 0),
     PRIMARY KEY(platform, native_path)
 ) STRICT;
 
-CREATE TABLE delivery_attempts (
-    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
-    attempt_id TEXT NOT NULL UNIQUE CHECK(length(trim(attempt_id)) > 0),
+CREATE TRIGGER download_delivery_exclusion_origin_immutable
+BEFORE UPDATE OF originating_job_id,reservation_id,platform,native_path ON download_delivery_exclusions
+BEGIN SELECT RAISE(ABORT, 'delivery exclusion authority is immutable'); END;
+
+CREATE TABLE download_delivery_attempts (
+    job_id INTEGER PRIMARY KEY REFERENCES download_jobs(id) ON DELETE RESTRICT,
+    attempt_id TEXT NOT NULL UNIQUE CHECK(length(attempt_id) = 36),
     phase TEXT NOT NULL CHECK(phase IN ('prepared', 'staged', 'published')),
     target_path_id INTEGER NOT NULL REFERENCES local_paths(id),
     staging_path_id INTEGER NOT NULL REFERENCES local_paths(id),
     staging_fingerprint BLOB,
     published_fingerprint BLOB,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     CHECK(target_path_id != staging_path_id),
     CHECK(
         (phase = 'prepared' AND staging_fingerprint IS NULL AND published_fingerprint IS NULL)
@@ -442,18 +495,22 @@ CREATE TABLE delivery_attempts (
     )
 ) STRICT;
 
-CREATE INDEX delivery_attempts_phase_idx ON delivery_attempts(phase, transfer_id);
+CREATE TRIGGER download_delivery_attempt_authority_immutable
+BEFORE UPDATE OF job_id,attempt_id,target_path_id,staging_path_id ON download_delivery_attempts
+BEGIN SELECT RAISE(ABORT, 'delivery attempt authority is immutable'); END;
 
-CREATE TABLE delivery_output_tombstones (
-    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
-    tombstone_id TEXT NOT NULL UNIQUE CHECK(length(trim(tombstone_id)) > 0),
+CREATE INDEX download_delivery_attempts_phase_idx ON download_delivery_attempts(phase, job_id);
+
+CREATE TABLE download_delivery_tombstones (
+    job_id INTEGER PRIMARY KEY REFERENCES download_jobs(id) ON DELETE RESTRICT,
+    tombstone_id TEXT NOT NULL UNIQUE CHECK(length(tombstone_id) = 36),
     phase TEXT NOT NULL CHECK(phase IN ('prepared', 'moved')),
     original_path_id INTEGER NOT NULL REFERENCES local_paths(id),
     tombstone_path_id INTEGER NOT NULL REFERENCES local_paths(id),
     source_fingerprint BLOB NOT NULL,
     moved_fingerprint BLOB,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     CHECK(original_path_id != tombstone_path_id),
     CHECK(
         (phase = 'prepared' AND moved_fingerprint IS NULL)
@@ -461,14 +518,18 @@ CREATE TABLE delivery_output_tombstones (
     )
 ) STRICT;
 
-CREATE INDEX delivery_output_tombstones_phase_idx
-ON delivery_output_tombstones(phase, transfer_id);
+CREATE TRIGGER download_delivery_tombstone_authority_immutable
+BEFORE UPDATE OF job_id,tombstone_id,original_path_id,tombstone_path_id,source_fingerprint ON download_delivery_tombstones
+BEGIN SELECT RAISE(ABORT, 'delivery tombstone authority is immutable'); END;
+
+CREATE INDEX download_delivery_tombstones_phase_idx
+ON download_delivery_tombstones(phase, job_id);
 
 CREATE TRIGGER clear_delivery_attempt_after_delivered
-AFTER UPDATE OF delivery_state ON transfers
+AFTER UPDATE OF delivery_state ON download_jobs
 WHEN NEW.delivery_state = 'delivered'
 BEGIN
-    DELETE FROM delivery_attempts WHERE transfer_id = NEW.id;
+    DELETE FROM download_delivery_attempts WHERE job_id = NEW.id;
 END;
 
 CREATE TABLE shared_file_scan_failures (
@@ -482,15 +543,15 @@ CREATE TABLE shared_file_scan_failures (
     UNIQUE(path_id)
 ) STRICT;
 
-CREATE TABLE transfer_pieces (
-    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+CREATE TABLE download_job_pieces (
+    job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     piece_index INTEGER NOT NULL CHECK(piece_index BETWEEN 0 AND 4294967295),
     state TEXT NOT NULL CHECK(state IN ('Missing', 'Verified')),
     bytes_written INTEGER NOT NULL DEFAULT 0 CHECK(bytes_written >= 0),
     block_bitmap TEXT,
     ich_corrupted INTEGER NOT NULL DEFAULT 0 CHECK(ich_corrupted IN (0, 1)),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    PRIMARY KEY(transfer_id, piece_index)
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
+    PRIMARY KEY(job_id, piece_index)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE servers (
@@ -555,35 +616,35 @@ CREATE TABLE peers (
     UNIQUE(user_hash)
 ) STRICT;
 
-CREATE TABLE transfer_sources (
+CREATE TABLE download_job_sources (
     id INTEGER PRIMARY KEY,
-    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+    job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     ip TEXT NOT NULL,
     tcp_port INTEGER NOT NULL CHECK(tcp_port BETWEEN 1 AND 65535),
     user_hash BLOB CHECK(user_hash IS NULL OR length(user_hash) = 16),
     connect_options INTEGER CHECK(connect_options IS NULL OR connect_options BETWEEN 0 AND 255),
     file_comment TEXT NOT NULL DEFAULT '',
     file_rating INTEGER NOT NULL DEFAULT 0 CHECK(file_rating BETWEEN 0 AND 255),
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
     last_outcome TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
-CREATE UNIQUE INDEX transfer_sources_identity_idx
-ON transfer_sources(transfer_id, ip, tcp_port);
+CREATE UNIQUE INDEX download_job_sources_identity_idx
+ON download_job_sources(job_id, ip, tcp_port);
 
-CREATE TABLE transfer_name_state (
-    transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id) ON DELETE CASCADE,
+CREATE TABLE download_job_name_state (
+    job_id INTEGER PRIMARY KEY REFERENCES download_jobs(id) ON DELETE CASCADE,
     display_name_pinned INTEGER NOT NULL DEFAULT 0
         CHECK(display_name_pinned IN (0, 1)),
     follow_majority_filename INTEGER NOT NULL DEFAULT 0
         CHECK(follow_majority_filename IN (0, 1))
 ) STRICT;
 
-CREATE TABLE transfer_file_name_observations (
+CREATE TABLE download_job_file_name_observations (
     id INTEGER PRIMARY KEY,
     position INTEGER NOT NULL CHECK(position >= 0),
-    transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+    job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     source_ip TEXT,
     source_tcp_port INTEGER CHECK(source_tcp_port IS NULL OR source_tcp_port BETWEEN 1 AND 65535),
     user_hash BLOB CHECK(user_hash IS NULL OR length(user_hash) = 16),
@@ -592,15 +653,15 @@ CREATE TABLE transfer_file_name_observations (
     server_endpoint TEXT,
     raw_name TEXT NOT NULL,
     normalized_name TEXT NOT NULL,
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    observed_at_s INTEGER NOT NULL CHECK(observed_at_s >= 0),
     CHECK((source_ip IS NULL) = (source_tcp_port IS NULL)),
     CHECK(length(trim(raw_name)) > 0),
     CHECK(length(trim(normalized_name)) > 0),
-    UNIQUE(transfer_id, position)
+    UNIQUE(job_id, position)
 ) STRICT;
 
-CREATE INDEX transfer_file_name_observations_transfer_idx
-ON transfer_file_name_observations(transfer_id, observed_at_ms, id);
+CREATE INDEX download_job_file_name_observations_job_idx
+ON download_job_file_name_observations(job_id, observed_at_s, id);
 
 CREATE TABLE kad_bootstrap_endpoints (
     position INTEGER PRIMARY KEY,
@@ -767,9 +828,9 @@ CREATE TABLE search_result_observations (
 
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_path_content_idx ON shared_file_memberships(path_id, known_file_id);
-CREATE INDEX transfers_pending_delete_idx
-ON transfers(delete_requested_at_ms)
-WHERE delete_requested_at_ms IS NOT NULL;
+CREATE INDEX download_jobs_pending_delete_idx
+ON download_jobs(delete_requested_at_s)
+WHERE delete_requested_at_s IS NOT NULL;
 CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
 CREATE INDEX kad_source_file_idx ON kad_source_publishes(ed2k_hash, observed_at_ms);
 CREATE INDEX kad_note_file_idx ON kad_note_publishes(ed2k_hash, observed_at_ms);
@@ -778,12 +839,13 @@ CREATE INDEX search_result_observations_result_idx
 ON search_result_observations(result_id, observed_at_ms, id);
 CREATE INDEX categories_temp_path_id_idx ON categories(temp_path_id);
 CREATE INDEX categories_destination_path_id_idx ON categories(destination_path_id);
-CREATE INDEX transfers_category_id_idx ON transfers(category_id);
-CREATE INDEX transfers_delivered_path_id_idx ON transfers(delivered_path_id);
-CREATE INDEX delivery_attempts_target_path_id_idx ON delivery_attempts(target_path_id);
-CREATE INDEX delivery_attempts_staging_path_id_idx ON delivery_attempts(staging_path_id);
-CREATE INDEX delivery_output_tombstones_original_path_id_idx ON delivery_output_tombstones(original_path_id);
-CREATE INDEX delivery_output_tombstones_tombstone_path_id_idx ON delivery_output_tombstones(tombstone_path_id);
+CREATE INDEX download_jobs_temp_path_idx ON download_jobs(selected_temp_path_id);
+CREATE INDEX download_jobs_category_id_idx ON download_jobs(category_id);
+CREATE INDEX download_jobs_delivered_path_id_idx ON download_jobs(delivered_path_id);
+CREATE INDEX download_delivery_attempts_target_path_id_idx ON download_delivery_attempts(target_path_id);
+CREATE INDEX download_delivery_attempts_staging_path_id_idx ON download_delivery_attempts(staging_path_id);
+CREATE INDEX download_delivery_tombstones_original_path_id_idx ON download_delivery_tombstones(original_path_id);
+CREATE INDEX download_delivery_tombstones_tombstone_path_id_idx ON download_delivery_tombstones(tombstone_path_id);
 CREATE INDEX kad_keyword_publishes_known_file_id_idx ON kad_keyword_publishes(known_file_id);
 CREATE INDEX search_results_known_file_id_idx ON search_results(known_file_id);
 

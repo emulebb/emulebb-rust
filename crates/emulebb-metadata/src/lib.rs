@@ -6,6 +6,11 @@ mod delivery_exclusion_store;
 mod discovery_store;
 mod download_history_model;
 mod download_history_store;
+mod download_job_model;
+mod download_job_store;
+pub use download_job_model::{
+    DownloadIntent, DownloadJobAdmission, DownloadJobRecord, DownloadJobRequest, JobId, JobToken,
+};
 mod identity_model;
 mod identity_store;
 mod kad_publish_model;
@@ -78,12 +83,13 @@ pub use shared_membership_store::ObservedRootChanged;
 pub use store::{InitialProfileStorage, MetadataStore};
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataFileImportRecord, MetadataPartialShare, MetadataSharedSourceFailure,
-    MetadataTransferAichIdentity, MetadataTransferCatalogEntry, MetadataTransferCounts,
-    MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
-    MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
-    MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
-    MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
-    MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
-    MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferSource,
+    MetadataDeliveryOutputReservation, MetadataFileImportRecord, MetadataPartialShare,
+    MetadataSharedSourceFailure, MetadataTransferAichIdentity, MetadataTransferCatalogEntry,
+    MetadataTransferCounts, MetadataTransferDeletionTombstone,
+    MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
+    MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
+    MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
+    MetadataTransferFileNameObservation, MetadataTransferManifest, MetadataTransferMediaMetadata,
+    MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
+    MetadataTransferSource,
 };

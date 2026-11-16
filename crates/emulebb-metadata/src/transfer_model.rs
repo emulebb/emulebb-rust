@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{NativeFileFingerprint, NativeFileIdentity};
+use crate::{DownloadIntent, JobId, JobToken, NativeFileFingerprint, NativeFileIdentity};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub enum MetadataTransferDeliveryOwnership {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferDeliveryAttempt {
+    pub job_id: JobId,
     pub file_hash: String,
     pub attempt_id: Uuid,
     pub phase: MetadataTransferDeliveryAttemptPhase,
@@ -32,8 +33,16 @@ pub struct MetadataTransferDeliveryAttempt {
     pub staging_path: PathBuf,
     pub staging_fingerprint: Option<NativeFileFingerprint>,
     pub published_fingerprint: Option<NativeFileFingerprint>,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
+    pub created_at_s: i64,
+    pub updated_at_s: i64,
+}
+
+/// Immutable exclusion authority; retain this exact snapshot across cleanup I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataDeliveryOutputReservation {
+    pub originating_job_id: JobId,
+    pub reservation_id: Uuid,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +53,7 @@ pub enum MetadataTransferDeletionTombstonePhase {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferDeletionTombstone {
+    pub job_id: JobId,
     pub file_hash: String,
     pub tombstone_id: Uuid,
     pub phase: MetadataTransferDeletionTombstonePhase,
@@ -51,8 +61,8 @@ pub struct MetadataTransferDeletionTombstone {
     pub tombstone_path: PathBuf,
     pub source_fingerprint: NativeFileFingerprint,
     pub moved_fingerprint: Option<NativeFileFingerprint>,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
+    pub created_at_s: i64,
+    pub updated_at_s: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,12 +80,13 @@ pub struct MetadataTransferAichIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
+    pub token: JobToken,
     pub file_hash: String,
     pub display_name: String,
     pub display_name_pinned: bool,
     pub follow_majority_filename: bool,
     pub file_name_observations: Vec<MetadataTransferFileNameObservation>,
-    pub file_size: u64,
+    pub expected_size_bytes: Option<u64>,
     pub piece_size: u64,
     pub completed: bool,
     pub final_rehash_pending: bool,
@@ -94,7 +105,7 @@ pub struct MetadataTransferManifest {
     pub comment: String,
     pub rating: u8,
     pub category_id: Option<i64>,
-    pub control_state: Option<String>,
+    pub intent: DownloadIntent,
     pub transfer_row_removed: bool,
     /// Explicit lifecycle for materializing a download outside the internal
     /// piece store. This is independent from temporary completion/rehash state.
@@ -102,7 +113,7 @@ pub struct MetadataTransferManifest {
     pub delivery_ownership: MetadataTransferDeliveryOwnership,
     /// Absolute path the completed payload was materialized to by its canonical
     /// name, or `None` until the transfer is delivered. Persisted on the
-    /// `transfers` row to make finished-file delivery idempotent across restarts.
+    /// `download_jobs` row to make finished-file delivery idempotent across restarts.
     pub delivered_path: Option<PathBuf>,
     /// Native file identity, size, and timestamps captured at delivery.
     pub source_fingerprint: Option<NativeFileFingerprint>,
@@ -121,7 +132,7 @@ pub struct MetadataTransferFileNameObservation {
     pub server_endpoint: Option<String>,
     pub raw_name: String,
     pub normalized_name: String,
-    pub observed_at_ms: i64,
+    pub observed_at_s: i64,
 }
 
 /// Compact bounded transfer state used to preserve partial exchange.

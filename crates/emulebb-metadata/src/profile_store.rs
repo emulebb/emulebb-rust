@@ -344,7 +344,7 @@ impl super::MetadataStore {
             )
             .optional()?;
         tx.execute(
-            "UPDATE transfers SET category_id=NULL WHERE category_id=?1",
+            "UPDATE download_jobs SET category_id=NULL WHERE category_id=?1",
             [id],
         )?;
         let changed = tx.execute("DELETE FROM categories WHERE id=?1", [id])?;
@@ -1069,10 +1069,10 @@ mod tests {
                 .is_err()
         );
         store
-            .upsert_transfer_manifest(&test_transfer_manifest(1, Some(second.id)))
+            .upsert_transfer_manifest(&test_transfer_manifest(&store, 1, Some(second.id)))
             .unwrap();
         store
-            .upsert_transfer_manifest(&test_transfer_manifest(2, Some(third.id)))
+            .upsert_transfer_manifest(&test_transfer_manifest(&store, 2, Some(third.id)))
             .unwrap();
         assert!(
             store
@@ -1081,7 +1081,14 @@ mod tests {
         );
         assert_eq!(
             store
-                .transfer_manifest_by_hash(&"01".repeat(16))
+                .download_job_manifest(
+                    store
+                        .latest_download_job(&"01".repeat(16))
+                        .unwrap()
+                        .unwrap()
+                        .token
+                        .job_id
+                )
                 .unwrap()
                 .unwrap()
                 .category_id,
@@ -1089,7 +1096,14 @@ mod tests {
         );
         assert_eq!(
             store
-                .transfer_manifest_by_hash(&"02".repeat(16))
+                .download_job_manifest(
+                    store
+                        .latest_download_job(&"02".repeat(16))
+                        .unwrap()
+                        .unwrap()
+                        .token
+                        .job_id
+                )
                 .unwrap()
                 .unwrap()
                 .category_id,
@@ -1208,7 +1222,7 @@ mod tests {
         let category = store
             .create_category("Retired", None, None, "", Path::new("incoming"))
             .unwrap();
-        let stale = test_transfer_manifest(4, Some(category.id));
+        let stale = test_transfer_manifest(&store, 4, Some(category.id));
         store.upsert_transfer_manifest(&stale).unwrap();
         assert!(
             store
@@ -1219,7 +1233,7 @@ mod tests {
         assert_eq!(stored.category_id, None);
         assert_eq!(
             store
-                .transfer_manifest_by_hash(&"04".repeat(16))
+                .download_job_manifest(stale.token.job_id)
                 .unwrap()
                 .unwrap()
                 .category_id,
@@ -1234,7 +1248,7 @@ mod tests {
             .create_category("Keep", None, None, "", Path::new("incoming"))
             .unwrap();
         store
-            .upsert_transfer_manifest(&test_transfer_manifest(3, Some(category.id)))
+            .upsert_transfer_manifest(&test_transfer_manifest(&store, 3, Some(category.id)))
             .unwrap();
         {
             let conn = store.connection().unwrap();
@@ -1248,7 +1262,14 @@ mod tests {
         assert_eq!(store.load_categories().unwrap()[0].id, category.id);
         assert_eq!(
             store
-                .transfer_manifest_by_hash(&"03".repeat(16))
+                .download_job_manifest(
+                    store
+                        .latest_download_job(&"03".repeat(16))
+                        .unwrap()
+                        .unwrap()
+                        .token
+                        .job_id
+                )
                 .unwrap()
                 .unwrap()
                 .category_id,
@@ -1257,16 +1278,29 @@ mod tests {
     }
 
     fn test_transfer_manifest(
+        store: &crate::MetadataStore,
         byte: u8,
         category_id: Option<i64>,
     ) -> crate::MetadataTransferManifest {
         crate::MetadataTransferManifest {
+            token: store
+                .admit_download_job(&crate::DownloadJobRequest {
+                    file_hash: format!("{byte:02x}").repeat(16),
+                    display_name: format!("{byte:02x}.bin"),
+                    expected_size_bytes: Some(10),
+                    category_id,
+                    intent: crate::DownloadIntent::Stopped,
+                    piece_size: 10,
+                })
+                .unwrap()
+                .job
+                .token,
             file_hash: format!("{byte:02x}").repeat(16),
             display_name: format!("{byte:02x}.bin"),
             display_name_pinned: false,
             follow_majority_filename: false,
             file_name_observations: Vec::new(),
-            file_size: 10,
+            expected_size_bytes: Some(10),
             piece_size: 10,
             completed: false,
             final_rehash_pending: false,
@@ -1283,7 +1317,7 @@ mod tests {
             comment: String::new(),
             rating: 0,
             category_id,
-            control_state: Some("paused".to_string()),
+            intent: crate::DownloadIntent::Stopped,
             transfer_row_removed: false,
             delivery_state: crate::MetadataTransferDeliveryState::Pending,
             delivery_ownership: crate::MetadataTransferDeliveryOwnership::None,

@@ -5,6 +5,18 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 
 pub(crate) fn validate_manifest(manifest: &MetadataTransferManifest) -> Result<()> {
+    let size = manifest.expected_size_bytes;
+    ensure!(
+        size.is_none_or(|size| size > 0),
+        "zero-byte execution is unsupported"
+    );
+    ensure!(
+        size.is_some()
+            || (!manifest.completed
+                && manifest.pieces.is_empty()
+                && manifest.verified_ranges.is_empty()),
+        "unknown-size jobs cannot carry payload geometry or verification"
+    );
     ensure!(
         manifest.aich_root.is_some() == manifest.aich_root_origin.is_some(),
         "AICH root and accepted origin must be present together"
@@ -32,10 +44,10 @@ pub(crate) fn validate_manifest(manifest: &MetadataTransferManifest) -> Result<(
             .checked_mul(manifest.piece_size)
             .context("transfer piece offset overflow")?;
         ensure!(
-            start < manifest.file_size,
+            start < size.unwrap_or(0),
             "transfer piece starts outside the payload"
         );
-        let extent = manifest.piece_size.min(manifest.file_size - start);
+        let extent = manifest.piece_size.min(size.unwrap_or(0) - start);
         ensure!(
             piece.bytes_written <= extent,
             "transfer piece progress exceeds its payload extent"
@@ -43,7 +55,7 @@ pub(crate) fn validate_manifest(manifest: &MetadataTransferManifest) -> Result<(
     }
     for range in &manifest.verified_ranges {
         ensure!(
-            range.start <= range.end && range.end <= manifest.file_size,
+            range.start <= range.end && range.end <= size.unwrap_or(0),
             "verified range is outside the payload"
         );
     }
@@ -51,6 +63,7 @@ pub(crate) fn validate_manifest(manifest: &MetadataTransferManifest) -> Result<(
 }
 
 fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
+    let size = manifest.expected_size_bytes;
     let valid = match (manifest.delivery_state, manifest.delivery_ownership) {
         (MetadataTransferDeliveryState::Pending, MetadataTransferDeliveryOwnership::None) => {
             manifest.delivered_path.is_none()
@@ -60,7 +73,7 @@ fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
                 && manifest
                     .source_fingerprint
                     .as_ref()
-                    .is_some_and(|fingerprint| fingerprint.size_bytes == manifest.file_size)
+                    .is_some_and(|fingerprint| fingerprint.size_bytes == size.unwrap_or(0))
         }
         (MetadataTransferDeliveryState::Delivered, MetadataTransferDeliveryOwnership::Unowned) => {
             manifest.delivered_path.is_some()
@@ -80,7 +93,7 @@ fn validate_delivery_state(manifest: &MetadataTransferManifest) -> Result<()> {
         ensure!(
             manifest.completed
                 && !manifest.final_rehash_pending
-                && fingerprint.size_bytes == manifest.file_size,
+                && fingerprint.size_bytes == size.unwrap_or(0),
             "invalid canonical payload fingerprint for transfer {}",
             manifest.file_hash
         );

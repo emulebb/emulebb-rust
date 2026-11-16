@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
@@ -21,7 +21,7 @@ impl super::MetadataStore {
                            WHEN aich_root IS NULL THEN NULL
                            ELSE lower(hex(aich_root))
                        END,
-                       first_completed_at_ms, last_completed_at_ms
+                       first_completed_at_s, last_completed_at_s
                 FROM download_history
                 WHERE ed2k_hash = ?1
                 "#,
@@ -32,8 +32,8 @@ impl super::MetadataStore {
                     display_name: row.get(1)?,
                     file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
                     aich_root: row.get(3)?,
-                    first_completed_at_ms: row.get(4)?,
-                    last_completed_at_ms: row.get(5)?,
+                    first_completed_at_s: row.get(4)?,
+                    last_completed_at_s: row.get(5)?,
                 })
             })
             .optional()
@@ -122,13 +122,13 @@ pub(crate) fn record_completed_download(
     manifest: &MetadataTransferManifest,
     hash: &[u8],
     aich_root: Option<&[u8]>,
-    completed_at_ms: Option<i64>,
+    completed_at_s: Option<i64>,
     completion_transition: bool,
 ) -> Result<()> {
     if !records_download_completion(manifest) {
         return Ok(());
     }
-    let completed_at_ms = completed_at_ms.ok_or_else(|| {
+    let completed_at_s = completed_at_s.ok_or_else(|| {
         anyhow!(
             "completed download {} has no completion timestamp",
             manifest.file_hash
@@ -146,10 +146,15 @@ pub(crate) fn record_completed_download(
         .optional()?;
     if let Some((existing_size, existing_aich_root)) = existing {
         ensure!(
-            existing_size == manifest.file_size,
+            existing_size
+                == manifest
+                    .expected_size_bytes
+                    .context("verified download has unknown size")?,
             "completed download history for {} has size {existing_size}, not {}",
             manifest.file_hash,
-            manifest.file_size
+            manifest
+                .expected_size_bytes
+                .context("verified download has unknown size")?
         );
         if let (Some(existing_aich_root), Some(aich_root)) =
             (existing_aich_root.as_deref(), aich_root)
@@ -166,24 +171,28 @@ pub(crate) fn record_completed_download(
         r#"
         INSERT INTO download_history(
             ed2k_hash, size_bytes, display_name, aich_root,
-            first_completed_at_ms, last_completed_at_ms
+            first_completed_at_s, last_completed_at_s
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
         ON CONFLICT(ed2k_hash) DO UPDATE SET
             display_name = excluded.display_name,
             aich_root = coalesce(excluded.aich_root, download_history.aich_root),
-            last_completed_at_ms = CASE
-                WHEN ?6 THEN excluded.last_completed_at_ms
-                ELSE download_history.last_completed_at_ms
+            last_completed_at_s = CASE
+                WHEN ?6 THEN excluded.last_completed_at_s
+                ELSE download_history.last_completed_at_s
             END
         "#,
     )?
     .execute(params![
         hash,
-        i64::try_from(manifest.file_size)?,
+        i64::try_from(
+            manifest
+                .expected_size_bytes
+                .context("verified download has unknown size")?
+        )?,
         manifest.display_name,
         aich_root,
-        completed_at_ms,
+        completed_at_s,
         completion_transition,
     ])?;
     Ok(())
@@ -200,14 +209,26 @@ mod tests {
         MetadataTransferManifest, MetadataTransferPiece, MetadataTransferRange,
     };
 
-    fn completed_download_manifest() -> MetadataTransferManifest {
+    fn completed_download_manifest(store: &MetadataStore) -> MetadataTransferManifest {
         MetadataTransferManifest {
+            token: store
+                .admit_download_job(&crate::DownloadJobRequest {
+                    file_hash: "00112233445566778899aabbccddeeff".to_string(),
+                    display_name: "completed.bin".to_string(),
+                    expected_size_bytes: Some(1024),
+                    category_id: None,
+                    intent: crate::DownloadIntent::Started,
+                    piece_size: 1024,
+                })
+                .unwrap()
+                .job
+                .token,
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             display_name: "completed.bin".to_string(),
             display_name_pinned: false,
             follow_majority_filename: false,
             file_name_observations: Vec::new(),
-            file_size: 1024,
+            expected_size_bytes: Some(1024),
             piece_size: 1024,
             completed: true,
             final_rehash_pending: false,
@@ -235,7 +256,7 @@ mod tests {
             comment: String::new(),
             rating: 0,
             category_id: None,
-            control_state: None,
+            intent: crate::DownloadIntent::Started,
             transfer_row_removed: false,
             delivery_state: MetadataTransferDeliveryState::Delivered,
             delivery_ownership: MetadataTransferDeliveryOwnership::Unowned,
@@ -245,20 +266,20 @@ mod tests {
         }
     }
 
-    fn transfer_completed_at_ms(store: &MetadataStore, file_hash: &str) -> Option<i64> {
-        store
-            .transfer_timestamps_by_hash(file_hash)
-            .unwrap()
-            .unwrap()
-            .1
+    fn transfer_completed_at_s(store: &MetadataStore, id: crate::JobId) -> Option<i64> {
+        store.download_job_timestamps(id).unwrap().unwrap().1
     }
 
     #[test]
     fn authoritative_download_completion_survives_manifest_deletion() {
         let store = MetadataStore::in_memory().unwrap();
-        let manifest = completed_download_manifest();
+        let manifest = completed_download_manifest(&store);
         store.upsert_transfer_manifest(&manifest).unwrap();
-        assert!(store.delete_transfer_manifest(&manifest.file_hash).unwrap());
+        assert!(
+            store
+                .delete_transfer_manifest(manifest.token.job_id)
+                .unwrap()
+        );
 
         let history = store
             .download_history_by_hash(&manifest.file_hash)
@@ -266,15 +287,15 @@ mod tests {
             .unwrap();
         assert_eq!(history.file_hash, manifest.file_hash);
         assert_eq!(history.display_name, manifest.display_name);
-        assert_eq!(history.file_size, manifest.file_size);
+        assert_eq!(history.file_size, manifest.expected_size_bytes.unwrap());
         assert_eq!(history.aich_root, manifest.aich_root);
-        assert!(history.first_completed_at_ms <= history.last_completed_at_ms);
+        assert!(history.first_completed_at_s <= history.last_completed_at_s);
     }
 
     #[test]
     fn incomplete_manifests_do_not_create_download_history() {
         let store = MetadataStore::in_memory().unwrap();
-        let mut manifest = completed_download_manifest();
+        let mut manifest = completed_download_manifest(&store);
         manifest.completed = false;
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert!(
@@ -288,10 +309,10 @@ mod tests {
     #[test]
     fn completion_timestamps_only_advance_on_completion_transitions() {
         let store = MetadataStore::in_memory().unwrap();
-        let mut manifest = completed_download_manifest();
+        let mut manifest = completed_download_manifest(&store);
         manifest.completed = false;
         store.upsert_transfer_manifest(&manifest).unwrap();
-        assert_eq!(transfer_completed_at_ms(&store, &manifest.file_hash), None);
+        assert_eq!(transfer_completed_at_s(&store, manifest.token.job_id), None);
         assert!(
             store
                 .download_history_by_hash(&manifest.file_hash)
@@ -305,14 +326,14 @@ mod tests {
         {
             let conn = store.connection().unwrap();
             conn.execute(
-                "UPDATE transfers SET completed_at_ms = ?1",
+                "UPDATE download_jobs SET completed_at_s = ?1",
                 rusqlite::params![FIRST_COMPLETION_MS],
             )
             .unwrap();
             conn.execute(
                 r#"
                 UPDATE download_history
-                SET first_completed_at_ms = ?1, last_completed_at_ms = ?1
+                SET first_completed_at_s = ?1, last_completed_at_s = ?1
                 "#,
                 rusqlite::params![FIRST_COMPLETION_MS],
             )
@@ -333,10 +354,10 @@ mod tests {
             metadata_refresh.aich_root.as_deref(),
             Some("1111111111111111111111111111111111111111")
         );
-        assert_eq!(metadata_refresh.first_completed_at_ms, FIRST_COMPLETION_MS);
-        assert_eq!(metadata_refresh.last_completed_at_ms, FIRST_COMPLETION_MS);
+        assert_eq!(metadata_refresh.first_completed_at_s, FIRST_COMPLETION_MS);
+        assert_eq!(metadata_refresh.last_completed_at_s, FIRST_COMPLETION_MS);
         assert_eq!(
-            transfer_completed_at_ms(&store, &manifest.file_hash),
+            transfer_completed_at_s(&store, manifest.token.job_id),
             Some(FIRST_COMPLETION_MS)
         );
 
@@ -345,7 +366,7 @@ mod tests {
         manifest.delivered_path = None;
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert_eq!(
-            transfer_completed_at_ms(&store, &manifest.file_hash),
+            transfer_completed_at_s(&store, manifest.token.job_id),
             Some(FIRST_COMPLETION_MS)
         );
         assert_eq!(
@@ -353,7 +374,7 @@ mod tests {
                 .download_history_by_hash(&manifest.file_hash)
                 .unwrap()
                 .unwrap()
-                .last_completed_at_ms,
+                .last_completed_at_s,
             FIRST_COMPLETION_MS
         );
 
@@ -361,7 +382,7 @@ mod tests {
         manifest.final_rehash_pending = true;
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert_eq!(
-            transfer_completed_at_ms(&store, &manifest.file_hash),
+            transfer_completed_at_s(&store, manifest.token.job_id),
             Some(FIRST_COMPLETION_MS)
         );
         assert_eq!(
@@ -369,7 +390,7 @@ mod tests {
                 .download_history_by_hash(&manifest.file_hash)
                 .unwrap()
                 .unwrap()
-                .last_completed_at_ms,
+                .last_completed_at_s,
             FIRST_COMPLETION_MS
         );
 
@@ -377,30 +398,30 @@ mod tests {
         manifest.final_rehash_pending = false;
         manifest.display_name = "completed-again.bin".to_string();
         store.upsert_transfer_manifest(&manifest).unwrap();
-        let recompleted_at_ms = transfer_completed_at_ms(&store, &manifest.file_hash).unwrap();
+        let recompleted_at_s = transfer_completed_at_s(&store, manifest.token.job_id).unwrap();
         let recompleted_history = store
             .download_history_by_hash(&manifest.file_hash)
             .unwrap()
             .unwrap();
-        assert!(recompleted_at_ms > FIRST_COMPLETION_MS);
+        assert!(recompleted_at_s > FIRST_COMPLETION_MS);
         assert_eq!(
-            recompleted_history.first_completed_at_ms,
+            recompleted_history.first_completed_at_s,
             FIRST_COMPLETION_MS
         );
-        assert_eq!(recompleted_history.last_completed_at_ms, recompleted_at_ms);
+        assert_eq!(recompleted_history.last_completed_at_s, recompleted_at_s);
         assert_eq!(recompleted_history.display_name, "completed-again.bin");
     }
 
     #[test]
     fn only_authoritative_download_completion_starts_timestamps() {
         let rehash_store = MetadataStore::in_memory().unwrap();
-        let mut rehash_manifest = completed_download_manifest();
+        let mut rehash_manifest = completed_download_manifest(&rehash_store);
         rehash_manifest.final_rehash_pending = true;
         rehash_store
             .upsert_transfer_manifest(&rehash_manifest)
             .unwrap();
         assert_eq!(
-            transfer_completed_at_ms(&rehash_store, &rehash_manifest.file_hash),
+            transfer_completed_at_s(&rehash_store, rehash_manifest.token.job_id),
             None
         );
         assert!(
@@ -415,13 +436,13 @@ mod tests {
             .upsert_transfer_manifest(&rehash_manifest)
             .unwrap();
         let rehash_completed_at =
-            transfer_completed_at_ms(&rehash_store, &rehash_manifest.file_hash).unwrap();
+            transfer_completed_at_s(&rehash_store, rehash_manifest.token.job_id).unwrap();
         assert_eq!(
             rehash_store
                 .download_history_by_hash(&rehash_manifest.file_hash)
                 .unwrap()
                 .unwrap()
-                .last_completed_at_ms,
+                .last_completed_at_s,
             rehash_completed_at
         );
     }
@@ -429,72 +450,83 @@ mod tests {
     #[test]
     fn recompletion_does_not_regress_when_wall_clock_moves_backwards() {
         let store = MetadataStore::in_memory().unwrap();
-        let manifest = completed_download_manifest();
+        let mut manifest = completed_download_manifest(&store);
         store.upsert_transfer_manifest(&manifest).unwrap();
         const FUTURE_COMPLETION_MS: i64 = 9_000_000_000_000;
         {
             let conn = store.connection().unwrap();
             conn.execute(
-                "UPDATE transfers SET completed_at_ms = ?1",
+                "UPDATE download_jobs SET completed_at_s = ?1",
                 rusqlite::params![FUTURE_COMPLETION_MS],
             )
             .unwrap();
             conn.execute(
                 r#"
                 UPDATE download_history
-                SET first_completed_at_ms = ?1, last_completed_at_ms = ?1
+                SET first_completed_at_s = ?1, last_completed_at_s = ?1
                 "#,
                 rusqlite::params![FUTURE_COMPLETION_MS],
             )
             .unwrap();
         }
 
-        assert!(store.delete_transfer_manifest(&manifest.file_hash).unwrap());
         assert!(
             store
-                .transfer_timestamps_by_hash(&manifest.file_hash)
+                .delete_transfer_manifest(manifest.token.job_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .download_job_timestamps(manifest.token.job_id)
                 .unwrap()
                 .is_none()
         );
+        manifest.token = completed_download_manifest(&store).token;
         store.upsert_transfer_manifest(&manifest).unwrap();
 
         assert_eq!(
-            transfer_completed_at_ms(&store, &manifest.file_hash),
+            transfer_completed_at_s(&store, manifest.token.job_id),
             Some(FUTURE_COMPLETION_MS)
         );
         let history = store
             .download_history_by_hash(&manifest.file_hash)
             .unwrap()
             .unwrap();
-        assert_eq!(history.first_completed_at_ms, FUTURE_COMPLETION_MS);
-        assert_eq!(history.last_completed_at_ms, FUTURE_COMPLETION_MS);
+        assert_eq!(history.first_completed_at_s, FUTURE_COMPLETION_MS);
+        assert_eq!(history.last_completed_at_s, FUTURE_COMPLETION_MS);
     }
 
     #[test]
     fn conflicting_completed_identity_rolls_back_manifest_update() {
         let store = MetadataStore::in_memory().unwrap();
-        let mut manifest = completed_download_manifest();
+        let mut manifest = completed_download_manifest(&store);
         store.upsert_transfer_manifest(&manifest).unwrap();
 
-        manifest.file_size += 1;
+        manifest.expected_size_bytes = manifest.expected_size_bytes.map(|size| size + 1);
         let error = store.upsert_transfer_manifest(&manifest).unwrap_err();
         assert!(error.is::<crate::MetadataContentConflict>());
         assert_eq!(
             store
-                .transfer_manifest_by_hash(&manifest.file_hash)
+                .download_job_manifest(manifest.token.job_id)
                 .unwrap()
                 .unwrap()
-                .file_size,
-            1024
+                .expected_size_bytes,
+            Some(1024)
         );
-        store.delete_transfer_manifest(&manifest.file_hash).unwrap();
-        manifest.completed = false;
-        assert!(
-            store
-                .upsert_transfer_manifest(&manifest)
-                .unwrap_err()
-                .is::<crate::MetadataContentConflict>()
-        );
-        assert_eq!(store.table_count("transfers").unwrap(), 0);
+        store
+            .delete_transfer_manifest(manifest.token.job_id)
+            .unwrap();
+        let error = store
+            .admit_download_job(&crate::DownloadJobRequest {
+                file_hash: manifest.file_hash.clone(),
+                display_name: manifest.display_name.clone(),
+                expected_size_bytes: manifest.expected_size_bytes,
+                category_id: None,
+                intent: crate::DownloadIntent::Started,
+                piece_size: manifest.piece_size,
+            })
+            .unwrap_err();
+        assert!(error.is::<crate::MetadataContentConflict>());
+        assert_eq!(store.table_count("download_jobs").unwrap(), 0);
     }
 }

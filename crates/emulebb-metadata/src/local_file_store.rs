@@ -791,7 +791,7 @@ impl MetadataStore {
     }
 
     /// Read hashsets and the first eligible verified path without consulting
-    /// download transfers. Used to hydrate complete-file protocol responses.
+    /// download jobs. Used to hydrate complete-file protocol responses.
     pub fn active_local_content_by_hash(
         &self,
         file_hash: &str,
@@ -927,7 +927,7 @@ mod tests {
             store
                 .connection()
                 .unwrap()
-                .query_row("SELECT count(*) FROM transfers", [], |row| row
+                .query_row("SELECT count(*) FROM download_jobs", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
             0
@@ -1007,10 +1007,10 @@ mod tests {
         content.fingerprint = fingerprint(42);
         store.upsert_verified_local_content(&content).unwrap();
         let conn = store.connection().unwrap();
-        let (name, transfers, md4, aich, paths): (String, i64, i64, i64, i64) = conn
+        let (name, download_jobs, md4, aich, paths): (String, i64, i64, i64, i64) = conn
             .query_row(
                 "SELECT known_files.display_name,
-                (SELECT count(*) FROM transfers),
+                (SELECT count(*) FROM download_jobs),
                 (SELECT count(*) FROM verified_local_md4_hashes),
                 (SELECT count(*) FROM verified_local_aich_hashes),
                 (SELECT count(*) FROM local_file_instances)
@@ -1028,7 +1028,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            (name.as_str(), transfers, md4, aich, paths),
+            (name.as_str(), download_jobs, md4, aich, paths),
             ("First.bin", 0, 1, 1, 2)
         );
         drop(conn);
