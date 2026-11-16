@@ -13,6 +13,7 @@ use capacity::{CapacityControl, CapacityLease};
 mod content_metadata;
 mod ingest;
 mod job_aich;
+mod job_control;
 mod job_delivery;
 mod job_hash;
 mod job_lifecycle;

@@ -7,6 +7,8 @@ use emulebb_metadata::{DownloadJobRecord, JobId};
 #[derive(Clone, Copy)]
 pub(in crate::ed2k_transfer) enum JobRead {
     Exact(JobId),
+    Query(emulebb_metadata::DownloadJobQuery),
+    Counts,
     Execution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
     Endpoints(emulebb_metadata::JobToken, i64, usize),
@@ -21,6 +23,8 @@ pub(in crate::ed2k_transfer) enum JobRead {
 }
 pub(in crate::ed2k_transfer) enum JobReadResult {
     Exact(Option<RetainedRead<DownloadJobRecord>>),
+    Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
+    Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Execution(Option<transfer::Ed2kResumeManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
@@ -37,6 +41,18 @@ impl LocalMutationRegistry {
         request: JobRead,
     ) -> Result<oneshot::Receiver<Result<JobReadResult>>> {
         let charge = match request {
+            JobRead::Query(query) => {
+                ensure!(
+                    (1..=200).contains(&query.limit),
+                    "invalid download job page size"
+                );
+                ensure!(
+                    query.category_id.is_none_or(|id| id > 0),
+                    "invalid download category ID"
+                );
+                2 * 1024 * 1024 + 4096
+            }
+            JobRead::Counts => 4096,
             JobRead::Endpoints(_, after, limit) => {
                 ensure!(
                     after >= 0 && (1..=256).contains(&limit),
@@ -87,6 +103,12 @@ impl LocalMutationRegistry {
             // WHY: callers can retain pages after worker completion/reaping. Move
             // the existing charge with the actual backing, never with its sender.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match request {
+                JobRead::Query(query) => metadata.download_job_page(query).map(|value| {
+                    JobReadResult::Query(RetainedRead::new(value, capacity.take_result()))
+                }),
+                JobRead::Counts => metadata.download_job_counts().map(|value| {
+                    JobReadResult::Counts(RetainedRead::new(value, capacity.take_result()))
+                }),
                 JobRead::Endpoints(token, after, limit) => metadata
                     .download_job_source_endpoints_after(token, after, limit)
                     .map(|value| {
@@ -175,6 +197,29 @@ impl transfer::Ed2kTransferRuntime {
             .await
             .map_err(|_| LocalMutationError::Unknown)?
     }
+    /// Newest-ID native browsing. The existing owner performs SQLite work and
+    /// the returned backing keeps its registry charge until final consumption.
+    pub async fn query_download_jobs(
+        &self,
+        query: emulebb_metadata::DownloadJobQuery,
+    ) -> Result<RetainedRead<emulebb_metadata::DownloadJobPage>> {
+        let JobReadResult::Query(page) = self.read_job_metadata(JobRead::Query(query)).await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+
+    /// Fixed-size historical-completion counters, without scanning job rows.
+    pub async fn download_job_counts(
+        &self,
+    ) -> Result<RetainedRead<emulebb_metadata::DownloadJobCounts>> {
+        let JobReadResult::Counts(counts) = self.read_job_metadata(JobRead::Counts).await? else {
+            unreachable!()
+        };
+        Ok(counts)
+    }
+
     pub async fn download_source_endpoints_after(
         &self,
         token: emulebb_metadata::JobToken,

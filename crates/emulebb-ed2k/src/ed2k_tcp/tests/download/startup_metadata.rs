@@ -416,11 +416,13 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
         report.file_outcomes,
         vec![
             Ed2kPeerFileDownloadOutcome {
+                observed_peer: Some((peer_addr, [0x42; 16])),
                 job_token: primary_job.token,
                 file_hash: primary_hash,
                 outcome: Ed2kPeerDownloadOutcome::FileNotFound,
             },
             Ed2kPeerFileDownloadOutcome {
+                observed_peer: Some((peer_addr, [0x42; 16])),
                 job_token: alternate_job.token,
                 file_hash: alternate_hash,
                 outcome: Ed2kPeerDownloadOutcome::FileNotFound,

@@ -131,6 +131,8 @@ async fn every_compact_result_variant_reuses_and_releases_the_registry_control()
     );
     let capacity = Arc::clone(&runtime.local_mutations.state.lock().unwrap().capacity);
     for request in [
+        JobRead::Query(emulebb_metadata::DownloadJobQuery::default()),
+        JobRead::Counts,
         JobRead::Exact(job.token.job_id),
         JobRead::Latest(hash),
         JobRead::Page(None, 1, false),
@@ -164,4 +166,55 @@ async fn every_compact_result_variant_reuses_and_releases_the_registry_control()
     reap_workers(&runtime.local_mutations).await;
     assert!(matches!(missing, JobReadResult::Exact(None)));
     assert_eq!(capacity.usage().bytes, 0);
+}
+
+#[tokio::test]
+async fn native_queries_preserve_order_filter_and_retained_charge() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+    let first = admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([81; 16]),
+        "first.bin".into(),
+        16,
+    );
+    let second = admit_download_job(
+        &runtime,
+        emulebb_kad_proto::Ed2kHash::from_bytes([82; 16]),
+        "second.bin".into(),
+        16,
+    );
+    let page = runtime
+        .query_download_jobs(emulebb_metadata::DownloadJobQuery {
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.jobs[0].token.job_id, second.token.job_id);
+    assert!(page.has_more);
+    assert_eq!(page.next_before, Some(second.token.job_id));
+    reap_workers(&runtime.local_mutations).await;
+    let capacity = Arc::clone(&runtime.local_mutations.state.lock().unwrap().capacity);
+    assert_eq!(capacity.usage().bytes, 2 * 1024 * 1024 + 4096);
+    drop(page);
+    let last = runtime
+        .query_download_jobs(emulebb_metadata::DownloadJobQuery {
+            before: Some(second.token.job_id),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(last.jobs[0].token.job_id, first.token.job_id);
+    assert!(!last.has_more);
+    drop(last);
+    let counts = runtime.download_job_counts().await.unwrap();
+    assert_eq!(counts.unfinished, 2);
+    assert_eq!(counts.completed, 0);
+    reap_workers(&runtime.local_mutations).await;
+    assert_eq!(capacity.usage().bytes, 4096);
+    drop(counts);
+    assert_eq!(capacity.usage().bytes, 0);
+    runtime.local_mutations.seal_and_drain().await.unwrap();
 }
