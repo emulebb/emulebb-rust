@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 #[derive(Debug, Default)]
-pub(super) struct CapacityControl {
+pub(in crate::ed2k_transfer) struct CapacityControl {
     state: Mutex<Usage>,
     available: Condvar,
     pub(super) changed: tokio::sync::Notify,
@@ -61,7 +61,7 @@ impl CapacityControl {
             eligible,
         })
     }
-    pub(super) fn wake(&self) {
+    pub(in crate::ed2k_transfer) fn wake(&self) {
         self.revision.fetch_add(1, Ordering::Release);
         self.available.notify_all();
         self.changed.notify_waiters();

@@ -331,11 +331,14 @@ async fn root_change_after_admission_restores_live_uncheckpointed_partial_and_co
     let mut manifest = Ed2kResumeManifest::new(&job);
     manifest.md4_hashset_acquired = true;
     manifest.verified_ranges = vec![Ed2kSharedRange { start: 0, end: 4 }];
-    runtime
-        .manifest_cache
-        .lock()
-        .await
-        .insert(job.token.job_id, manifest.clone());
+    runtime.manifest_cache.lock().await.insert(
+        job.token.job_id,
+        runtime
+            .local_mutations
+            .residents
+            .copy_manifest(&manifest)
+            .unwrap(),
+    );
     let mut entry = Ed2kSharedEntry::from_manifest(&manifest);
     entry.publish.session_request_count = 17;
     entry.all_time_uploaded_bytes = 31;

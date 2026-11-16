@@ -114,26 +114,38 @@ impl Ed2kTransferRuntime {
     pub(super) async fn load_manifest_or_rebuild_unlocked(
         &self,
         job: &Ed2kTransferJob,
-    ) -> Result<Ed2kResumeManifest> {
-        let mut manifest = self.load_manifest_unlocked(job.token).await?;
+    ) -> Result<super::ResidentManifest> {
+        let cached = self
+            .manifest_cache
+            .lock()
+            .await
+            .get(&job.token.job_id)
+            .filter(|manifest| manifest.token == job.token)
+            .cloned();
+        let manifest = if let Some(manifest) = cached {
+            manifest
+        } else {
+            let super::local_mutation::job_read::JobReadResult::Execution(manifest) = self
+                .read_job_metadata(super::local_mutation::job_read::JobRead::SelectExecution(
+                    job.token,
+                ))
+                .await?
+            else {
+                unreachable!()
+            };
+            manifest.context("selected download has no execution geometry")?
+        };
         anyhow::ensure!(
             manifest.file_hash == job.file_hash && manifest.file_size == job.file_size,
             "execution descriptor differs from admitted job"
         );
         if manifest.pieces.is_empty() {
+            let mut manifest = manifest.edit()?;
             // Admission creates the job before payload geometry. Initialize only
             // this exact row; an absent job is never recreated by a callback.
             manifest.pieces = Ed2kResumeManifest::new(job).pieces;
             self.store_manifest_unlocked(&manifest).await?;
-        } else if !self
-            .manifest_cache
-            .lock()
-            .await
-            .contains_key(&job.token.job_id)
-        {
-            // Selected reopen must establish the resident execution before any
-            // payload writer. Diagnostic hydration alone does not activate it.
-            self.mark_manifest_persisted_unlocked(&manifest).await?;
+            return self.load_manifest_unlocked(job.token).await;
         }
         Ok(manifest)
     }
@@ -141,7 +153,7 @@ impl Ed2kTransferRuntime {
     pub(super) async fn load_manifest_optional_unlocked(
         &self,
         token: JobToken,
-    ) -> Result<Option<Ed2kResumeManifest>> {
+    ) -> Result<Option<super::ResidentManifest>> {
         if let Some(manifest) = self.manifest_cache.lock().await.get(&token.job_id).cloned() {
             anyhow::ensure!(
                 manifest.token == token,
@@ -226,7 +238,7 @@ impl Ed2kTransferRuntime {
         } else if let Some(token) = token {
             self.load_manifest_optional_unlocked(token)
                 .await?
-                .map(|manifest| super::Ed2kFileServingView::from(&manifest))
+                .map(|manifest| super::Ed2kFileServingView::from(&*manifest))
         } else {
             None
         };
@@ -257,7 +269,7 @@ impl Ed2kTransferRuntime {
             && self.load_manifest_optional_unlocked(token).await?.is_some()
         {
             let partial =
-                super::Ed2kFileServingView::from(&self.load_aich_manifest_unlocked(token).await?);
+                super::Ed2kFileServingView::from(&*self.load_aich_manifest_unlocked(token).await?);
             if !partial.completed && partial.has_payload_authority {
                 let Some(allowed) = self.admit_shared_hashes(&[hash.0], false).await? else {
                     return Ok(None);
@@ -273,7 +285,7 @@ impl Ed2kTransferRuntime {
     pub(super) async fn load_manifest_unlocked(
         &self,
         token: JobToken,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         self.load_manifest_optional_unlocked(token)
             .await?
             .with_context(|| format!("missing ED2K transfer metadata for job {}", token.job_id))
@@ -285,8 +297,8 @@ impl Ed2kTransferRuntime {
     pub(super) async fn load_aich_manifest_unlocked(
         &self,
         token: JobToken,
-    ) -> Result<Ed2kResumeManifest> {
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+    ) -> Result<super::ResidentManifest> {
+        let manifest = self.load_manifest_unlocked(token).await?;
         let file_hash = manifest.file_hash.clone();
         let metadata = self.metadata.clone();
         let identity =
@@ -313,7 +325,7 @@ impl Ed2kTransferRuntime {
                 .get(&token.job_id)
                 .filter(|value| value.token == token)
                 .map(|value| value.category_id);
-            manifest.category_id = if let Some(category) = existing_category {
+            let category_id = if let Some(category) = existing_category {
                 category
             } else {
                 let metadata = metadata.clone();
@@ -322,8 +334,13 @@ impl Ed2kTransferRuntime {
                     .context("category read task panicked")??
                     .context("missing transfer while publishing AICH identity")?
             };
-            let mut cached = manifest.clone();
+            let resident_write = self.local_mutations.residents.reserve(token.job_id)?;
             let mut cache = Arc::clone(&self.manifest_cache).lock_owned().await;
+            let mut manifest = cache
+                .get(&token.job_id)
+                .filter(|value| value.token == token)
+                .cloned()
+                .unwrap_or(manifest);
             let mut catalog = Arc::clone(&self.shared_catalog).write_owned().await;
             let generation = Arc::clone(&self.shared_catalog_generation);
             let corroboration = Arc::clone(&self.aich_root_corroboration);
@@ -334,14 +351,16 @@ impl Ed2kTransferRuntime {
                     .lock()
                     .expect("aich corroboration mutex poisoned");
                 metadata.publish_download_job_aich_identity(token, |identity| {
-                    super::aich_trust::merge_persisted_identity(&mut manifest, &identity)?;
-                    super::aich_trust::merge_persisted_identity(&mut cached, &identity)?;
+                    manifest.write_with(resident_write, |manifest| {
+                        manifest.category_id = category_id;
+                        super::aich_trust::merge_persisted_identity(manifest, &identity)
+                    })?;
                     if manifest.aich_root_origin
                         != Some(super::Ed2kAichRootOrigin::NetworkConsensus)
                     {
                         map.remove(&token);
                     }
-                    cache.insert(token.job_id, cached);
+                    cache.insert(token.job_id, manifest.clone());
                     let mut changed = false;
                     catalog.update_by_hash(&parsed_hash, |entry| {
                         if entry.aich_root != manifest.aich_root {
@@ -409,6 +428,61 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
+    /// Publish a single progress delta and its dirty bookkeeping without an
+    /// await between them. Readers retain their earlier charged backing.
+    pub(super) async fn publish_piece_progress_unlocked(
+        &self,
+        token: JobToken,
+        file_hash: &str,
+        expected: Option<&super::Ed2kPieceState>,
+        piece: &super::Ed2kPieceState,
+        permit: super::resident::Reservation,
+    ) -> Result<super::ResidentManifest> {
+        let _content = self.lock_content(file_hash).await;
+        let mut cache = self.manifest_cache.lock().await;
+        let current = cache
+            .get_mut(&token.job_id)
+            .filter(|value| value.token == token)
+            .context("progress execution no longer has a cache")?;
+        let target = current
+            .pieces
+            .get(piece.piece_index as usize)
+            .filter(|target| target.piece_index == piece.piece_index)
+            .context("progress cache geometry changed")?;
+        anyhow::ensure!(
+            expected.is_none_or(|expected| expected == target),
+            "progress changed during payload write"
+        );
+        anyhow::ensure!(
+            target.state == piece.state && target.ich_corrupted == piece.ich_corrupted,
+            "structural transition cannot use a progress delta"
+        );
+        let changed = target != piece;
+        let progress = manifest_progress_bytes(current);
+        let mut states = self.manifest_checkpoint_state.lock().await;
+        let state = states
+            .entry(token)
+            .or_insert_with(|| Ed2kManifestCheckpointState {
+                revision: 0,
+                persisted_bytes_written: progress,
+                last_persisted_at: Instant::now(),
+                dirty_piece_indexes: Default::default(),
+            });
+        let revision = state
+            .revision
+            .checked_add(1)
+            .context("download progress revision exhausted")?;
+        if changed {
+            current.write_with(permit, |current| {
+                current.pieces[piece.piece_index as usize] = piece.clone();
+                Ok(())
+            })?;
+        }
+        state.revision = revision;
+        state.dirty_piece_indexes.insert(piece.piece_index);
+        Ok(current.clone())
+    }
+
     /// Transfer the exact job guard and bounded dirty-piece delta to the shared
     /// retained registry. Capacity waits release the job guard and rebuild the
     /// delta from current dirty state, so they cannot replay a stale snapshot.
@@ -419,32 +493,14 @@ impl Ed2kTransferRuntime {
         mut guard: ScopedLockGuard<JobId>,
     ) -> Result<()> {
         let token = manifest.token;
-        {
-            let _content = self.lock_content(&manifest.file_hash).await;
-            let mut cache = self.manifest_cache.lock().await;
-            let current = cache
-                .get_mut(&token.job_id)
-                .filter(|value| value.token == token)
-                .context("checkpoint execution no longer has a cache")?;
-            let piece = manifest
-                .pieces
-                .get(current_piece as usize)
-                .filter(|piece| piece.piece_index == current_piece)
-                .context("missing checkpoint piece")?;
-            let target = current
-                .pieces
-                .get_mut(current_piece as usize)
-                .filter(|piece| piece.piece_index == current_piece)
-                .context("checkpoint cache geometry changed")?;
-            anyhow::ensure!(
-                target.state == piece.state && target.ich_corrupted == piece.ich_corrupted,
-                "structural transition cannot use a progress checkpoint"
-            );
-            target.bytes_written = piece.bytes_written;
-            target.block_bitmap = piece.block_bitmap.clone();
-            self.note_dirty_piece_unlocked(current, current_piece)
-                .await?;
-        }
+        let piece = manifest
+            .pieces
+            .get(current_piece as usize)
+            .filter(|piece| piece.piece_index == current_piece)
+            .context("missing checkpoint piece")?;
+        let permit = self.local_mutations.residents.reserve(token.job_id)?;
+        self.publish_piece_progress_unlocked(token, &manifest.file_hash, None, piece, permit)
+            .await?;
         loop {
             let capacity_revision = self.local_mutations.capacity_revision();
             let submitted = {
@@ -519,7 +575,7 @@ impl Ed2kTransferRuntime {
     pub(super) async fn cache_manifest_unlocked(
         &self,
         manifest: &Ed2kResumeManifest,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         let token = manifest.token;
         let _content = self.lock_content(&manifest.file_hash).await;
         let _fence = self.category_assignment_gate.read().await;
@@ -535,20 +591,21 @@ impl Ed2kTransferRuntime {
             "stale execution cannot publish a manifest"
         );
         let mut cache = self.manifest_cache.lock().await;
-        let mut current = manifest.clone();
-        current.category_id = job.category_id;
+        let mut current = self.local_mutations.residents.copy_manifest(manifest)?;
+        let current_value = current.try_mut()?;
+        current_value.category_id = job.category_id;
         if let Some(persisted) = cache
             .get(&token.job_id)
             .filter(|value| value.token == token)
             && persisted.delivery_state == super::Ed2kDeliveryState::Delivered
         {
             // Only delivery's dedicated authority boundary may change these.
-            current.delivery_state = persisted.delivery_state;
-            current.delivery_ownership = persisted.delivery_ownership;
-            current.delivered_path = persisted.delivered_path.clone();
-            current.source_fingerprint = persisted.source_fingerprint.clone();
-            current.completed = true;
-            current.final_rehash_pending = false;
+            current_value.delivery_state = persisted.delivery_state;
+            current_value.delivery_ownership = persisted.delivery_ownership;
+            current_value.delivered_path = persisted.delivered_path.clone();
+            current_value.source_fingerprint = persisted.source_fingerprint.clone();
+            current_value.completed = true;
+            current_value.final_rehash_pending = false;
         }
         cache.insert(token.job_id, current.clone());
         Ok(current)
@@ -557,7 +614,7 @@ impl Ed2kTransferRuntime {
     pub(super) async fn mark_manifest_persisted_unlocked(
         &self,
         manifest: &Ed2kResumeManifest,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         let current = self.cache_manifest_unlocked(manifest).await?;
         let mut states = self.manifest_checkpoint_state.lock().await;
         let revision = states

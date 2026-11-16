@@ -124,7 +124,7 @@ pub struct SharedEligibility {
     publication_failed: Arc<AtomicBool>,
     sealed: AtomicBool,
     stripes: Arc<std::sync::Mutex<ShareStripes>>,
-    manifests: Arc<tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, Ed2kResumeManifest>>>,
+    manifests: Arc<tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, super::ResidentManifest>>>,
     read_slot: Arc<tokio::sync::Mutex<Option<EligibilityTask>>>,
     local_mutations: Arc<super::local_mutation::LocalMutationRegistry>,
 }
@@ -145,7 +145,9 @@ impl SharedEligibility {
         root_dirty: Arc<AtomicBool>,
         publication_failed: Arc<AtomicBool>,
         stripes: Arc<std::sync::Mutex<ShareStripes>>,
-        manifests: Arc<tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, Ed2kResumeManifest>>>,
+        manifests: Arc<
+            tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, super::ResidentManifest>>,
+        >,
         local_mutations: Arc<super::local_mutation::LocalMutationRegistry>,
     ) -> Self {
         Self {

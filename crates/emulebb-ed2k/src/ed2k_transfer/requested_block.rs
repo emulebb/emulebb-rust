@@ -189,7 +189,7 @@ impl Ed2kTransferRuntime {
                 checkpoint_reason = None;
                 self.note_dirty_piece_unlocked(manifest, piece_index)
                     .await?;
-                *manifest = self.cache_manifest_unlocked(manifest).await?;
+                self.cache_manifest_unlocked(manifest).await?;
             }
         } else {
             self.store_manifest_unlocked(manifest).await?;

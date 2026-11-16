@@ -16,29 +16,31 @@ impl LocalMutationRegistry {
     fn submit_aich_decision(
         &self,
         runtime: &transfer::Ed2kTransferRuntime,
-        manifest: &transfer::Ed2kResumeManifest,
+        manifest: &mut Option<transfer::ResidentDraft>,
         expected_generation: u64,
         votes: &Option<transfer::aich_trust::AichRootCorroboration>,
         guard: transfer::store::ScopedLockGuard<JobId>,
     ) -> Result<oneshot::Receiver<Result<AichReceipt>>> {
-        let strings = manifest.aich_hashset.iter().try_fold(0usize, |n, hash| {
+        let source = manifest.as_ref().expect("unadmitted AICH proposal");
+        let strings = source.aich_hashset.iter().try_fold(0usize, |n, hash| {
             ensure!(hash.len() == 40, "invalid AICH hash length");
             n.checked_add(hash.capacity())
                 .ok_or_else(|| LocalMutationError::TooLarge.into())
         })?;
-        let bytes = manifest
+        let bytes = source
             .aich_hashset
             .capacity()
             .checked_mul(std::mem::size_of::<String>())
             .and_then(|n| n.checked_add(strings))
             .ok_or(LocalMutationError::TooLarge)?;
         ensure!(
-            manifest.aich_hashset.len() <= 28_258 && bytes <= 2 * 1024 * 1024,
+            source.aich_hashset.len() <= 28_258 && bytes <= 2 * 1024 * 1024,
             LocalMutationError::TooLarge
         );
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
         let lease = Self::reserve_unit(&mut state, AICH_WORKSPACE, true, false)?;
+        let manifest = manifest.take().expect("admitted AICH proposal");
         let token = manifest.token;
         let proposed = MetadataDownloadAichState {
             identity: MetadataTransferAichIdentity {
@@ -51,6 +53,7 @@ impl LocalMutationRegistry {
             acquired: manifest.aich_hashset_acquired,
             hashes: manifest.aich_hashset.clone(),
         };
+        let resident_write = manifest.into_write_credit();
         let votes = votes.clone();
         let metadata = runtime.metadata.clone();
         let locks = Arc::clone(&runtime.content_locks);
@@ -110,12 +113,15 @@ impl LocalMutationRegistry {
                         if let Some(current) =
                             cache.get_mut(&token.job_id).filter(|m| m.token == token)
                         {
-                            transfer::aich_trust::merge_persisted_identity(
-                                current,
-                                &stored.identity,
-                            )?;
-                            current.aich_hashset = stored.hashes.clone();
-                            current.aich_hashset_acquired = stored.acquired;
+                            current.write_with(resident_write, |current| {
+                                transfer::aich_trust::merge_persisted_identity(
+                                    current,
+                                    &stored.identity,
+                                )?;
+                                current.aich_hashset = stored.hashes.clone();
+                                current.aich_hashset_acquired = stored.acquired;
+                                Ok(())
+                            })?;
                         }
                         if let Some(votes) = votes
                             && matches!(
@@ -183,30 +189,30 @@ impl transfer::Ed2kTransferRuntime {
     pub(in crate::ed2k_transfer) async fn persist_aich_decision(
         &self,
         mut guard: transfer::store::ScopedLockGuard<JobId>,
-        mut manifest: transfer::Ed2kResumeManifest,
+        manifest: transfer::ResidentDraft,
         expected_generation: u64,
         votes: Option<transfer::aich_trust::AichRootCorroboration>,
     ) -> Result<(
-        transfer::Ed2kResumeManifest,
+        transfer::ResidentManifest,
         transfer::store::ScopedLockGuard<JobId>,
     )> {
+        let token = manifest.token;
+        let mut proposal = Some(manifest);
         loop {
             let capacity_revision = self.local_mutations.capacity_revision();
             match self.local_mutations.submit_aich_decision(
                 self,
-                &manifest,
+                &mut proposal,
                 expected_generation,
                 &votes,
                 guard,
             ) {
                 Ok(receipt) => {
-                    let (identity, acquired, guard) =
+                    let (_identity, _acquired, guard) =
                         receipt.await.map_err(|_| LocalMutationError::Unknown)??;
-                    transfer::aich_trust::merge_persisted_identity(&mut manifest, &identity)?;
-                    manifest.aich_hashset_acquired = acquired;
-                    if !acquired {
-                        manifest.aich_hashset.clear();
-                    }
+                    // The owner published the current identity without retaining
+                    // a second full proposal geometry across SQL or capacity waits.
+                    let manifest = self.load_aich_manifest_unlocked(token).await?;
                     return Ok((manifest, guard));
                 }
                 Err(error)
@@ -218,7 +224,7 @@ impl transfer::Ed2kTransferRuntime {
                     self.local_mutations
                         .wait_for_completion(capacity_revision)
                         .await?;
-                    guard = self.lock_manifest(manifest.token).await;
+                    guard = self.lock_manifest(token).await;
                 }
                 Err(error) => return Err(error),
             }

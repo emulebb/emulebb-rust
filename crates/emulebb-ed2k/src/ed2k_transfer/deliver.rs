@@ -898,7 +898,7 @@ impl Ed2kTransferRuntime {
         ownership: super::Ed2kDeliveryOwnership,
     ) -> Result<()> {
         let _manifest_guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
         anyhow::ensure!(
             manifest.delivery_state == super::Ed2kDeliveryState::Pending
                 && manifest.completed

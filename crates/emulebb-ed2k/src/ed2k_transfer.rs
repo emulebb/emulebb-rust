@@ -39,6 +39,8 @@ mod block_bitmap;
 mod block_lease;
 mod callback;
 mod catalog;
+mod category_cache;
+pub use category_cache::{CategoryCacheFence, CategoryCacheMutation};
 mod completion_rehash;
 mod corruption_blackbox;
 mod credit_ledger;
@@ -70,11 +72,14 @@ mod piece_store;
 mod reask_reciprocity;
 mod reload_index;
 mod requested_block;
+mod resident;
 mod salvage;
 mod shared_catalog;
 pub use shared_catalog::{CategoryCatalogDecision, CategoryRootMutation, category_copy_matches};
 mod source_exchange;
 mod store;
+
+pub use resident::{ResidentDraft, ResidentManifest};
 mod transfer_sql;
 mod upload;
 mod upload_cooldown;
@@ -314,7 +319,7 @@ pub struct Ed2kTransferRuntime {
     /// destructive deletion. Unlike the manifest IO lock this may be held
     /// across slow filesystem work without delaying unrelated manifest reads.
     lifecycle_locks: Arc<StdMutex<HashMap<JobId, std::sync::Weak<Mutex<()>>>>>,
-    manifest_cache: Arc<Mutex<HashMap<JobId, Ed2kResumeManifest>>>,
+    manifest_cache: Arc<Mutex<HashMap<JobId, ResidentManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<JobToken, Ed2kManifestCheckpointState>>>,
     /// Process-local download block reservations. Durable manifests describe
     /// bytes which reached the piece store; they never own network work. This

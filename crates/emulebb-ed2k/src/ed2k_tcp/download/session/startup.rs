@@ -11,7 +11,7 @@ use crate::{
         encode_multipacket_ext2_request, encode_multipacket_request, encode_request_filename,
         encode_request_sources2, encode_set_req_file_id, encode_start_upload_req,
     },
-    ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime},
+    ed2k_transfer::{ED2K_PART_SIZE, Ed2kTransferRuntime, ResidentManifest},
 };
 
 use super::state::DownloadSessionState;
@@ -26,7 +26,7 @@ pub(super) struct DownloadStartupStep<'a> {
     pub(super) file_hash: &'a Ed2kHash,
     pub(super) file_hash_hex: &'a str,
     pub(super) send_initial_requests: bool,
-    pub(super) manifest: &'a mut Ed2kResumeManifest,
+    pub(super) manifest: &'a mut ResidentManifest,
     pub(super) request_file_identifier: &'a Ed2kFileIdentifier,
     pub(super) session_state: &'a mut DownloadSessionState,
 }

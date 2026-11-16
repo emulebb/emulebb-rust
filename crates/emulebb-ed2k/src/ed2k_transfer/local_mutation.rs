@@ -27,7 +27,7 @@ pub(super) mod job_storage;
 mod publication;
 pub(super) mod read_result;
 
-const MAX_UNITS: usize = 4;
+pub(super) const MAX_UNITS: usize = 4;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 // Potentially slow filesystem work cannot occupy the final publication slot or
 // its byte headroom. These are sublimits of the existing registry, not new pools.
@@ -113,12 +113,28 @@ fn withdrawal_path_charge(path: &std::path::Path) -> Result<usize> {
         .ok_or_else(|| LocalMutationError::TooLarge.into())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct LocalMutationRegistry {
+    pub(super) residents: Arc<super::resident::ResidentControl>,
     state: Mutex<State>,
     join_gate: tokio::sync::Mutex<()>,
     preparation: Arc<std::sync::atomic::AtomicBool>,
     cleanup: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for LocalMutationRegistry {
+    fn default() -> Self {
+        let state = State::default();
+        Self {
+            residents: Arc::new(super::resident::ResidentControl::new(Arc::clone(
+                &state.capacity,
+            ))),
+            state: Mutex::new(state),
+            join_gate: Default::default(),
+            preparation: Default::default(),
+            cleanup: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]

@@ -229,11 +229,14 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&manifest).unwrap(),
             )
             .unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(old.token.job_id, manifest);
+        runtime.manifest_cache.lock().await.insert(
+            old.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&manifest)
+                .unwrap(),
+        );
         let lifecycle = runtime.lock_lifecycle(old.token.job_id).await;
         let io = runtime.lock_manifest(old.token).await;
         let late_handle = runtime.take_payload_handle(old.token).await.unwrap();

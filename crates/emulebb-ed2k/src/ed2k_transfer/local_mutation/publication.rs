@@ -25,7 +25,7 @@ pub(super) struct ContentPublication {
     metadata: emulebb_metadata::MetadataStore,
     cache: Arc<
         tokio::sync::Mutex<
-            std::collections::HashMap<emulebb_metadata::JobId, transfer::Ed2kResumeManifest>,
+            std::collections::HashMap<emulebb_metadata::JobId, transfer::ResidentManifest>,
         >,
     >,
     catalog: transfer::Ed2kSharedCatalog,
@@ -87,9 +87,12 @@ impl ContentPublication {
             .token;
         let live = {
             let cache = self.cache.blocking_lock();
-            super::ingest::live_partial(
-                token.and_then(|token| cache.get(&token.job_id).filter(|m| m.token == token)),
-            )?
+            super::ingest::live_partial(token.and_then(|token| {
+                cache
+                    .get(&token.job_id)
+                    .filter(|m| m.token == token)
+                    .map(|m| &**m)
+            }))?
         };
         Ok(live
             .unwrap_or(stored)

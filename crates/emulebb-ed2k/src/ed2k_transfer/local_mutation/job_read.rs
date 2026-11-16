@@ -10,6 +10,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
     Execution(emulebb_metadata::JobToken),
+    SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
     Endpoints(emulebb_metadata::JobToken, i64, usize),
     Names(emulebb_metadata::JobToken, i64, usize),
@@ -25,7 +26,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Exact(Option<RetainedRead<DownloadJobRecord>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
-    Execution(Option<transfer::Ed2kResumeManifest>),
+    Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
     Names(RetainedRead<Vec<emulebb_metadata::MetadataDownloadNameEntry>>),
@@ -85,20 +86,33 @@ impl LocalMutationRegistry {
             }
             JobRead::Latest(_) => 1024 * 1024,
             JobRead::Exact(_) => 1024 * 1024,
-            JobRead::Execution(_) => 6 * 1024 * 1024,
+            JobRead::Execution(_) | JobRead::SelectExecution(_) => 6 * 1024 * 1024,
         };
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
-        let lease = Self::reserve_unit(&mut state, charge, false, false)?;
+        let (lease, mut resident) =
+            if let JobRead::Execution(token) | JobRead::SelectExecution(token) = request {
+                let (resident, lease) = self.residents.reserve_with(token.job_id, || {
+                    Self::reserve_unit(&mut state, charge, false, false)
+                })?;
+                (lease, Some(resident))
+            } else {
+                (Self::reserve_unit(&mut state, charge, false, false)?, None)
+            };
         let metadata = runtime.metadata.clone();
+        let cache = Arc::clone(&runtime.manifest_cache);
+        let content_locks = Arc::clone(&runtime.content_locks);
+        let categories = Arc::clone(&runtime.category_assignment_gate);
         #[cfg(test)]
-        let gate = state.publication_gate.take();
+        let mut gate = state.publication_gate.take();
         let (sender, receipt) = oneshot::channel();
         Self::spawn_unit(&mut state, lease, move |capacity| {
             #[cfg(test)]
-            if let Some((reached, release)) = gate {
-                let _ = reached.send(());
-                let _ = release.recv();
+            if !matches!(request, JobRead::SelectExecution(_)) {
+                if let Some((reached, release)) = gate.take() {
+                    let _ = reached.send(());
+                    let _ = release.recv();
+                }
             }
             // WHY: callers can retain pages after worker completion/reaping. Move
             // the existing charge with the actual backing, never with its sender.
@@ -129,9 +143,65 @@ impl LocalMutationRegistry {
                         value.map(|value| RetainedRead::new(value, capacity.take_result())),
                     )
                 }),
-                JobRead::Execution(token) => {
-                    transfer::transfer_sql::stream_execution_from_metadata(&metadata, token)
-                        .map(JobReadResult::Execution)
+                JobRead::Execution(token) | JobRead::SelectExecution(token) => {
+                    let selected = matches!(request, JobRead::SelectExecution(_));
+                    let observed = if selected {
+                        Some(metadata.capture_download_availability()?)
+                    } else {
+                        None
+                    };
+                    let manifest =
+                        transfer::transfer_sql::stream_execution_from_metadata(&metadata, token)?;
+                    let manifest = manifest
+                        .map(|manifest| {
+                            resident
+                                .take()
+                                .expect("admitted resident")
+                                .publish(manifest)
+                        })
+                        .transpose()?;
+                    if !selected
+                        || manifest
+                            .as_ref()
+                            .is_none_or(|manifest| manifest.pieces.is_empty())
+                    {
+                        return Ok(JobReadResult::Execution(manifest));
+                    }
+                    let manifest = manifest.expect("selected execution geometry");
+                    #[cfg(test)]
+                    if let Some((reached, release)) = gate.take() {
+                        let _ = reached.send(());
+                        let _ = release.recv();
+                    }
+                    let _category = categories.blocking_read();
+                    let _content =
+                        transfer::store::scoped_lock(&content_locks, manifest.file_hash.clone())
+                            .blocking_lock_owned();
+                    let mut cache = cache.blocking_lock();
+                    if let Some(current) = cache
+                        .get(&token.job_id)
+                        .filter(|current| current.token == token)
+                    {
+                        // A current resident owns cache-only progress. A private
+                        // SQL snapshot must never replace that live authority.
+                        return Ok(JobReadResult::Execution(Some(current.clone())));
+                    }
+                    metadata
+                        .publish_observed_download_execution(
+                            token,
+                            observed.as_ref().expect("selection observation"),
+                            || {
+                                cache.insert(token.job_id, manifest.clone());
+                                Ok(JobReadResult::Execution(Some(manifest)))
+                            },
+                        )
+                        .map_err(|error| {
+                            if error.is::<emulebb_metadata::MetadataAvailabilityChanged>() {
+                                LocalMutationError::Busy.into()
+                            } else {
+                                error
+                            }
+                        })
                 }
                 JobRead::Publish(after, limit) => metadata
                     .try_download_publish_entries_after(after.map(hex::encode).as_deref(), limit)

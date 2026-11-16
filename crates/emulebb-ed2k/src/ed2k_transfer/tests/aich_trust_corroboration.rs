@@ -158,12 +158,13 @@ async fn accepted_authority_retires_old_parts_without_another_vote_and_after_res
             .record_network_aich_observations(file_hash.token, &observations)
             .await
             .unwrap();
-        let mut stale = runtime
+        let stale = runtime
             .store_aich_hashset(file_hash.token, old.clone())
             .await
             .unwrap();
         // Simulate a newer cache-only append: identity refresh must not reload
         // old SQL piece rows over independently received payload progress.
+        let mut stale = stale.edit().unwrap();
         stale.pieces[0].bytes_written = 123;
         runtime.cache_manifest_unlocked(&stale).await.unwrap();
         let mut replacement = consistent_candidate();
