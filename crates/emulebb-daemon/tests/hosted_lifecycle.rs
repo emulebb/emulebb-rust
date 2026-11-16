@@ -5,7 +5,7 @@ use std::{fs, net::SocketAddr, time::Duration};
 use emulebb_core::{EmulebbCore, ServerCreate};
 use emulebb_daemon::{DaemonProfile, RestBootstrapSettings, ShutdownRequest, run_hosted};
 use emulebb_index::FileIndex;
-use emulebb_metadata::MetadataStore;
+use emulebb_metadata::{DiscoveryDomain, DiscoveryInitializationStatus, MetadataStore};
 use tokio::sync::oneshot;
 
 const FIXTURE_API_KEY: &str = "synthetic-hosted-lifecycle-fixture-key";
@@ -101,13 +101,6 @@ async fn assert_running_shutdown(stop: Stop) {
     };
     profile.ed2k.listen_port = None;
     profile.kad.listen_port = None;
-    // Preserve existing discovery state so this REST-only fixture never fetches
-    // public bootstrap data. It does not start or qualify a Kad/P2P session.
-    fs::write(
-        profile.profile_dir.join("nodes.dat"),
-        b"owned REST-only fixture",
-    )
-    .unwrap();
     let core = EmulebbCore::new(
         "fixture",
         FileIndex::open(profile.metadata_path()).unwrap(),
@@ -125,6 +118,25 @@ async fn assert_running_shutdown(stop: Stop) {
     .await
     .unwrap();
     drop(core);
+    // WHY: both domains must be initialized to keep this fixture local-only.
+    let metadata = MetadataStore::open(profile.metadata_path()).unwrap();
+    assert_eq!(
+        metadata
+            .discovery_initialization_status(DiscoveryDomain::Servers)
+            .unwrap(),
+        DiscoveryInitializationStatus::Initialized
+    );
+    assert_eq!(
+        metadata.replace_kad_routing_snapshot(0, true, &[]).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        metadata
+            .discovery_initialization_status(DiscoveryDomain::Kad)
+            .unwrap(),
+        DiscoveryInitializationStatus::Initialized
+    );
+    drop(metadata);
     let metadata_path = profile.metadata_path();
     let shutdown = ShutdownRequest::default();
     let (ready, observer) = oneshot::channel();

@@ -34,6 +34,12 @@ impl RoutingBin {
         self.contacts.len()
     }
 
+    pub(crate) fn owned_bytes(&self) -> usize {
+        self.contacts
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Contact>())
+    }
+
     /// Returns true if the bin is full (K contacts).
     pub fn is_full(&self) -> bool {
         self.contacts.len() >= K

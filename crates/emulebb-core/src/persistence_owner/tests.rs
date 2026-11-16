@@ -1,6 +1,7 @@
+use super::kad::kad_charge;
 use super::*;
 
-fn setup() -> (MetadataStore, Arc<Mutex<CoreState>>, Arc<PersistenceOwner>) {
+pub(super) fn setup() -> (MetadataStore, Arc<Mutex<CoreState>>, Arc<PersistenceOwner>) {
     let store = MetadataStore::in_memory().unwrap();
     let state = Arc::new(Mutex::new(
         profile_state::load_core_state(&store, vec![]).unwrap(),
@@ -9,13 +10,13 @@ fn setup() -> (MetadataStore, Arc<Mutex<CoreState>>, Arc<PersistenceOwner>) {
     (store, state, owner)
 }
 
-fn usage(owner: &PersistenceOwner) -> (usize, usize) {
+pub(super) fn usage(owner: &PersistenceOwner) -> (usize, usize) {
     let admission = owner.admission.lock().unwrap();
     let quota = admission.quota.lock().unwrap();
     (quota.slots, quota.bytes)
 }
 
-async fn wait_for_slots(owner: &PersistenceOwner, expected: usize) {
+pub(super) async fn wait_for_slots(owner: &PersistenceOwner, expected: usize) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if usage(owner).0 == expected {
@@ -66,7 +67,7 @@ async fn identity_owner_returns_the_same_nonzero_id() {
     owner.close_and_drain().await.unwrap();
 }
 
-fn kad_contact(i: u32) -> KadRoutingContact {
+pub(super) fn kad_contact(i: u32) -> KadRoutingContact {
     let mut id = [0; 16];
     id[..4].copy_from_slice(&i.to_be_bytes());
     KadRoutingContact {
@@ -96,13 +97,13 @@ fn kad_contact(i: u32) -> KadRoutingContact {
 #[tokio::test]
 async fn kad_full_snapshot_reply_retains_bytes_without_retaining_slot() {
     use emulebb_metadata::DiscoveryInitializationStatus;
-    let (_, _, owner) = setup();
+    let (store, _, owner) = setup();
     let input: Vec<_> = (0..KAD_ROUTING_MAX_CONTACTS as u32)
         .map(kad_contact)
         .collect();
     assert!(kad_charge().unwrap() <= MAX_BYTES);
     assert_eq!(
-        owner.initialize_kad_pending(0, &input).await.unwrap(),
+        store.replace_kad_routing_snapshot(0, true, &input).unwrap(),
         Some(1)
     );
     let loaded = owner.load_kad().await.unwrap();
@@ -122,58 +123,26 @@ async fn kad_full_snapshot_reply_retains_bytes_without_retaining_slot() {
 }
 
 #[tokio::test]
-async fn kad_pending_guard_empty_and_failed_batch_are_atomic() {
-    use emulebb_metadata::DiscoveryInitializationStatus;
-    let (store, _, owner) = setup();
-    let duplicate = kad_contact(4);
-    assert!(matches!(
-        owner
-            .initialize_kad_pending(0, &[duplicate.clone(), duplicate])
-            .await,
-        Err(PersistenceError::Storage(_))
-    ));
+async fn empty_kad_load_retains_no_payload_bytes() {
+    let (_, _, owner) = setup();
     let pending = owner.load_kad().await.unwrap();
     assert_eq!(
         pending.snapshot().initialization,
-        DiscoveryInitializationStatus::Pending
+        emulebb_metadata::DiscoveryInitializationStatus::Pending
     );
-    assert_eq!(pending.snapshot().revision, 0);
-    wait_for_slots(&owner, 0).await;
     assert_eq!(pending.snapshot().contacts.capacity(), 0);
     assert_eq!(usage(&owner), (0, 0));
     drop(pending);
-    assert_eq!(owner.initialize_kad_pending(0, &[]).await.unwrap(), Some(1));
-    assert_eq!(
-        owner
-            .initialize_kad_pending(1, &[kad_contact(5)])
-            .await
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        owner
-            .initialize_kad_pending(0, &[kad_contact(6)])
-            .await
-            .unwrap(),
-        None
-    );
-    let empty = store.load_kad_routing_snapshot().unwrap();
-    assert_eq!(
-        empty.initialization,
-        DiscoveryInitializationStatus::Initialized
-    );
-    assert!(empty.contacts.is_empty());
     owner.close_and_drain().await.unwrap();
 }
-
 #[tokio::test]
 async fn retained_kad_replies_apply_shared_byte_backpressure() {
-    let (_, _, owner) = setup();
+    let (store, _, owner) = setup();
     let input: Vec<_> = (0..KAD_ROUTING_MAX_CONTACTS as u32)
         .map(kad_contact)
         .collect();
     assert_eq!(
-        owner.initialize_kad_pending(0, &input).await.unwrap(),
+        store.replace_kad_routing_snapshot(0, true, &input).unwrap(),
         Some(1)
     );
     let mut replies = Vec::new();
@@ -196,35 +165,40 @@ async fn retained_kad_replies_apply_shared_byte_backpressure() {
 }
 
 #[tokio::test]
-async fn only_one_concurrent_pending_initializer_can_commit() {
-    let (store, _, owner) = setup();
-    let first = {
-        let owner = Arc::clone(&owner);
-        tokio::spawn(async move {
-            owner
-                .initialize_kad_pending(0, &[kad_contact(7)])
-                .await
-                .unwrap()
-        })
-    };
-    let second = {
-        let owner = Arc::clone(&owner);
-        tokio::spawn(async move {
-            owner
-                .initialize_kad_pending(0, &[kad_contact(8)])
-                .await
-                .unwrap()
-        })
-    };
-    let outcomes = [first.await.unwrap(), second.await.unwrap()];
+async fn concurrent_ingress_is_reserved_before_fetch_and_released_on_drop() {
+    let (_, _, owner) = setup();
+    let mut tickets = Vec::new();
+    for _ in 0..(MAX_BYTES / KAD_INGRESS_PREPARATION_BYTES) {
+        tickets.push(owner.reserve_kad_ingress().unwrap());
+    }
+    assert_eq!(usage(&owner), (0, MAX_BYTES));
+    assert!(matches!(
+        owner.reserve_kad_ingress(),
+        Err(PersistenceError::Busy)
+    ));
+    drop(tickets.pop());
+    let ticket = owner.reserve_kad_ingress().unwrap();
+    drop(ticket);
+    drop(tickets);
+    assert_eq!(usage(&owner), (0, 0));
+    let mut ticket = owner.reserve_kad_ingress().unwrap();
+    let mut bytes = 1u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&[4; 16]);
+    bytes.extend_from_slice(&u32::from_be_bytes([192, 0, 2, 4]).to_le_bytes());
+    bytes.extend_from_slice(&4672u16.to_le_bytes());
+    bytes.extend_from_slice(&4662u16.to_le_bytes());
+    bytes.push(0);
+    ticket.finish_preparation().unwrap();
     assert_eq!(
-        outcomes.iter().filter(|result| **result == Some(1)).count(),
+        owner
+            .import_kad_owned(bytes, true, ticket)
+            .await
+            .unwrap()
+            .unwrap(),
         1
     );
-    assert_eq!(outcomes.iter().filter(|result| result.is_none()).count(), 1);
-    let loaded = store.load_kad_routing_snapshot().unwrap();
-    assert_eq!(loaded.revision, 1);
-    assert_eq!(loaded.contacts.len(), 1);
+    wait_for_slots(&owner, 0).await;
+    assert_eq!(usage(&owner), (0, 0));
     owner.close_and_drain().await.unwrap();
 }
 
@@ -256,6 +230,14 @@ async fn cancelled_queued_kad_initialization_survives_last_owner_drop() {
         profile_state::load_core_state(&store, vec![]).unwrap(),
     ));
     let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
+    let mut ticket = owner.reserve_kad_ingress().unwrap();
+    ticket.finish_preparation().unwrap();
+    let mut bytes = 1u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&[17; 16]);
+    bytes.extend_from_slice(&u32::from_be_bytes([192, 0, 2, 17]).to_le_bytes());
+    bytes.extend_from_slice(&4672u16.to_le_bytes());
+    bytes.extend_from_slice(&4662u16.to_le_bytes());
+    bytes.push(0);
     let guard = state.lock().await;
     let friend = {
         let owner = Arc::clone(&owner);
@@ -264,7 +246,7 @@ async fn cancelled_queued_kad_initialization_survives_last_owner_drop() {
     wait_for_slots(&owner, 1).await;
     let kad = {
         let owner = Arc::clone(&owner);
-        tokio::spawn(async move { owner.initialize_kad_pending(0, &[kad_contact(17)]).await })
+        tokio::spawn(async move { owner.import_kad_owned(bytes, true, ticket).await })
     };
     wait_for_slots(&owner, 2).await;
     kad.abort();
@@ -291,8 +273,8 @@ async fn cancelled_queued_kad_initialization_survives_last_owner_drop() {
     .unwrap();
     let reopened = MetadataStore::open_with_profile_lease(&path, Arc::new(next)).unwrap();
     assert_eq!(
-        reopened.load_kad_routing_snapshot().unwrap().contacts,
-        vec![kad_contact(17)]
+        reopened.load_kad_routing_snapshot().unwrap().contacts[0].node_id,
+        [17; 16]
     );
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
@@ -572,7 +554,7 @@ async fn post_commit_worker_failure_reconciles_or_faults_the_domain() {
     assert!(store.has_friend(&"22".repeat(16)).unwrap());
     assert!(!store.has_friend(&"44".repeat(16)).unwrap());
     assert!(matches!(
-        slot.check_friend_state(),
+        slot.check_coherent_state(),
         Err(PersistenceError::CommitUnknown)
     ));
     assert!(matches!(

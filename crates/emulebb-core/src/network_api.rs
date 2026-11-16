@@ -9,6 +9,43 @@ struct Ed2kStartupCandidate {
     reachability: Option<ReachabilityRuntimeLease>,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct KadStartupGate {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+struct PendingNetworkTasks(Vec<JoinHandle<()>>);
+
+struct AbortNetworkOnDrop(Vec<tokio::task::AbortHandle>);
+impl Drop for AbortNetworkOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+impl std::ops::Deref for PendingNetworkTasks {
+    type Target = Vec<JoinHandle<()>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for PendingNetworkTasks {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for PendingNetworkTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 impl Ed2kStartupCandidate {
     fn new(nat: Arc<NatManager>, reachability: &ReachabilityRuntimeAuthority) -> Self {
         Self {
@@ -123,8 +160,20 @@ async fn run_ed2k_client_state_prune_loop_with_clock(
 impl EmulebbCore {
     pub async fn import_kad_nodes_url(&self, url: &str) -> Result<bool> {
         let url = validate_url_import(url)?;
-        match fetch_url_bytes(&url, crate::NODES_DAT_MAX_BYTES).await {
-            Ok(bytes) => Ok(self.import_kad_nodes_bytes(&bytes).await.unwrap_or(0) > 0),
+        let mut reservation = self.reserve_kad_import()?;
+        let fetched = tokio::select! {
+            biased;
+            _ = reservation.cancelled() => return Err(crate::PersistenceError::Closing.into()),
+            result = fetch_url_bytes(&url, crate::NODES_DAT_MAX_BYTES) => result,
+        };
+        match fetched {
+            Ok(bytes) => {
+                reservation.finish_preparation()?;
+                Ok(self
+                    .import_kad_nodes_owned(bytes, false, reservation)
+                    .await?
+                    > 0)
+            }
             Err(error) => {
                 tracing::warn!("nodes.dat import fetch failed: {error:#}");
                 Ok(false)
@@ -132,33 +181,63 @@ impl EmulebbCore {
         }
     }
 
+    /// Reserve bounded discovery ingress before collecting a response body.
+    fn reserve_kad_import(&self) -> Result<crate::persistence_owner::KadImportReservation> {
+        Ok(self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?
+            .reserve_kad_ingress()?)
+    }
+
     /// Parse a `nodes.dat` payload and add its contacts to the running Kad node.
-    pub async fn import_kad_nodes_bytes(&self, data: &[u8]) -> Result<usize> {
-        let contacts = emulebb_kad_dht::bootstrap::parse_nodes_dat(data)
-            .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"))?;
-        ensure!(
-            !contacts.is_empty(),
-            "nodes.dat contains no usable contacts"
-        );
+    pub async fn import_kad_nodes_bytes(&self, data: Vec<u8>) -> Result<usize> {
+        let mut reservation = self.reserve_kad_import()?;
+        reservation.finish_preparation()?;
+        self.import_kad_nodes_owned(data, false, reservation).await
+    }
 
-        let path = self
-            .ed2k_network
-            .as_ref()
-            .and_then(|network| network.kad_nodes_dat_path.clone());
-        if let Some(path) = path {
-            let bytes = data.to_vec();
-            tokio::task::spawn_blocking(move || write_nodes_dat_atomic(&path, &bytes))
-                .await
-                .context("nodes.dat persistence worker failed")??;
-        }
+    /// Whether fresh-profile Kad discovery still needs its initial import.
+    pub async fn kad_discovery_pending(&self) -> Result<bool> {
+        let snapshot = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?
+            .load_kad()
+            .await?;
+        Ok(snapshot.snapshot().initialization
+            == emulebb_metadata::DiscoveryInitializationStatus::Pending)
+    }
 
-        if let Some(dht) = self.ed2k_dht_node().await {
-            return dht
-                .import_nodes_dat(data)
-                .await
-                .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"));
+    /// Fetch and import the trusted first-run source only while Kad is pending.
+    pub async fn initialize_kad_discovery_url(&self, url: &str) -> Result<usize> {
+        if !self.kad_discovery_pending().await? {
+            return Ok(0);
         }
-        Ok(contacts.len())
+        let mut reservation = self.reserve_kad_import()?;
+        let client = crate::discovery_client_builder(crate::DiscoveryUrlPolicy::TrustedBootstrap)?
+            .user_agent(concat!("eMuleBB-Rust/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(10))
+            .build()?;
+        let fetched = tokio::select! {
+            biased;
+            _ = reservation.cancelled() => return Err(crate::PersistenceError::Closing.into()),
+            result = crate::fetch_discovery_bytes(&client, url, crate::NODES_DAT_MAX_BYTES, Duration::from_secs(10), crate::DiscoveryUrlPolicy::TrustedBootstrap) => result,
+        }?;
+        reservation.finish_preparation()?;
+        self.import_kad_nodes_owned(fetched, true, reservation)
+            .await
+    }
+
+    async fn import_kad_nodes_owned(
+        &self,
+        data: Vec<u8>,
+        pending_only: bool,
+        reservation: crate::persistence_owner::KadImportReservation,
+    ) -> Result<usize> {
+        self.persistence_owner
+            .owner(&self.metadata_store, &self.state)?
+            .import_kad_owned(data, pending_only, reservation)
+            .await?
+            .map_err(anyhow::Error::msg)
     }
 
     pub async fn import_server_met_url(&self, url: &str) -> Result<bool> {
@@ -417,6 +496,10 @@ impl EmulebbCore {
             }
         }
         let prerequisites = async {
+            let persistence = self
+                .persistence_owner
+                .owner(&self.metadata_store, &self.state)?;
+            let kad_node_id = persistence.load_or_create_kad_node_id().await?;
             let configured_bootstrap_endpoints_text =
                 configured_kad_bootstrap_endpoints_text(&network.kad_bootstrap_endpoints);
             let kad_bind_if_index = network
@@ -424,10 +507,10 @@ impl EmulebbCore {
                 .interface_index(network.bind_ip, "Kad UDP")?;
             let dht = DhtNode::new(DhtConfig {
                 bind_addr: Some(network.kad_bind_addr),
+                node_id: emulebb_kad_proto::NodeId::from_bytes(*kad_node_id.as_bytes()),
                 obfuscation_enabled: network.ed2k.obfuscation_enabled,
                 bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
                 max_concurrent_searches: KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP,
-                nodes_dat: current_kad_nodes_dat(&network),
                 nodes_text: configured_bootstrap_endpoints_text,
                 class_budgets: kad_rpc_class_budgets(),
                 // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
@@ -455,17 +538,47 @@ impl EmulebbCore {
                 Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
                     format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
                 })?);
-            Ok::<_, anyhow::Error>((dht, ed2k_listener))
+            let handoff = persistence.attach_kad(&dht).await?;
+            #[cfg(test)]
+            {
+                let gate = self.kad_startup_gate.lock().unwrap().clone();
+                if let Some(gate) = gate {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+            }
+            Ok::<_, anyhow::Error>((dht, ed2k_listener, handoff))
         }
         .await;
-        let (dht, ed2k_listener) = match prerequisites {
+        let (dht, ed2k_listener, kad_handoff) = match prerequisites {
             Ok(prerequisites) => prerequisites,
             Err(error) => return Err(startup_candidate.rollback(error).await),
         };
         let (nat, reachability) = startup_candidate.install();
         let hello_identity = self.ed2k_hello_identity(&network);
         let (callback_sessions, callback_session_inbox) = ed2k_callback_session_channel();
-        let mut tasks = Vec::new();
+        let mut tasks = PendingNetworkTasks(Vec::new());
+        {
+            let persistence = self
+                .persistence_owner
+                .owner(&self.metadata_store, &self.state)?;
+            let checkpoint_dht = dht.clone();
+            let checkpoint_shutdown = Arc::clone(&shutdown);
+            tasks.push(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(15 * 60));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    if checkpoint_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Err(error) = persistence.checkpoint_kad(&checkpoint_dht, false).await {
+                        tracing::warn!(%error, "Kad checkpoint failed");
+                    }
+                }
+            }));
+        }
         // The Kad socket is also the stock eD2K client-UDP socket. Its receive
         // loop stays active even when Kad routing itself is disabled so
         // OP_PORTTEST and other client-UDP traffic remain reachable.
@@ -813,7 +926,7 @@ impl EmulebbCore {
             server_control,
             dht,
             callback_sessions,
-            kad_nodes_dat_path: network.kad_nodes_dat_path.clone(),
+            kad_persistence_finished: false,
             kad_firewall: Arc::clone(&kad_firewall),
             reachability,
             nat,
@@ -821,8 +934,9 @@ impl EmulebbCore {
             server_connect_plan,
             server_task,
             kad_firewall_recheck,
-            tasks,
+            tasks: std::mem::take(&mut tasks.0),
         });
+        kad_handoff.commit();
         self.ed2k_download_tasks.start();
         drop(runtime_guard);
         self.queue_ed2k_shared_catalog_publish();
@@ -853,36 +967,39 @@ impl EmulebbCore {
         Ok(self.ed2k_status().await)
     }
 
-    pub async fn disconnect_ed2k(&self) -> NetworkStatus {
+    /// Finish the final Kad snapshot while its source runtime is still owned.
+    pub async fn finish_kad_persistence(&self) -> Result<()> {
+        let mut runtime = self.ed2k_runtime.lock().await;
+        if let Some(runtime) = runtime.as_mut() {
+            if !runtime.kad_persistence_finished {
+                let persistence = self
+                    .persistence_owner
+                    .owner(&self.metadata_store, &self.state)?;
+                persistence.finish_kad(&runtime.dht).await?;
+                runtime.kad_persistence_finished = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn disconnect_ed2k(&self) -> Result<NetworkStatus> {
+        self.finish_kad_persistence().await?;
+        self.disconnect_ed2k_after_persistence().await
+    }
+
+    /// Stop network tasks during daemon exit even if the final snapshot failed.
+    pub async fn disconnect_ed2k_after_persistence(&self) -> Result<NetworkStatus> {
         // Drop the reask detach handle so post-disconnect downloads stay on TCP
         // and the closed command channel lets the (aborted) loop wind down.
         *self.ed2k_reask_handle.lock().unwrap() = None;
         if let Some(mut runtime) = self.ed2k_runtime.lock().await.take() {
-            let final_public_ip = self.ed2k_reachability.get();
+            let mut handles = Vec::with_capacity(runtime.tasks.len() + 1);
+            handles.push(runtime.server_task.abort_handle());
+            handles.extend(runtime.tasks.iter().map(|task| task.abort_handle()));
+            let _abort_on_drop = AbortNetworkOnDrop(handles);
             runtime.reachability.retire();
             runtime.shutdown.store(true, Ordering::SeqCst);
             runtime.server_control.wake_supervisor();
-            // Capture the final reachability value and persist the live routing
-            // sample before aborting the Kad tasks. A write failure must not
-            // strand shutdown, but it is visible in logs and the previous file
-            // remains intact because replacement is atomic.
-            runtime
-                .dht
-                .set_public_ip_for_udp_keys(final_public_ip)
-                .await;
-            if let Some(path) = runtime.kad_nodes_dat_path.as_deref() {
-                match persist_kad_nodes_dat(&runtime.dht, path).await {
-                    Ok(contacts) => tracing::info!(
-                        contacts,
-                        path = %path.display(),
-                        "persisted Kad routing sample"
-                    ),
-                    Err(error) => tracing::warn!(
-                        path = %path.display(),
-                        "failed to persist Kad routing sample: {error:#}"
-                    ),
-                }
-            }
             let Ed2kRuntime {
                 server_task,
                 tasks,
@@ -910,20 +1027,8 @@ impl EmulebbCore {
                 state.active_download_peer_endpoints.remove(&endpoint);
             }
         }
-        self.ed2k_status().await
+        Ok(self.ed2k_status().await)
     }
-}
-
-fn current_kad_nodes_dat(network: &Ed2kNetworkConfig) -> Option<Vec<u8>> {
-    let persisted = network
-        .kad_nodes_dat_path
-        .as_deref()
-        .and_then(|path| fs::read(path).ok())
-        .filter(|bytes| {
-            emulebb_kad_dht::bootstrap::parse_nodes_dat(bytes)
-                .is_ok_and(|contacts| !contacts.is_empty())
-        });
-    persisted.or_else(|| network.kad_nodes_dat.clone())
 }
 
 /// Keep persisted Kad receiver-key bindings aligned with the single live
@@ -943,95 +1048,6 @@ async fn run_kad_udp_key_public_ip_sync(
             dht.set_public_ip_for_udp_keys(current).await;
             observed = current;
         }
-    }
-}
-
-async fn persist_kad_nodes_dat(dht: &DhtNode, path: &Path) -> Result<usize> {
-    let bytes = dht
-        .encode_nodes_dat_snapshot()
-        .await
-        .context("failed to encode live Kad routing sample")?;
-    let contacts = bytes
-        .get(8..12)
-        .and_then(|raw| raw.try_into().ok())
-        .map(u32::from_le_bytes)
-        .unwrap_or_default() as usize;
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || write_nodes_dat_atomic(&path, &bytes))
-        .await
-        .context("Kad nodes.dat persistence worker failed")??;
-    Ok(contacts)
-}
-
-fn write_nodes_dat_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-
-    let parent = path.parent().context("nodes.dat path has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create nodes.dat directory {}", parent.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("nodes.dat path has no UTF-8 file name")?;
-    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-    let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .with_context(|| format!("failed to create temporary {}", temporary.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("failed to write temporary {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync temporary {}", temporary.display()))?;
-        drop(file);
-        replace_file_atomically(&temporary, path)
-            .with_context(|| format!("failed to replace {}", path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::rename(source, destination)
-}
-
-#[cfg(windows)]
-fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both buffers are NUL-terminated UTF-16 paths and remain alive
-    // for the call. MoveFileExW atomically replaces an existing destination on
-    // the same volume; the temporary is deliberately created beside it.
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
     }
 }
 
@@ -1212,67 +1228,6 @@ mod ed2k_startup_candidate_tests {
         retirement.await.unwrap();
 
         assert!(task_dropped.load(Ordering::SeqCst));
-    }
-}
-
-#[cfg(test)]
-mod nodes_dat_persistence_tests {
-    use super::*;
-    use emulebb_kad_proto::{KadUdpKey, NodeId};
-    use emulebb_kad_routing::Contact;
-
-    #[tokio::test]
-    async fn learned_contact_is_atomically_persisted_and_reloaded_on_restart() {
-        let directory =
-            std::env::temp_dir().join(format!("emulebb-nodes-dat-restart-{}", Uuid::new_v4()));
-        fs::create_dir(&directory).unwrap();
-        let path = directory.join("nodes.dat");
-        fs::write(&path, b"previous-valid-destination").unwrap();
-
-        let public_ip: Ipv4Addr = "198.51.100.120".parse().unwrap();
-        let peer: SocketAddr = "203.0.113.120:46120".parse().unwrap();
-        let node_id = NodeId::from_bytes([0x78; 16]);
-        let first = DhtNode::new(DhtConfig {
-            bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
-            ..DhtConfig::default()
-        })
-        .await
-        .unwrap();
-        first.set_public_ip_for_udp_keys(Some(public_ip)).await;
-        first.register_peer_key(peer, 0xA1B2_C3D4);
-        let mut learned = Contact::new(node_id, "203.0.113.120".parse().unwrap(), 46120, 46121, 10);
-        learned.verified = true;
-        first.add_contact(learned).await.unwrap();
-
-        let bytes = first.encode_nodes_dat_snapshot().await.unwrap();
-        write_nodes_dat_atomic(&path, &bytes).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-
-        let restarted = DhtNode::new(DhtConfig {
-            bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
-            nodes_dat: Some(fs::read(&path).unwrap()),
-            ..DhtConfig::default()
-        })
-        .await
-        .unwrap();
-        let restored = restarted.routing_contacts().await;
-        assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].id, node_id);
-        assert_eq!(restored[0].udp_key, KadUdpKey::new(0xA1B2_C3D4));
-        assert_eq!(restored[0].udp_key_ip, Some(public_ip));
-        assert!(restored[0].verified);
-        assert_eq!(restarted.known_peer_key(peer), None);
-        restarted.set_public_ip_for_udp_keys(Some(public_ip)).await;
-        assert_eq!(
-            restarted.known_peer_key(peer),
-            Some(KadUdpKey::new(0xA1B2_C3D4))
-        );
-
-        drop(restarted);
-        drop(first);
-        fs::remove_file(&path).unwrap();
-        fs::remove_dir(&directory).unwrap();
     }
 }
 

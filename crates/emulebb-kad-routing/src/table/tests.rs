@@ -21,6 +21,39 @@ fn unique_ip(i: usize) -> String {
 }
 
 #[test]
+fn global_cap_blocks_growth_but_keeps_updates_and_weak_replacement() {
+    let mut partial = RoutingTable::with_max_size(NodeId::ZERO, 1);
+    let mut first = make_contact([1; 16], "10.1.0.1");
+    partial.add_contact(first.clone()).unwrap();
+    let generation = partial.persistence_generation();
+    assert!(matches!(
+        partial.add_contact(make_contact([2; 16], "10.2.0.1")),
+        Err(RoutingError::TableFull { .. })
+    ));
+    assert_eq!(partial.persistence_generation(), generation);
+    first.tcp_port += 1;
+    partial.add_contact(first).unwrap();
+    assert_eq!(partial.persistence_generation(), Some(2));
+    let mut full = RoutingTable::with_max_size(NodeId::ZERO, K);
+    for i in 1..=K {
+        let mut weak = make_contact([i as u8; 16], &format!("10.{i}.0.1"));
+        weak.probe_type = 3;
+        weak.expires_at = Some(std::time::SystemTime::now() - Duration::from_secs(60));
+        full.add_contact(weak).unwrap();
+    }
+    let mut strong = make_contact([99; 16], "10.99.0.1");
+    strong.verified = true;
+    strong.received_hello_packet = true;
+    strong.udp_key = emulebb_kad_proto::KadUdpKey::new(123);
+    strong.probe_type = 0;
+    strong.expires_at = Some(std::time::SystemTime::now() + Duration::from_secs(3600));
+    full.add_contact(strong).unwrap();
+    assert_eq!(full.len(), K);
+    assert_eq!(full.persistence_generation(), Some((K + 1) as u64));
+    assert!(full.get(&NodeId::from_bytes([99; 16])).is_some());
+}
+
+#[test]
 fn persistence_generation_tracks_mutations_and_exhaustion() {
     let mut table = RoutingTable::new(NodeId::ZERO);
     let contact = make_contact([1; 16], "192.0.2.1");

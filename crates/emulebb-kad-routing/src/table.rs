@@ -27,6 +27,7 @@ pub struct RoutingTable {
     total_contacts: usize,
     /// None means the counter exhausted and persistence must fail visibly.
     generation: Option<u64>,
+    sealed: bool,
 }
 
 impl RoutingTable {
@@ -45,11 +46,15 @@ impl RoutingTable {
             subnet_counts: HashMap::new(),
             total_contacts: 0,
             generation: Some(0),
+            sealed: false,
         }
     }
 
     /// Add a contact to the routing table.
     pub fn add_contact(&mut self, contact: Contact) -> Result<(), RoutingError> {
+        if self.sealed {
+            return Err(RoutingError::Sealed);
+        }
         let own_id = self.own_id;
         // Global IP uniqueness check.
         let ip_count = self.ip_counts.get(&contact.ip).copied().unwrap_or(0);
@@ -191,6 +196,9 @@ impl RoutingTable {
 
     /// Remove a contact by ID. Returns true if found and removed.
     pub fn remove(&mut self, id: &NodeId) -> bool {
+        if self.sealed {
+            return false;
+        }
         let own_id = self.own_id;
         if let Some(contact) = self.root.remove(id, &own_id) {
             self.release_ip_bookkeeping(contact.ip);
@@ -247,6 +255,22 @@ impl RoutingTable {
         self.max_size
     }
 
+    /// Conservative accounting of current tree and hash-map backing storage.
+    pub fn owned_bytes(&self) -> usize {
+        let ip = self
+            .ip_counts
+            .capacity()
+            .saturating_mul(2 * (std::mem::size_of::<(Ipv4Addr, usize)>() + 1));
+        let subnet = self
+            .subnet_counts
+            .capacity()
+            .saturating_mul(2 * (std::mem::size_of::<([u8; 3], usize)>() + 1));
+        self.root
+            .owned_bytes()
+            .saturating_add(ip)
+            .saturating_add(subnet)
+    }
+
     /// Returns our own node ID.
     pub fn own_id(&self) -> &NodeId {
         &self.own_id
@@ -262,6 +286,11 @@ impl RoutingTable {
         self.generation
     }
 
+    /// Stop all further mutations before final persistence capture.
+    pub fn seal(&mut self) {
+        self.sealed = true;
+    }
+
     fn advance_generation(&mut self) {
         self.generation = self.generation.and_then(|value| value.checked_add(1));
     }
@@ -275,6 +304,9 @@ impl RoutingTable {
     /// endpoint or weaken existing contact knowledge. New contacts still pass
     /// the ordinary routing admission and subnet rules.
     pub fn merge_restored_contact(&mut self, incoming: Contact) -> Result<bool, RoutingError> {
+        if self.sealed {
+            return Err(RoutingError::Sealed);
+        }
         if let Some(existing) = self.root.get_mut(&incoming.id, &self.own_id) {
             if existing.ip != incoming.ip || existing.udp_port != incoming.udp_port {
                 return Ok(false);
@@ -315,6 +347,9 @@ impl RoutingTable {
     /// when the contact was found with a matching IP (and is now verified),
     /// `false` otherwise (unknown contact or IP mismatch).
     pub fn verify_contact(&mut self, id: &NodeId, ip: Ipv4Addr) -> bool {
+        if self.sealed {
+            return false;
+        }
         let own_id = self.own_id;
         let (found, changed) = match self.root.get_mut(id, &own_id) {
             Some(contact) if contact.ip == ip => {
@@ -365,6 +400,9 @@ impl RoutingTable {
         &mut self,
         now: std::time::SystemTime,
     ) -> crate::maintenance::SmallTimerOutcome {
+        if self.sealed {
+            return crate::maintenance::SmallTimerOutcome::default();
+        }
         // Snapshot the IP of every dead+expired contact before the sweep deletes
         // it so bookkeeping can be released by id afterwards.
         let removed_ips: std::collections::HashMap<NodeId, Ipv4Addr> = self
@@ -395,6 +433,9 @@ impl RoutingTable {
     /// through the same accounting as removal — the `< K/2` merge gate means the
     /// merged bin always fits every contact, so this is a defensive no-op path.
     pub fn consolidate(&mut self) -> u32 {
+        if self.sealed {
+            return 0;
+        }
         let mut dropped = Vec::new();
         let merges = self.root.consolidate(&mut dropped);
         let changed = !dropped.is_empty();
@@ -420,6 +461,9 @@ impl RoutingTable {
         now: std::time::SystemTime,
         rng: &mut impl FnMut() -> u8,
     ) -> Option<NodeId> {
+        if self.sealed {
+            return None;
+        }
         const BIG_TIMER_REARM: Duration = Duration::from_secs(3600);
         let own_id = self.own_id;
         self.root
@@ -430,6 +474,9 @@ impl RoutingTable {
     /// HELLO probe was sent to it (oracle `CContact::CheckingType`). Returns the
     /// new counter value, or `None` if the contact is gone.
     pub fn checking_type(&mut self, id: &NodeId) -> Option<u8> {
+        if self.sealed {
+            return None;
+        }
         let own_id = self.own_id;
         let mut changed = false;
         let result = self.root.get_mut(id, &own_id).map(|contact| {

@@ -107,7 +107,6 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 mod app_api;
 mod build_identity;
@@ -146,6 +145,7 @@ mod kad_callback_initiator;
 mod kad_control;
 mod kad_hello;
 mod kad_passive_replay;
+mod kad_persistence;
 mod kad_public_search;
 mod kad_publish_diagnostics;
 mod kad_publish_schedule;
@@ -368,8 +368,8 @@ struct Ed2kRuntime {
     server_control: Ed2kServerControlHandle,
     dht: DhtNode,
     callback_sessions: Ed2kCallbackSessionHandle,
-    /// Profile-local `nodes.dat` destination for the shutdown routing sample.
-    kad_nodes_dat_path: Option<PathBuf>,
+    /// Final Kad snapshot has completed before network teardown.
+    kad_persistence_finished: bool,
     /// Shared Kad firewall verification state, read by `kad_status` to report the
     /// real UDP-firewall verdict (oracle `CUDPFirewallTester::IsFirewalledUDP`).
     kad_firewall: Arc<Mutex<KadFirewallState>>,
@@ -543,6 +543,8 @@ pub struct EmulebbCore {
     /// Orders settings commit and runtime publication, including canceled waiters.
     settings_update_order: Arc<Mutex<()>>,
     persistence_owner: Arc<persistence_owner::PersistenceSlot>,
+    #[cfg(test)]
+    kad_startup_gate: Arc<std::sync::Mutex<Option<Arc<network_api::KadStartupGate>>>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -736,6 +738,8 @@ impl EmulebbCore {
             next_transfer_event_id: Arc::new(AtomicU64::new(1)),
             settings_update_order: Arc::new(Mutex::new(())),
             persistence_owner: Arc::new(persistence_owner::PersistenceSlot::default()),
+            #[cfg(test)]
+            kad_startup_gate: Arc::new(std::sync::Mutex::new(None)),
             state: Arc::new(Mutex::new(core_state)),
         })
     }

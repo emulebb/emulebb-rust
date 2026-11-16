@@ -26,6 +26,42 @@ fn contact(id: u8, ip: u32) -> KadRoutingContact {
 }
 
 #[test]
+fn checkpoint_preserves_discovery_initialization_while_advancing_revision() {
+    let store = MetadataStore::in_memory().unwrap();
+    assert_eq!(
+        store
+            .checkpoint_kad_routing_snapshot(0, &[contact(1, 0xc0000201)])
+            .unwrap(),
+        Some(1)
+    );
+    let pending = store.load_kad_routing_snapshot().unwrap();
+    assert_eq!(
+        pending.initialization,
+        DiscoveryInitializationStatus::Pending
+    );
+    assert_eq!(
+        store.checkpoint_kad_routing_snapshot(1, &[]).unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        store.load_kad_routing_snapshot().unwrap().initialization,
+        DiscoveryInitializationStatus::Pending
+    );
+    assert_eq!(
+        store.replace_kad_routing_snapshot(2, true, &[]).unwrap(),
+        Some(3)
+    );
+    assert_eq!(
+        store.checkpoint_kad_routing_snapshot(3, &[]).unwrap(),
+        Some(4)
+    );
+    assert_eq!(
+        store.load_kad_routing_snapshot().unwrap().initialization,
+        DiscoveryInitializationStatus::Initialized
+    );
+}
+
+#[test]
 fn load_rejects_more_than_the_routing_limit() {
     let store = MetadataStore::in_memory().unwrap();
     {

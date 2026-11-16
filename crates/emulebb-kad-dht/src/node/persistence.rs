@@ -196,6 +196,11 @@ impl DhtNode {
         let binding = self.public_ip_for_udp_keys();
         let mut keys = Vec::with_capacity(table.len());
         let mut lookups = Vec::with_capacity(table.len());
+        if keys.capacity() > DEFAULT_MAX_SIZE.next_power_of_two()
+            || lookups.capacity() > DEFAULT_MAX_SIZE.next_power_of_two()
+        {
+            return Err(DhtError::RoutingSnapshotTooLarge);
+        }
         table.visit_contacts(|contact| {
             keys.push(RoutingKeyProjection {
                 node_id: contact.id,
@@ -233,31 +238,75 @@ impl DhtNode {
     /// Persistence callers must reserve their contact and conversion memory
     /// before calling, because capture allocates up to the routing limit.
     pub async fn capture_routing_snapshot(&self) -> Result<Vec<RoutingSnapshotContact>, DhtError> {
-        let contacts = {
-            let table = self.inner.routing_table.lock().await;
-            if table.len() > DEFAULT_MAX_SIZE {
-                return Err(DhtError::RoutingSnapshotTooLarge);
-            }
-            table.all_contacts()
-        };
+        Ok(self.capture_routing_bundle().await?.1)
+    }
+
+    /// Capture rows and their exact projection under one routing and key fence.
+    pub async fn capture_routing_bundle(
+        &self,
+    ) -> Result<(RoutingProjection, Vec<RoutingSnapshotContact>), DhtError> {
         let _binding = self.inner.key_binding_gate.lock().await;
+        let table = self.inner.routing_table.lock().await;
+        if table.len() > DEFAULT_MAX_SIZE {
+            return Err(DhtError::RoutingSnapshotTooLarge);
+        }
+        let routing = table
+            .persistence_generation()
+            .ok_or(DhtError::RoutingGenerationExhausted)?;
         let public_ip = self.public_ip_for_udp_keys();
-        let mut snapshot = Vec::with_capacity(contacts.len());
-        for contact in &contacts {
-            let mut record = RoutingSnapshotContact::try_from(contact)?;
+        let mut snapshot = Vec::with_capacity(table.len());
+        let mut lookups = Vec::with_capacity(table.len());
+        if snapshot.capacity() > DEFAULT_MAX_SIZE.next_power_of_two()
+            || lookups.capacity() > DEFAULT_MAX_SIZE.next_power_of_two()
+        {
+            return Err(DhtError::RoutingSnapshotTooLarge);
+        }
+        let mut error = None;
+        table.visit_contacts(|contact| match RoutingSnapshotContact::try_from(contact) {
+            Ok(record) => {
+                lookups.push((contact.ip, None));
+                snapshot.push(record);
+            }
+            Err(failure) => error = Some(failure),
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let (keys, binding_epoch) = self
+            .inner
+            .rpc
+            .capture_peer_keys(&mut lookups)
+            .ok_or(DhtError::RoutingGenerationExhausted)?;
+        let mut projection = Vec::with_capacity(snapshot.len());
+        if projection.capacity() > DEFAULT_MAX_SIZE.next_power_of_two() {
+            return Err(DhtError::RoutingSnapshotTooLarge);
+        }
+        for (record, (_, learned)) in snapshot.iter_mut().zip(lookups) {
             if let Some(binding) = public_ip {
-                let addr = SocketAddr::new(IpAddr::V4(contact.ip), contact.udp_port);
-                if let Some(key) = self
-                    .known_peer_key(addr)
-                    .filter(|key| *key != KadUdpKey::ZERO)
-                {
-                    record.udp_key = key;
+                if let Some(key) = learned.filter(|key| *key != 0) {
+                    record.udp_key = KadUdpKey::new(key);
                     record.udp_key_ip = Some(binding);
                 }
             }
-            snapshot.push(record);
+            projection.push(RoutingKeyProjection {
+                node_id: record.node_id,
+                key: record.udp_key,
+                binding: record.udp_key_ip,
+            });
         }
-        Ok(snapshot)
+        projection.sort_unstable_by_key(|entry| entry.node_id);
+        snapshot.sort_unstable_by_key(|entry| entry.node_id);
+        Ok((
+            RoutingProjection {
+                token: RoutingProjectionToken {
+                    routing,
+                    keys,
+                    binding_epoch,
+                },
+                keys: projection,
+            },
+            snapshot,
+        ))
     }
 
     /// Validate and merge a snapshot. Expired entries and routing-admission
@@ -270,16 +319,16 @@ impl DhtNode {
         if records.len() > DEFAULT_MAX_SIZE {
             return Err(DhtError::RoutingSnapshotTooLarge);
         }
-        let contacts: Vec<Contact> = records
-            .iter()
-            .map(Contact::try_from)
-            .collect::<Result<_, _>>()?;
+        for record in records {
+            Contact::try_from(record)?;
+        }
         let mut outcome = RoutingRestoreOutcome::default();
-        let mut accepted = Vec::new();
         let mut accepted_ids = HashSet::new();
+        let _binding = self.inner.key_binding_gate.lock().await;
         {
             let mut table = self.inner.routing_table.lock().await;
-            for contact in contacts {
+            for record in records {
+                let contact = Contact::try_from(record)?;
                 if contact.expires_at.is_some_and(|expires| expires <= now) {
                     outcome.expired += 1;
                     continue;
@@ -295,26 +344,22 @@ impl DhtNode {
                             outcome.accepted += 1;
                         }
                         if let Some(merged) = table.get(&id) {
-                            accepted.push(merged.clone());
+                            let addr = SocketAddr::new(IpAddr::V4(merged.ip), merged.udp_port);
+                            self.inner
+                                .rpc
+                                .register_peer_identity_if_absent(addr, merged.id);
+                            self.inner
+                                .rpc
+                                .register_peer_version_if_higher(addr, merged.kad_version);
+                            if self.udp_key_matches_public_ip(merged.udp_key, merged.udp_key_ip) {
+                                self.inner
+                                    .rpc
+                                    .register_peer_key_if_absent(addr, merged.udp_key.value());
+                            }
                         }
                     }
                     Ok(false) | Err(_) => outcome.rejected += 1,
                 }
-            }
-        }
-        let _binding = self.inner.key_binding_gate.lock().await;
-        for contact in accepted {
-            let addr = SocketAddr::new(IpAddr::V4(contact.ip), contact.udp_port);
-            self.inner
-                .rpc
-                .register_peer_identity_if_absent(addr, contact.id);
-            self.inner
-                .rpc
-                .register_peer_version_if_higher(addr, contact.kad_version);
-            if self.udp_key_matches_public_ip(contact.udp_key, contact.udp_key_ip) {
-                self.inner
-                    .rpc
-                    .register_peer_key_if_absent(addr, contact.udp_key.value());
             }
         }
         Ok(outcome)

@@ -86,7 +86,7 @@ async fn disconnect_drains_download_tasks_and_releases_connection_budget() {
     });
     started_rx.await.unwrap();
 
-    core.disconnect_ed2k().await;
+    core.disconnect_ed2k().await.unwrap();
 
     assert!(core.ed2k_download_tasks.is_empty());
     let next_admission = core.ed2k_transfers.try_admit_source_connection();
@@ -556,7 +556,7 @@ async fn disconnect_releases_detached_reask_source_leases_and_re_engages() {
 
     // The reask loop breaks on shutdown without emitting SourceReleased; the
     // lease would leak. disconnect_ed2k must release it.
-    core.disconnect_ed2k().await;
+    core.disconnect_ed2k().await.unwrap();
     {
         let state = core.state.lock().await;
         assert!(

@@ -685,7 +685,7 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
         server_control,
         dht,
         callback_sessions: ed2k_callback_session_channel().0,
-        kad_nodes_dat_path: None,
+        kad_persistence_finished: true,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         reachability,
         nat: Arc::new(NatManager::default()),
@@ -804,7 +804,7 @@ async fn server_disconnect_waits_for_supervisor_retirement_ack() {
         server_control,
         dht,
         callback_sessions: ed2k_callback_session_channel().0,
-        kad_nodes_dat_path: None,
+        kad_persistence_finished: true,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         reachability,
         nat: Arc::new(NatManager::default()),
@@ -872,7 +872,7 @@ async fn full_disconnect_waits_for_server_supervisor_retirement() {
         server_control: test_server_control_handle(),
         dht,
         callback_sessions: ed2k_callback_session_channel().0,
-        kad_nodes_dat_path: None,
+        kad_persistence_finished: true,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),
@@ -897,19 +897,18 @@ async fn full_disconnect_waits_for_server_supervisor_retirement() {
     tokio::time::timeout(Duration::from_secs(1), disconnect)
         .await
         .expect("disconnect should finish after supervisor retirement")
+        .unwrap()
         .unwrap();
 }
 
 #[tokio::test]
 async fn nodes_dat_import_persists_while_kad_is_stopped() {
     let transfer_root = unique_runtime_dir("emulebb-core-kad-stopped-import");
-    let nodes_path = transfer_root.join("nodes.dat");
-    let mut network = test_network_config_with_store(
+    let network = test_network_config_with_store(
         &transfer_root,
         KadLocalStoreConfig::default(),
         SnoopQueueConfig::default(),
     );
-    network.kad_nodes_dat_path = Some(nodes_path.clone());
     let core = EmulebbCore::new_with_network(
         "test",
         FileIndex::in_memory().unwrap(),
@@ -926,8 +925,15 @@ async fn nodes_dat_import_persists_while_kad_is_stopped() {
     bytes.extend_from_slice(&4662u16.to_le_bytes());
     bytes.push(0);
 
-    assert_eq!(core.import_kad_nodes_bytes(&bytes).await.unwrap(), 1);
-    assert_eq!(fs::read(nodes_path).unwrap(), bytes);
+    assert_eq!(core.import_kad_nodes_bytes(bytes).await.unwrap(), 1);
+    assert_eq!(
+        core.metadata_store
+            .load_kad_routing_snapshot()
+            .unwrap()
+            .contacts
+            .len(),
+        1
+    );
     assert!(!core.status().await.kad.running);
 }
 
@@ -936,15 +942,11 @@ async fn rejected_discovery_url_documents_leave_servers_and_nodes_bytes_unchange
     use super::discovery_fixture::{Reply, server};
 
     let temporary = unique_runtime_dir("bounded-discovery-import");
-    let nodes_path = temporary.join("nodes.dat");
-    let original_nodes = b"synthetic existing nodes state";
-    fs::write(&nodes_path, original_nodes).unwrap();
-    let mut network = test_network_config_with_store(
+    let network = test_network_config_with_store(
         &temporary,
         KadLocalStoreConfig::default(),
         SnoopQueueConfig::default(),
     );
-    network.kad_nodes_dat_path = Some(nodes_path.clone());
     let core = EmulebbCore::new_with_network(
         "test",
         FileIndex::in_memory().unwrap(),
@@ -966,14 +968,213 @@ async fn rejected_discovery_url_documents_leave_servers_and_nodes_bytes_unchange
         } else { Reply::body(b"malformed discovery bytes") }).collect();
         let source = server(replies).await;
         assert!(!core.import_server_met_url(&source.url).await.unwrap());
-        assert!(!core.import_kad_nodes_url(&source.url).await.unwrap());
+        assert!(!matches!(
+            core.import_kad_nodes_url(&source.url).await,
+            Ok(true)
+        ));
         assert_eq!(
             serde_json::to_value(core.servers().await).unwrap(),
             original_servers
         );
-        assert_eq!(fs::read(&nodes_path).unwrap(), original_nodes);
+        assert!(
+            core.metadata_store
+                .load_kad_routing_snapshot()
+                .unwrap()
+                .contacts
+                .is_empty()
+        );
         assert_eq!(source.hits.load(Ordering::SeqCst), 2);
     }
+}
+
+#[tokio::test]
+async fn shutdown_cancels_unadmitted_slow_kad_url_fetch() {
+    use super::discovery_fixture::{Reply, server};
+    let source = server(vec![Reply {
+        parts: vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx".to_vec(),
+            vec![0; 99],
+        ],
+        before: Duration::ZERO,
+        between: Duration::from_secs(30),
+    }])
+    .await;
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let id = owner.load_or_create_kad_node_id().await.unwrap();
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+        node_id: emulebb_kad_proto::NodeId::from_bytes(*id.as_bytes()),
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    owner.attach_kad(&dht).await.unwrap().commit();
+    owner.load_or_create_kad_node_id().await.unwrap();
+    dht.add_contact(emulebb_kad_routing::Contact::new(
+        emulebb_kad_proto::NodeId::from_bytes([77; 16]),
+        "192.0.2.77".parse().unwrap(),
+        4672,
+        4662,
+        9,
+    ))
+    .await
+    .unwrap();
+    let fetch = {
+        let core = Arc::clone(&core);
+        let url = source.url.clone();
+        tokio::spawn(async move { core.import_kad_nodes_url(&url).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while source.hits.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    core.stop_persistence_admission().unwrap();
+    let finish = {
+        let owner = Arc::clone(&owner);
+        let dht = dht.clone();
+        tokio::spawn(async move { owner.finish_kad(&dht).await })
+    };
+    let error = tokio::time::timeout(Duration::from_secs(2), fetch)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::PersistenceError>(),
+        Some(crate::PersistenceError::Closing)
+    ));
+    tokio::time::timeout(Duration::from_secs(2), finish)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        core.metadata_store
+            .load_kad_routing_snapshot()
+            .unwrap()
+            .contacts
+            .len(),
+        1
+    );
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_actual_startup_before_install_retires_owner_handoff() {
+    let root = unique_runtime_dir("kad-startup-cancel");
+    let mut network = test_network_config_with_store(
+        &root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.egress_route = emulebb_ed2k::networking::EgressRoute::DirectSystemRoute;
+    network.vpn_guard.mode = "off".into();
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.kad_bind_addr = "127.0.0.1:0".parse().unwrap();
+    network.listen_port = 0;
+    network.p2p_bind_ip = None;
+    network.nat_config.enabled = false;
+    network.ed2k.server_endpoints = vec!["127.0.0.1:1".into()];
+    let core = Arc::new(
+        EmulebbCore::new_with_network(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            &root,
+            Some(network),
+        )
+        .unwrap(),
+    );
+    let gate = Arc::new(crate::network_api::KadStartupGate::default());
+    *core.kad_startup_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let starting = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move { core.connect_ed2k().await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    starting.abort();
+    let _ = starting.await;
+    assert!(core.ed2k_runtime.lock().await.is_none());
+    *core.kad_startup_gate.lock().unwrap() = None;
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    owner.load_or_create_kad_node_id().await.unwrap();
+    core.connect_ed2k().await.unwrap();
+    assert!(core.ed2k_runtime.lock().await.is_some());
+    core.disconnect_ed2k().await.unwrap();
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn final_kad_capture_survives_timed_out_network_cleanup() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let id = owner.load_or_create_kad_node_id().await.unwrap();
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+        node_id: emulebb_kad_proto::NodeId::from_bytes(*id.as_bytes()),
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    owner.attach_kad(&dht).await.unwrap().commit();
+    dht.add_contact(emulebb_kad_routing::Contact::new(
+        emulebb_kad_proto::NodeId::from_bytes([78; 16]),
+        "192.0.2.78".parse().unwrap(),
+        4672,
+        4662,
+        9,
+    ))
+    .await
+    .unwrap();
+    let (server_control, _rx) = ed2k_server_control_channel(true);
+    let (search_handle, _search_rx) = new_ed2k_server_search_channel(1);
+    *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+        search_handle,
+        server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        server_control,
+        dht,
+        callback_sessions: ed2k_callback_session_channel().0,
+        kad_persistence_finished: false,
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        reachability: core.ed2k_reachability_authority.begin_runtime(),
+        nat: Arc::new(NatManager::default()),
+        shutdown: Arc::new(AtomicBool::new(false)),
+        server_connect_plan: test_server_connect_plan_sender(),
+        server_task: tokio::spawn(std::future::pending()),
+        kad_firewall_recheck: None,
+        tasks: Vec::new(),
+    });
+    core.stop_persistence_admission().unwrap();
+    core.finish_kad_persistence().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), core.disconnect_ed2k())
+            .await
+            .is_err()
+    );
+    core.drain_persistence().await.unwrap();
+    assert_eq!(
+        core.metadata_store
+            .load_kad_routing_snapshot()
+            .unwrap()
+            .contacts
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1002,7 +1203,7 @@ async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() 
         server_control: test_server_control_handle(),
         dht,
         callback_sessions: ed2k_callback_session_channel().0,
-        kad_nodes_dat_path: None,
+        kad_persistence_finished: true,
         kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
         reachability: core.ed2k_reachability_authority.begin_runtime(),
         nat: Arc::new(NatManager::default()),

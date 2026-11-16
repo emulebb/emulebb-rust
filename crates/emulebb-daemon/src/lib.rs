@@ -331,8 +331,6 @@ impl DaemonProfile {
             kad_local_store: kad_local_store_config(&self.kad),
             kad_snoop_queue: SnoopQueueConfig::default(),
             kad_passive_replay_enabled: self.kad.passive_replay_enabled,
-            kad_nodes_dat: discovery_bootstrap::load_valid_nodes_dat(self.profile_io_dir())?,
-            kad_nodes_dat_path: Some(self.profile_io_dir().join("nodes.dat")),
             kad_bootstrap_endpoints: self.kad_bootstrap_endpoints.clone(),
             kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,
@@ -714,31 +712,45 @@ fn kad_local_store_config(settings: &KadSettings) -> KadLocalStoreConfig {
 /// (lease reset + task aborts + NAT release) in case a future step blocks.
 const SHUTDOWN_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Ordered, bounded, idempotent network teardown run after the REST server has
-/// stopped accepting requests. Releases UPnP/NAT port mappings, aborts the
-/// session + detached download tasks, and resets download-source leases via
-/// `core.disconnect_ed2k()`. Wrapped in a hard timeout so a wedged provider can
-/// never block process exit; `disconnect_ed2k` is itself idempotent (a second
-/// call simply finds no runtime), so this is safe to call more than once.
-///
-/// SQLite is finalised by dropping the last `Arc<EmulebbCore>` once the caller
-/// returns: the metadata store commits per write transaction (synchronous=FULL,
-/// WAL), so closing the connection on drop is a clean flush with no in-memory
-/// state to lose.
-async fn graceful_teardown(core: &Arc<EmulebbCore>) {
+/// Finish persistence before bounded network cleanup, including on failure.
+async fn graceful_teardown(core: &Arc<EmulebbCore>) -> Result<()> {
     info!("running graceful network teardown");
-    // Surface the shutdown on GET /api/v1/app for any controller still polling.
     core.begin_shutdown();
-    // The shared-directory watcher is process-scoped, not P2P-session-scoped:
-    // keep it alive across ED2K/Kad disconnects, but stop it for daemon exit.
+    let admission = core.stop_persistence_admission();
     core.stop_shared_directory_monitor();
-    match tokio::time::timeout(SHUTDOWN_TEARDOWN_TIMEOUT, core.disconnect_ed2k()).await {
-        Ok(_status) => info!("graceful network teardown complete (NAT mappings released)"),
-        Err(_) => tracing::warn!(
-            timeout_secs = SHUTDOWN_TEARDOWN_TIMEOUT.as_secs(),
-            "graceful network teardown timed out; forcing shutdown"
-        ),
-    }
+    let result = teardown_sequence(
+        core.finish_kad_persistence(),
+        async { core.disconnect_ed2k_after_persistence().await.map(|_| ()) },
+        SHUTDOWN_TEARDOWN_TIMEOUT,
+    )
+    .await;
+    admission.and(result)
+}
+
+async fn teardown_sequence(
+    snapshot: impl std::future::Future<Output = Result<()>>,
+    cleanup: impl std::future::Future<Output = Result<()>>,
+    deadline: Duration,
+) -> Result<()> {
+    let snapshot = snapshot.await.context("failed to persist final Kad state");
+    let cleanup = match tokio::time::timeout(deadline, cleanup).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!("graceful network teardown timed out; forcing shutdown");
+            Ok(())
+        }
+    };
+    snapshot.and(cleanup)
+}
+
+/// Drain even after a failed final snapshot or network cleanup.
+async fn finalize_daemon(core: &Arc<EmulebbCore>) -> Result<()> {
+    let teardown = graceful_teardown(core).await;
+    let drain = core
+        .drain_persistence()
+        .await
+        .context("failed to drain persistence");
+    teardown.and(drain)
 }
 
 pub async fn run(profile: DaemonProfile) -> Result<()> {
@@ -788,7 +800,7 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     }
     let index = FileIndex::from_metadata_store(profile.open_metadata_store()?);
     let metadata_store = index.metadata_store();
-    discovery_bootstrap::seed_empty_discovery(&metadata_store, profile.profile_io_dir()).await?;
+    discovery_bootstrap::seed_empty_discovery(&metadata_store).await?;
     let ed2k_network = profile.ed2k_network_config(&metadata_store)?;
     let ed2k_network_configured = ed2k_network.is_some();
     let vpn_guard_monitor = ed2k_network
@@ -807,6 +819,11 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
         .with_profile_dir(profile.profile_io_dir().to_path_buf())
         .with_incoming_dir(incoming_dir),
     );
+    let shutdown_error = Arc::new(std::sync::Mutex::new(None));
+    let run_result: Result<()> = async {
+    if let Err(error) = discovery_bootstrap::seed_pending_kad(&core).await {
+        warn!(%error, "Kad discovery initialization unavailable; retrying next launch");
+    }
     let deletion_recovery = core.recover_pending_transfer_deletions().await?;
     if deletion_recovery.recovered > 0 {
         info!(
@@ -897,11 +914,9 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     let bound_addr = listener.local_addr()?;
     let host_shutdown = if let Some(host) = host {
         if host.shutdown.is_requested() {
-            graceful_teardown(&core).await;
             return Ok(());
         }
         if host.ready.send(bound_addr).is_err() {
-            graceful_teardown(&core).await;
             bail!("embedded host readiness receiver closed during startup");
         }
         Some(host.shutdown)
@@ -1045,23 +1060,27 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
         });
     }
     let shutdown_core = Arc::clone(&core);
+    let callback_error = Arc::clone(&shutdown_error);
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown::wait_for_shutdown(shutdown_rx, host_shutdown).await;
             // WHY: event streams must close for every shutdown source, and P2P
             // teardown must not wait behind HTTP response draining.
             shutdown_tx.send_replace(true);
-            graceful_teardown(&shutdown_core).await;
+            if let Err(error) = graceful_teardown(&shutdown_core).await {
+                tracing::error!(%error, "graceful network teardown failed");
+                *callback_error.lock().unwrap() = Some(error);
+            }
         })
         .await;
-    // Idempotent final teardown also covers serve errors that bypassed or
-    // interrupted the normal shutdown future.
-    graceful_teardown(&core).await;
-    core.drain_persistence()
-        .await
-        .context("failed to drain persistence")?;
     serve_result?;
     Ok(())
+    }.await;
+    // WHY: every exit after the owner can start must stop tasks and drain it,
+    // including startup errors and hosted shutdown before readiness.
+    let final_result = finalize_daemon(&core).await;
+    let callback_result = shutdown_error.lock().unwrap().take().map_or(Ok(()), Err);
+    run_result.and(callback_result).and(final_result)
 }
 
 async fn connect_to_most_popular_server(core: &EmulebbCore) {

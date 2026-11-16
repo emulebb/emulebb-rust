@@ -77,6 +77,18 @@ async fn absent_lengths_and_many_small_chunks_cannot_bypass_the_cap() {
 }
 
 #[tokio::test]
+async fn many_small_chunks_use_one_bounded_body_allocation() {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}0\r\n\r\n",
+        "1\r\na\r\n".repeat(16)
+    );
+    let source = server(vec![Reply::raw(response.as_bytes())]).await;
+    let body = fetch(&source, 16).await.unwrap();
+    assert_eq!(body, vec![b'a'; 16]);
+    assert_eq!(body.capacity(), 16);
+}
+
+#[tokio::test]
 async fn declared_oversize_is_rejected_before_waiting_for_body() {
     let source = server(vec![Reply::raw(
         b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n",

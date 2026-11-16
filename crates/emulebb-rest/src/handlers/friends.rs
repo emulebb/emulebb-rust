@@ -11,7 +11,10 @@ use axum::{
 };
 use serde_json::json;
 
-use emulebb_core::{FriendCreate, PersistenceError};
+use super::persistence::persistence_error;
+use emulebb_core::FriendCreate;
+#[cfg(test)]
+use emulebb_core::PersistenceError;
 
 use crate::handlers::prelude::*;
 
@@ -37,7 +40,7 @@ pub(crate) async fn create_friend(
     };
     match state.core.add_friend(request).await {
         Ok(friend) => api_ok(friend).into_response(),
-        Err(error) => friend_error(error),
+        Err(error) => persistence_error(error),
     }
 }
 
@@ -50,55 +53,7 @@ pub(crate) async fn delete_friend(
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "friend not found").into_response()
         }
-        Err(error) => friend_error(error),
-    }
-}
-
-pub(crate) fn friend_error(error: anyhow::Error) -> axum::response::Response {
-    match error.downcast_ref::<PersistenceError>() {
-        Some(PersistenceError::CommittedAfterWorkerFailure) => api_error_with_details(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "PERSISTENCE_COMMITTED",
-            error.to_string(),
-            json!({"committed": true}),
-        )
-        .into_response(),
-        Some(PersistenceError::Busy) => api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "PERSISTENCE_BUSY",
-            error.to_string(),
-        )
-        .into_response(),
-        Some(PersistenceError::Closing) => api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "PERSISTENCE_CLOSING",
-            error.to_string(),
-        )
-        .into_response(),
-        Some(PersistenceError::TooLarge) => api_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "PERSISTENCE_TOO_LARGE",
-            error.to_string(),
-        )
-        .into_response(),
-        Some(PersistenceError::Storage(_)) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "PERSISTENCE_FAILED",
-            error.to_string(),
-        )
-        .into_response(),
-        Some(PersistenceError::CommitUnknown | PersistenceError::Worker) => api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "PERSISTENCE_UNAVAILABLE",
-            error.to_string(),
-        )
-        .into_response(),
-        _ => api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => persistence_error(error),
     }
 }
 
@@ -152,7 +107,7 @@ mod tests {
                 true,
             ),
         ] {
-            let response = friend_error(error.into());
+            let response = persistence_error(error.into());
             assert_eq!(response.status(), status);
             let body = axum::body::to_bytes(response.into_body(), 4096)
                 .await

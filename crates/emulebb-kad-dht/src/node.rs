@@ -52,6 +52,7 @@ struct DhtInner {
     current_public_ip: Arc<AtomicU32>,
     /// Serializes public-address/key-map transitions with durable snapshots.
     key_binding_gate: Mutex<()>,
+    persistence_sealed: std::sync::atomic::AtomicBool,
     config: DhtConfig,
     /// Per-target dedup + bounded concurrency for search/publish traversals
     /// (oracle `CSearchManager::AlreadySearchingFor` + the concurrent-search
@@ -69,6 +70,15 @@ struct DhtInner {
     /// every good RES contact learned during any traversal is forwarded here and
     /// drained into the routing table by the task spawned in [`DhtNode::start`].
     res_contact_tx: mpsc::UnboundedSender<LearnedResContact>,
+}
+
+/// Non-owning identity for fencing operations against a retired runtime.
+pub struct DhtInstance(std::sync::Weak<DhtInner>);
+
+impl DhtInstance {
+    pub fn matches(&self, node: &DhtNode) -> bool {
+        self.0.ptr_eq(&Arc::downgrade(&node.inner))
+    }
 }
 
 /// A good `KADEMLIA2_RES` contact learned during traversal, carried over the
@@ -131,6 +141,13 @@ impl Clone for DhtNode {
 }
 
 impl DhtNode {
+    pub fn instance(&self) -> DhtInstance {
+        DhtInstance(Arc::downgrade(&self.inner))
+    }
+    /// Whether two handles refer to the same live routing instance.
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     /// Create a new DhtNode. Does NOT bind the socket or start any tasks.
     /// Call `start()` to begin.
     pub async fn new(mut config: DhtConfig) -> Result<Self, DhtError> {
@@ -198,6 +215,7 @@ impl DhtNode {
                 rpc,
                 current_public_ip,
                 key_binding_gate: Mutex::new(()),
+                persistence_sealed: std::sync::atomic::AtomicBool::new(false),
                 config,
                 search_concurrency,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
@@ -206,14 +224,6 @@ impl DhtNode {
                 res_contact_tx,
             }),
         };
-
-        // A persisted routing sample is live routing state, not merely a list
-        // of one-shot bootstrap endpoints. Restore it immediately so restart
-        // retains verification/key metadata and the table can bootstrap from
-        // its own contacts just like stock RoutingZone.
-        if let Some(nodes_dat) = node.inner.config.nodes_dat.clone() {
-            node.import_nodes_dat(&nodes_dat).await?;
-        }
 
         Ok(node)
     }
@@ -284,6 +294,9 @@ impl DhtNode {
     /// whose saved binding matches the new address are re-exposed.
     pub async fn set_public_ip_for_udp_keys(&self, public_ip: Option<Ipv4Addr>) {
         let _binding = self.inner.key_binding_gate.lock().await;
+        if self.inner.persistence_sealed.load(Ordering::Acquire) {
+            return;
+        }
         let bits = public_ip.map_or(0, u32::from);
         let previous = self.inner.current_public_ip.swap(bits, Ordering::Relaxed);
         if previous == bits {
@@ -302,6 +315,15 @@ impl DhtNode {
                 );
             }
         }
+    }
+
+    /// Stop routing and key mutations before final snapshot capture.
+    pub async fn seal_persistence(&self) {
+        let _binding = self.inner.key_binding_gate.lock().await;
+        let mut table = self.inner.routing_table.lock().await;
+        table.seal();
+        self.inner.rpc.seal_peer_keys();
+        self.inner.persistence_sealed.store(true, Ordering::Release);
     }
 
     pub(crate) fn udp_key_matches_public_ip(

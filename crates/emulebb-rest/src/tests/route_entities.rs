@@ -799,3 +799,147 @@ async fn search_result_download_accepts_paused_request_body() {
     assert_eq!(value["data"]["searchId"], search_id);
     assert_eq!(value["data"]["hash"], "00112233445566778899aabbccddeeff");
 }
+
+#[tokio::test]
+async fn kad_import_frontdoor_reports_closed_persistence() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    core.drain_persistence().await.unwrap();
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/kad/operations/import-nodes-url")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"url":"http://127.0.0.1:1/nodes.dat"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING");
+}
+
+#[tokio::test]
+async fn server_connect_frontdoors_report_closed_persistence() {
+    let root = unique_test_dir("server-persistence-fault");
+    let mut network = test_network_config(&root);
+    network.egress_route = emulebb_ed2k::networking::EgressRoute::DirectSystemRoute;
+    network.vpn_guard.mode = "off".into();
+    network.p2p_bind_ip = None;
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.kad_bind_addr = "127.0.0.1:0".parse().unwrap();
+    network.listen_port = 0;
+    network.nat_config.enabled = false;
+    let core = Arc::new(
+        EmulebbCore::new_with_network(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            &root,
+            Some(network),
+        )
+        .unwrap(),
+    );
+    core.add_server(emulebb_core::ServerCreate {
+        address: "127.0.0.1".into(),
+        port: 1,
+        name: None,
+        priority: None,
+        static_server: None,
+        connect: None,
+    })
+    .await
+    .unwrap();
+    core.drain_persistence().await.unwrap();
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    for (uri, body) in [
+        ("/api/v1/servers/operations/connect", ""),
+        ("/api/v1/servers/127.0.0.1%3A1/operations/connect", ""),
+        (
+            "/api/v1/servers",
+            r#"{"address":"127.0.0.2","port":1,"connect":true}"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING", "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn kad_stop_frontdoor_reports_closed_persistence() {
+    let root = unique_test_dir("kad-stop-persistence-fault");
+    let mut network = test_network_config(&root);
+    network.egress_route = emulebb_ed2k::networking::EgressRoute::DirectSystemRoute;
+    network.vpn_guard.mode = "off".into();
+    network.p2p_bind_ip = None;
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.kad_bind_addr = "127.0.0.1:0".parse().unwrap();
+    network.listen_port = 0;
+    network.nat_config.enabled = false;
+    network.ed2k.server_endpoints = vec!["127.0.0.1:1".into()];
+    let core = Arc::new(
+        EmulebbCore::new_with_network(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            &root,
+            Some(network),
+        )
+        .unwrap(),
+    );
+    core.connect_ed2k().await.unwrap();
+    core.drain_persistence().await.unwrap();
+    let app = router(
+        Arc::clone(&core),
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/kad/operations/stop")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING");
+    core.disconnect_ed2k_after_persistence().await.unwrap();
+}

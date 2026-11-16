@@ -2334,7 +2334,7 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
       </div>
       <div class="notice alert alert-info" role="status">
         Kad network: {props.kad.connected ? "Connected" : props.kad.running ? props.kad.bootstrapping ? "Bootstrapping" : "Starting" : "Stopped"}.
-        {!props.kad.running && " You can import nodes.dat now; it is validated and saved for the next Start."}
+        {!props.kad.running && " You can import nodes.dat now; validated contacts are saved in your profile database for the next Start."}
       </div>
       <div class="kv compact">
         <span>Running</span>
@@ -2358,7 +2358,7 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
         event.preventDefault();
         const url = parseUrlImportText(importUrl);
         if (url) {
-          void props.run(() => props.client.post("kad/operations/import-nodes-url", { url }), "nodes.dat imported, validated, and saved");
+          void props.run(() => props.client.post("kad/operations/import-nodes-url", { url }), "Kad contacts saved in your profile database");
         }
       }}>
         <input class="form-control" value={importUrl} placeholder="nodes.dat URL" aria-invalid={kadImportUrlError ? "true" : "false"} onInput={(event) => setImportUrl(event.currentTarget.value)} />

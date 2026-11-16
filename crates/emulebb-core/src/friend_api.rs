@@ -1,9 +1,13 @@
 use super::*;
 
 impl EmulebbCore {
+    /// Stop accepting regular persistence work while allowing final Kad capture.
+    pub fn stop_persistence_admission(&self) -> Result<()> {
+        Ok(self.persistence_owner.stop_regular_admission()?)
+    }
     pub async fn friends(&self) -> Result<Vec<Friend>> {
         let state = self.state.lock().await;
-        self.persistence_owner.check_friend_state()?;
+        self.persistence_owner.check_coherent_state()?;
         Ok(state.friends.values().cloned().collect())
     }
 

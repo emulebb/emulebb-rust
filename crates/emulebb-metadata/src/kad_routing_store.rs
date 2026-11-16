@@ -167,6 +167,25 @@ impl MetadataStore {
         only_if_pending: bool,
         contacts: &[KadRoutingContact],
     ) -> Result<Option<i64>> {
+        self.write_kad_routing_snapshot(expected_revision, only_if_pending, true, contacts)
+    }
+
+    /// Persist automatic routing changes without changing discovery initialization.
+    pub fn checkpoint_kad_routing_snapshot(
+        &self,
+        expected_revision: i64,
+        contacts: &[KadRoutingContact],
+    ) -> Result<Option<i64>> {
+        self.write_kad_routing_snapshot(expected_revision, false, false, contacts)
+    }
+
+    fn write_kad_routing_snapshot(
+        &self,
+        expected_revision: i64,
+        only_if_pending: bool,
+        initialize: bool,
+        contacts: &[KadRoutingContact],
+    ) -> Result<Option<i64>> {
         ensure!(expected_revision >= 0, "invalid Kad routing revision");
         ensure!(
             contacts.len() <= KAD_ROUTING_MAX_CONTACTS,
@@ -233,7 +252,9 @@ impl MetadataStore {
                 ])?;
             }
         }
-        Self::mark_discovery_initialized(&tx, DiscoveryDomain::Kad)?;
+        if initialize {
+            Self::mark_discovery_initialized(&tx, DiscoveryDomain::Kad)?;
+        }
         tx.execute(
             "UPDATE kad_routing_revision SET revision = ?1 WHERE id = 1",
             [next],

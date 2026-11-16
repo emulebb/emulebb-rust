@@ -44,6 +44,11 @@ impl RpcManager {
         self.inner.obfuscation.reset_peer_keys(accept_new_keys);
     }
 
+    /// Freeze key learning without discarding the saved binding.
+    pub fn seal_peer_keys(&self) {
+        self.inner.obfuscation.seal_peer_keys();
+    }
+
     /// Derive the verify key we should announce to a specific IPv4 peer.
     #[must_use]
     pub fn verify_key_for_ip(&self, ip: Ipv4Addr) -> u32 {

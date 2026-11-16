@@ -360,6 +360,7 @@ fn log_routing_rejection(
     contact_udp_port: u16,
 ) {
     match error {
+        RoutingError::Sealed => {}
         RoutingError::SubnetLimitExceeded { prefix, scope } => {
             log_subnet_limit_rejection(contact_id, contact_ip, contact_udp_port, *prefix, scope);
         }

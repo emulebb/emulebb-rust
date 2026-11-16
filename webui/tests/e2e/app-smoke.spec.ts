@@ -568,7 +568,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
   await kadPanel.getByRole("button", { name: "Import" }).click();
-  await expect(page.getByText("nodes.dat imported, validated, and saved")).toBeVisible();
+  await expect(page.getByText("Kad contacts saved in your profile database")).toBeVisible();
   await kadPanel.getByRole("button", { name: "Start" }).click();
   await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
 
@@ -882,7 +882,7 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   await kadPanel.getByPlaceholder("nodes.dat URL").fill("http://example.invalid/nodes.dat");
   await expect(kadPanel.getByText(kadUrlError)).toHaveCount(0);
   await kadImportButton.click();
-  await expect(page.getByText("nodes.dat imported, validated, and saved")).toBeVisible();
+  await expect(page.getByText("Kad contacts saved in your profile database")).toBeVisible();
   const kadImportPost = requests.find((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url");
   expect(kadImportPost).toBeDefined();
   expect(JSON.parse(kadImportPost?.body ?? "{}")).toEqual({ url: "http://example.invalid/nodes.dat" });

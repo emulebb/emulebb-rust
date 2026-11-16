@@ -1,4 +1,4 @@
-//! Bounded ordered persistence for migrated mutations.
+//! Bounded ordered persistence for durable mutations.
 
 use std::{
     sync::{Arc, Mutex as StdMutex, mpsc},
@@ -6,16 +6,23 @@ use std::{
 };
 use tokio::sync::{Mutex, mpsc as async_mpsc, oneshot};
 
-use crate::{Friend, core_state::CoreState, profile_state};
+use crate::{Friend, core_state::CoreState, kad_persistence, profile_state};
+use emulebb_kad_dht::{DhtNode, RoutingProjection, RoutingSnapshotContact};
 use emulebb_metadata::{
     KAD_ROUTING_MAX_CONTACTS, KadNodeId, KadRoutingContact, KadRoutingSnapshot, MetadataStore,
 };
 
+mod kad;
+
+#[cfg(test)]
+#[path = "persistence_owner/kad_tests.rs"]
+mod kad_tests;
 #[cfg(test)]
 mod tests;
 
 const MAX_SLOTS: usize = 64;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
+const KAD_INGRESS_PREPARATION_BYTES: usize = 2 * crate::NODES_DAT_MAX_BYTES;
 // Charge four copies of variable backing storage for request, worker/SQL
 // conversion, cache publication and response, plus fixed command overhead.
 // Allocator bookkeeping and thread stacks are outside this payload budget.
@@ -55,26 +62,22 @@ impl std::fmt::Display for PersistenceError {
 impl std::error::Error for PersistenceError {}
 
 enum Command {
-    Add {
-        hash: String,
-        name: String,
-    },
-    Delete {
-        hash: String,
-    },
+    Add { hash: String, name: String },
+    Delete { hash: String },
     KadLoad,
     KadIdentity,
-    KadInitialize {
-        expected_revision: i64,
-        contacts: Vec<KadRoutingContact>,
-    },
+    KadAttach(DhtNode),
+    KadCheckpoint { dht: DhtNode, final_snapshot: bool },
+    KadImport { input: KadInput, pending_only: bool },
 }
 
 enum Response {
     Friend(Option<Friend>),
     KadLoaded(LeasedKadSnapshot),
     KadIdentity(KadNodeId),
-    KadInitialized(Option<i64>),
+    KadAttached(KadAttachGuard),
+    KadCheckpointed,
+    KadImported(Result<usize, String>),
 }
 
 /// Keeps a returned snapshot charged independently of a request slot.
@@ -84,13 +87,6 @@ pub(crate) struct LeasedKadSnapshot {
 }
 
 impl LeasedKadSnapshot {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "RUST-FEAT-062 Kad runtime integration follows this owner boundary"
-        )
-    )]
     pub(crate) fn snapshot(&self) -> &KadRoutingSnapshot {
         &self.snapshot
     }
@@ -101,10 +97,25 @@ struct Request {
     permit: Permit,
     response: oneshot::Sender<Result<Response, PersistenceError>>,
     enqueued: Instant,
+    handoff: Option<oneshot::Receiver<()>>,
+    released: oneshot::Sender<()>,
+}
+
+/// Dropping an uncommitted startup handoff retires its unpublished DHT.
+pub(crate) struct KadAttachGuard(Option<oneshot::Sender<()>>);
+
+impl KadAttachGuard {
+    pub(crate) fn commit(mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 struct Admission {
     sender: Option<async_mpsc::Sender<Request>>,
+    stopping: bool,
+    cancel_ingress: tokio_util::sync::CancellationToken,
     quota: Arc<StdMutex<Quota>>,
 }
 
@@ -112,6 +123,7 @@ struct Quota {
     faulted: bool,
     slots: usize,
     bytes: usize,
+    available: Arc<tokio::sync::Notify>,
 }
 
 struct Permit {
@@ -124,10 +136,55 @@ struct ByteLease {
     bytes: usize,
 }
 
+struct KadInput {
+    bytes: Vec<u8>,
+    _ingress: ByteLease,
+}
+
+/// A bounded discovery response reservation, released on cancellation.
+pub(crate) struct KadImportReservation {
+    lease: ByteLease,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl KadImportReservation {
+    /// Resolve when shutdown cancels pre-enqueue discovery preparation.
+    pub(crate) async fn cancelled(&self) {
+        self.cancellation.cancelled().await;
+    }
+
+    /// The transport frame is gone once body collection returns.
+    pub(crate) fn finish_preparation(&mut self) -> Result<(), PersistenceError> {
+        let extra = self
+            .lease
+            .bytes
+            .checked_sub(crate::NODES_DAT_MAX_BYTES)
+            .ok_or(PersistenceError::Worker)?;
+        let mut quota = self
+            .lease
+            .quota
+            .lock()
+            .map_err(|_| PersistenceError::Worker)?;
+        quota.bytes -= extra;
+        self.lease.bytes -= extra;
+        quota.available.notify_waiters();
+        Ok(())
+    }
+}
+
+struct KadRuntime {
+    dht: Option<DhtNode>,
+    instance: emulebb_kad_dht::DhtInstance,
+    revision: i64,
+    finished: bool,
+    baseline: Option<(RoutingProjection, ByteLease)>,
+}
+
 impl Drop for ByteLease {
     fn drop(&mut self) {
         if let Ok(mut quota) = self.quota.lock() {
             quota.bytes -= self.bytes;
+            quota.available.notify_waiters();
         }
     }
 }
@@ -165,6 +222,7 @@ impl Drop for Permit {
         if let Ok(mut quota) = self.quota.lock() {
             quota.slots -= 1;
             quota.bytes -= self.bytes;
+            quota.available.notify_waiters();
         }
     }
 }
@@ -174,9 +232,27 @@ enum DbCommand {
     Delete(Friend),
     KadLoad,
     KadIdentity,
-    KadInitialize {
+    KadReplace {
         expected_revision: i64,
         contacts: Vec<KadRoutingContact>,
+    },
+    KadMerge {
+        input: KadInput,
+        seed: Vec<RoutingSnapshotContact>,
+        identity: KadNodeId,
+        revision: i64,
+        pending_only: bool,
+    },
+}
+
+enum KadMergeOutcome {
+    Invalid(String),
+    Conflict,
+    NoAccepted,
+    Applied {
+        revision: i64,
+        accepted: usize,
+        records: Vec<RoutingSnapshotContact>,
     },
 }
 
@@ -184,7 +260,8 @@ enum DbResponse {
     Friend(Friend, bool),
     KadLoaded(KadRoutingSnapshot),
     KadIdentity(KadNodeId),
-    KadInitialized(Option<i64>),
+    KadReplaced(Option<i64>),
+    KadMerged(KadMergeOutcome),
 }
 struct DbRequest {
     command: DbCommand,
@@ -199,11 +276,25 @@ pub(crate) struct PersistenceSlot {
 #[derive(Default)]
 struct SlotState {
     closed: bool,
+    stopping: bool,
     owner: Option<Arc<PersistenceOwner>>,
 }
 
 impl PersistenceSlot {
-    pub(crate) fn check_friend_state(&self) -> Result<(), PersistenceError> {
+    pub(crate) fn stop_regular_admission(&self) -> Result<(), PersistenceError> {
+        let mut slot = self.inner.lock().map_err(|_| PersistenceError::Worker)?;
+        slot.stopping = true;
+        if let Some(owner) = &slot.owner {
+            let mut admission = owner
+                .admission
+                .lock()
+                .map_err(|_| PersistenceError::Worker)?;
+            admission.stopping = true;
+            admission.cancel_ingress.cancel();
+        }
+        Ok(())
+    }
+    pub(crate) fn check_coherent_state(&self) -> Result<(), PersistenceError> {
         let slot = self.inner.lock().map_err(|_| PersistenceError::Worker)?;
         if let Some(owner) = &slot.owner {
             let admission = owner
@@ -232,6 +323,9 @@ impl PersistenceSlot {
         }
         if let Some(owner) = &slot.owner {
             return Ok(Arc::clone(owner));
+        }
+        if slot.stopping {
+            return Err(PersistenceError::Closing);
         }
         let owner = PersistenceOwner::start(store.clone(), Arc::clone(state))?;
         slot.owner = Some(Arc::clone(&owner));
@@ -298,15 +392,45 @@ impl PersistenceOwner {
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
+                    if matches!(&request.command, DbCommand::KadMerge { .. }) {
+                        let DbRequest { command, response } = request;
+                        let DbCommand::KadMerge {
+                            input,
+                            seed,
+                            identity,
+                            revision,
+                            pending_only,
+                        } = command
+                        else {
+                            unreachable!()
+                        };
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            kad::merge_in_worker(
+                                &store,
+                                input,
+                                seed,
+                                identity,
+                                revision,
+                                pending_only,
+                                #[cfg(test)]
+                                &worker_started_signal,
+                            )
+                        }));
+                        let result = match result {
+                            Ok(Ok(outcome)) => Ok(DbResponse::KadMerged(outcome)),
+                            Ok(Err(error)) => Err(error),
+                            Err(_) => Err(PersistenceError::CommitUnknown),
+                        };
+                        let _ = response.send(result);
+                        continue;
+                    }
                     if matches!(
                         &request.command,
-                        DbCommand::KadLoad
-                            | DbCommand::KadIdentity
-                            | DbCommand::KadInitialize { .. }
+                        DbCommand::KadLoad | DbCommand::KadIdentity | DbCommand::KadReplace { .. }
                     ) {
                         let writing = matches!(
                             &request.command,
-                            DbCommand::KadIdentity | DbCommand::KadInitialize { .. }
+                            DbCommand::KadIdentity | DbCommand::KadReplace { .. }
                         );
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             || match &request.command {
@@ -316,16 +440,12 @@ impl PersistenceOwner {
                                 DbCommand::KadIdentity => store
                                     .load_or_create_kad_node_id()
                                     .map(DbResponse::KadIdentity),
-                                DbCommand::KadInitialize {
+                                DbCommand::KadReplace {
                                     expected_revision,
                                     contacts,
                                 } => store
-                                    .replace_kad_routing_snapshot(
-                                        *expected_revision,
-                                        true,
-                                        contacts,
-                                    )
-                                    .map(DbResponse::KadInitialized),
+                                    .checkpoint_kad_routing_snapshot(*expected_revision, contacts)
+                                    .map(DbResponse::KadReplaced),
                                 _ => unreachable!(),
                             },
                         ));
@@ -363,7 +483,8 @@ impl PersistenceOwner {
                             }
                             DbCommand::KadLoad
                             | DbCommand::KadIdentity
-                            | DbCommand::KadInitialize { .. } => unreachable!(),
+                            | DbCommand::KadReplace { .. }
+                            | DbCommand::KadMerge { .. } => unreachable!(),
                         };
                         #[cfg(test)]
                         if injected != 0 && result.is_ok() {
@@ -406,7 +527,8 @@ impl PersistenceOwner {
                                 }
                                 DbCommand::KadLoad
                                 | DbCommand::KadIdentity
-                                | DbCommand::KadInitialize { .. } => {
+                                | DbCommand::KadReplace { .. }
+                                | DbCommand::KadMerge { .. } => {
                                     unreachable!()
                                 }
                             };
@@ -430,7 +552,8 @@ impl PersistenceOwner {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
                             DbCommand::KadLoad
                             | DbCommand::KadIdentity
-                            | DbCommand::KadInitialize { .. } => unreachable!(),
+                            | DbCommand::KadReplace { .. }
+                            | DbCommand::KadMerge { .. } => unreachable!(),
                         };
                         DbResponse::Friend(friend, recovered)
                     });
@@ -443,14 +566,18 @@ impl PersistenceOwner {
             faulted: false,
             slots: 0,
             bytes: 0,
+            available: Arc::new(tokio::sync::Notify::new()),
         }));
         let admission = Arc::new(StdMutex::new(Admission {
             sender: Some(sender),
+            stopping: false,
+            cancel_ingress: tokio_util::sync::CancellationToken::new(),
             quota: Arc::clone(&quota),
         }));
         let coordinator_admission = Arc::downgrade(&admission);
         let join = tokio::spawn(async move {
             let mut failures = false;
+            let mut kad_runtime = None;
             while let Some(mut request) = receiver.recv().await {
                 tracing::debug!(
                     queue_ms = request.enqueued.elapsed().as_millis() as u64,
@@ -464,6 +591,7 @@ impl PersistenceOwner {
                         &state,
                         &db_tx,
                         &mut request,
+                        &mut kad_runtime,
                         #[cfg(test)]
                         &coordinator_gate,
                     )
@@ -476,6 +604,7 @@ impl PersistenceOwner {
                         let _state = state.lock().await;
                         let mut admission = shared.lock().map_err(|_| PersistenceError::Worker)?;
                         quota.lock().map_err(|_| PersistenceError::Worker)?.faulted = true;
+                        admission.cancel_ingress.cancel();
                         admission.sender.take();
                     } else {
                         quota.lock().map_err(|_| PersistenceError::Worker)?.faulted = true;
@@ -490,8 +619,32 @@ impl PersistenceOwner {
                         | PersistenceError::CommitUnknown
                         | PersistenceError::CommittedAfterWorkerFailure)
                 );
-                let _ = request.response.send(result);
-                // Request retains its permit until commit and publication complete.
+                let Request {
+                    response,
+                    handoff,
+                    permit,
+                    released,
+                    ..
+                } = request;
+                if let Some(handoff) = handoff {
+                    // The attach projection has its own resident byte lease;
+                    // fence later commands on the handoff, not on the temporary
+                    // payload reservation that startup has already consumed.
+                    drop(permit);
+                    let _ = released.send(());
+                    let _ = response.send(result);
+                    if handoff.await.is_err() {
+                        if let Some(runtime) = kad_runtime.take() {
+                            if let Some(dht) = runtime.dht {
+                                dht.seal_persistence().await;
+                            }
+                        }
+                    }
+                } else {
+                    let _ = response.send(result);
+                    drop(permit);
+                    let _ = released.send(());
+                }
             }
             drop(db_tx);
             let joined = tokio::task::spawn_blocking(move || worker.join())
@@ -526,22 +679,6 @@ impl PersistenceOwner {
     pub(crate) async fn delete(&self, hash: String) -> Result<Option<Friend>, PersistenceError> {
         self.submit(Command::Delete { hash }).await
     }
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "RUST-FEAT-062 Kad runtime integration follows this owner boundary"
-        )
-    )]
-    pub(crate) async fn load_or_create_kad_node_id(&self) -> Result<KadNodeId, PersistenceError> {
-        match self
-            .submit_reserved(FIXED_CHARGE, || Ok(Command::KadIdentity))
-            .await?
-        {
-            Response::KadIdentity(id) => Ok(id),
-            _ => Err(PersistenceError::Worker),
-        }
-    }
     async fn submit(&self, command: Command) -> Result<Option<Friend>, PersistenceError> {
         let payload = match &command {
             Command::Add { hash, name } => hash
@@ -549,7 +686,11 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::KadLoad | Command::KadIdentity | Command::KadInitialize { .. } => {
+            Command::KadLoad
+            | Command::KadIdentity
+            | Command::KadAttach(_)
+            | Command::KadCheckpoint { .. }
+            | Command::KadImport { .. } => {
                 unreachable!()
             }
         };
@@ -562,63 +703,24 @@ impl PersistenceOwner {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "RUST-FEAT-062 Kad runtime integration follows this owner boundary"
-        )
-    )]
-    pub(crate) async fn load_kad(&self) -> Result<LeasedKadSnapshot, PersistenceError> {
-        match self
-            .submit_reserved(kad_charge()?, || Ok(Command::KadLoad))
-            .await?
-        {
-            Response::KadLoaded(snapshot) => Ok(snapshot),
-            _ => Err(PersistenceError::Worker),
-        }
-    }
-
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "RUST-FEAT-062 Kad runtime integration follows this owner boundary"
-        )
-    )]
-    pub(crate) async fn initialize_kad_pending(
-        &self,
-        expected_revision: i64,
-        contacts: &[KadRoutingContact],
-    ) -> Result<Option<i64>, PersistenceError> {
-        if contacts.len() > KAD_ROUTING_MAX_CONTACTS {
-            return Err(PersistenceError::TooLarge);
-        }
-        match self
-            .submit_reserved(kad_charge()?, || {
-                let mut owned = Vec::with_capacity(contacts.len());
-                if owned.capacity() > KAD_RESERVED_CAPACITY {
-                    return Err(PersistenceError::TooLarge);
-                }
-                owned.extend_from_slice(contacts);
-                Ok(Command::KadInitialize {
-                    expected_revision,
-                    contacts: owned,
-                })
-            })
-            .await?
-        {
-            Response::KadInitialized(revision) => Ok(revision),
-            _ => Err(PersistenceError::Worker),
-        }
-    }
-
     async fn submit_reserved(
         &self,
         charge: usize,
         make_command: impl FnOnce() -> Result<Command, PersistenceError>,
     ) -> Result<Response, PersistenceError> {
+        self.submit_reserved_inner(charge, false, make_command)
+            .await
+    }
+
+    async fn submit_reserved_inner(
+        &self,
+        charge: usize,
+        final_snapshot: bool,
+        make_command: impl FnOnce() -> Result<Command, PersistenceError>,
+    ) -> Result<Response, PersistenceError> {
         let (response, receive) = oneshot::channel();
+        let (released, release_complete) = oneshot::channel();
+        let is_attach;
         {
             let admission = self
                 .admission
@@ -634,6 +736,9 @@ impl PersistenceOwner {
                 } else {
                     PersistenceError::Closing
                 });
+            }
+            if admission.stopping && !final_snapshot {
+                return Err(PersistenceError::Closing);
             }
             if charge > MAX_BYTES {
                 return Err(PersistenceError::TooLarge);
@@ -654,6 +759,7 @@ impl PersistenceOwner {
             };
             drop(quota);
             let command = make_command()?;
+            is_attach = matches!(&command, Command::KadAttach(_));
             // Sending under the same lock makes close/admission a single boundary.
             let sender = admission.sender.as_ref().expect("checked sender").clone();
             let sent = sender.try_send(Request {
@@ -661,6 +767,8 @@ impl PersistenceOwner {
                 permit,
                 response,
                 enqueued: Instant::now(),
+                handoff: None,
+                released,
             });
             drop(admission);
             if let Err(error) = sent {
@@ -670,14 +778,23 @@ impl PersistenceOwner {
                 });
             }
         }
-        receive.await.map_err(|_| PersistenceError::Worker)?
+        let result = receive.await.map_err(|_| PersistenceError::Worker)?;
+        if !is_attach {
+            release_complete
+                .await
+                .map_err(|_| PersistenceError::Worker)?;
+        }
+        result
     }
     pub(crate) async fn close_and_drain(&self) -> Result<(), PersistenceError> {
-        self.admission
-            .lock()
-            .map_err(|_| PersistenceError::Worker)?
-            .sender
-            .take();
+        {
+            let mut admission = self
+                .admission
+                .lock()
+                .map_err(|_| PersistenceError::Worker)?;
+            admission.cancel_ingress.cancel();
+            admission.sender.take();
+        }
         let mut drain = self.join.lock().await;
         if let Some(join) = drain.join.as_mut() {
             let outcome = join.await.unwrap_or(Err(PersistenceError::Worker));
@@ -691,33 +808,23 @@ impl PersistenceOwner {
     }
 }
 
-fn kad_charge() -> Result<usize, PersistenceError> {
-    KAD_RESERVED_CAPACITY
-        .checked_mul(std::mem::size_of::<KadRoutingContact>())
-        .and_then(|bytes| bytes.checked_add(FIXED_CHARGE))
-        .ok_or(PersistenceError::TooLarge)
-}
-
 async fn process(
     state: &Arc<Mutex<CoreState>>,
     db: &mpsc::SyncSender<DbRequest>,
     request: &mut Request,
+    kad_runtime: &mut Option<KadRuntime>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
     if matches!(
         &request.command,
-        Command::KadLoad | Command::KadIdentity | Command::KadInitialize { .. }
+        Command::KadAttach(_) | Command::KadCheckpoint { .. } | Command::KadImport { .. }
     ) {
+        return kad::process_runtime(db, request, kad_runtime).await;
+    }
+    if matches!(&request.command, Command::KadLoad | Command::KadIdentity) {
         let command = match std::mem::replace(&mut request.command, Command::KadLoad) {
             Command::KadLoad => DbCommand::KadLoad,
             Command::KadIdentity => DbCommand::KadIdentity,
-            Command::KadInitialize {
-                expected_revision,
-                contacts,
-            } => DbCommand::KadInitialize {
-                expected_revision,
-                contacts,
-            },
             _ => unreachable!(),
         };
         let (response, receive) = oneshot::channel();
@@ -739,8 +846,9 @@ async fn process(
                     _lease: lease,
                 }))
             }
-            DbResponse::KadInitialized(revision) => Ok(Response::KadInitialized(revision)),
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
+            DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
+            DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
             DbResponse::Friend(..) => Err(PersistenceError::Worker),
         };
     }
@@ -767,7 +875,11 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::KadLoad | Command::KadIdentity | Command::KadInitialize { .. } => {
+            Command::KadLoad
+            | Command::KadIdentity
+            | Command::KadAttach(_)
+            | Command::KadCheckpoint { .. }
+            | Command::KadImport { .. } => {
                 unreachable!()
             }
         }

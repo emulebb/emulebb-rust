@@ -35,6 +35,7 @@ pub(super) struct VerifyKeyEntry {
 pub(super) struct ReceiverKeys {
     entries: HashMap<std::net::IpAddr, VerifyKeyEntry>,
     generation: Option<u64>,
+    sealed: bool,
 }
 
 impl Default for ReceiverKeys {
@@ -42,6 +43,7 @@ impl Default for ReceiverKeys {
         Self {
             entries: HashMap::new(),
             generation: Some(0),
+            sealed: false,
         }
     }
 }
@@ -171,7 +173,8 @@ impl ObfuscationLayer {
         let mut guard = self.receiver_verify_keys.lock();
         // WHY: a packet admitted before an address reset can be delayed on the
         // map lock. Its old binding must not repopulate the new key epoch.
-        if !self.peer_key_learning_enabled.load(Ordering::Acquire)
+        if guard.sealed
+            || !self.peer_key_learning_enabled.load(Ordering::Acquire)
             || epoch == u64::MAX
             || self.peer_key_epoch.load(Ordering::Acquire) != epoch
         {
@@ -210,6 +213,9 @@ impl ObfuscationLayer {
         // Disable first so the receive loop cannot repopulate the map between
         // the clear and the new binding becoming active.
         let mut keys = self.receiver_verify_keys.lock();
+        if keys.sealed {
+            return;
+        }
         self.peer_key_learning_enabled
             .store(false, Ordering::Release);
         let epoch = self.peer_key_epoch.load(Ordering::Acquire);
@@ -221,6 +227,14 @@ impl ObfuscationLayer {
         }
         self.peer_key_learning_enabled
             .store(accept_new_keys && next != u64::MAX, Ordering::Release);
+    }
+
+    /// Freeze learned keys at the final persistence boundary.
+    pub fn seal_peer_keys(&self) {
+        let mut keys = self.receiver_verify_keys.lock();
+        keys.sealed = true;
+        self.peer_key_learning_enabled
+            .store(false, Ordering::Release);
     }
 
     /// Return the latest receiver verify key learned for the peer IP behind this endpoint.

@@ -234,3 +234,25 @@ async fn compact_capture_cannot_mix_old_key_with_new_binding() {
     let key = &projection.keys[0];
     assert!(!(key.key == KadUdpKey::new(42) && key.binding == Some(new)));
 }
+
+#[tokio::test]
+async fn sealed_final_capture_rejects_late_routing_and_key_changes() {
+    let dht = node().await;
+    let peer = contact(9, Ipv4Addr::new(192, 0, 2, 9));
+    let binding = Ipv4Addr::new(198, 51, 100, 9);
+    dht.set_public_ip_for_udp_keys(Some(binding)).await;
+    dht.add_contact(peer.clone()).await.unwrap();
+    let endpoint = SocketAddr::new(IpAddr::V4(peer.ip), peer.udp_port);
+    dht.register_peer_key(endpoint, 77);
+    dht.seal_persistence().await;
+    let before = dht.capture_routing_bundle().await.unwrap();
+    dht.register_peer_key(endpoint, 88);
+    dht.set_public_ip_for_udp_keys(Some(Ipv4Addr::new(198, 51, 100, 10)))
+        .await;
+    assert!(
+        dht.add_contact(contact(10, Ipv4Addr::new(192, 0, 2, 10)))
+            .await
+            .is_err()
+    );
+    assert_eq!(dht.capture_routing_bundle().await.unwrap(), before);
+}

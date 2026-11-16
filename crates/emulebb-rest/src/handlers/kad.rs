@@ -29,7 +29,10 @@ pub(crate) async fn kad_nodes(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    api_collection_page(state.core.kad_nodes().await, query).into_response()
+    match state.core.kad_nodes().await {
+        Ok(nodes) => api_collection_page(nodes, query).into_response(),
+        Err(error) => super::persistence::persistence_error(error),
+    }
 }
 
 pub(crate) async fn kad_start(State(state): State<RestState>) -> impl IntoResponse {
@@ -40,19 +43,20 @@ pub(crate) async fn kad_start(State(state): State<RestState>) -> impl IntoRespon
             &state.core.vpn_guard_status(),
         ))
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
 pub(crate) async fn kad_stop(State(state): State<RestState>) -> impl IntoResponse {
-    state.core.set_kad_running(false).await;
-    api_ok(kad_response(
-        &state.core.status().await.kad,
-        state.core.network_binding_status().as_ref(),
-        &state.core.vpn_guard_status(),
-    ))
+    match state.core.stop_kad().await {
+        Ok(_) => api_ok(kad_response(
+            &state.core.status().await.kad,
+            state.core.network_binding_status().as_ref(),
+            &state.core.vpn_guard_status(),
+        ))
+        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
+    }
 }
 
 pub(crate) async fn kad_import_nodes_url(
@@ -72,9 +76,7 @@ pub(crate) async fn kad_import_nodes_url(
             "failed to update nodes.dat from URL",
         )
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -110,9 +112,7 @@ pub(crate) async fn kad_bootstrap(
             &state.core.vpn_guard_status(),
         ))
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
