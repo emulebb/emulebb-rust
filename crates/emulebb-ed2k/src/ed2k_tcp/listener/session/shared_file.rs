@@ -606,7 +606,7 @@ async fn source_exchange_source_count(
         .download_source_endpoints_after(token, 0, 51)
         .await?;
     let mut endpoints = page
-        .into_iter()
+        .iter()
         .map(|entry| (entry.ip, entry.tcp_port))
         .collect::<HashSet<_>>();
     if endpoints.len() > 50 {
@@ -741,7 +741,7 @@ async fn source_exchange_peers_excluding(
         if page.is_empty() {
             break;
         }
-        for entry in page {
+        for entry in &page {
             after = entry.id;
             if !source_exchange_eligible(entry.ip, entry.tcp_port, exclude_ipv4)
                 || !seen.insert((entry.ip, entry.tcp_port))

@@ -45,13 +45,15 @@ async fn remembered_source_plaintext_fallback_preserves_single_endpoint_hint() {
         .await
         .unwrap();
 
-    let sources: Vec<_> = runtime
+    let sources = runtime
         .download_sources_after(job.token, 0, 256)
         .await
         .unwrap()
-        .into_iter()
-        .map(|entry| entry.source)
-        .collect();
+        .map(|page| {
+            page.into_iter()
+                .map(|entry| entry.source)
+                .collect::<Vec<_>>()
+        });
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].ip, "198.51.100.44");
     assert_eq!(sources[0].tcp_port, 4662);
@@ -104,13 +106,15 @@ async fn remembered_source_late_user_hash_upgrades_endpoint_hint() {
         .await
         .unwrap();
 
-    let sources: Vec<_> = runtime
+    let sources = runtime
         .download_sources_after(job.token, 0, 256)
         .await
         .unwrap()
-        .into_iter()
-        .map(|entry| entry.source)
-        .collect();
+        .map(|page| {
+            page.into_iter()
+                .map(|entry| entry.source)
+                .collect::<Vec<_>>()
+        });
     assert_eq!(sources.len(), 1);
     assert_eq!(
         sources[0].user_hash.as_deref(),
@@ -160,13 +164,15 @@ async fn protocol_drop_removes_only_the_exact_remembered_source() {
             .await
             .unwrap()
     );
-    let sources: Vec<_> = runtime
+    let sources = runtime
         .download_sources_after(job.token, 0, 256)
         .await
         .unwrap()
-        .into_iter()
-        .map(|entry| entry.source)
-        .collect();
+        .map(|page| {
+            page.into_iter()
+                .map(|entry| entry.source)
+                .collect::<Vec<_>>()
+        });
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].tcp_port, 4663);
     assert_eq!(
@@ -205,13 +211,15 @@ async fn remembered_source_roundtrips_every_crypt_bit_combination() {
             .unwrap();
     }
 
-    let sources: Vec<_> = runtime
+    let sources = runtime
         .download_sources_after(job.token, 0, 256)
         .await
         .unwrap()
-        .into_iter()
-        .map(|entry| entry.source)
-        .collect();
+        .map(|page| {
+            page.into_iter()
+                .map(|entry| entry.source)
+                .collect::<Vec<_>>()
+        });
     assert_eq!(sources.len(), 8);
     for connect_options in 0u8..=0x07 {
         assert!(sources.iter().any(|source| {
@@ -280,13 +288,15 @@ async fn source_file_description_matches_identity_and_survives_rediscovery_and_r
         .await
         .unwrap();
 
-    let sources: Vec<_> = runtime
+    let sources = runtime
         .download_sources_after(job.token, 0, 256)
         .await
         .unwrap()
-        .into_iter()
-        .map(|entry| entry.source)
-        .collect();
+        .map(|page| {
+            page.into_iter()
+                .map(|entry| entry.source)
+                .collect::<Vec<_>>()
+        });
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].tcp_port, 4662);
     assert_eq!(sources[0].file_comment, "verified source comment");
@@ -294,13 +304,15 @@ async fn source_file_description_matches_identity_and_survives_rediscovery_and_r
     drop(runtime);
 
     let reloaded = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let sources: Vec<_> = reloaded
+    let sources = reloaded
         .download_sources_after(job.token, 0, 256)
         .await
         .unwrap()
-        .into_iter()
-        .map(|entry| entry.source)
-        .collect();
+        .map(|page| {
+            page.into_iter()
+                .map(|entry| entry.source)
+                .collect::<Vec<_>>()
+        });
     assert_eq!(sources[0].file_comment, "verified source comment");
     assert_eq!(sources[0].file_rating, 5);
 }

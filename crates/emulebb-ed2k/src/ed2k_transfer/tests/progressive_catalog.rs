@@ -155,12 +155,12 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
         .unwrap();
     assert_eq!(publish.len(), 2);
     assert_eq!(
-        runtime
+        &*runtime
             .publish_entries_after(None, 200)
             .await
             .unwrap()
             .unwrap(),
-        publish
+        &*publish
     );
     let catalog = runtime.shared_catalog();
     let guard = catalog.read().await;

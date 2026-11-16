@@ -1,4 +1,5 @@
 //! Compact job reads use the same retained registry; no history worker hydration.
+use super::read_result::RetainedRead;
 use super::*;
 use crate::ed2k_transfer as transfer;
 use emulebb_metadata::{DownloadJobRecord, JobId};
@@ -19,14 +20,14 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Removed(Option<JobId>, usize),
 }
 pub(in crate::ed2k_transfer) enum JobReadResult {
-    Exact(Option<DownloadJobRecord>),
+    Exact(Option<RetainedRead<DownloadJobRecord>>),
     Execution(Option<transfer::Ed2kResumeManifest>),
-    Sources(Vec<emulebb_metadata::MetadataDownloadSourceEntry>),
-    Endpoints(Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>),
-    Names(Vec<emulebb_metadata::MetadataDownloadNameEntry>),
-    Page(Vec<DownloadJobRecord>),
-    Ids(Vec<JobId>),
-    Publish(Option<Vec<emulebb_metadata::MetadataTransferPublishEntry>>),
+    Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
+    Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
+    Names(RetainedRead<Vec<emulebb_metadata::MetadataDownloadNameEntry>>),
+    Page(RetainedRead<Vec<DownloadJobRecord>>),
+    Ids(RetainedRead<Vec<JobId>>),
+    Publish(Option<RetainedRead<Vec<emulebb_metadata::MetadataTransferPublishEntry>>>),
 }
 
 impl LocalMutationRegistry {
@@ -74,44 +75,83 @@ impl LocalMutationRegistry {
         Self::reap(&mut state);
         let lease = Self::reserve_unit(&mut state, charge, false, false)?;
         let metadata = runtime.metadata.clone();
+        #[cfg(test)]
+        let gate = state.publication_gate.take();
         let (sender, receipt) = oneshot::channel();
-        Self::spawn_unit(&mut state, lease, move |_capacity| {
+        Self::spawn_unit(&mut state, lease, move |capacity| {
+            #[cfg(test)]
+            if let Some((reached, release)) = gate {
+                let _ = reached.send(());
+                let _ = release.recv();
+            }
+            // WHY: callers can retain pages after worker completion/reaping. Move
+            // the existing charge with the actual backing, never with its sender.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match request {
                 JobRead::Endpoints(token, after, limit) => metadata
                     .download_job_source_endpoints_after(token, after, limit)
-                    .map(JobReadResult::Endpoints),
+                    .map(|value| {
+                        JobReadResult::Endpoints(RetainedRead::new(value, capacity.take_result()))
+                    }),
                 JobRead::Sources(token, after, limit) => metadata
                     .download_job_sources_after(token, after, limit)
-                    .map(JobReadResult::Sources),
+                    .map(|value| {
+                        JobReadResult::Sources(RetainedRead::new(value, capacity.take_result()))
+                    }),
                 JobRead::Names(token, after, limit) => metadata
                     .download_job_names_after(token, after, limit)
-                    .map(JobReadResult::Names),
-                JobRead::Exact(id) => metadata.download_job(id).map(JobReadResult::Exact),
+                    .map(|value| {
+                        JobReadResult::Names(RetainedRead::new(value, capacity.take_result()))
+                    }),
+                JobRead::Exact(id) => metadata.download_job(id).map(|value| {
+                    JobReadResult::Exact(
+                        value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                    )
+                }),
                 JobRead::Execution(token) => {
                     transfer::transfer_sql::stream_execution_from_metadata(&metadata, token)
                         .map(JobReadResult::Execution)
                 }
                 JobRead::Publish(after, limit) => metadata
                     .try_download_publish_entries_after(after.map(hex::encode).as_deref(), limit)
-                    .map(JobReadResult::Publish),
-                JobRead::Latest(hash) => metadata
-                    .latest_download_job(&hex::encode(hash))
-                    .map(JobReadResult::Exact),
+                    .map(|value| {
+                        JobReadResult::Publish(
+                            value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                        )
+                    }),
+                JobRead::Latest(hash) => {
+                    metadata
+                        .latest_download_job(&hex::encode(hash))
+                        .map(|value| {
+                            JobReadResult::Exact(
+                                value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                            )
+                        })
+                }
                 JobRead::Page(after, limit, runnable) => metadata
                     .download_jobs_after(after, limit, runnable)
-                    .map(JobReadResult::Page),
+                    .map(|value| {
+                        JobReadResult::Page(RetainedRead::new(value, capacity.take_result()))
+                    }),
                 JobRead::Delivery(after, limit) => metadata
                     .pending_delivery_jobs_after(after, limit)
-                    .map(JobReadResult::Ids),
+                    .map(|value| {
+                        JobReadResult::Ids(RetainedRead::new(value, capacity.take_result()))
+                    }),
                 JobRead::Retirement(after, limit) => metadata
                     .pending_transfer_retirement_jobs_after(after, limit)
-                    .map(JobReadResult::Ids),
+                    .map(|value| {
+                        JobReadResult::Ids(RetainedRead::new(value, capacity.take_result()))
+                    }),
                 JobRead::Removed(after, limit) => metadata
                     .removed_download_jobs_after(after, limit)
-                    .map(JobReadResult::Ids),
+                    .map(|value| {
+                        JobReadResult::Ids(RetainedRead::new(value, capacity.take_result()))
+                    }),
                 JobRead::Deletion(after, limit) => metadata
                     .pending_transfer_deletion_jobs_after(after, limit)
-                    .map(JobReadResult::Ids),
+                    .map(|value| {
+                        JobReadResult::Ids(RetainedRead::new(value, capacity.take_result()))
+                    }),
             }));
             let (result, outcome) = match result {
                 Ok(result) => (result, 0),
@@ -140,7 +180,7 @@ impl transfer::Ed2kTransferRuntime {
         token: emulebb_metadata::JobToken,
         after: i64,
         limit: usize,
-    ) -> Result<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>> {
+    ) -> Result<RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>> {
         let JobReadResult::Endpoints(page) = self
             .read_job_metadata(JobRead::Endpoints(token, after, limit))
             .await?
@@ -154,7 +194,7 @@ impl transfer::Ed2kTransferRuntime {
         token: emulebb_metadata::JobToken,
         after: i64,
         limit: usize,
-    ) -> Result<Vec<emulebb_metadata::MetadataDownloadSourceEntry>> {
+    ) -> Result<RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>> {
         let JobReadResult::Sources(page) = self
             .read_job_metadata(JobRead::Sources(token, after, limit))
             .await?
@@ -168,7 +208,7 @@ impl transfer::Ed2kTransferRuntime {
         token: emulebb_metadata::JobToken,
         after: i64,
         limit: usize,
-    ) -> Result<Vec<emulebb_metadata::MetadataDownloadNameEntry>> {
+    ) -> Result<RetainedRead<Vec<emulebb_metadata::MetadataDownloadNameEntry>>> {
         let JobReadResult::Names(page) = self
             .read_job_metadata(JobRead::Names(token, after, limit))
             .await?
@@ -177,7 +217,7 @@ impl transfer::Ed2kTransferRuntime {
         };
         Ok(page)
     }
-    pub async fn download_job(&self, id: JobId) -> Result<Option<DownloadJobRecord>> {
+    pub async fn download_job(&self, id: JobId) -> Result<Option<RetainedRead<DownloadJobRecord>>> {
         let JobReadResult::Exact(job) = self.read_job_metadata(JobRead::Exact(id)).await? else {
             unreachable!()
         };
@@ -188,7 +228,7 @@ impl transfer::Ed2kTransferRuntime {
         after: Option<JobId>,
         limit: usize,
         runnable_only: bool,
-    ) -> Result<Vec<DownloadJobRecord>> {
+    ) -> Result<RetainedRead<Vec<DownloadJobRecord>>> {
         let JobReadResult::Page(page) = self
             .read_job_metadata(JobRead::Page(after, limit, runnable_only))
             .await?
@@ -203,7 +243,7 @@ impl transfer::Ed2kTransferRuntime {
         &self,
         after: Option<&str>,
         limit: usize,
-    ) -> Result<Option<Vec<emulebb_metadata::MetadataTransferPublishEntry>>> {
+    ) -> Result<Option<RetainedRead<Vec<emulebb_metadata::MetadataTransferPublishEntry>>>> {
         let after = after
             .map(str::parse::<emulebb_kad_proto::Ed2kHash>)
             .transpose()?
@@ -221,7 +261,7 @@ impl transfer::Ed2kTransferRuntime {
         &self,
         after: Option<JobId>,
         limit: usize,
-    ) -> Result<Vec<JobId>> {
+    ) -> Result<RetainedRead<Vec<JobId>>> {
         let JobReadResult::Ids(ids) = self
             .read_job_metadata(JobRead::Deletion(after, limit))
             .await?
@@ -235,7 +275,7 @@ impl transfer::Ed2kTransferRuntime {
         &self,
         after: Option<JobId>,
         limit: usize,
-    ) -> Result<Vec<JobId>> {
+    ) -> Result<RetainedRead<Vec<JobId>>> {
         let JobReadResult::Ids(ids) = self
             .read_job_metadata(JobRead::Delivery(after, limit))
             .await?
@@ -245,3 +285,6 @@ impl transfer::Ed2kTransferRuntime {
         Ok(ids)
     }
 }
+
+#[cfg(test)]
+mod tests;

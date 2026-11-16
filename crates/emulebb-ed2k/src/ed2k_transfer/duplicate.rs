@@ -441,6 +441,7 @@ mod tests {
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].file_hash, shared.file_hash);
         assert_eq!(published[0].display_name, "shared-redownload.bin");
+        drop(published);
 
         let job = super::super::test_support::admit_download_job(
             &runtime,
@@ -478,6 +479,7 @@ mod tests {
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].upload_priority, "release");
         assert_eq!(published[0].comment, "local copy");
+        drop(published);
         let evidence = runtime.download_evidence(&shared.file_hash).await.unwrap();
         assert!(evidence.active_transfer.is_some());
         assert_eq!(evidence.current_local_files.len(), 1);

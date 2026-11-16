@@ -19,6 +19,11 @@ use super::{
 
 const UPLOAD_READ_AHEAD_BYTES: u64 = ED2K_EMBLOCK_SIZE * 3;
 
+pub(super) fn job_payload_path(mut storage: PathBuf) -> PathBuf {
+    storage.push(PAYLOAD_FILE_NAME);
+    storage
+}
+
 struct IncompletePayloadAuthority {
     token: emulebb_metadata::JobToken,
     file_hash: String,
@@ -827,6 +832,8 @@ impl Ed2kTransferRuntime {
         // the per-file manifest lock, then drop it before touching the payload, so
         // the file open/seek/read does not hold the lock and serialize concurrent
         // uploads/downloads against each other (FIX B4b).
+        // Declared before the derived path so its backing drops before charge.
+        let mut retained_job_path = None;
         let (payload_path, verified_ranges, authority, incomplete_authority) = if let Some(local) =
             local
         {
@@ -857,9 +864,13 @@ impl Ed2kTransferRuntime {
             if job.token != token || job.removed_at_s.is_some() || job.internal_storage_retired {
                 return Ok(None);
             }
-            let Some(storage) = job.storage.filter(|storage| storage.identity.is_some()) else {
+            if !job
+                .storage
+                .as_ref()
+                .is_some_and(|storage| storage.identity.is_some())
+            {
                 return Ok(None);
-            };
+            }
             let Some(manifest) = self.load_manifest_optional_unlocked(token).await? else {
                 return Ok(None);
             };
@@ -879,8 +890,13 @@ impl Ed2kTransferRuntime {
                             Some(IncompletePayloadAuthority::from_manifest(&manifest)?),
                         )
                     };
+                    let path = std::sync::Arc::new(job.map(|job| {
+                        job_payload_path(job.storage.expect("validated job storage").path)
+                    }));
+                    let payload_path = path.to_path_buf();
+                    retained_job_path = Some(path);
                     (
-                        storage.path.join(PAYLOAD_FILE_NAME),
+                        payload_path,
                         manifest.verified_ranges.clone(),
                         authority,
                         incomplete_authority,
@@ -902,14 +918,24 @@ impl Ed2kTransferRuntime {
             return Ok(None);
         }
 
-        let open_path = payload_path.clone();
+        // WHY: a cancelled upload can leave this blocking open running. Keep
+        // the compact read's existing charge with its derived native path too.
+        let retained_open_path = retained_job_path.clone();
+        let open_path = if retained_open_path.is_some() {
+            PathBuf::new()
+        } else {
+            payload_path.clone()
+        };
         let expected_fingerprint = authority.expected_fingerprint().cloned();
         let stable_open = authority.requires_fingerprint();
         let opened = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+            let open_path = retained_open_path
+                .as_ref()
+                .map_or(open_path.as_path(), |path| path.as_path());
             let file = if stable_open {
-                super::ingest::open_stable_read_file_without_follow(&open_path)
+                super::ingest::open_stable_read_file_without_follow(open_path)
             } else {
-                super::ingest::open_regular_file_without_follow(&open_path)
+                super::ingest::open_regular_file_without_follow(open_path)
             }
             .with_context(|| format!("failed to open piece store {}", open_path.display()))?;
             let metadata = file.metadata().with_context(|| {

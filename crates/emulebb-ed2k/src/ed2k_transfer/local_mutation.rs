@@ -23,6 +23,7 @@ pub(super) mod job_read;
 mod job_retirement;
 pub(super) mod job_storage;
 mod publication;
+pub(super) mod read_result;
 
 const MAX_UNITS: usize = 4;
 const MAX_BYTES: usize = 8 * 1024 * 1024;

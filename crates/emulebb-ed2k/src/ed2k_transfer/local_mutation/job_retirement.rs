@@ -289,7 +289,7 @@ impl transfer::Ed2kTransferRuntime {
         };
         let cursor = ids.last().copied();
         let mut report = transfer::Ed2kTransferDeletionRecoveryReport::default();
-        for id in ids {
+        for &id in &ids {
             match self.cleanup_removed_download_job(id).await {
                 Ok(true) => report.recovered += 1,
                 Ok(false) => {}
@@ -317,7 +317,7 @@ impl transfer::Ed2kTransferRuntime {
         };
         let cursor = ids.last().copied();
         let mut report = transfer::Ed2kTransferRetirementRecoveryReport::default();
-        for id in ids {
+        for &id in &ids {
             match self.retire_download_storage(id).await {
                 Ok(true) => report.recovered += 1,
                 Ok(false) => {}

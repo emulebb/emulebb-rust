@@ -89,6 +89,15 @@ impl CapacityControl {
     }
 }
 impl CapacityLease {
+    /// Admit separately allocated result backing while the source stays charged.
+    /// This reuses the same byte budget and grants no task or filesystem slot.
+    pub(super) fn reserve_result(&self, bytes: usize) -> Result<Self> {
+        ensure!(
+            self.fs_bytes == 0 && !self.eligible,
+            "result still owns filesystem admission"
+        );
+        self.control.reserve(bytes, false, false)
+    }
     pub(super) fn is_filesystem(&self) -> bool {
         self.fs_bytes != 0
     }
