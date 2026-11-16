@@ -92,6 +92,54 @@ pub struct DownloadJobStorage {
     pub identity: Option<crate::NativeFileIdentity>,
 }
 
+/// Opaque storage diagnostic. Bounds are UTF-8 bytes, checked before allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadJobStorageFailure {
+    code: String,
+    message: String,
+    failed_at_s: i64,
+}
+impl DownloadJobStorageFailure {
+    pub const MAX_CODE_BYTES: usize = 64;
+    pub const MAX_MESSAGE_BYTES: usize = 4096;
+
+    pub fn new(code: &str, message: &str, failed_at_s: i64) -> Result<Self> {
+        ensure!(
+            !code.is_empty() && code.len() <= Self::MAX_CODE_BYTES && !code.contains('\0'),
+            "storage failure code is empty, contains NUL or exceeds byte allowance"
+        );
+        ensure!(
+            message.len() <= Self::MAX_MESSAGE_BYTES && !message.contains('\0'),
+            "storage failure message contains NUL or exceeds byte allowance"
+        );
+        ensure!(
+            failed_at_s >= 0,
+            "storage failure timestamp must be nonnegative Unix seconds"
+        );
+        Ok(Self {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            failed_at_s,
+        })
+    }
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    pub fn failed_at_s(&self) -> i64 {
+        self.failed_at_s
+    }
+}
+
+/// A refused callback still reports the actual current record, if it exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadJobStorageFailureOutcome {
+    pub applied: bool,
+    pub job: Option<DownloadJobRecord>,
+}
+
 /// Compact pages never hydrate piece maps, sources, or historical workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadJobRecord {
@@ -104,6 +152,7 @@ pub struct DownloadJobRecord {
     pub intent: DownloadIntent,
     pub selected_temp: Option<PathBuf>,
     pub storage: Option<DownloadJobStorage>,
+    pub storage_failure: Option<DownloadJobStorageFailure>,
     pub payload_verified: bool,
     pub delivery_state: crate::MetadataTransferDeliveryState,
     pub created_at_s: i64,

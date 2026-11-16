@@ -337,6 +337,11 @@ CREATE TABLE download_jobs (
     selected_temp_path_id INTEGER REFERENCES local_paths(id),
     storage_path_id INTEGER UNIQUE REFERENCES local_paths(id),
     terminal_completed_at_s INTEGER CHECK(terminal_completed_at_s IS NULL OR terminal_completed_at_s >= 0),
+    storage_failure_code TEXT CHECK(storage_failure_code IS NULL OR
+        (length(CAST(storage_failure_code AS BLOB)) BETWEEN 1 AND 64 AND instr(storage_failure_code, char(0)) = 0)),
+    storage_failure_message TEXT CHECK(storage_failure_message IS NULL OR
+        (length(CAST(storage_failure_message AS BLOB)) <= 4096 AND instr(storage_failure_message, char(0)) = 0)),
+    storage_failed_at_s INTEGER CHECK(storage_failed_at_s IS NULL OR storage_failed_at_s >= 0),
     internal_storage_retired INTEGER NOT NULL DEFAULT 0 CHECK(internal_storage_retired IN (0, 1)),
     display_name TEXT NOT NULL,
     part_size_bytes INTEGER NOT NULL CHECK(part_size_bytes > 0),
@@ -388,6 +393,8 @@ CREATE TABLE download_jobs (
     -- an established identity plus the marker authorizes payload writes/cleanup.
     storage_directory_identity BLOB CHECK(storage_directory_identity IS NULL OR length(storage_directory_identity)<=64),
     storage_directory_marker_id TEXT UNIQUE CHECK(storage_directory_marker_id IS NULL OR length(storage_directory_marker_id)=36),
+    CHECK((storage_failure_code IS NULL) = (storage_failure_message IS NULL)),
+    CHECK((storage_failure_code IS NULL) = (storage_failed_at_s IS NULL)),
     CHECK((selected_temp_path_id IS NULL) = (storage_path_id IS NULL)),
     CHECK((storage_path_id IS NULL) = (storage_directory_marker_id IS NULL)),
     CHECK(storage_directory_identity IS NULL OR storage_path_id IS NOT NULL),
@@ -410,7 +417,7 @@ ON download_jobs(known_file_id)
 WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
 CREATE INDEX download_jobs_visible_page_idx ON download_jobs(id) WHERE removed_at_s IS NULL;
 CREATE INDEX download_jobs_work_page_idx ON download_jobs(intent, id)
-WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
+WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND storage_failure_code IS NULL;
 CREATE INDEX download_jobs_removed_page_idx ON download_jobs(id) WHERE removed_at_s IS NOT NULL;
 CREATE INDEX download_jobs_content_history_idx ON download_jobs(known_file_id, id);
 CREATE TRIGGER download_jobs_fixed_physical_storage BEFORE UPDATE OF storage_path_id, storage_directory_identity, storage_directory_marker_id ON download_jobs

@@ -99,7 +99,10 @@ const JOB_COLUMNS: &str = "j.id,j.execution_generation,lower(hex(k.ed2k_hash)),
     j.terminal_completed_at_s,j.removed_at_s,j.internal_storage_retired,
     length(CAST(j.display_name AS BLOB)),length(p.native_path),
     storage.platform,CASE WHEN length(storage.native_path)<=65536 THEN storage.native_path END,
-    j.storage_directory_marker_id,CASE WHEN length(j.storage_directory_identity)<=64 THEN j.storage_directory_identity END,length(storage.native_path),length(j.storage_directory_identity)";
+    j.storage_directory_marker_id,CASE WHEN length(j.storage_directory_identity)<=64 THEN j.storage_directory_identity END,length(storage.native_path),length(j.storage_directory_identity),
+    CASE WHEN length(CAST(j.storage_failure_code AS BLOB))<=64 THEN j.storage_failure_code END,
+    CASE WHEN length(CAST(j.storage_failure_message AS BLOB))<=4096 THEN j.storage_failure_message END,
+    j.storage_failed_at_s,length(CAST(j.storage_failure_code AS BLOB)),length(CAST(j.storage_failure_message AS BLOB))";
 
 fn job_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
     bounded_row_bytes(
@@ -109,6 +112,8 @@ fn job_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
             (19, MAX_JOB_PATH_BYTES, 4),
             (24, MAX_JOB_PATH_BYTES, 4),
             (25, 64, 2),
+            (29, 64, 1),
+            (30, 4096, 1),
         ],
     )
 }
@@ -150,6 +155,23 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJobRecord> {
                 })
             })
             .transpose()?,
+        storage_failure: match (
+            row.get_ref(26)?.as_str_or_null()?,
+            row.get_ref(27)?.as_str_or_null()?,
+            row.get::<_, Option<i64>>(28)?,
+        ) {
+            (None, None, None) => None,
+            (Some(code), Some(message), Some(at)) => Some(
+                crate::DownloadJobStorageFailure::new(code, message, at).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        26,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?,
+            ),
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
         payload_verified: row.get::<_, bool>(10)? && !row.get::<_, bool>(11)?,
         delivery_state: match delivery.as_str() {
             "pending" => crate::MetadataTransferDeliveryState::Pending,
@@ -342,6 +364,7 @@ impl MetadataStore {
         tx.execute(
             "UPDATE download_jobs SET selected_temp_path_id=coalesce(selected_temp_path_id,?2),
             execution_generation=?3,intent='started',updated_at_s=?4,
+            storage_failure_code=NULL,storage_failure_message=NULL,storage_failed_at_s=NULL,
             storage_path_id=coalesce(storage_path_id,?5),storage_directory_marker_id=coalesce(storage_directory_marker_id,?6) WHERE id=?1",
             params![token.job_id, path_id, generation, unix_s(),storage_path_id,marker.to_string()],
         )?;
@@ -365,6 +388,28 @@ impl MetadataStore {
             params![token.job_id,i64::try_from(token.generation)?,identity,unix_s()])?!=0)
     }
 
+    /// Capture an unfinished attempt's storage fault and fence all its callbacks.
+    /// Desired intent is retained; only an admitted explicit start clears it.
+    pub fn fail_download_job_storage(
+        &self,
+        token: JobToken,
+        failure: &crate::DownloadJobStorageFailure,
+    ) -> Result<crate::DownloadJobStorageFailureOutcome> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let generation = i64::try_from(token.generation)?;
+        // WHY: advancing the existing callback fence prevents a late success from
+        // erasing the fault or completing delivery from the failed attempt.
+        let applied = tx.execute("UPDATE download_jobs SET execution_generation=execution_generation+1,
+            storage_failure_code=?3,storage_failure_message=?4,storage_failed_at_s=?5,updated_at_s=?6
+            WHERE id=?1 AND execution_generation=?2 AND execution_generation<9223372036854775807
+            AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL",
+            params![token.job_id,generation,failure.code(),failure.message(),failure.failed_at_s(),unix_s()])? != 0;
+        let job = read_job(&tx, token.job_id)?;
+        tx.commit()?;
+        Ok(crate::DownloadJobStorageFailureOutcome { applied, job })
+    }
+
     pub fn stop_download_job(&self, token: JobToken) -> Result<bool> {
         let generation = i64::try_from(token.generation)?;
         ensure!(generation < i64::MAX, "job generation exhausted");
@@ -382,7 +427,7 @@ impl MetadataStore {
         ensure!((1..=256).contains(&limit), "invalid download job page size");
         let conn = self.connection()?;
         let predicate = if runnable_only {
-            "AND j.intent='started' AND j.terminal_completed_at_s IS NULL"
+            "AND j.intent='started' AND j.terminal_completed_at_s IS NULL AND j.storage_failure_code IS NULL"
         } else {
             ""
         };

@@ -21,7 +21,8 @@ pub use download_execution_store::{
 };
 pub use download_job_model::{
     DownloadIntent, DownloadJobAdmission, DownloadJobRecord, DownloadJobRequest,
-    DownloadJobStorage, JobId, JobToken,
+    DownloadJobStorage, DownloadJobStorageFailure, DownloadJobStorageFailureOutcome, JobId,
+    JobToken,
 };
 pub use download_peer_store::{
     MetadataDownloadNameEntry, MetadataDownloadPeerChange, MetadataDownloadPeerDelta,

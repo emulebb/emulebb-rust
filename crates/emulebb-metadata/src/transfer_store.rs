@@ -761,7 +761,8 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id FROM download_jobs WHERE id>?1
             AND completed=1 AND final_rehash_pending=0 AND terminal_completed_at_s IS NULL
-            AND removed_at_s IS NULL AND delete_requested_at_s IS NULL ORDER BY id LIMIT ?2",
+            AND removed_at_s IS NULL AND delete_requested_at_s IS NULL
+            AND storage_failure_code IS NULL ORDER BY id LIMIT ?2",
         )?;
         Ok(stmt
             .query_map(
