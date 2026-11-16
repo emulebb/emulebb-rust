@@ -1224,10 +1224,12 @@ impl super::MetadataStore {
         id: JobId,
         tombstone_id: Uuid,
         moved_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
+    ) -> Result<Option<MetadataTransferDeletionTombstone>> {
         let now = crate::download_job_store::unix_s();
         let moved_fingerprint = moved_fingerprint.storage_bytes();
-        let changed = self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             r#"
             UPDATE download_delivery_tombstones
             SET phase = 'moved',
@@ -1256,7 +1258,13 @@ impl super::MetadataStore {
                 moved_fingerprint,
             ],
         )?;
-        Ok(changed != 0)
+        let snapshot = if changed != 0 {
+            download_job_deletion_tombstone(&tx, id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(snapshot)
     }
 
     pub fn clear_prepared_transfer_deletion_tombstone(
@@ -1282,7 +1290,8 @@ impl super::MetadataStore {
         Ok(changed != 0)
     }
 
-    /// Settle the moved snapshot captured before cleanup, under durable delete
+    /// Settle an exact snapshot after reclaiming its owned object or deciding
+    /// to preserve missing/foreign prepared objects, under durable delete
     /// intent and the same execution generation. Never reacquire a newer token
     /// after filesystem work merely to make a stale completion eligible.
     pub fn settle_recovered_output_tombstone(
@@ -1290,9 +1299,7 @@ impl super::MetadataStore {
         token: JobToken,
         expected: &MetadataTransferDeletionTombstone,
     ) -> Result<bool> {
-        if expected.job_id != token.job_id
-            || expected.phase != MetadataTransferDeletionTombstonePhase::Moved
-        {
+        if expected.job_id != token.job_id {
             return Ok(false);
         }
         let mut conn = self.connection()?;
@@ -1826,7 +1833,7 @@ fn retire_job_children(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> 
     Ok(())
 }
 
-fn delete_job_row(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> {
+pub(crate) fn delete_job_row(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> {
     // Job deletion is not knowledge deletion. Accepted identity, names, origins,
     // upload history and policy remain even after the final job/path disappears.
     ensure!(

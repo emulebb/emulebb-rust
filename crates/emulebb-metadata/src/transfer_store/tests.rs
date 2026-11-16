@@ -2527,9 +2527,26 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
         MetadataTransferDeletionTombstonePhase::Prepared
     );
     assert!(prepared.moved_fingerprint.is_none());
+    let cleanup_token = store
+        .download_job(manifest.token.job_id)
+        .unwrap()
+        .unwrap()
+        .token;
+    assert!(
+        !store
+            .settle_recovered_output_tombstone(manifest.token, &prepared)
+            .unwrap()
+    );
+    let mut changed_prepared = prepared.clone();
+    changed_prepared.updated_at_s += 1;
+    assert!(
+        !store
+            .settle_recovered_output_tombstone(cleanup_token, &changed_prepared)
+            .unwrap()
+    );
     assert!(
         store
-            .clear_prepared_transfer_deletion_tombstone(manifest.token.job_id, abandoned_id)
+            .settle_recovered_output_tombstone(cleanup_token, &prepared)
             .unwrap()
     );
 
@@ -2563,6 +2580,14 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
         .unwrap()
         .token;
     let moved_fingerprint = fingerprint(manifest.expected_size_bytes.unwrap(), 102);
+    let committed_moved = store
+        .mark_transfer_deletion_tombstone_moved(
+            manifest.token.job_id,
+            tombstone_id,
+            &moved_fingerprint,
+        )
+        .unwrap()
+        .unwrap();
     assert!(
         store
             .mark_transfer_deletion_tombstone_moved(
@@ -2571,15 +2596,7 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
                 &moved_fingerprint,
             )
             .unwrap()
-    );
-    assert!(
-        store
-            .mark_transfer_deletion_tombstone_moved(
-                manifest.token.job_id,
-                tombstone_id,
-                &moved_fingerprint,
-            )
-            .unwrap()
+            .is_some()
     );
     assert!(
         !store
@@ -2589,11 +2606,13 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
                 &fingerprint(manifest.expected_size_bytes.unwrap(), 103),
             )
             .unwrap()
+            .is_some()
     );
     let moved = store
         .download_job_deletion_tombstone(manifest.token.job_id)
         .unwrap()
         .unwrap();
+    assert_eq!(committed_moved, moved);
     assert_eq!(moved.phase, MetadataTransferDeletionTombstonePhase::Moved);
     assert_eq!(moved.moved_fingerprint, Some(moved_fingerprint.clone()));
     assert!(

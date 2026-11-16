@@ -411,6 +411,7 @@ WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
 CREATE INDEX download_jobs_visible_page_idx ON download_jobs(id) WHERE removed_at_s IS NULL;
 CREATE INDEX download_jobs_work_page_idx ON download_jobs(intent, id)
 WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
+CREATE INDEX download_jobs_removed_page_idx ON download_jobs(id) WHERE removed_at_s IS NOT NULL;
 CREATE INDEX download_jobs_content_history_idx ON download_jobs(known_file_id, id);
 CREATE TRIGGER download_jobs_fixed_physical_storage BEFORE UPDATE OF storage_path_id, storage_directory_identity, storage_directory_marker_id ON download_jobs
 WHEN (old.storage_path_id IS NOT NULL AND new.storage_path_id IS NOT old.storage_path_id)
@@ -491,6 +492,7 @@ CREATE TABLE download_delivery_exclusions (
     PRIMARY KEY(platform, native_path)
 ) STRICT;
 
+CREATE INDEX download_delivery_exclusion_origin_idx ON download_delivery_exclusions(originating_job_id);
 CREATE INDEX download_delivery_exclusion_identity_idx ON download_delivery_exclusions(output_identity)
 WHERE output_identity IS NOT NULL;
 CREATE INDEX download_delivery_exclusion_secondary_identity_idx ON download_delivery_exclusions(secondary_identity)
