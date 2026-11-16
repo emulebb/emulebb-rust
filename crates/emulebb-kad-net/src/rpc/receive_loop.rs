@@ -25,6 +25,7 @@ impl RpcManager {
             loop {
                 match inner.transport.recv_raw().await {
                     Ok((data, from)) => {
+                        let peer_key_epoch = inner.obfuscation.peer_key_epoch();
                         let DecryptResult {
                             data: plain,
                             was_obfuscated,
@@ -348,7 +349,11 @@ impl RpcManager {
                         if should_learn_sender_verify_key(response_opcode)
                             && let Some(sender_verify_key) = sender_verify_key
                         {
-                            inner.obfuscation.register_peer_key(from, sender_verify_key);
+                            inner.obfuscation.register_peer_key_at_epoch(
+                                from,
+                                sender_verify_key,
+                                peer_key_epoch,
+                            );
                         }
 
                         debug!(

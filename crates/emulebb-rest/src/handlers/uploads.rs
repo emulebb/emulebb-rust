@@ -150,9 +150,7 @@ pub(crate) async fn upload_add_friend(
             "upload client not found",
         )
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -165,9 +163,7 @@ pub(crate) async fn upload_remove_friend(
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "friend not found").into_response()
         }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 

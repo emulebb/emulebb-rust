@@ -31,10 +31,22 @@ impl RpcManager {
         self.inner.obfuscation.register_peer_key(addr, key);
     }
 
+    /// Fill an absent restored key without replacing live key evidence.
+    pub fn register_peer_key_if_absent(&self, addr: SocketAddr, key: u32) {
+        self.inner
+            .obfuscation
+            .register_peer_key_if_absent(addr, key);
+    }
+
     /// Clear all peer receiver keys after our public IPv4 binding changes and
     /// control whether newly observed keys may be retained under that binding.
     pub fn reset_peer_keys(&self, accept_new_keys: bool) {
         self.inner.obfuscation.reset_peer_keys(accept_new_keys);
+    }
+
+    /// Freeze key learning without discarding the saved binding.
+    pub fn seal_peer_keys(&self) {
+        self.inner.obfuscation.seal_peer_keys();
     }
 
     /// Derive the verify key we should announce to a specific IPv4 peer.
@@ -49,10 +61,26 @@ impl RpcManager {
         self.inner.obfuscation.receiver_verify_key_for_addr(addr)
     }
 
+    /// Capture a batch of learned keys with their generation and binding epoch.
+    pub fn capture_peer_keys(&self, lookups: &mut [(Ipv4Addr, Option<u32>)]) -> Option<(u64, u64)> {
+        self.inner.obfuscation.capture_peer_keys(lookups)
+    }
+
     /// Register a peer's Kad node ID for request-obfuscation fallback when no
     /// receiver verify key is known yet.
     pub fn register_peer_identity(&self, addr: SocketAddr, node_id: emulebb_kad_proto::NodeId) {
         self.inner.obfuscation.register_peer_identity(addr, node_id);
+    }
+
+    /// Restore an absent peer identity without replacing live evidence.
+    pub fn register_peer_identity_if_absent(
+        &self,
+        addr: SocketAddr,
+        node_id: emulebb_kad_proto::NodeId,
+    ) {
+        self.inner
+            .obfuscation
+            .register_peer_identity_if_absent(addr, node_id);
     }
 
     /// Register the peer Kad version so outbound transport shape can match the oracle gates.
@@ -60,5 +88,12 @@ impl RpcManager {
         self.inner
             .obfuscation
             .register_peer_version(addr, kad_version);
+    }
+
+    /// Restore a peer version without lowering an already learned version.
+    pub fn register_peer_version_if_higher(&self, addr: SocketAddr, kad_version: u8) {
+        self.inner
+            .obfuscation
+            .register_peer_version_if_higher(addr, kad_version);
     }
 }

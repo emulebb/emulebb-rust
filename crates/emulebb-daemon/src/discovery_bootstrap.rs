@@ -1,42 +1,52 @@
-use std::{
-    fs,
-    io::{ErrorKind, Write},
-    path::Path,
-    time::Duration,
-};
+use std::{future::Future, time::Duration};
 
 use anyhow::{Context, Result, ensure};
-use emulebb_core::{DiscoveryUrlPolicy, NODES_DAT_MAX_BYTES, SERVER_MET_MAX_BYTES};
+use emulebb_core::{DiscoveryUrlPolicy, SERVER_MET_MAX_BYTES};
 use emulebb_ed2k::ed2k_server::parse_server_met;
-use emulebb_kad_dht::bootstrap::parse_nodes_dat;
-use emulebb_metadata::{MetadataServer, MetadataStore};
+use emulebb_metadata::{
+    DiscoveryDomain, DiscoveryInitializationStatus, MetadataServer, MetadataStore,
+};
 use reqwest::Client;
 use tracing::{info, warn};
 
 pub(crate) const TRUSTED_SERVER_MET_URLS: &[&str] = &[
     "https://upd.emule-security.org/server.met",
     "https://emuling.gitlab.io/server.met",
+    "https://www.gruk.org/server.met",
 ];
 pub(crate) const TRUSTED_NODES_DAT_URL: &str = "https://upd.emule-security.org/nodes.dat";
-pub(crate) const NODES_DAT_FILE: &str = "nodes.dat";
 
 const DISCOVERY_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Seeds discovery data only where the profile has no usable data already.
-pub(crate) async fn seed_empty_discovery(
-    metadata: &MetadataStore,
-    profile_dir: &Path,
-) -> Result<()> {
+pub(crate) async fn seed_empty_discovery(metadata: &MetadataStore) -> Result<()> {
     let client = discovery_client_builder()?
         .build()
         .context("failed to create first-run discovery HTTP client")?;
 
-    let (servers, nodes) = tokio::join!(
-        seed_empty_servers(metadata, &client),
-        seed_missing_nodes_dat(profile_dir, &client),
-    );
-    servers?;
-    nodes?;
+    seed_empty_servers(metadata, &client).await
+}
+
+pub(crate) async fn seed_pending_kad(core: &emulebb_core::EmulebbCore) -> Result<()> {
+    seed_kad_with(core, || {
+        core.initialize_kad_discovery_url(TRUSTED_NODES_DAT_URL)
+    })
+    .await
+}
+
+async fn seed_kad_with<F, Fut>(core: &emulebb_core::EmulebbCore, fetch: F) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<usize>>,
+{
+    if !core.kad_discovery_pending().await? {
+        return Ok(());
+    }
+    match fetch().await {
+        Ok(count) if count > 0 => info!(count, "Kad discovery initialized"),
+        Ok(_) => info!("Kad discovery source admitted no contacts"),
+        Err(error) => warn!(%error, "Kad discovery import failed; retrying next launch"),
+    }
     Ok(())
 }
 
@@ -49,23 +59,35 @@ fn discovery_client_builder() -> Result<reqwest::ClientBuilder> {
 }
 
 async fn seed_empty_servers(metadata: &MetadataStore, client: &Client) -> Result<()> {
-    // A disabled list is still user-owned state. Seed only a truly empty list
-    // so startup never silently re-enables servers the user turned off.
-    if !metadata.load_servers()?.is_empty() {
+    seed_servers_with(metadata, |url| async move {
+        fetch_bounded(client, url, SERVER_MET_MAX_BYTES).await
+    })
+    .await
+}
+
+async fn seed_servers_with<F, Fut>(metadata: &MetadataStore, fetch: F) -> Result<()>
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>>>,
+{
+    if metadata.discovery_initialization_status(DiscoveryDomain::Servers)?
+        == DiscoveryInitializationStatus::Initialized
+    {
         return Ok(());
     }
 
     for url in TRUSTED_SERVER_MET_URLS {
-        match fetch_bounded(client, url, SERVER_MET_MAX_BYTES).await {
+        match fetch(url).await {
             Ok(bytes) => match seed_servers_from_bytes(metadata, &bytes) {
-                Ok(count) if count > 0 => {
-                    info!(
-                        url,
-                        count, "seeded empty server list from trusted server.met"
-                    );
+                Ok(count) => {
+                    if count > 0 {
+                        info!(
+                            url,
+                            count, "initialized server list from trusted server.met"
+                        );
+                    }
                     return Ok(());
                 }
-                Ok(_) => warn!(url, "trusted server.met contained no usable servers"),
                 Err(error) => warn!(url, %error, "trusted server.met validation failed"),
             },
             Err(error) => warn!(url, %error, "trusted server.met download failed"),
@@ -78,8 +100,9 @@ async fn seed_empty_servers(metadata: &MetadataStore, client: &Client) -> Result
 fn seed_servers_from_bytes(metadata: &MetadataStore, bytes: &[u8]) -> Result<usize> {
     let servers = parse_server_met(bytes).context("failed to parse server.met")?;
     ensure!(!servers.is_empty(), "server.met has no usable entries");
-    for server in &servers {
-        metadata.upsert_server(&MetadataServer {
+    let servers: Vec<MetadataServer> = servers
+        .into_iter()
+        .map(|server| MetadataServer {
             address: server.ip.to_string(),
             port: server.port,
             name: server
@@ -106,75 +129,13 @@ fn seed_servers_from_bytes(metadata: &MetadataStore, bytes: &[u8]) -> Result<usi
             udp_flags: None,
             udp_key: None,
             udp_key_ip: None,
-        })?;
+        })
+        .collect();
+    if metadata.initialize_servers_if_pending(&servers)? {
+        Ok(servers.len())
+    } else {
+        Ok(0)
     }
-    Ok(servers.len())
-}
-
-async fn seed_missing_nodes_dat(profile_dir: &Path, client: &Client) -> Result<()> {
-    let path = profile_dir.join(NODES_DAT_FILE);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > 0 => return Ok(()),
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
-        }
-    }
-
-    let bytes = match fetch_bounded(client, TRUSTED_NODES_DAT_URL, NODES_DAT_MAX_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            warn!(url = TRUSTED_NODES_DAT_URL, %error, "trusted nodes.dat download failed");
-            return Ok(());
-        }
-    };
-    let contacts = match parse_nodes_dat(&bytes) {
-        Ok(contacts) if !contacts.is_empty() => contacts,
-        Ok(_) => {
-            warn!(
-                url = TRUSTED_NODES_DAT_URL,
-                "trusted nodes.dat contained no usable contacts"
-            );
-            return Ok(());
-        }
-        Err(error) => {
-            warn!(url = TRUSTED_NODES_DAT_URL, %error, "trusted nodes.dat validation failed");
-            return Ok(());
-        }
-    };
-    write_atomic(&path, &bytes)?;
-    info!(
-        url = TRUSTED_NODES_DAT_URL,
-        count = contacts.len(),
-        path = %path.display(),
-        "seeded empty Kad discovery data from trusted nodes.dat"
-    );
-    Ok(())
-}
-
-pub(crate) fn load_valid_nodes_dat(profile_dir: &Path) -> Result<Option<Vec<u8>>> {
-    let path = profile_dir.join(NODES_DAT_FILE);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", path.display()));
-        }
-    };
-    let contacts = match parse_nodes_dat(&bytes) {
-        Ok(contacts) if !contacts.is_empty() => contacts,
-        Ok(_) => {
-            warn!(path = %path.display(), "persisted nodes.dat has no usable contacts; using Kad fallback seeds");
-            return Ok(None);
-        }
-        Err(error) => {
-            warn!(path = %path.display(), %error, "persisted nodes.dat is invalid; using Kad fallback seeds");
-            return Ok(None);
-        }
-    };
-    debug_assert!(!contacts.is_empty());
-    Ok(Some(bytes))
 }
 
 async fn fetch_bounded(client: &Client, url: &str, max_bytes: usize) -> Result<Vec<u8>> {
@@ -186,26 +147,6 @@ async fn fetch_bounded(client: &Client, url: &str, max_bytes: usize) -> Result<V
         DiscoveryUrlPolicy::TrustedBootstrap,
     )
     .await
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("nodes.dat path has no file name")?;
-    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = fs::File::create(&temporary)
-        .with_context(|| format!("failed to create temporary {}", temporary.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("failed to write temporary {}", temporary.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync temporary {}", temporary.display()))?;
-    drop(file);
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -248,17 +189,35 @@ mod tests {
         data
     }
 
-    fn one_nodes_dat() -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend_from_slice(&[0x11; 16]);
-        data.extend_from_slice(&u32::from_be_bytes([203, 0, 113, 9]).to_le_bytes());
-        data.extend_from_slice(&4672u16.to_le_bytes());
-        data.extend_from_slice(&4662u16.to_le_bytes());
-        data.push(9);
-        data
+    #[tokio::test]
+    async fn pending_kad_retries_on_next_initialization_attempt_only() {
+        let core = emulebb_core::EmulebbCore::new_in_memory(
+            "test",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap();
+        seed_kad_with(&core, || async {
+            Err(anyhow::anyhow!("source unavailable"))
+        })
+        .await
+        .unwrap();
+        assert!(core.kad_discovery_pending().await.unwrap());
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[7; 16]);
+        bytes.extend_from_slice(&u32::from_be_bytes([192, 0, 2, 7]).to_le_bytes());
+        bytes.extend_from_slice(&4672u16.to_le_bytes());
+        bytes.extend_from_slice(&4662u16.to_le_bytes());
+        bytes.push(0);
+        seed_kad_with(&core, || core.import_kad_nodes_bytes(bytes))
+            .await
+            .unwrap();
+        assert!(!core.kad_discovery_pending().await.unwrap());
+        seed_kad_with(&core, || async {
+            panic!("initialized domain fetched again")
+        })
+        .await
+        .unwrap();
+        core.drain_persistence().await.unwrap();
     }
 
     #[test]
@@ -289,33 +248,118 @@ mod tests {
         assert_eq!(servers[0].endpoint(), "203.0.113.8:4661");
     }
 
-    #[test]
-    fn persisted_nodes_dat_is_validated_before_runtime_use() {
+    #[tokio::test]
+    async fn server_initialization_retries_after_reopen_and_uses_first_valid_source() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join(NODES_DAT_FILE), one_nodes_dat()).unwrap();
-
-        let bytes = load_valid_nodes_dat(temp.path()).unwrap().unwrap();
-        assert_eq!(parse_nodes_dat(&bytes).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn malformed_persisted_nodes_dat_falls_back_without_startup_failure() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join(NODES_DAT_FILE), b"not nodes.dat").unwrap();
-
-        assert!(load_valid_nodes_dat(temp.path()).unwrap().is_none());
+        let path = temp.path().join("metadata.db");
+        let metadata = MetadataStore::open(&path).unwrap();
+        let calls = AtomicUsize::new(0);
+        seed_servers_with(&metadata, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(b"invalid".to_vec()) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Servers)
+                .unwrap(),
+            DiscoveryInitializationStatus::Pending
+        );
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Kad)
+                .unwrap(),
+            DiscoveryInitializationStatus::Pending
+        );
+        // Startup invokes this operation once. Reopen models the next launch;
+        // no background retry is scheduled by this operation.
+        drop(metadata);
+        let metadata = MetadataStore::open(&path).unwrap();
+        calls.store(0, Ordering::SeqCst);
+        seed_servers_with(&metadata, |url| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(url, TRUSTED_SERVER_MET_URLS[attempt]);
+            async move {
+                if attempt < 2 {
+                    Ok(b"invalid".to_vec())
+                } else {
+                    Ok(one_server_met())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(metadata.load_servers().unwrap().len(), 1);
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Servers)
+                .unwrap(),
+            DiscoveryInitializationStatus::Initialized
+        );
+        seed_servers_with(&metadata, |_| async {
+            panic!("initialized list was fetched")
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
-    async fn nonempty_nodes_dat_is_never_replaced() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(NODES_DAT_FILE);
-        fs::write(&path, b"operator-owned-nodes").unwrap();
-
-        seed_missing_nodes_dat(temp.path(), &Client::new())
+    async fn concurrent_server_mutation_wins_over_bootstrap_response() {
+        let metadata = MetadataStore::in_memory().unwrap();
+        let fixture = MetadataStore::in_memory().unwrap();
+        seed_servers_from_bytes(&fixture, &one_server_met()).unwrap();
+        let mut operator_server = fixture.load_servers().unwrap().remove(0);
+        operator_server.enabled = false;
+        seed_servers_with(&metadata, |_| {
+            metadata.upsert_server(&operator_server).unwrap();
+            async {
+                let mut bytes = one_server_met();
+                bytes[5..9].copy_from_slice(&[203, 0, 113, 10]);
+                Ok(bytes)
+            }
+        })
+        .await
+        .unwrap();
+        let servers = metadata.load_servers().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].endpoint(), "203.0.113.8:4661");
+        assert!(!servers[0].enabled);
+        assert_eq!(
+            metadata
+                .discovery_initialization_status(DiscoveryDomain::Servers)
+                .unwrap(),
+            DiscoveryInitializationStatus::Initialized
+        );
+        seed_servers_with(&metadata, |_| async { panic!("disabled list was fetched") })
             .await
             .unwrap();
+    }
 
-        assert_eq!(fs::read(path).unwrap(), b"operator-owned-nodes");
+    #[tokio::test]
+    async fn first_valid_server_source_stops_fallbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let metadata = MetadataStore::in_memory().unwrap();
+        let calls = AtomicUsize::new(0);
+        seed_servers_with(&metadata, |url| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(url, TRUSTED_SERVER_MET_URLS[attempt]);
+            async move {
+                if attempt == 0 {
+                    Ok(b"invalid".to_vec())
+                } else {
+                    Ok(one_server_met())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(metadata.load_servers().unwrap().len(), 1);
     }
 }

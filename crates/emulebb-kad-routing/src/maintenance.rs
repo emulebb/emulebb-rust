@@ -54,6 +54,7 @@ pub struct SmallTimerOutcome {
     pub removed: Vec<NodeId>,
     /// Per-leaf lowest-quality expired contacts to HELLO-probe (one per leaf).
     pub probes: Vec<ProbeCandidate>,
+    pub(crate) snapshot_changed: bool,
 }
 
 /// Compute the small-timer maintenance actions for a leaf bin at `now`,
@@ -67,9 +68,10 @@ pub struct SmallTimerOutcome {
 pub(crate) fn small_timer_for_bin(
     bin: &mut crate::bin::RoutingBin,
     now: SystemTime,
-) -> (Vec<NodeId>, Option<ProbeCandidate>) {
+) -> (Vec<NodeId>, Option<ProbeCandidate>, bool) {
     // Pass 1: seed missing expiry windows and collect dead+expired removals.
     let mut to_remove = Vec::new();
+    let mut snapshot_changed = false;
     for contact in bin.iter_mut() {
         if contact.is_dead() && contact.is_expired_at(now) {
             to_remove.push(contact.id);
@@ -77,6 +79,7 @@ pub(crate) fn small_timer_for_bin(
         }
         if contact.expires_at.is_none() {
             contact.expires_at = Some(now);
+            snapshot_changed = true;
         }
     }
     for id in &to_remove {
@@ -94,7 +97,12 @@ pub(crate) fn small_timer_for_bin(
             probe = Some((ProbeCandidate::from_contact(contact), quality));
         }
     }
-    (to_remove, probe.map(|(candidate, _)| candidate))
+    snapshot_changed |= !to_remove.is_empty();
+    (
+        to_remove,
+        probe.map(|(candidate, _)| candidate),
+        snapshot_changed,
+    )
 }
 
 /// Build a random `FindNode` target inside the leaf identified by

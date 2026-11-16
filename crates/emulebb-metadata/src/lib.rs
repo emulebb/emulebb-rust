@@ -3,12 +3,14 @@
 mod aich_recovery_store;
 mod content_identity;
 mod delivery_exclusion_store;
+mod discovery_store;
 mod download_history_model;
 mod download_history_store;
 mod identity_model;
 mod identity_store;
 mod kad_publish_model;
 mod kad_publish_store;
+mod kad_routing_store;
 mod library_projection;
 mod local_catalog;
 mod local_file_store;
@@ -35,12 +37,17 @@ mod transfer_store;
 mod transfer_validation;
 
 pub use aich_recovery_store::MetadataAichRecoverySet;
+pub use discovery_store::{DiscoveryDomain, DiscoveryInitializationStatus};
 pub use download_history_model::{MetadataCurrentSharedFile, MetadataDownloadHistoryEntry};
 pub use identity_model::MetadataLocalIdentity;
+pub use identity_store::KadNodeId;
 pub use kad_publish_model::{
     MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadOutboundPublish,
     MetadataKadOutboundPublishKind, MetadataKadOutboundPublishSchedule, MetadataKadPublishCache,
     MetadataKadSourcePublish,
+};
+pub use kad_routing_store::{
+    KAD_ROUTING_MAX_CONTACTS, KadRoutingContact, KadRoutingContactType, KadRoutingSnapshot,
 };
 pub use local_file_store::{
     MetadataContentConflict, MetadataLocalFileInstance, MetadataLocalShareEntry,
@@ -53,6 +60,7 @@ pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use profile_ownership::ProfileLeaseGuard;
+pub use profile_store::FriendWriteTiming;
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
     MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,

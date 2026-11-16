@@ -283,7 +283,7 @@ async fn explicit_bootstrap_contacts_the_requested_endpoint() {
         .await
         .expect("bootstrap from explicitly requested endpoint");
     assert!(
-        core.kad_nodes().await.iter().any(|node| {
+        core.kad_nodes().await.unwrap().iter().any(|node| {
             node.ip == selected.ip().to_string() && node.udp_port == selected.port()
         })
     );
@@ -302,7 +302,7 @@ async fn explicit_bootstrap_contacts_the_requested_endpoint() {
     ])
     .unwrap();
     assert_eq!(
-        core.import_kad_nodes_bytes(&rejected).await.unwrap(),
+        core.import_kad_nodes_bytes(rejected).await.unwrap(),
         0,
         "a rejected duplicate-IP contact must not be reported as imported"
     );

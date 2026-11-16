@@ -84,7 +84,16 @@ pub async fn fetch_discovery_bytes(
         {
             bail!("discovery response exceeds {max_bytes} bytes");
         }
+        // Kad callers reserve body capacity and one accepted frame. Server
+        // discovery has its own bounded body but is not yet on that owner.
+        // Transport, TLS and rejected oversized frames remain transport-owned.
         let mut body = Vec::new();
+        body.try_reserve_exact(max_bytes)
+            .map_err(|_| anyhow::anyhow!("cannot allocate bounded discovery response"))?;
+        ensure!(
+            body.capacity() <= max_bytes,
+            "discovery response allocation exceeds limit"
+        );
         while let Some(chunk) = response
             .chunk()
             .await
@@ -94,10 +103,6 @@ pub async fn fetch_discovery_bytes(
                 chunk.len() <= max_bytes.saturating_sub(body.len()),
                 "discovery response exceeds {max_bytes} bytes"
             );
-            // WHY: ordinary Vec growth can reserve beyond the fixed document
-            // ceiling even when the received byte count is still within it.
-            body.try_reserve_exact(chunk.len())
-                .map_err(|_| anyhow::anyhow!("cannot allocate bounded discovery response"))?;
             body.extend_from_slice(&chunk);
         }
         Ok(body)
