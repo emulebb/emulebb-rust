@@ -128,6 +128,47 @@ impl MetadataStore {
         Ok(inserted)
     }
 
+    /// Bind the identity obtained from the exclusively created output handle,
+    /// before writing bytes. This is a sharing barrier, never deletion authority.
+    pub fn bind_delivery_output_identity(
+        &self,
+        token: JobToken,
+        reservation: &MetadataDeliveryOutputReservation,
+        attempt: &MetadataTransferDeliveryAttempt,
+        fingerprint: &crate::NativeFileFingerprint,
+        evidence: crate::NativeFileIdentityEvidence,
+    ) -> Result<bool> {
+        evidence.validate_fingerprint(fingerprint)?;
+        if !matches!(
+            attempt.phase,
+            crate::MetadataTransferDeliveryAttemptPhase::Prepared
+                | crate::MetadataTransferDeliveryAttemptPhase::Staged
+        ) || reservation.originating_job_id != token.job_id
+            || attempt.job_id != token.job_id
+            || attempt.attempt_id != reservation.reservation_id
+        {
+            return Ok(false);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND execution_generation=?2
+            AND intent='started' AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL)",
+            params![token.job_id,i64::try_from(token.generation)?],|row|row.get(0))?;
+        if !current
+            || crate::transfer_store::delivery_attempt_by_job(&tx, token.job_id)?.as_ref()
+                != Some(attempt)
+            || reservation_by_id(&tx, token.job_id, reservation.reservation_id)?.as_ref()
+                != Some(reservation)
+        {
+            return Ok(false);
+        }
+        let changed=tx.execute("UPDATE download_delivery_exclusions SET output_identity=?3,secondary_identity=?4
+            WHERE originating_job_id=?1 AND reservation_id=?2 AND (output_identity IS NULL OR (output_identity=?3 AND secondary_identity IS ?4))",
+            params![token.job_id,reservation.reservation_id.to_string(),evidence.primary().storage_bytes(),evidence.secondary().map(|identity|identity.storage_bytes())])?;
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+
     /// Capture exact immutable reservation authority before cleanup I/O.
     pub fn delivery_output_reservation(
         &self,
@@ -207,12 +248,15 @@ impl MetadataStore {
         Ok(self.connection()?.execute(
             "DELETE FROM download_delivery_exclusions
             WHERE originating_job_id=?1 AND reservation_id=?2 AND platform=?3 AND native_path=?4
-            AND NOT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1)",
+            AND output_identity IS ?5 AND secondary_identity IS ?6 AND NOT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1)",
             params![
                 reservation.originating_job_id,
                 reservation.reservation_id.to_string(),
                 NativePath::platform(),
-                path.storage_bytes()
+                path.storage_bytes(),
+                reservation
+                    .output_identity
+                    .map(|identity| identity.storage_bytes()),reservation.secondary_identity.map(|identity|identity.storage_bytes())
             ],
         )? != 0)
     }
@@ -238,13 +282,45 @@ fn reservation_by_id(
     job_id: JobId,
     id: Uuid,
 ) -> Result<Option<MetadataDeliveryOutputReservation>> {
-    Ok(conn.query_row("SELECT platform,CASE WHEN length(native_path)<=65536 THEN native_path END,length(native_path)
+    Ok(conn.query_row("SELECT platform,CASE WHEN length(native_path)<=65536 THEN native_path END,length(native_path),output_identity,secondary_identity
         FROM download_delivery_exclusions WHERE originating_job_id=?1 AND reservation_id=?2",
         params![job_id,id.to_string()],|row| {
             crate::download_job_store::bounded_row_bytes(row,&[(2,65536,4)])?;
             Ok(MetadataDeliveryOutputReservation {originating_job_id:job_id,reservation_id:id,
-                path:crate::native_path::path_from_row(row,0,1)?})
+                path:crate::native_path::path_from_row(row,0,1)?,
+                output_identity:crate::native_file::optional_identity_from_row(row,3)?,
+                secondary_identity:crate::native_file::optional_identity_from_row(row,4)?})
         }).optional()?)
+}
+
+pub(crate) fn identity_is_excluded(
+    conn: &Connection,
+    identity: crate::NativeFileIdentity,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE output_identity=?1 OR secondary_identity=?1)",
+        [identity.storage_bytes()],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn evidence_is_excluded(
+    conn: &Connection,
+    evidence: crate::NativeFileIdentityEvidence,
+) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE output_identity IN (?1,?2) OR secondary_identity IN (?1,?2))",
+        params![evidence.primary().storage_bytes(),evidence.secondary().map(|identity|identity.storage_bytes())],|row|row.get(0))?)
+}
+
+pub(crate) fn ensure_evidence_not_excluded(
+    conn: &Connection,
+    evidence: crate::NativeFileIdentityEvidence,
+) -> Result<()> {
+    ensure!(
+        !evidence_is_excluded(conn, evidence)?,
+        "local file is an incomplete delivery output"
+    );
+    Ok(())
 }
 
 pub(crate) fn ensure_not_excluded(conn: &Connection, path: &Path) -> Result<()> {
@@ -289,6 +365,354 @@ mod tests {
     }
 
     #[test]
+    fn paired_actual_windows_ids_block_overlap_but_preserve_unrelated_volume() {
+        let root =
+            std::env::temp_dir().join(format!("emulebb-exclusion-paired-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut store = MetadataStore::in_memory().unwrap();
+        let target = root.join("output.bin");
+        let attempt = Uuid::new_v4();
+        let token = prepared_job(&store, &target, attempt);
+        let low = crate::NativeFileIdentity::WindowsLowResolution {
+            volume_serial_number: 7,
+            file_index: 17,
+        };
+        let high = crate::NativeFileIdentity::WindowsHighResolution {
+            volume_serial_number: 7,
+            file_id: 19,
+        };
+        let mut proof = crate::NativeFileFingerprint {
+            identity: high,
+            size_bytes: 1,
+            modified: crate::NativeFileTimestamp::new(1, 0).unwrap(),
+            changed: None,
+        };
+        let alias = root.join("alias.bin");
+        let mut content = crate::MetadataVerifiedLocalContent {
+            secondary_identity: Some(low),
+            file_hash: "22".repeat(16),
+            display_name: "alias.bin".into(),
+            file_size: 1,
+            part_size: 1,
+            md4_hashset: Vec::new(),
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            path: alias.clone(),
+            fingerprint: proof.clone(),
+            upload_priority: "normal".into(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+        };
+        store
+            .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+                path: root.to_string_lossy().into_owned(),
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }])
+            .unwrap();
+        store.upsert_verified_local_content(&content).unwrap();
+        assert!(
+            store
+                .admit_local_path_to_root(&root, &alias, Path::new("alias.bin"), &proof)
+                .unwrap()
+        );
+        let query = crate::MetadataSharedFileQuery {
+            limit: 10,
+            count_total: true,
+            ..Default::default()
+        };
+        // Warm the disposable projection before the reservation changes. Binding
+        // must invalidate it even while the alias membership remains untouched.
+        assert_eq!(
+            store
+                .query_active_local_share_entries(&query)
+                .unwrap()
+                .total,
+            1
+        );
+        assert!(
+            store
+                .reserve_delivery_output(token, &target, attempt)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .query_active_local_share_entries(&query)
+                .unwrap()
+                .total,
+            1
+        );
+        let reservation = store
+            .delivery_output_reservation(token.job_id, attempt)
+            .unwrap()
+            .unwrap();
+        let journal = store
+            .download_job_delivery_attempt(token.job_id)
+            .unwrap()
+            .unwrap();
+        proof.identity = low;
+        let low_evidence = crate::NativeFileIdentityEvidence::new(low, None).unwrap();
+        assert!(
+            store
+                .bind_delivery_output_identity(token, &reservation, &journal, &proof, low_evidence)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .try_verified_share_batch(&[[0x22; 16]])
+                .unwrap()
+                .unwrap()[0]
+                .0
+        );
+        let page = store.query_active_local_share_entries(&query).unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.entries.is_empty());
+        assert_eq!(store.active_shared_content_count().unwrap(), 0);
+        assert!(store.upsert_verified_local_content(&content).is_err());
+        content.secondary_identity = None;
+        assert!(store.upsert_verified_local_content(&content).is_err());
+        let other_low = crate::NativeFileIdentity::WindowsLowResolution {
+            volume_serial_number: 71,
+            file_index: 17,
+        };
+        content.secondary_identity = Some(other_low);
+        content.fingerprint.identity = crate::NativeFileIdentity::WindowsHighResolution {
+            volume_serial_number: 71,
+            file_id: 19,
+        };
+        content.file_hash = "33".repeat(16);
+        content.path = root.join("unrelated.bin");
+        store.upsert_verified_local_content(&content).unwrap();
+        assert!(
+            store
+                .admit_local_path_to_root(
+                    &root,
+                    &content.path,
+                    Path::new("unrelated.bin"),
+                    &content.fingerprint
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .try_verified_share_batch(&[[0x33; 16]])
+                .unwrap()
+                .unwrap()[0]
+                .0
+        );
+        assert!(
+            !evidence_is_excluded(
+                &store.connection().unwrap(),
+                crate::NativeFileIdentityEvidence::new(
+                    content.fingerprint.identity,
+                    Some(other_low)
+                )
+                .unwrap()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            store
+                .query_active_local_share_entries(&query)
+                .unwrap()
+                .total,
+            1
+        );
+        let bound = store
+            .delivery_output_reservation(token.job_id, attempt)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .release_delivery_output(token, &bound, &journal)
+                .unwrap()
+        );
+        let page = store.query_active_local_share_entries(&query).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(store.active_shared_content_count().unwrap(), 2);
+        drop(store);
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn bound_output_identity_excludes_aliases_and_invalidates_old_release_snapshots() {
+        let root =
+            std::env::temp_dir().join(format!("emulebb-exclusion-identity-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut store = MetadataStore::in_memory().unwrap();
+        let target = root.join("output.bin");
+        let attempt = Uuid::new_v4();
+        let token = prepared_job(&store, &target, attempt);
+        assert!(
+            store
+                .reserve_delivery_output(token, &target, attempt)
+                .unwrap()
+        );
+        let reserved = store
+            .delivery_output_reservation(token.job_id, attempt)
+            .unwrap()
+            .unwrap();
+        let journal = store
+            .download_job_delivery_attempt(token.job_id)
+            .unwrap()
+            .unwrap();
+        let proof = crate::NativeFileFingerprint {
+            identity: crate::NativeFileIdentity::Unix {
+                device_id: 19,
+                inode_number: 23,
+            },
+            size_bytes: 1,
+            modified: crate::NativeFileTimestamp::new(1, 0).unwrap(),
+            changed: None,
+        };
+        let evidence = crate::NativeFileIdentityEvidence::new(proof.identity, None).unwrap();
+        let alias = root.join("different-leaf.bin");
+        let content = crate::MetadataVerifiedLocalContent {
+            secondary_identity: None,
+            file_hash: "22".repeat(16),
+            display_name: "different-leaf.bin".into(),
+            file_size: 1,
+            part_size: 1,
+            md4_hashset: Vec::new(),
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            path: alias.clone(),
+            fingerprint: proof.clone(),
+            upload_priority: "normal".into(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+        };
+        store
+            .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+                path: root.to_string_lossy().into_owned(),
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }])
+            .unwrap();
+        // A candidate admitted before identity binding cannot remain eligible afterwards.
+        store.upsert_verified_local_content(&content).unwrap();
+        assert!(
+            store
+                .admit_local_path_to_root(&root, &alias, Path::new("different-leaf.bin"), &proof)
+                .unwrap()
+        );
+        assert!(
+            store
+                .try_verified_share_batch(&[[0x22; 16]])
+                .unwrap()
+                .unwrap()[0]
+                .0
+        );
+        assert_eq!(store.active_shared_content_count().unwrap(), 1);
+        assert!(
+            store
+                .bind_delivery_output_identity(token, &reserved, &journal, &proof, evidence)
+                .unwrap()
+        );
+        let bound = store
+            .delivery_output_reservation(token.job_id, attempt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound.output_identity, Some(proof.identity));
+        assert_eq!(store.active_shared_content_count().unwrap(), 0);
+        assert!(
+            !store
+                .try_verified_share_batch(&[[0x22; 16]])
+                .unwrap()
+                .unwrap()[0]
+                .0
+        );
+        assert!(store.upsert_verified_local_content(&content).is_err());
+        store
+            .replace_root_memberships(
+                &root,
+                &[(
+                    alias.clone(),
+                    PathBuf::from("different-leaf.bin"),
+                    proof.clone(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM shared_file_memberships WHERE removed_at_ms IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            !store
+                .try_verified_share_batch(&[[0x22; 16]])
+                .unwrap()
+                .unwrap()[0]
+                .0
+        );
+        assert!(
+            !store
+                .mark_session_verified_local_path(&alias, &proof)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .admit_local_path_to_root(&root, &alias, Path::new("different-leaf.bin"), &proof)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .release_delivery_output(token, &reserved, &journal)
+                .unwrap()
+        );
+        let mut replaced = proof.clone();
+        replaced.identity = crate::NativeFileIdentity::Unix {
+            device_id: 19,
+            inode_number: 24,
+        };
+        let replaced_evidence =
+            crate::NativeFileIdentityEvidence::new(replaced.identity, None).unwrap();
+        assert!(
+            !store
+                .bind_delivery_output_identity(
+                    token,
+                    &bound,
+                    &journal,
+                    &replaced,
+                    replaced_evidence
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .bind_delivery_output_identity(token, &bound, &journal, &proof, replaced_evidence)
+                .is_err()
+        );
+        assert!(store.stop_download_job(token).unwrap());
+        assert!(
+            !store
+                .bind_delivery_output_identity(token, &bound, &journal, &proof, evidence)
+                .unwrap()
+        );
+        let recovery = store.download_job(token.job_id).unwrap().unwrap().token;
+        assert!(
+            store
+                .release_recovered_delivery_output(recovery, &bound, Some(&journal))
+                .unwrap()
+        );
+        assert!(!identity_is_excluded(&store.connection().unwrap(), proof.identity).unwrap());
+        drop(store);
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     fn reservation_requires_current_started_token_and_exact_attempt_target() {
         let root = std::env::temp_dir().join(format!("emulebb-exclusion-fence-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -315,6 +739,7 @@ mod tests {
             .unwrap();
         store
             .upsert_verified_local_content(&crate::MetadataVerifiedLocalContent {
+                secondary_identity: None,
                 file_hash: "22".repeat(16),
                 display_name: "target.bin".into(),
                 file_size: 1,
@@ -427,7 +852,7 @@ mod tests {
                 .reserve_delivery_output(restarted.token, &target, attempt)
                 .unwrap()
         );
-        assert!(store.request_transfer_deletion(token.job_id, None).unwrap());
+        assert!(store.request_transfer_deletion(token.job_id).unwrap());
         let deleting = store.download_job(token.job_id).unwrap().unwrap();
         let reservation = store
             .delivery_output_reservation(token.job_id, attempt)

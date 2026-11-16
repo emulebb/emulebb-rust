@@ -96,6 +96,7 @@ fn register_shared_test_job(store: &MetadataStore, id: crate::JobId) {
         .unwrap();
     store
         .upsert_verified_local_content(&crate::MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: manifest.file_hash.clone(),
             display_name: manifest.display_name,
             file_size: manifest.expected_size_bytes.unwrap(),
@@ -349,11 +350,7 @@ fn retirement_creation_is_generation_fenced_and_pending_authority_blocks_job_del
     manifest.delivered_path = Some(std::env::temp_dir().join("retirement-generation.bin"));
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert!(store.stop_download_job(manifest.token).unwrap());
-    assert!(
-        !store
-            .request_transfer_retirement(manifest.token, None)
-            .unwrap()
-    );
+    assert!(!store.request_transfer_retirement(manifest.token).unwrap());
     assert!(
         !store
             .transfer_retirement_pending(manifest.token.job_id)
@@ -364,14 +361,10 @@ fn retirement_creation_is_generation_fenced_and_pending_authority_blocks_job_del
         .start_download_job(stopped.token, &std::env::temp_dir())
         .unwrap()
         .unwrap();
+    assert!(store.request_transfer_retirement(resumed.token).unwrap());
     assert!(
         store
-            .request_transfer_retirement(resumed.token, None)
-            .unwrap()
-    );
-    assert!(
-        store
-            .request_transfer_deletion(resumed.token.job_id, None)
+            .request_transfer_deletion(resumed.token.job_id)
             .unwrap()
     );
     assert!(
@@ -413,11 +406,7 @@ fn publication_collapses_history_and_preserves_current_partial_claim_size() {
                 .join(format!("{}.bin", manifest.token.job_id)),
         );
         store.upsert_transfer_manifest(&manifest).unwrap();
-        assert!(
-            store
-                .request_transfer_retirement(manifest.token, None)
-                .unwrap()
-        );
+        assert!(store.request_transfer_retirement(manifest.token).unwrap());
         assert!(
             store
                 .finalize_transfer_retirement(manifest.token.job_id)
@@ -590,6 +579,7 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
     let path = std::env::temp_dir().join("retained-completed-job.bin");
     store
         .upsert_verified_local_content(&crate::MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: manifest.file_hash.clone(),
             display_name: manifest.display_name.clone(),
             file_size: 16,
@@ -616,11 +606,7 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
         ich_corrupted: false,
     }];
     store.upsert_transfer_manifest(&manifest).unwrap();
-    assert!(
-        store
-            .request_transfer_retirement(manifest.token, None)
-            .unwrap()
-    );
+    assert!(store.request_transfer_retirement(manifest.token).unwrap());
     let completed = store.download_job(manifest.token.job_id).unwrap().unwrap();
     assert!(completed.completed_at_s.is_some());
     assert!(completed.removed_at_s.is_none());
@@ -733,6 +719,7 @@ fn failed_partial_projection_rolls_back_shared_path_withdrawal() {
     let fingerprint = fingerprint(manifest.expected_size_bytes.unwrap(), 19);
     store
         .upsert_verified_local_content(&crate::MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: manifest.file_hash.clone(),
             display_name: manifest.display_name.clone(),
             file_size: 16,
@@ -874,6 +861,7 @@ fn accepted_local_identity_and_stale_checkpoint_preserve_md4_verified_progress()
     }];
     store.upsert_transfer_manifest(&stale).unwrap();
     let content = crate::MetadataVerifiedLocalContent {
+        secondary_identity: None,
         file_hash: stale.file_hash.clone(),
         display_name: "local-authority.bin".to_owned(),
         file_size: stale.expected_size_bytes.unwrap(),
@@ -933,6 +921,7 @@ fn local_acceptance_of_same_master_preserves_acquired_parts_and_progress() {
     manifest.aich_hashset = vec!["33".repeat(20)];
     store.upsert_transfer_manifest(&manifest).unwrap();
     let content = crate::MetadataVerifiedLocalContent {
+        secondary_identity: None,
         file_hash: manifest.file_hash.clone(),
         display_name: "same-master.bin".to_owned(),
         file_size: manifest.expected_size_bytes.unwrap(),
@@ -979,6 +968,7 @@ fn unverified_operator_claim_does_not_override_verified_content_authority() {
     store.upsert_transfer_manifest(&proposal).unwrap();
 
     let content = crate::MetadataVerifiedLocalContent {
+        secondary_identity: None,
         file_hash: manifest.file_hash.clone(),
         display_name: "local.bin".to_string(),
         file_size: manifest.expected_size_bytes.unwrap(),
@@ -1122,6 +1112,7 @@ fn accepted_identity_survives_conflicting_transfer_and_index_observations() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     store
         .upsert_verified_local_content(&crate::MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: manifest.file_hash.clone(),
             display_name: manifest.display_name.clone(),
             file_size: 16,
@@ -1593,6 +1584,7 @@ fn deleting_download_preserves_same_hash_local_content() {
     );
     let path = std::env::temp_dir().join("emulebb-same-hash-local-content.bin");
     let content = crate::MetadataVerifiedLocalContent {
+        secondary_identity: None,
         file_hash: manifest.file_hash.clone(),
         display_name: "shared.bin".to_string(),
         file_size: manifest.expected_size_bytes.unwrap(),
@@ -1968,7 +1960,7 @@ fn delivery_attempt_requires_an_authoritative_pending_download() {
         .unwrap();
     assert!(
         store
-            .request_transfer_deletion(manifest.token.job_id, None)
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
     assert!(
@@ -2194,27 +2186,27 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         device_id: 17,
         inode_number: 29,
     };
+    let allocated = store
+        .start_download_job(manifest.token, &std::env::temp_dir())
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .establish_download_job_storage(allocated.token, directory_identity)
+            .unwrap()
+    );
     let directory_authority = MetadataTransferDirectoryDeletionAuthority {
         identity: directory_identity,
-        marker_id: Uuid::from_u128(31),
+        marker_id: allocated.storage.unwrap().marker_id,
     };
     assert!(
         store
-            .request_transfer_deletion(manifest.token.job_id, Some(directory_authority))
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
     assert!(
         store
-            .request_transfer_deletion(
-                manifest.token.job_id,
-                Some(MetadataTransferDirectoryDeletionAuthority {
-                    identity: NativeFileIdentity::Unix {
-                        device_id: 17,
-                        inode_number: 30,
-                    },
-                    marker_id: Uuid::from_u128(37),
-                }),
-            )
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
     assert_eq!(
@@ -2347,7 +2339,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     }
     assert!(
         store
-            .request_transfer_deletion(manifest.token.job_id, None)
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
     let timestamps = store
@@ -2410,21 +2402,12 @@ fn deletion_intent_never_adopts_a_later_transfer_directory() {
 
     assert!(
         store
-            .request_transfer_deletion(manifest.token.job_id, None)
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
     assert!(
         store
-            .request_transfer_deletion(
-                manifest.token.job_id,
-                Some(MetadataTransferDirectoryDeletionAuthority {
-                    identity: NativeFileIdentity::Unix {
-                        device_id: 41,
-                        inode_number: 43,
-                    },
-                    marker_id: Uuid::from_u128(47),
-                }),
-            )
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
     assert_eq!(
@@ -2448,7 +2431,7 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert!(
         store
-            .request_transfer_deletion(manifest.token.job_id, None)
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
 
@@ -2634,7 +2617,7 @@ fn deletion_tombstone_requires_owned_delivered_output() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert!(
         store
-            .request_transfer_deletion(manifest.token.job_id, None)
+            .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
     let tombstone_id = Uuid::new_v4();

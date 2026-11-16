@@ -70,12 +70,19 @@ const JOB_COLUMNS: &str = "j.id,j.execution_generation,lower(hex(k.ed2k_hash)),
     CASE WHEN length(p.native_path)<=65536 THEN p.native_path END,
     j.completed,j.final_rehash_pending,j.delivery_state,j.created_at_s,j.updated_at_s,
     j.terminal_completed_at_s,j.removed_at_s,j.internal_storage_retired,
-    length(CAST(j.display_name AS BLOB)),length(p.native_path)";
+    length(CAST(j.display_name AS BLOB)),length(p.native_path),
+    storage.platform,CASE WHEN length(storage.native_path)<=65536 THEN storage.native_path END,
+    j.storage_directory_marker_id,CASE WHEN length(j.storage_directory_identity)<=64 THEN j.storage_directory_identity END,length(storage.native_path),length(j.storage_directory_identity)";
 
 fn job_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
     bounded_row_bytes(
         row,
-        &[(18, MAX_JOB_TEXT_BYTES, 2), (19, MAX_JOB_PATH_BYTES, 4)],
+        &[
+            (18, MAX_JOB_TEXT_BYTES, 2),
+            (19, MAX_JOB_PATH_BYTES, 4),
+            (24, MAX_JOB_PATH_BYTES, 4),
+            (25, 64, 2),
+        ],
     )
 }
 
@@ -99,6 +106,30 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJobRecord> {
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
         selected_temp: optional_path_from_row(row, 8, 9)?,
+        storage: optional_path_from_row(row, 20, 21)?
+            .map(|path| {
+                let marker: String = row.get(22)?;
+                let marker_id = marker.parse::<uuid::Uuid>().map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        22,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let identity = row
+                    .get::<_, Option<Vec<u8>>>(23)?
+                    .map(|bytes| {
+                        crate::NativeFileIdentity::from_storage_bytes(&bytes)
+                            .ok_or(rusqlite::Error::InvalidQuery)
+                    })
+                    .transpose()?;
+                Ok::<_, rusqlite::Error>(crate::DownloadJobStorage {
+                    path,
+                    marker_id,
+                    identity,
+                })
+            })
+            .transpose()?,
         payload_verified: row.get::<_, bool>(10)? && !row.get::<_, bool>(11)?,
         delivery_state: match delivery.as_str() {
             "pending" => crate::MetadataTransferDeliveryState::Pending,
@@ -116,7 +147,7 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJobRecord> {
 pub(crate) fn read_job(conn: &Connection, id: JobId) -> Result<Option<DownloadJobRecord>> {
     let sql = format!(
         "SELECT {JOB_COLUMNS} FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id
-        LEFT JOIN local_paths p ON p.id=j.selected_temp_path_id WHERE j.id=?1"
+        LEFT JOIN local_paths p ON p.id=j.selected_temp_path_id LEFT JOIN local_paths storage ON storage.id=j.storage_path_id WHERE j.id=?1"
     );
     Ok(conn.query_row(&sql, [id], row_job).optional()?)
 }
@@ -280,17 +311,42 @@ impl MetadataStore {
         };
         let selected = current.selected_temp.as_deref().unwrap_or(selected_temp);
         let path_id = upsert_local_path(&tx, selected)?;
+        let (storage_path, marker) = match &current.storage {
+            Some(storage) => (storage.path.clone(), storage.marker_id),
+            None => {
+                let marker = uuid::Uuid::new_v4();
+                (selected.join(format!("{}-{marker}", token.job_id)), marker)
+            }
+        };
+        validate_job_path(&storage_path)?;
+        let storage_path_id = upsert_local_path(&tx, &storage_path)?;
         let generation = i64::try_from(token.generation)?
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("job generation exhausted"))?;
         tx.execute(
             "UPDATE download_jobs SET selected_temp_path_id=coalesce(selected_temp_path_id,?2),
-            execution_generation=?3,intent='started',updated_at_s=?4 WHERE id=?1",
-            params![token.job_id, path_id, generation, unix_s()],
+            execution_generation=?3,intent='started',updated_at_s=?4,
+            storage_path_id=coalesce(storage_path_id,?5),storage_directory_marker_id=coalesce(storage_directory_marker_id,?6) WHERE id=?1",
+            params![token.job_id, path_id, generation, unix_s(),storage_path_id,marker.to_string()],
         )?;
         let result = read_job(&tx, token.job_id)?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Called only after exclusive allocation and marker creation. A stale
+    /// creator cannot publish ownership into a newer execution generation.
+    pub fn establish_download_job_storage(
+        &self,
+        token: JobToken,
+        identity: crate::NativeFileIdentity,
+    ) -> Result<bool> {
+        let identity = identity.storage_bytes();
+        Ok(self.connection()?.execute("UPDATE download_jobs SET storage_directory_identity=?3,updated_at_s=?4
+            WHERE id=?1 AND execution_generation=?2 AND intent='started' AND removed_at_s IS NULL
+              AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL AND storage_path_id IS NOT NULL
+              AND (storage_directory_identity IS NULL OR storage_directory_identity=?3)",
+            params![token.job_id,i64::try_from(token.generation)?,identity,unix_s()])?!=0)
     }
 
     pub fn stop_download_job(&self, token: JobToken) -> Result<bool> {
@@ -315,7 +371,7 @@ impl MetadataStore {
             ""
         };
         let sql=format!("SELECT {JOB_COLUMNS} FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id
-            LEFT JOIN local_paths p ON p.id=j.selected_temp_path_id WHERE j.id>?1 AND j.removed_at_s IS NULL {predicate}
+            LEFT JOIN local_paths p ON p.id=j.selected_temp_path_id LEFT JOIN local_paths storage ON storage.id=j.storage_path_id WHERE j.id>?1 AND j.removed_at_s IS NULL {predicate}
             ORDER BY j.id LIMIT ?2");
         let mut stmt = conn.prepare_cached(&sql)?;
         let mut rows = stmt.query(params![after.map_or(0, JobId::get), i64::try_from(limit)?])?;

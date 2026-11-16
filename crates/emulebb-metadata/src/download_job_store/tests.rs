@@ -223,11 +223,7 @@ fn latest_head_and_admission_roll_back_together() {
 fn removed_pending_cleanup_does_not_block_new_job_or_change_its_head() {
     let store = MetadataStore::in_memory().unwrap();
     let first = store.admit_download_job(&request(5, Some(16))).unwrap().job;
-    assert!(
-        store
-            .request_transfer_deletion(first.token.job_id, None)
-            .unwrap()
-    );
+    assert!(store.request_transfer_deletion(first.token.job_id).unwrap());
     let second = store.admit_download_job(&request(5, Some(16))).unwrap();
     assert!(second.created);
     assert!(second.job.token.job_id > first.token.job_id);
@@ -352,5 +348,111 @@ fn nullable_sizes_are_distinct_from_zero_and_pages_are_bounded() {
             .unwrap()
             .expected_size_bytes,
         Some(0)
+    );
+}
+
+#[test]
+fn physical_storage_is_fixed_and_distinct_between_fresh_profiles() {
+    let first = MetadataStore::in_memory().unwrap();
+    let second = MetadataStore::in_memory().unwrap();
+    let a = first
+        .admit_download_job(&request(91, Some(16)))
+        .unwrap()
+        .job;
+    let b = second
+        .admit_download_job(&request(91, Some(16)))
+        .unwrap()
+        .job;
+    assert_eq!(a.token.job_id, b.token.job_id);
+    let base = std::env::temp_dir().join("shared-download-temp");
+    let a = first.start_download_job(a.token, &base).unwrap().unwrap();
+    let b = second.start_download_job(b.token, &base).unwrap().unwrap();
+    let storage = a.storage.clone().unwrap();
+    assert!(storage.path.starts_with(&base));
+    assert_ne!(storage.path, b.storage.unwrap().path);
+    assert!(storage.identity.is_none());
+    let identity = crate::NativeFileIdentity::Unix {
+        device_id: 11,
+        inode_number: 12,
+    };
+    assert!(
+        first
+            .establish_download_job_storage(a.token, identity)
+            .unwrap()
+    );
+    assert!(first.stop_download_job(a.token).unwrap());
+    assert!(
+        !first
+            .establish_download_job_storage(a.token, identity)
+            .unwrap()
+    );
+    let stopped = first.download_job(a.token.job_id).unwrap().unwrap();
+    let resumed = first
+        .start_download_job(stopped.token, &base.join("ignored-new-base"))
+        .unwrap()
+        .unwrap();
+    let established = resumed.storage.unwrap();
+    assert_eq!(established.path, storage.path);
+    assert_eq!(established.marker_id, storage.marker_id);
+    assert_eq!(established.identity, Some(identity));
+    assert!(
+        first
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE download_jobs SET storage_directory_marker_id=?2 WHERE id=?1",
+                params![a.token.job_id, uuid::Uuid::new_v4().to_string()]
+            )
+            .is_err()
+    );
+    assert!(first.request_transfer_deletion(a.token.job_id).unwrap());
+    assert_eq!(
+        first
+            .transfer_directory_deletion_authority(a.token.job_id)
+            .unwrap(),
+        Some(crate::MetadataTransferDirectoryDeletionAuthority {
+            identity,
+            marker_id: storage.marker_id
+        })
+    );
+}
+
+#[test]
+fn allocation_intent_without_established_identity_never_authorizes_cleanup() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = store
+        .admit_download_job(&request(92, Some(16)))
+        .unwrap()
+        .job;
+    let job = store
+        .start_download_job(job.token, &std::env::temp_dir())
+        .unwrap()
+        .unwrap();
+    let storage = job.storage.clone().unwrap();
+    assert!(store.request_transfer_deletion(job.token.job_id).unwrap());
+    assert!(
+        store
+            .transfer_directory_deletion_authority(job.token.job_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .storage,
+        Some(storage)
+    );
+    assert!(
+        !store
+            .establish_download_job_storage(
+                job.token,
+                crate::NativeFileIdentity::Unix {
+                    device_id: 1,
+                    inode_number: 2
+                }
+            )
+            .unwrap()
     );
 }

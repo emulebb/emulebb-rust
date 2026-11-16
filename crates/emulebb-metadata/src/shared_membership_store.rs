@@ -68,12 +68,14 @@ impl MetadataStore {
         );
         let native_root = NativePath::from(root);
         let native_path = NativePath::from(path);
-        if crate::delivery_exclusion_store::is_excluded(tx, path)? {
+        if crate::delivery_exclusion_store::identity_is_excluded(tx, current.identity)?
+            || crate::delivery_exclusion_store::is_excluded(tx, path)?
+        {
             return Ok(false);
         }
         let found = tx.query_row(
             "SELECT shared_directory_roots.id, local_file_instances.path_id,
-                    local_file_instances.verified_fingerprint
+                    local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
              FROM shared_directory_roots
              JOIN local_paths root_paths ON root_paths.id = shared_directory_roots.path_id
              JOIN local_paths file_paths ON file_paths.platform = root_paths.platform
@@ -94,11 +96,11 @@ impl MetadataStore {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(2)?,crate::native_file::optional_identity_from_row(row,3)?,
                 ))
             },
         );
-        let (root_id, path_id, stored) = match found {
+        let (root_id, path_id, stored, secondary) = match found {
             Ok(found) => found,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
             Err(error) => return Err(error.into()),
@@ -106,6 +108,10 @@ impl MetadataStore {
         if !NativeFileFingerprint::from_storage_bytes(&stored)
             .is_some_and(|fingerprint| fingerprint.safely_matches(current))
         {
+            return Ok(false);
+        }
+        let evidence = crate::NativeFileIdentityEvidence::new(current.identity, secondary)?;
+        if crate::delivery_exclusion_store::evidence_is_excluded(tx, evidence)? {
             return Ok(false);
         }
         let now = unix_ms();
@@ -331,7 +337,11 @@ impl MetadataStore {
             DELETE FROM temp.scanned_membership_paths;",
         )?;
         for (path, relative, current_fingerprint) in paths {
-            if crate::delivery_exclusion_store::is_excluded(&tx, path)? {
+            if crate::delivery_exclusion_store::identity_is_excluded(
+                &tx,
+                current_fingerprint.identity,
+            )? || crate::delivery_exclusion_store::is_excluded(&tx, path)?
+            {
                 continue;
             }
             ensure!(
@@ -343,13 +353,13 @@ impl MetadataStore {
                 "shared member must have a safe relative path"
             );
             let native_path = NativePath::from(path.as_path());
-            let cached: (i64, Vec<u8>) = match tx.query_row(
-                "SELECT local_file_instances.path_id, local_file_instances.verified_fingerprint
+            let cached: (i64, Vec<u8>,Option<crate::NativeFileIdentity>) = match tx.query_row(
+                "SELECT local_file_instances.path_id, local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
                  FROM local_file_instances
                  JOIN local_paths ON local_paths.id = local_file_instances.path_id
                  WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2",
                 params![NativePath::platform(), native_path.storage_bytes()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?,crate::native_file::optional_identity_from_row(row,2)?)),
             ) {
                 Ok(cached) => cached,
                 Err(rusqlite::Error::QueryReturnedNoRows) => continue,
@@ -360,6 +370,11 @@ impl MetadataStore {
                 continue;
             };
             if !stored_fingerprint.safely_matches(current_fingerprint) {
+                continue;
+            }
+            let evidence =
+                crate::NativeFileIdentityEvidence::new(current_fingerprint.identity, cached.2)?;
+            if crate::delivery_exclusion_store::evidence_is_excluded(&tx, evidence)? {
                 continue;
             }
             let path_id = cached.0;
@@ -440,15 +455,16 @@ impl MetadataStore {
     /// The runtime still checks the open file's fingerprint before serving.
     pub fn active_shared_content_count(&self) -> Result<usize> {
         let count: i64 = self.connection()?.query_row(
-            "SELECT count(DISTINCT local_file_instances.known_file_id)
+            concat!("SELECT count(DISTINCT local_file_instances.known_file_id)
              FROM shared_file_memberships
              JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
              JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
              WHERE shared_file_memberships.removed_at_ms IS NULL
+               AND ", crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), "
                AND shared_directory_roots.enabled = 1
                AND shared_directory_roots.deleted_at_ms IS NULL
                AND shared_directory_roots.accessible = 1
-               AND shared_directory_roots.shareable = 1",
+               AND shared_directory_roots.shareable = 1"),
             [], |row| row.get(0),
         )?;
         Ok(usize::try_from(count)?)

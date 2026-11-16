@@ -9,7 +9,8 @@ mod download_history_store;
 mod download_job_model;
 mod download_job_store;
 pub use download_job_model::{
-    DownloadIntent, DownloadJobAdmission, DownloadJobRecord, DownloadJobRequest, JobId, JobToken,
+    DownloadIntent, DownloadJobAdmission, DownloadJobRecord, DownloadJobRequest,
+    DownloadJobStorage, JobId, JobToken,
 };
 mod identity_model;
 mod identity_store;
@@ -68,7 +69,9 @@ pub use local_file_store::{
     MetadataVerifiedLocalContent,
 };
 pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot};
-pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};
+pub use native_file::{
+    NativeFileFingerprint, NativeFileIdentity, NativeFileIdentityEvidence, NativeFileTimestamp,
+};
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};

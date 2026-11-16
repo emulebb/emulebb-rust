@@ -45,7 +45,7 @@ impl rusqlite::types::FromSql for JobId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct JobToken {
     pub job_id: JobId,
     pub generation: u64,
@@ -82,6 +82,16 @@ pub struct DownloadJobRequest {
     pub piece_size: u64,
 }
 
+/// Physical ownership is distinct from a profile-scoped public JobId. The full
+/// path and random marker are fixed before allocation; identity is established
+/// after exclusive directory creation and before any payload write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadJobStorage {
+    pub path: PathBuf,
+    pub marker_id: uuid::Uuid,
+    pub identity: Option<crate::NativeFileIdentity>,
+}
+
 /// Compact pages never hydrate piece maps, sources, or historical workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadJobRecord {
@@ -93,6 +103,7 @@ pub struct DownloadJobRecord {
     pub category_id: Option<i64>,
     pub intent: DownloadIntent,
     pub selected_temp: Option<PathBuf>,
+    pub storage: Option<DownloadJobStorage>,
     pub payload_verified: bool,
     pub delivery_state: crate::MetadataTransferDeliveryState,
     pub created_at_s: i64,

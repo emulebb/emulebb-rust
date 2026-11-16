@@ -1370,23 +1370,17 @@ impl super::MetadataStore {
         Ok(changed != 0)
     }
 
-    /// Persist a terminal destructive-delete request and its initial owned
-    /// transfer-directory identity before either filesystem authority is
-    /// touched. Repeating the request preserves both original values.
-    pub fn request_transfer_deletion(
-        &self,
-        id: JobId,
-        transfer_directory_authority: Option<MetadataTransferDirectoryDeletionAuthority>,
-    ) -> Result<bool> {
+    /// Persist destructive intent without minting ownership over a directory.
+    /// Cleanup uses only the authority established at exclusive allocation.
+    pub fn request_transfer_deletion(&self, id: JobId) -> Result<bool> {
         let now = crate::download_job_store::unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed=tx.execute("UPDATE download_jobs SET delete_requested_at_s=?2,removed_at_s=coalesce(removed_at_s,?2),
-            storage_directory_identity=?3,storage_directory_marker_id=?4,updated_at_s=?2,
+            updated_at_s=?2,
             execution_generation=execution_generation+1
             WHERE id=?1 AND delete_requested_at_s IS NULL AND execution_generation<9223372036854775807",
-            params![id,now,transfer_directory_authority.map(|a| a.identity.storage_bytes()),
-                transfer_directory_authority.map(|a| a.marker_id.to_string())])?;
+            params![id,now])?;
         if changed != 0 {
             tx.execute("UPDATE known_files SET latest_download_job_id=NULL WHERE latest_download_job_id=?1",[id])?;
         }
@@ -1437,7 +1431,7 @@ impl super::MetadataStore {
             .query_row(
                 r#"
                 SELECT download_jobs.storage_directory_identity,
-                       download_jobs.storage_directory_marker_id
+                       CASE WHEN download_jobs.storage_directory_identity IS NOT NULL THEN download_jobs.storage_directory_marker_id END
                 FROM known_files
                 JOIN download_jobs ON download_jobs.known_file_id = known_files.id
                 WHERE download_jobs.id = ?1
@@ -1453,11 +1447,7 @@ impl super::MetadataStore {
 
     /// Record terminal completion and durably own only its internal piece
     /// directory. The delivered output and verified local content are retained.
-    pub fn request_transfer_retirement(
-        &self,
-        token: JobToken,
-        authority: Option<MetadataTransferDirectoryDeletionAuthority>,
-    ) -> Result<bool> {
+    pub fn request_transfer_retirement(&self, token: JobToken) -> Result<bool> {
         let id = token.job_id;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1487,12 +1477,10 @@ impl super::MetadataStore {
             params![job_id, crate::download_job_store::unix_s()],
         )?;
         tx.execute(
-            "INSERT INTO download_retirements(job_id, directory_identity, directory_marker_id) VALUES (?1, ?2, ?3) ON CONFLICT(job_id) DO NOTHING",
-            params![
-                job_id,
-                authority.map(|value| value.identity.storage_bytes()),
-                authority.map(|value| value.marker_id.hyphenated().to_string()),
-            ],
+            "INSERT INTO download_retirements(job_id, directory_identity, directory_marker_id)
+             SELECT id,storage_directory_identity,CASE WHEN storage_directory_identity IS NOT NULL THEN storage_directory_marker_id END
+             FROM download_jobs WHERE id=?1 ON CONFLICT(job_id) DO NOTHING",
+            params![job_id],
         )?;
         tx.commit()?;
         Ok(true)

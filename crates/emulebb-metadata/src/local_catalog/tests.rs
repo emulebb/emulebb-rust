@@ -61,7 +61,7 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
             }
         }
         tx.execute(
-            "INSERT INTO local_file_instances SELECT id+1,id,32,x'01',?1,0 FROM known_files",
+            "INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) SELECT id+1,id,32,x'01',?1,0 FROM known_files",
             [&fingerprint],
         )
         .unwrap();

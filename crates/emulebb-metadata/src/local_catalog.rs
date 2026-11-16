@@ -8,7 +8,32 @@ use crate::{
 use anyhow::Result;
 use rusqlite::{Row, params};
 
-pub(crate) const VERIFIED_SHARE_EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM known_files k JOIN verified_local_content c ON c.known_file_id=k.id JOIN local_file_instances i INDEXED BY local_file_instances_content_idx ON i.known_file_id=k.id JOIN temp.session_verified_local_paths v ON v.path_id=i.path_id AND v.verified_fingerprint=i.verified_fingerprint WHERE k.ed2k_hash=?1 AND EXISTS(SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL AND r.accessible=1 AND r.shareable=1))";
+// All eligible-copy readers compare both actual identity observations. This
+// fragment accepts only a source-code SQL alias, never request input.
+macro_rules! unexcluded_identity_sql {
+    ($instance:literal) => {
+        concat!(
+            "NOT EXISTS(SELECT 1 FROM download_delivery_exclusions exclusion WHERE ",
+            "exclusion.output_identity IN (",
+            $instance,
+            ".native_identity,",
+            $instance,
+            ".secondary_identity) OR ",
+            "exclusion.secondary_identity IN (",
+            $instance,
+            ".native_identity,",
+            $instance,
+            ".secondary_identity))"
+        )
+    };
+}
+pub(crate) use unexcluded_identity_sql;
+
+pub(crate) const VERIFIED_SHARE_EXISTS_SQL: &str = concat!(
+    "SELECT EXISTS(SELECT 1 FROM known_files k JOIN verified_local_content c ON c.known_file_id=k.id JOIN local_file_instances i INDEXED BY local_file_instances_content_idx ON i.known_file_id=k.id JOIN temp.session_verified_local_paths v ON v.path_id=i.path_id AND v.verified_fingerprint=i.verified_fingerprint WHERE k.ed2k_hash=?1 AND ",
+    crate::local_catalog::unexcluded_identity_sql!("i"),
+    " AND EXISTS(SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL AND r.accessible=1 AND r.shareable=1))"
+);
 const PARTIAL_SHARE_OFFER_SQL: &str = "SELECT length(CAST(t.display_name AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.display_name,t.expected_size_bytes,t.upload_priority,t.rating FROM known_files k JOIN download_jobs t ON t.known_file_id=k.id WHERE k.ed2k_hash=?1 AND t.expected_size_bytes IS NOT NULL AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL AND t.delete_requested_at_s IS NULL AND EXISTS(SELECT 1 FROM download_job_verified_ranges r WHERE r.job_id=t.id)";
 
 /// Compact, bounded fields needed to advertise an independent partial source.
@@ -45,21 +70,22 @@ pub(crate) fn representative_path(verified_only: bool) -> String {
     } else {
         ""
     };
-    format!("SELECT candidate.path_id FROM local_file_instances candidate
+    format!(concat!("SELECT candidate.path_id FROM local_file_instances candidate
         JOIN local_paths candidate_paths ON candidate_paths.id = candidate.path_id
         WHERE candidate.known_file_id = known_files.id
+          AND ", crate::local_catalog::unexcluded_identity_sql!("candidate"), "
           AND EXISTS (SELECT 1 FROM shared_file_memberships m
               JOIN shared_directory_roots r ON r.id = m.root_id
               WHERE m.path_id = candidate.path_id AND m.removed_at_ms IS NULL
                 AND r.enabled = 1 AND r.deleted_at_ms IS NULL AND r.accessible = 1 AND r.shareable = 1)
           {verified}
-        ORDER BY candidate_paths.platform, candidate_paths.native_path LIMIT 1")
+        ORDER BY candidate_paths.platform, candidate_paths.native_path LIMIT 1"), verified=verified)
 }
 
 pub(crate) fn catalog_sql(exact: bool, verified_only: bool, instances: bool) -> String {
     let selection = if exact { "=" } else { ">" };
     let columns = if instances {
-        "local_paths.platform, local_paths.native_path, lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes, local_file_instances.verified_fingerprint"
+        "local_paths.platform, local_paths.native_path, lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes, local_file_instances.verified_fingerprint,local_file_instances.secondary_identity"
     } else {
         COLUMNS
     };

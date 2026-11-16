@@ -2,6 +2,7 @@ use super::*;
 
 fn content(root: &std::path::Path, byte: &str) -> MetadataVerifiedLocalContent {
     MetadataVerifiedLocalContent {
+        secondary_identity: None,
         file_hash: byte.repeat(16),
         display_name: "Sample.bin".into(),
         file_size: 184_321,
@@ -352,4 +353,129 @@ fn fallback_rechecks_binding_changed_after_actual_recovery_transaction_abort() {
     drop(competing);
     drop(db);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ingest_projection_and_copy_readers_skip_paired_exclusion_before_selecting_sibling() {
+    let root = std::env::temp_dir().join(format!("ingest-exclusion-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let mut db = MetadataStore::in_memory().unwrap();
+    db.replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+        path: root.to_string_lossy().into_owned(),
+        monitor_owned: false,
+        shareable: true,
+        accessible: true,
+    }])
+    .unwrap();
+    let low = crate::NativeFileIdentity::WindowsLowResolution {
+        volume_serial_number: 7,
+        file_index: 11,
+    };
+    let mut blocked = content(&root, "11");
+    blocked.fingerprint.identity = crate::NativeFileIdentity::WindowsHighResolution {
+        volume_serial_number: 7,
+        file_id: 19,
+    };
+    blocked.secondary_identity = Some(low);
+    db.upsert_verified_local_content(&blocked).unwrap();
+    assert!(
+        db.admit_local_path_to_root(
+            &root,
+            &blocked.path,
+            std::path::Path::new("sample.bin"),
+            &blocked.fingerprint
+        )
+        .unwrap()
+    );
+    // Retained orphan reservation authority remains effective even after its
+    // originating job is gone. Leave membership/session rows in place.
+    let output = root.join("output.bin");
+    db.connection().unwrap().execute(
+        "INSERT INTO download_delivery_exclusions(platform,native_path,reservation_id,originating_job_id,output_identity)
+         VALUES(?1,?2,?3,1,?4)",
+        params![NativePath::platform(), NativePath::from(output.as_path()).storage_bytes(),
+            uuid::Uuid::new_v4().to_string(), low.storage_bytes()],
+    ).unwrap();
+    assert!(
+        db.local_ingest_projections(&[blocked.file_hash.clone()])
+            .unwrap()[0]
+            .complete
+            .is_none()
+    );
+    assert!(
+        db.current_shared_files_by_hash(&blocked.file_hash)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db.next_shared_copy(&blocked.file_hash, 0, 65_536)
+            .unwrap()
+            .is_none()
+    );
+
+    let mut sibling = content(&root, "11");
+    sibling.path = root.join("sibling.bin");
+    db.upsert_verified_local_content(&sibling).unwrap();
+    assert!(
+        db.admit_local_path_to_root(
+            &root,
+            &sibling.path,
+            std::path::Path::new("sibling.bin"),
+            &sibling.fingerprint
+        )
+        .unwrap()
+    );
+    let projections = db
+        .local_ingest_projections(&[blocked.file_hash.clone()])
+        .unwrap();
+    assert_eq!(
+        projections[0]
+            .complete
+            .as_ref()
+            .unwrap()
+            .media_path
+            .as_ref(),
+        Some(&sibling.path)
+    );
+    let copies = db.current_shared_files_by_hash(&blocked.file_hash).unwrap();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(copies[0].source_path, sibling.path);
+    assert_eq!(
+        db.next_shared_copy(&blocked.file_hash, 0, 65_536)
+            .unwrap()
+            .unwrap()
+            .source_path,
+        sibling.path
+    );
+
+    let recovery = MetadataAichRecoverySet {
+        root: [0x22; 20],
+        size: sibling.file_size,
+        parts: vec![vec![0x33; 40]],
+        part_roots: vec![[0x22; 20]],
+    };
+    let expected = db.local_file_instance(&sibling.path).unwrap().unwrap();
+    let epoch = AtomicU64::new(0);
+    let committed = db
+        .commit_local_ingest(
+            &sibling,
+            &recovery,
+            &MetadataTransferMediaMetadata::default(),
+            Some(&expected),
+            &[],
+            None,
+            (&epoch, 0),
+        )
+        .unwrap();
+    assert_eq!(
+        committed.projections[0]
+            .complete
+            .as_ref()
+            .unwrap()
+            .media_path
+            .as_ref(),
+        Some(&sibling.path)
+    );
+    drop(db);
+    std::fs::remove_dir(root).unwrap();
 }

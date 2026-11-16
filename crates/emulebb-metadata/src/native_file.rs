@@ -78,6 +78,61 @@ impl NativeFileIdentity {
     }
 }
 
+/// Actual observations from one open handle. A Windows high-resolution
+/// fingerprint additionally needs the genuine low-resolution observation for
+/// exclusion comparisons with handles/filesystems which expose only that API.
+/// This evidence grants no destructive ownership and never converts ID formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeFileIdentityEvidence {
+    primary: NativeFileIdentity,
+    secondary: Option<NativeFileIdentity>,
+}
+
+impl NativeFileIdentityEvidence {
+    pub fn new(
+        primary: NativeFileIdentity,
+        secondary: Option<NativeFileIdentity>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            matches!(
+                (primary, secondary),
+                (NativeFileIdentity::Unix { .. }, None)
+                    | (NativeFileIdentity::WindowsLowResolution { .. }, None)
+                    | (
+                        NativeFileIdentity::WindowsHighResolution { .. },
+                        Some(NativeFileIdentity::WindowsLowResolution { .. })
+                    )
+            ),
+            "incomplete or incompatible native identity evidence"
+        );
+        Ok(Self { primary, secondary })
+    }
+    pub const fn primary(self) -> NativeFileIdentity {
+        self.primary
+    }
+    pub const fn secondary(self) -> Option<NativeFileIdentity> {
+        self.secondary
+    }
+    pub fn validate_fingerprint(self, fingerprint: &NativeFileFingerprint) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.primary == fingerprint.identity,
+            "native identity evidence does not match fingerprint"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn optional_identity_from_row(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+) -> rusqlite::Result<Option<NativeFileIdentity>> {
+    row.get::<_, Option<Vec<u8>>>(column)?
+        .map(|bytes| {
+            NativeFileIdentity::from_storage_bytes(&bytes).ok_or(rusqlite::Error::InvalidQuery)
+        })
+        .transpose()
+}
+
 /// One filesystem timestamp with its full native subsecond value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeFileTimestamp {
@@ -401,5 +456,34 @@ mod tests {
 
         assert!(NativeFileFingerprint::from_storage_bytes(&unknown_version).is_none());
         assert!(NativeFileFingerprint::from_storage_bytes(&trailing).is_none());
+    }
+}
+
+#[cfg(test)]
+mod identity_evidence_tests {
+    use super::*;
+    #[test]
+    fn high_identity_requires_actual_low_observation_and_matching_fingerprint() {
+        let high = NativeFileIdentity::WindowsHighResolution {
+            volume_serial_number: 7,
+            file_id: 11,
+        };
+        let low = NativeFileIdentity::WindowsLowResolution {
+            volume_serial_number: 7,
+            file_index: 13,
+        };
+        assert!(NativeFileIdentityEvidence::new(high, None).is_err());
+        assert!(NativeFileIdentityEvidence::new(low, Some(high)).is_err());
+        let evidence = NativeFileIdentityEvidence::new(high, Some(low)).unwrap();
+        let mut fingerprint = NativeFileFingerprint {
+            identity: high,
+            size_bytes: 1,
+            modified: NativeFileTimestamp::new(1, 0).unwrap(),
+            changed: None,
+        };
+        evidence.validate_fingerprint(&fingerprint).unwrap();
+        fingerprint.identity = low;
+        assert!(evidence.validate_fingerprint(&fingerprint).is_err());
+        assert_ne!(evidence.primary(), evidence.secondary().unwrap());
     }
 }

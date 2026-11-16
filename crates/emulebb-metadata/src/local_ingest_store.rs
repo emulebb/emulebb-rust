@@ -89,17 +89,23 @@ fn project(conn: &Connection, hash: &str) -> Result<MetadataIngestProjection> {
     // One verified copy by path key, never an unverified representative and
     // never a materialized list of all copies. Bounds apply before decoding.
     let sql = format!(
-        "SELECT {} FROM known_files
+        concat!(
+            "SELECT {} FROM known_files
         JOIN verified_local_content ON verified_local_content.known_file_id=known_files.id
         JOIN local_file_instances ON local_file_instances.known_file_id=known_files.id
         JOIN local_paths ON local_paths.id=local_file_instances.path_id
         JOIN temp.session_verified_local_paths v ON v.path_id=local_paths.id
             AND v.verified_fingerprint=local_file_instances.verified_fingerprint
-        WHERE known_files.ed2k_hash=?1 AND EXISTS(SELECT 1 FROM shared_file_memberships m
+        WHERE known_files.ed2k_hash=?1
+        AND ",
+            crate::local_catalog::unexcluded_identity_sql!("local_file_instances"),
+            "
+        AND EXISTS(SELECT 1 FROM shared_file_memberships m
             JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=local_paths.id
             AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL
             AND r.accessible=1 AND r.shareable=1)
-        ORDER BY local_file_instances.path_id LIMIT 1",
+        ORDER BY local_file_instances.path_id LIMIT 1"
+        ),
         crate::local_catalog::COLUMNS
     );
     // Validate the selected row before catalog_entry allocates text/path buffers.

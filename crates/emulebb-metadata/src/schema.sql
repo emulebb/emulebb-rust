@@ -254,6 +254,7 @@ CREATE TABLE local_paths (
 ) STRICT;
 
 CREATE INDEX local_paths_search_idx ON local_paths(platform, search_key);
+CREATE INDEX local_paths_delivery_leaf_idx ON local_paths(platform, file_name_search_key, id);
 
 -- Durable, verified path-to-content cache. Presence in this table does not
 -- authorize serving: current root membership and a live fingerprint match do.
@@ -262,6 +263,7 @@ CREATE TABLE local_file_instances (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     native_identity BLOB NOT NULL CHECK(length(native_identity) > 0),
+    secondary_identity BLOB CHECK(secondary_identity IS NULL OR length(secondary_identity)<=64),
     verified_fingerprint BLOB NOT NULL CHECK(length(verified_fingerprint) > 0),
     verified_at_ms INTEGER NOT NULL CHECK(verified_at_ms >= 0)
 ) STRICT;
@@ -273,6 +275,8 @@ CREATE UNIQUE INDEX local_file_instances_path_content_idx
 
 CREATE INDEX local_file_instances_identity_idx
     ON local_file_instances(native_identity, size_bytes);
+CREATE INDEX local_file_instances_secondary_identity_idx
+    ON local_file_instances(secondary_identity, size_bytes) WHERE secondary_identity IS NOT NULL;
 
 CREATE TABLE shared_directory_roots (
     id INTEGER PRIMARY KEY,
@@ -331,6 +335,7 @@ CREATE TABLE download_jobs (
     expected_size_bytes INTEGER CHECK(expected_size_bytes IS NULL OR expected_size_bytes >= 0),
     execution_generation INTEGER NOT NULL DEFAULT 0 CHECK(execution_generation >= 0),
     selected_temp_path_id INTEGER REFERENCES local_paths(id),
+    storage_path_id INTEGER UNIQUE REFERENCES local_paths(id),
     terminal_completed_at_s INTEGER CHECK(terminal_completed_at_s IS NULL OR terminal_completed_at_s >= 0),
     internal_storage_retired INTEGER NOT NULL DEFAULT 0 CHECK(internal_storage_retired IN (0, 1)),
     display_name TEXT NOT NULL,
@@ -379,23 +384,13 @@ CREATE TABLE download_jobs (
     -- deliberately preserve the marker.
     delete_requested_at_s INTEGER
         CHECK(delete_requested_at_s IS NULL OR delete_requested_at_s >= 0),
-    -- Stable identity of the owned transfer directory captured before it is
-    -- renamed to the deletion tombstone. Recovery must never recursively
-    -- delete a path whose identity differs from this durable authority.
-    storage_directory_identity BLOB,
-    -- Random marker created inside the owned directory before deletion intent
-    -- commits. Native identities can be reused after deletion, so recovery
-    -- requires both this marker and the native identity.
-    storage_directory_marker_id TEXT,
-    CHECK(
-        (storage_directory_identity IS NULL AND storage_directory_marker_id IS NULL)
-        OR (
-            storage_directory_identity IS NOT NULL
-            AND storage_directory_marker_id IS NOT NULL
-            AND length(trim(storage_directory_marker_id)) > 0
-            AND delete_requested_at_s IS NOT NULL
-        )
-    ),
+    -- Allocation intent is persisted before exclusive directory creation. Only
+    -- an established identity plus the marker authorizes payload writes/cleanup.
+    storage_directory_identity BLOB CHECK(storage_directory_identity IS NULL OR length(storage_directory_identity)<=64),
+    storage_directory_marker_id TEXT UNIQUE CHECK(storage_directory_marker_id IS NULL OR length(storage_directory_marker_id)=36),
+    CHECK((selected_temp_path_id IS NULL) = (storage_path_id IS NULL)),
+    CHECK((storage_path_id IS NULL) = (storage_directory_marker_id IS NULL)),
+    CHECK(storage_directory_identity IS NULL OR storage_path_id IS NOT NULL),
     CHECK(
         (delivery_state = 'pending' AND delivery_ownership = 'none' AND delivered_path_id IS NULL)
         OR (delivery_state = 'delivered' AND delivery_ownership = 'owned' AND delivered_path_id IS NOT NULL AND source_fingerprint IS NOT NULL)
@@ -417,6 +412,12 @@ CREATE INDEX download_jobs_visible_page_idx ON download_jobs(id) WHERE removed_a
 CREATE INDEX download_jobs_work_page_idx ON download_jobs(intent, id)
 WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
 CREATE INDEX download_jobs_content_history_idx ON download_jobs(known_file_id, id);
+CREATE TRIGGER download_jobs_fixed_physical_storage BEFORE UPDATE OF storage_path_id, storage_directory_identity, storage_directory_marker_id ON download_jobs
+WHEN (old.storage_path_id IS NOT NULL AND new.storage_path_id IS NOT old.storage_path_id)
+  OR (old.storage_directory_marker_id IS NOT NULL AND new.storage_directory_marker_id IS NOT old.storage_directory_marker_id)
+  OR (old.storage_directory_identity IS NOT NULL AND new.storage_directory_identity IS NOT old.storage_directory_identity)
+BEGIN SELECT RAISE(ABORT, 'download job physical storage authority is immutable'); END;
+
 CREATE TRIGGER download_jobs_fixed_storage BEFORE UPDATE OF selected_temp_path_id ON download_jobs
 WHEN old.selected_temp_path_id IS NOT NULL AND new.selected_temp_path_id IS NOT old.selected_temp_path_id
 BEGIN SELECT RAISE(ABORT, 'download job storage is immutable once selected'); END;
@@ -470,8 +471,19 @@ CREATE TABLE download_delivery_exclusions (
     native_path BLOB NOT NULL,
     reservation_id TEXT NOT NULL UNIQUE CHECK(length(reservation_id)=36),
     originating_job_id INTEGER NOT NULL CHECK(originating_job_id > 0),
+    output_identity BLOB CHECK(output_identity IS NULL OR length(output_identity)<=64),
+    secondary_identity BLOB CHECK(secondary_identity IS NULL OR length(secondary_identity)<=64),
+    CHECK(secondary_identity IS NULL OR output_identity IS NOT NULL),
     PRIMARY KEY(platform, native_path)
 ) STRICT;
+
+CREATE INDEX download_delivery_exclusion_identity_idx ON download_delivery_exclusions(output_identity)
+WHERE output_identity IS NOT NULL;
+CREATE INDEX download_delivery_exclusion_secondary_identity_idx ON download_delivery_exclusions(secondary_identity)
+WHERE secondary_identity IS NOT NULL;
+CREATE TRIGGER download_delivery_exclusion_identity_immutable BEFORE UPDATE OF output_identity,secondary_identity ON download_delivery_exclusions
+WHEN old.output_identity IS NOT NULL AND (new.output_identity IS NOT old.output_identity OR new.secondary_identity IS NOT old.secondary_identity)
+BEGIN SELECT RAISE(ABORT, 'delivery exclusion identity is immutable'); END;
 
 CREATE TRIGGER download_delivery_exclusion_origin_immutable
 BEFORE UPDATE OF originating_job_id,reservation_id,platform,native_path ON download_delivery_exclusions
@@ -870,8 +882,9 @@ BEGIN
 END;
 
 CREATE TRIGGER library_catalog_local_file_instances_update
-AFTER UPDATE OF known_file_id, verified_fingerprint ON local_file_instances
+AFTER UPDATE OF known_file_id, verified_fingerprint, native_identity, secondary_identity ON local_file_instances
 WHEN old.known_file_id IS NOT new.known_file_id OR old.verified_fingerprint IS NOT new.verified_fingerprint
+  OR old.native_identity IS NOT new.native_identity OR old.secondary_identity IS NOT new.secondary_identity
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
 END;
@@ -931,6 +944,27 @@ END;
 CREATE TRIGGER library_catalog_verified_local_content_update
 AFTER UPDATE OF known_file_id ON verified_local_content
 WHEN old.known_file_id IS NOT new.known_file_id
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+-- Reservation identity changes affect eligibility before membership withdrawal.
+CREATE TRIGGER library_catalog_delivery_exclusions_insert
+AFTER INSERT ON download_delivery_exclusions
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_delivery_exclusions_delete
+AFTER DELETE ON download_delivery_exclusions
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_delivery_exclusions_update
+AFTER UPDATE OF platform, native_path, output_identity, secondary_identity ON download_delivery_exclusions
+WHEN old.platform IS NOT new.platform OR old.native_path IS NOT new.native_path
+  OR old.output_identity IS NOT new.output_identity OR old.secondary_identity IS NOT new.secondary_identity
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
 END;

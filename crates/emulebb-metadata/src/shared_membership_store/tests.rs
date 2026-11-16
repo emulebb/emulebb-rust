@@ -37,7 +37,12 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         changed: Some(NativeFileTimestamp::new(1_700_000_001, 234_567_890).unwrap()),
     };
     store
-        .upsert_local_file_instance(&file, hash, &fingerprint)
+        .upsert_local_file_instance(
+            &file,
+            hash,
+            &fingerprint,
+            crate::NativeFileIdentityEvidence::new((&fingerprint).identity, None).unwrap(),
+        )
         .unwrap();
     store.connection().unwrap().execute_batch(
         "CREATE TEMP TRIGGER fail_session_verification BEFORE INSERT ON session_verified_local_paths
@@ -183,7 +188,12 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         inode_number: 12,
     };
     store
-        .upsert_local_file_instance(&file, hash, &replacement)
+        .upsert_local_file_instance(
+            &file,
+            hash,
+            &replacement,
+            crate::NativeFileIdentityEvidence::new((&replacement).identity, None).unwrap(),
+        )
         .unwrap();
     store
         .replace_root_memberships(

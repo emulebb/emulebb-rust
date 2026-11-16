@@ -43,6 +43,9 @@ pub struct MetadataDeliveryOutputReservation {
     pub originating_job_id: JobId,
     pub reservation_id: Uuid,
     pub path: PathBuf,
+    /// Exclusion only; never grants permission to delete the output.
+    pub output_identity: Option<NativeFileIdentity>,
+    pub secondary_identity: Option<NativeFileIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
