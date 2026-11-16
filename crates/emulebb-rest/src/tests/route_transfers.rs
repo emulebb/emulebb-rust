@@ -176,7 +176,7 @@ async fn transfer_patch_uses_canonical_update_families() {
                 .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"categoryName":"media"}"#))
+                .body(Body::from(r#"{"category":"media"}"#))
                 .unwrap(),
         )
         .await
@@ -186,8 +186,7 @@ async fn transfer_patch_uses_canonical_update_families() {
         .await
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["categoryId"], 1);
-    assert_eq!(value["data"]["categoryName"], "Media");
+    assert_eq!(value["data"]["category"], "Media");
 
     let rename_response = app
         .clone()
@@ -210,7 +209,7 @@ async fn transfer_patch_uses_canonical_update_families() {
     assert_eq!(value["data"]["displayName"], "Renamed.bin");
     assert_eq!(value["data"]["nameConsensus"]["pinned"], true);
     assert_eq!(value["data"]["priority"], "veryhigh");
-    assert_eq!(value["data"]["categoryId"], 1);
+    assert_eq!(value["data"]["category"], "Media");
 
     let multi_family_response = app
         .oneshot(

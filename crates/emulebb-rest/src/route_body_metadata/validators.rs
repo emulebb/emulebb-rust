@@ -945,7 +945,7 @@ pub(super) fn validate_transfer_patch_body_fields(
     if object.contains_key("priority") {
         mutation_family_count += 1;
     }
-    if object.contains_key("categoryId") || object.contains_key("categoryName") {
+    if object.contains_key("category") {
         mutation_family_count += 1;
     }
     if object.contains_key("displayName") {
@@ -953,7 +953,7 @@ pub(super) fn validate_transfer_patch_body_fields(
     }
     if mutation_family_count == 0 {
         return Err(invalid_body_error(
-            "transfer PATCH requires priority, categoryId, categoryName, or displayName",
+            "transfer PATCH requires priority, category, or displayName",
         ));
     }
     if mutation_family_count > 1 {
@@ -1194,50 +1194,28 @@ fn validate_category_core_body_fields(
 ) -> Result<(), Box<Response>> {
     if require_name || object.contains_key("name") {
         validate_non_empty_text_body_field(object.get("name"), "name")?;
+        if !object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(emulebb_core::valid_category_name)
+        {
+            return Err(invalid_body_error(
+                "name must be 1-64 ASCII letters, digits, or hyphens and start with a letter or digit",
+            ));
+        }
     }
-    if let Some(path) = object.get("path")
-        && !path.is_null()
-    {
-        validate_path_text_body_field(Some(path), "path")?;
+    for name in ["tempDir", "destinationDir"] {
+        if let Some(path) = object.get(name)
+            && !path.is_null()
+        {
+            validate_path_text_body_field(Some(path), name)?;
+        }
     }
     if object
         .get("comment")
         .is_some_and(|value| !value.is_string())
     {
         return Err(invalid_body_error("comment must be a string"));
-    }
-    if let Some(color) = object.get("color")
-        && !color.is_null()
-    {
-        let Some(color) = color.as_u64() else {
-            return Err(invalid_body_error("color must be null or an RGB integer"));
-        };
-        if color > 0x00ff_ffff {
-            return Err(invalid_body_error("color must be null or an RGB integer"));
-        }
-    }
-    if let Some(priority) = object.get("priority") {
-        validate_category_priority_body_field(priority)?;
-    }
-    Ok(())
-}
-
-fn validate_category_priority_body_field(value: &serde_json::Value) -> Result<(), Box<Response>> {
-    if let Some(priority) = value.as_u64() {
-        if priority <= u32::MAX as u64 {
-            return Ok(());
-        }
-        return Err(invalid_body_error(
-            "priority must be a supported priority value",
-        ));
-    }
-    let Some(priority) = value.as_str() else {
-        return Err(invalid_body_error("priority must be a string or number"));
-    };
-    if !matches!(priority, "verylow" | "low" | "normal" | "high" | "veryhigh") {
-        return Err(invalid_body_error(
-            "priority must be one of verylow, low, normal, high, veryhigh",
-        ));
     }
     Ok(())
 }

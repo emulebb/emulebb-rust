@@ -72,31 +72,15 @@ fn validate_category_selector_body(
     if !uses_category_selector_body(method, path) {
         return Ok(());
     }
-    if object.contains_key("categoryId") && object.contains_key("categoryName") {
-        return Err(invalid_body_error(
-            "categoryId and categoryName are mutually exclusive",
-        ));
-    }
-    if let Some(category_id) = object.get("categoryId") {
-        let Some(category_id) = category_id.as_u64() else {
-            return Err(invalid_body_error("categoryId must be an unsigned number"));
-        };
-        if category_id > u32::MAX as u64 {
-            return Err(invalid_body_error("categoryId is out of range"));
+    if let Some(category) = object.get("category") {
+        if category.is_null() {
+            return Ok(());
         }
-        return Ok(());
-    }
-    if let Some(category_name) = object.get("categoryName") {
-        let Some(category_name) = category_name.as_str() else {
-            return Err(invalid_body_error("categoryName must be a string"));
+        let Some(category_name) = category.as_str() else {
+            return Err(invalid_body_error("category must be a string or null"));
         };
-        if category_name
-            .trim_matches(|ch: char| ch.is_ascii_whitespace())
-            .is_empty()
-        {
-            return Err(invalid_body_error(
-                "categoryName does not match a configured category",
-            ));
+        if !emulebb_core::valid_category_name(category_name) {
+            return Err(invalid_body_error("category must be a valid category name"));
         }
     }
     Ok(())
@@ -168,17 +152,9 @@ fn validate_route_specific_body_fields(
 }
 
 fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {
-    const TRANSFER_ADD: &[&str] = &[
-        "link",
-        "links",
-        "categoryId",
-        "categoryName",
-        "paused",
-        "knownFilePolicy",
-    ];
-    const TRANSFER_PATCH: &[&str] = &["displayName", "priority", "categoryId", "categoryName"];
-    const SEARCH_RESULT_DOWNLOAD: &[&str] =
-        &["categoryId", "categoryName", "paused", "knownFilePolicy"];
+    const TRANSFER_ADD: &[&str] = &["link", "links", "category", "paused", "knownFilePolicy"];
+    const TRANSFER_PATCH: &[&str] = &["displayName", "priority", "category"];
+    const SEARCH_RESULT_DOWNLOAD: &[&str] = &["category", "paused", "knownFilePolicy"];
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
@@ -194,7 +170,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static", "enabled"];
-    const CATEGORY: &[&str] = &["name", "path", "comment", "color", "priority"];
+    const CATEGORY: &[&str] = &["name", "tempDir", "destinationDir", "comment"];
+    const CATEGORY_PATCH: &[&str] = &["tempDir", "destinationDir", "comment"];
     const FRIEND_CREATE: &[&str] = &["userHash", "name"];
     const SEARCH_CREATE: &[&str] = &[
         "query",
@@ -322,7 +299,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
             Some(SHARED_FILE_IGNORE_RULE)
         }
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
-        ("PATCH", ["categories", _]) => Some(CATEGORY),
+        ("PATCH", ["categories", _]) => Some(CATEGORY_PATCH),
         ("POST", ["searches", _, "results", _, "operations", "download"]) => {
             Some(SEARCH_RESULT_DOWNLOAD)
         }

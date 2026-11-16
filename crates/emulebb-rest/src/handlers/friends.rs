@@ -106,6 +106,70 @@ mod tests {
                 "PERSISTENCE_COMMITTED",
                 true,
             ),
+            (
+                PersistenceError::CommittedPublicationFailed,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PERSISTENCE_COMMITTED",
+                true,
+            ),
+        ] {
+            let response = persistence_error(error.into());
+            assert_eq!(response.status(), status);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(
+                body["error"]["details"]
+                    .get("committed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                committed
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_mutation_outcomes_use_the_shared_persistence_contract() {
+        use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+        for (error, status, code, committed) in [
+            (
+                LocalMutationError::Busy,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PERSISTENCE_BUSY",
+                false,
+            ),
+            (
+                LocalMutationError::Closing,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PERSISTENCE_CLOSING",
+                false,
+            ),
+            (
+                LocalMutationError::TooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PERSISTENCE_TOO_LARGE",
+                false,
+            ),
+            (
+                LocalMutationError::Storage,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PERSISTENCE_FAILED",
+                false,
+            ),
+            (
+                LocalMutationError::Committed,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PERSISTENCE_COMMITTED",
+                true,
+            ),
+            (
+                LocalMutationError::Unknown,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PERSISTENCE_UNAVAILABLE",
+                false,
+            ),
         ] {
             let response = persistence_error(error.into());
             assert_eq!(response.status(), status);

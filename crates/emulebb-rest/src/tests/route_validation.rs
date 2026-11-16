@@ -31,7 +31,7 @@ async fn write_routes_use_canonical_json_error_envelope() {
         ("POST", "/api/v1/diagnostics/bundles"),
         ("POST", "/api/v1/diagnostics/crash-tests"),
         ("POST", "/api/v1/categories"),
-        ("PATCH", "/api/v1/categories/1"),
+        ("PATCH", "/api/v1/categories/Media"),
         ("POST", "/api/v1/friends"),
         ("POST", "/api/v1/ip-filter/operations/reload"),
         ("POST", "/api/v1/nat/operations/refresh"),
@@ -96,7 +96,7 @@ async fn json_body_must_be_an_object_for_canonical_contract() {
     let cases = [
         ("POST", "/api/v1/app/shutdown", "[]"),
         ("POST", "/api/v1/transfers", "[]"),
-        ("PATCH", "/api/v1/categories/1", "\"name\""),
+        ("PATCH", "/api/v1/categories/Media", "\"name\""),
         ("POST", "/api/v1/kad/operations/start", "true"),
     ];
 

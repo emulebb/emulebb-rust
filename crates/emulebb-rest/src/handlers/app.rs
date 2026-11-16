@@ -178,9 +178,7 @@ pub(crate) async fn capture_diagnostic_bundle(
             .header(header::CONTENT_LENGTH, bundle.len().to_string())
             .body(Body::from(bundle))
             .expect("diagnostic bundle response must be valid"),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -314,10 +312,14 @@ pub(crate) async fn snapshot(
         .iter()
         .map(shared_file_response)
         .collect::<Vec<_>>();
+    let transfers = match state.core.transfers().await {
+        Ok(transfers) => transfers,
+        Err(error) => return super::persistence::persistence_error(error),
+    };
     api_ok(json!({
         "app": app_info_response(state.core.app_info()),
         "status": status,
-        "transfers": bounded(state.core.transfers().await, limit),
+        "transfers": bounded(transfers, limit),
         "sharedFiles": shared_files,
         "uploads": bounded(without_score_breakdown(state.core.uploads().await), limit),
         "uploadQueue": bounded(without_score_breakdown(state.core.upload_queue().await), limit),

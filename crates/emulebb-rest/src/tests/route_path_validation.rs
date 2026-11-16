@@ -18,19 +18,19 @@ async fn path_error_value(method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn category_id_path_uses_canonical_unsigned_validation() {
+async fn category_path_uses_name_validation() {
     let cases = [
         (
-            "/api/v1/categories/abc",
-            "categoryId must be an unsigned decimal string",
+            "/api/v1/categories/-invalid",
+            "categoryName must be a valid category name",
         ),
         (
-            "/api/v1/categories/-1",
-            "categoryId must be an unsigned decimal string",
+            "/api/v1/categories/invalid_name",
+            "categoryName must be a valid category name",
         ),
         (
-            "/api/v1/categories/4294967296",
-            "categoryId is out of range",
+            "/api/v1/categories/invalid.name",
+            "categoryName must be a valid category name",
         ),
     ];
     for (uri, expected_message) in cases {
@@ -132,7 +132,7 @@ async fn endpoint_path_parameters_use_canonical_address_port_validation() {
 #[tokio::test]
 async fn valid_path_parameters_still_reach_handlers() {
     let accepted_routes = [
-        ("GET", "/api/v1/categories/0"),
+        ("GET", "/api/v1/categories/Media"),
         ("GET", "/api/v1/searches/1"),
         ("GET", "/api/v1/servers/local:4661"),
         ("GET", "/api/v1/servers/local%3A4661"),

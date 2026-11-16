@@ -23,10 +23,11 @@ pub(crate) async fn transfers(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    let items = state
-        .core
-        .transfers()
-        .await
+    let transfers = match state.core.transfers().await {
+        Ok(transfers) => transfers,
+        Err(error) => return super::persistence::persistence_error(error),
+    };
+    let items = transfers
         .into_iter()
         .filter(|transfer| {
             query
@@ -35,9 +36,12 @@ pub(crate) async fn transfers(
                 .is_none_or(|state| transfer.state == state)
         })
         .filter(|transfer| {
-            query
-                .category_id
-                .is_none_or(|category_id| transfer.category_id == category_id)
+            query.category.as_deref().is_none_or(|category| {
+                transfer
+                    .category_name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(category))
+            })
         })
         .collect::<Vec<_>>();
     api_collection_page(items, query.page()).into_response()
@@ -92,8 +96,11 @@ pub(crate) async fn transfer(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.transfer(&hash).await {
-        Some(transfer) => api_ok(transfer).into_response(),
-        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),
+        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
