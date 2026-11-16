@@ -10,6 +10,7 @@ use tokio::{sync::oneshot, task::JoinSet};
 
 pub(super) mod capacity;
 use capacity::{CapacityControl, CapacityLease};
+mod availability;
 mod content_metadata;
 mod ingest;
 mod job_aich;

@@ -97,7 +97,7 @@ pub use download_coordinator::{Ed2kDownloadCoordinatorConfig, MAX_SOURCES_FILE_U
 use download_throttle::Ed2kDownloadThrottle;
 pub use download_throttle::Ed2kDownloadThrottleReservation;
 pub use duplicate::{
-    Ed2kActiveTransferEvidence, Ed2kCurrentLocalFileEvidence, Ed2kCurrentLocalFileKind,
+    Ed2kActiveDownloadEvidence, Ed2kCurrentLocalFileEvidence, Ed2kCurrentLocalFileKind,
     Ed2kDownloadEvidence, Ed2kPreviouslyCompletedEvidence,
 };
 pub(crate) use hashset::decode_aich_hash_hex;

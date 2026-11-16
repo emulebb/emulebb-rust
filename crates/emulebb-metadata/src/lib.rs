@@ -2,6 +2,12 @@
 
 mod aich_recovery_store;
 mod content_identity;
+mod download_availability;
+pub use download_availability::{
+    AvailabilitySource, DownloadAvailabilityAdmission, LocalContentAvailability,
+    MetadataAvailabilityCandidate, MetadataAvailabilityChanged, MetadataAvailabilityCut,
+    MetadataAvailabilityStep, MetadataLocalContentChoiceRequired,
+};
 mod delivery_exclusion_store;
 mod discovery_store;
 mod download_cleanup_store;

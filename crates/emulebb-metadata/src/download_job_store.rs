@@ -199,7 +199,30 @@ impl MetadataStore {
     /// Allocate identity and latest pointer together. An unfinished duplicate
     /// returns unchanged, including intent, name, category, and fixed storage.
     pub fn admit_download_job(&self, request: &DownloadJobRequest) -> Result<DownloadJobAdmission> {
+        self.admit_download_job_inner(request, None)
+    }
+
+    /// Persistence half of native admission. The filesystem observation cannot
+    /// be used after any intervening metadata mutation or root-policy change.
+    pub fn admit_available_download_job(
+        &self,
+        request: &DownloadJobRequest,
+        gate: crate::DownloadAvailabilityAdmission<'_>,
+    ) -> Result<DownloadJobAdmission> {
+        self.admit_download_job_inner(request, Some(gate))
+    }
+
+    fn admit_download_job_inner(
+        &self,
+        request: &DownloadJobRequest,
+        gate: Option<crate::DownloadAvailabilityAdmission<'_>>,
+    ) -> Result<DownloadJobAdmission> {
         let hash = decode_fixed_hex(&request.file_hash, 16, "ED2K hash")?;
+        let aich = gate
+            .as_ref()
+            .and_then(|g| g.aich_root)
+            .map(|root| decode_fixed_hex(root, 20, "AICH root"))
+            .transpose()?;
         ensure!(
             !request.display_name.trim().is_empty()
                 && request.display_name.len() <= MAX_JOB_TEXT_BYTES,
@@ -211,8 +234,39 @@ impl MetadataStore {
             expected.is_none_or(|size| size > 0),
             "download size must be positive or unknown"
         );
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // WHY: availability is a physical observation, not permission to wait
+        // behind unrelated work while its filesystem facts can change.
+        let conn = if gate.is_some() {
+            match self.conn.try_lock() {
+                Ok(conn) => conn,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(crate::MetadataAvailabilityChanged.into());
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    anyhow::bail!("metadata connection lock poisoned")
+                }
+            }
+        } else {
+            self.connection()?
+        };
+        let _no_wait = gate
+            .as_ref()
+            .map(|_| crate::download_availability::AvailabilityNoWait::new(&conn))
+            .transpose()?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| match &error {
+                rusqlite::Error::SqliteFailure(code, _)
+                    if gate.is_some()
+                        && matches!(
+                            code.code,
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        ) =>
+                {
+                    anyhow::Error::new(crate::MetadataAvailabilityChanged)
+                }
+                _ => error.into(),
+            })?;
         let existing = tx
             .query_row(
                 "SELECT j.id FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id
@@ -221,11 +275,21 @@ impl MetadataStore {
                 |row| row.get::<_, JobId>(0),
             )
             .optional()?;
-        if let Some(size) = expected {
-            crate::content_identity::check_accepted_identity(&tx, &hash, size, None)?;
-        }
+        crate::content_identity::check_accepted_claims(&tx, &hash, expected, aich.as_deref())?;
         if let Some(id) = existing {
             let job = read_job(&tx, id)?.expect("selected job");
+            let stored_aich: Option<Vec<u8>> = tx.query_row(
+                "SELECT aich_root FROM download_jobs WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                stored_aich
+                    .as_deref()
+                    .zip(aich.as_deref())
+                    .is_none_or(|(a, b)| a == b),
+                MetadataContentConflict("download attempt has conflicting AICH root")
+            );
             ensure!(
                 job.expected_size_bytes
                     .zip(request.expected_size_bytes)
@@ -236,6 +300,15 @@ impl MetadataStore {
                 created: false,
                 job,
             });
+        }
+        if let Some(gate) = &gate {
+            gate.cut.check(self, &tx)?;
+            gate.check_root()?;
+            ensure!(
+                gate.redownload
+                    || gate.availability == crate::LocalContentAvailability::ConfirmedAbsent,
+                crate::MetadataLocalContentChoiceRequired(gate.availability)
+            );
         }
         // Admission records a claim on the job, never accepted size on content.
         tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
@@ -256,15 +329,18 @@ impl MetadataStore {
             "zero-byte download execution is unsupported"
         );
         tx.execute("INSERT INTO download_jobs(known_file_id,expected_size_bytes,display_name,part_size_bytes,part_count,
-            intent,category_id,visible_state,delivery_state,created_at_s,updated_at_s)
-            VALUES(?1,?2,?3,?4,0,?5,?6,'queued','pending',?7,?7)",
-            params![known,expected,request.display_name,i64::try_from(request.piece_size)?,request.intent.as_str(),request.category_id,unix_s()])?;
+            intent,category_id,visible_state,delivery_state,created_at_s,updated_at_s,aich_root,aich_root_origin)
+            VALUES(?1,?2,?3,?4,0,?5,?6,'queued','pending',?7,?7,?8,CASE WHEN ?8 IS NOT NULL THEN 'operator_link' END)",
+            params![known,expected,request.display_name,i64::try_from(request.piece_size)?,request.intent.as_str(),request.category_id,unix_s(),aich])?;
         let id = JobId::new(tx.last_insert_rowid())?;
         tx.execute(
             "UPDATE known_files SET latest_download_job_id=?2 WHERE id=?1",
             params![known, id],
         )?;
         let job = read_job(&tx, id)?.expect("inserted job");
+        if let Some(gate) = &gate {
+            gate.check_root()?;
+        }
         tx.commit()?;
         Ok(DownloadJobAdmission { created: true, job })
     }

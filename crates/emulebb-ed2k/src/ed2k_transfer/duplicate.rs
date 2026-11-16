@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use emulebb_metadata::{MetadataCurrentSharedFile, NativeFileFingerprint};
@@ -36,13 +36,6 @@ pub(super) fn first_present_source(
     None
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ed2kActiveTransferEvidence {
-    pub display_name: String,
-    pub file_size: u64,
-    pub final_rehash_pending: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ed2kCurrentLocalFileKind {
     Shared,
@@ -67,110 +60,44 @@ pub struct Ed2kPreviouslyCompletedEvidence {
     pub last_completed_at_s: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kActiveDownloadEvidence {
+    pub token: emulebb_metadata::JobToken,
+    pub display_name: String,
+    pub expected_size_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ed2kDownloadEvidence {
-    pub active_transfer: Option<Ed2kActiveTransferEvidence>,
-    pub current_local_files: Vec<Ed2kCurrentLocalFileEvidence>,
+    pub active_job: Option<Ed2kActiveDownloadEvidence>,
+    pub availability: emulebb_metadata::LocalContentAvailability,
+    /// At most one matching native copy; this is not a library listing.
+    pub present_file: Option<Ed2kCurrentLocalFileEvidence>,
     pub previously_completed: Option<Ed2kPreviouslyCompletedEvidence>,
 }
 
 impl Ed2kDownloadEvidence {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.active_transfer.is_none()
-            && self.current_local_files.is_empty()
+        self.active_job.is_none()
+            && self.availability == emulebb_metadata::LocalContentAvailability::ConfirmedAbsent
             && self.previously_completed.is_none()
     }
 }
 
 impl Ed2kTransferRuntime {
-    pub async fn download_evidence(&self, file_hash: &str) -> Result<Ed2kDownloadEvidence> {
-        let file_hash = file_hash
+    /// Retained bounded native evidence. Unknown storage is never absence.
+    pub async fn download_evidence(
+        &self,
+        file_hash: &str,
+    ) -> Result<super::local_mutation::read_result::RetainedRead<Ed2kDownloadEvidence>> {
+        let hash = file_hash
             .parse::<emulebb_kad_proto::Ed2kHash>()?
             .to_string();
-        let token = self.resolve_protocol_job(&file_hash).await?;
-        let _guard = if let Some(token) = token {
-            Some(self.lock_manifest(token).await)
-        } else {
-            None
-        };
-        let manifest = if let Some(token) = token {
-            self.load_manifest_optional_unlocked(token).await?
-        } else {
-            None
-        };
-        let metadata = self.metadata.clone();
-        let evidence_hash = file_hash.clone();
-        let (shared_files, history) = tokio::task::spawn_blocking(move || {
-            Ok::<_, anyhow::Error>((
-                metadata.current_shared_files_by_hash(&evidence_hash)?,
-                metadata.download_history_by_hash(&evidence_hash)?,
-            ))
-        })
-        .await
-        .context("ED2K duplicate evidence query task panicked")??;
-
-        let active_transfer = manifest
-            .as_ref()
-            .filter(|manifest| !manifest.completed || manifest.final_rehash_pending)
-            .map(|manifest| Ed2kActiveTransferEvidence {
-                display_name: manifest.display_name.clone(),
-                file_size: manifest.file_size,
-                final_rehash_pending: manifest.final_rehash_pending,
-            });
-
-        let mut current_local_files = Vec::new();
-        let mut seen_paths = BTreeSet::new();
-        for shared_file in shared_files {
-            push_current_file_if_present(
-                &mut current_local_files,
-                &mut seen_paths,
-                shared_file.display_name,
-                shared_file.file_size,
-                shared_file.source_path,
-                Ed2kCurrentLocalFileKind::Shared,
-            )
-            .await?;
-        }
-        if let Some(manifest) = manifest
-            .as_ref()
-            .filter(|manifest| manifest.completed && !manifest.transfer_row_removed)
-        {
-            if let Some(delivered_path) = manifest.delivered_path.as_deref() {
-                push_current_file_if_present(
-                    &mut current_local_files,
-                    &mut seen_paths,
-                    manifest.display_name.clone(),
-                    manifest.file_size,
-                    PathBuf::from(delivered_path),
-                    Ed2kCurrentLocalFileKind::Delivered,
-                )
-                .await?;
-            }
-            {
-                push_current_file_if_present(
-                    &mut current_local_files,
-                    &mut seen_paths,
-                    manifest.display_name.clone(),
-                    manifest.file_size,
-                    self.payload_path(manifest.token.job_id)?,
-                    Ed2kCurrentLocalFileKind::ManagedPayload,
-                )
-                .await?;
-            }
-        }
-
-        Ok(Ed2kDownloadEvidence {
-            active_transfer,
-            current_local_files,
-            previously_completed: history.map(|entry| Ed2kPreviouslyCompletedEvidence {
-                display_name: entry.display_name,
-                file_size: entry.file_size,
-                aich_root: entry.aich_root,
-                first_completed_at_s: entry.first_completed_at_s,
-                last_completed_at_s: entry.last_completed_at_s,
-            }),
-        })
+        self.local_mutations
+            .submit_availability_read(self, &hash)?
+            .await
+            .map_err(|_| super::local_mutation::LocalMutationError::Unknown)?
     }
 
     pub(super) async fn first_present_shared_source(
@@ -212,32 +139,6 @@ impl Ed2kTransferRuntime {
     }
 }
 
-async fn push_current_file_if_present(
-    evidence: &mut Vec<Ed2kCurrentLocalFileEvidence>,
-    seen_paths: &mut BTreeSet<PathBuf>,
-    display_name: String,
-    file_size: u64,
-    path: PathBuf,
-    kind: Ed2kCurrentLocalFileKind,
-) -> Result<()> {
-    if !seen_paths.insert(path.clone()) {
-        return Ok(());
-    }
-    let Ok(metadata) = tokio::fs::metadata(&path).await else {
-        return Ok(());
-    };
-    if !metadata.is_file() || metadata.len() != file_size {
-        return Ok(());
-    }
-    evidence.push(Ed2kCurrentLocalFileEvidence {
-        display_name,
-        file_size,
-        path: emulebb_metadata::NativePath::from(path.as_path()).display_path(),
-        kind,
-    });
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -274,15 +175,12 @@ mod tests {
             .download_evidence(&active_hash.to_string())
             .await
             .unwrap();
+        assert_eq!(active.active_job.as_ref().unwrap().token, job.token);
         assert_eq!(
-            active.active_transfer,
-            Some(Ed2kActiveTransferEvidence {
-                display_name: "active.bin".to_string(),
-                file_size: 8,
-                final_rehash_pending: false,
-            })
+            active.active_job.as_ref().unwrap().expected_size_bytes,
+            Some(8)
         );
-        assert!(active.current_local_files.is_empty());
+        assert!(active.present_file.is_none());
         assert!(active.previously_completed.is_none());
 
         let shared_path = root.path().join("shared.bin");
@@ -293,10 +191,10 @@ mod tests {
             .unwrap();
         admit_local_share(&runtime, root.path(), &shared_path).await;
         let shared_evidence = runtime.download_evidence(&shared.file_hash).await.unwrap();
-        assert!(shared_evidence.active_transfer.is_none());
-        assert_eq!(shared_evidence.current_local_files.len(), 1);
+        assert!(shared_evidence.active_job.is_none());
+        assert!(shared_evidence.present_file.is_some());
         assert_eq!(
-            shared_evidence.current_local_files[0].kind,
+            shared_evidence.present_file.as_ref().unwrap().kind,
             Ed2kCurrentLocalFileKind::Shared
         );
         assert!(shared_evidence.previously_completed.is_none());
@@ -337,9 +235,9 @@ mod tests {
             .unwrap();
 
         let completed = runtime.download_evidence(&hash).await.unwrap();
-        assert_eq!(completed.current_local_files.len(), 1);
+        assert!(completed.present_file.is_some());
         assert_eq!(
-            completed.current_local_files[0].kind,
+            completed.present_file.as_ref().unwrap().kind,
             Ed2kCurrentLocalFileKind::ManagedPayload
         );
         assert!(completed.previously_completed.is_some());
@@ -351,7 +249,7 @@ mod tests {
             .await
             .unwrap();
         let after_restart = restarted.download_evidence(&hash).await.unwrap();
-        assert_eq!(after_restart.current_local_files.len(), 1);
+        assert!(after_restart.present_file.is_some());
         assert!(after_restart.previously_completed.is_some());
 
         assert!(
@@ -367,10 +265,14 @@ mod tests {
                 .unwrap()
         );
         let after_removal = restarted.download_evidence(&hash).await.unwrap();
-        assert!(after_removal.active_transfer.is_none());
-        assert!(after_removal.current_local_files.is_empty());
+        assert!(after_removal.active_job.is_none());
+        assert!(after_removal.present_file.is_none());
         assert_eq!(
-            after_removal.previously_completed.unwrap().display_name,
+            after_removal
+                .previously_completed
+                .as_ref()
+                .unwrap()
+                .display_name,
             "download.bin"
         );
     }
@@ -481,8 +383,8 @@ mod tests {
         assert_eq!(published[0].comment, "local copy");
         drop(published);
         let evidence = runtime.download_evidence(&shared.file_hash).await.unwrap();
-        assert!(evidence.active_transfer.is_some());
-        assert_eq!(evidence.current_local_files.len(), 1);
+        assert!(evidence.active_job.is_some());
+        assert!(evidence.present_file.is_some());
         assert_eq!(
             runtime
                 .read_verified_range(&shared.file_hash.parse().unwrap(), 0, payload.len() as u64,)
@@ -502,8 +404,8 @@ mod tests {
             .download_evidence(&shared.file_hash)
             .await
             .unwrap();
-        assert!(restarted_evidence.active_transfer.is_some());
-        assert_eq!(restarted_evidence.current_local_files.len(), 1);
+        assert!(restarted_evidence.active_job.is_some());
+        assert!(restarted_evidence.present_file.is_some());
         let servable = restarted.serving_view(&shared.file_hash).await.unwrap();
         assert!(servable.completed);
         assert_eq!(servable.upload_priority, "release");

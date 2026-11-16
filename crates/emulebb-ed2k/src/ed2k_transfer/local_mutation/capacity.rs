@@ -163,6 +163,30 @@ impl CapacityLease {
             let _ = release.recv();
         }
     }
+    /// Convert fresh admission evidence without waiting or releasing its physical
+    /// allowance first. A refused transition has no side effects on the ledger.
+    pub(super) fn try_enter_publication(&mut self, workspace: usize) -> Result<()> {
+        ensure!(
+            self.eligible && self.fs_bytes != 0 && workspace <= MAX_BYTES,
+            "invalid publication capacity transition"
+        );
+        let mut usage = self
+            .control
+            .state
+            .lock()
+            .map_err(|_| LocalMutationError::Unknown)?;
+        ensure!(
+            usage.bytes - self.bytes + workspace <= MAX_BYTES,
+            LocalMutationError::Busy
+        );
+        usage.long_fs_bytes -= self.fs_bytes;
+        usage.bytes = usage.bytes - self.bytes + workspace;
+        self.bytes = workspace;
+        self.fs_bytes = 0;
+        drop(usage);
+        self.control.wake();
+        Ok(())
+    }
     /// Transfer already admitted backing to its longer-lived owner. This does
     /// not add capacity or transfer the worker's filesystem eligibility.
     pub(in crate::ed2k_transfer) fn split_retained_bytes(&mut self, bytes: usize) -> Result<Self> {

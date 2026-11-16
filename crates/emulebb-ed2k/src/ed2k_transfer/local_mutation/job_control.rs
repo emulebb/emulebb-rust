@@ -14,13 +14,13 @@ use std::{
 const CONTROL_WORKSPACE: usize = PUBLICATION_WORKSPACE + 1024 * 1024;
 
 enum Control<'a> {
-    Admit(&'a DownloadJobRequest),
+    Admit(&'a DownloadJobRequest, bool, Option<&'a str>),
     Start(JobToken, &'a Path),
     Learn(JobToken, u64),
     Fail(JobToken, &'a DownloadJobStorageFailure),
 }
 enum OwnedControl {
-    Admit(DownloadJobRequest),
+    Admit(DownloadJobRequest, bool, Option<String>),
     Start(JobToken, PathBuf),
     Learn(JobToken, u64),
     Fail(JobToken, DownloadJobStorageFailure),
@@ -47,9 +47,11 @@ impl LocalMutationRegistry {
     ) -> Result<oneshot::Receiver<Result<RetainedRead<ControlResult>>>> {
         // Validate caller backing before cloning it under the admitted workspace.
         match &change {
-            Control::Admit(request) => {
+            Control::Admit(request, _, aich) => {
                 ensure!(
-                    request.file_hash.len() == 32 && request.display_name.len() <= 65_536,
+                    request.file_hash.len() == 32
+                        && request.display_name.len() <= 65_536
+                        && aich.is_none_or(|root| root.len() == 40),
                     LocalMutationError::TooLarge
                 );
             }
@@ -62,7 +64,9 @@ impl LocalMutationRegistry {
         Self::reap(&mut state);
         let lease = Self::reserve_unit(&mut state, CONTROL_WORKSPACE, true, false)?;
         let change = match change {
-            Control::Admit(request) => OwnedControl::Admit(request.clone()),
+            Control::Admit(request, redownload, aich) => {
+                OwnedControl::Admit(request.clone(), redownload, aich.map(str::to_owned))
+            }
             Control::Start(token, path) => OwnedControl::Start(token, path.to_owned()),
             Control::Learn(token, size) => OwnedControl::Learn(token, size),
             Control::Fail(token, failure) => OwnedControl::Fail(token, failure.clone()),
@@ -80,6 +84,7 @@ impl LocalMutationRegistry {
         let votes = Arc::clone(&runtime.aich_root_corroboration);
         let blackboxes = Arc::clone(&runtime.corruption_blackbox);
         let source_exchange = runtime.source_exchange.clone();
+        let epoch = Arc::clone(&runtime.category_root_epoch);
         let dirty = Arc::clone(&runtime.category_root_dirty);
         let failed = Arc::clone(&runtime.share_publication_failed);
         let (sender, receipt) = oneshot::channel();
@@ -89,7 +94,7 @@ impl LocalMutationRegistry {
             let mut committed = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let (hash, old_token) = match &change {
-                    OwnedControl::Admit(request) => (request.file_hash.clone(), None),
+                    OwnedControl::Admit(request, _, _) => (request.file_hash.clone(), None),
                     OwnedControl::Start(token, _)
                     | OwnedControl::Learn(token, _)
                     | OwnedControl::Fail(token, _) => {
@@ -103,12 +108,70 @@ impl LocalMutationRegistry {
                     }
                 };
                 let hash = hash.parse::<emulebb_kad_proto::Ed2kHash>()?;
-                let content =
-                    transfer::store::scoped_lock(&locks, hash.to_string()).blocking_lock_owned();
+                // Filesystem capacity and SQL snapshots are acquired before any
+                // content/stripe guard. The original worker owns every phase.
+                let availability = if let OwnedControl::Admit(_, redownload, _) = &change {
+                    let root_cut = epoch.load(Ordering::Acquire);
+                    ensure!(root_cut % 2 == 0, LocalMutationError::Busy);
+                    let cut = metadata.capture_download_availability()?;
+                    let active = metadata.active_download_job(&hash.to_string())?.is_some();
+                    let state = if active || *redownload {
+                        emulebb_metadata::LocalContentAvailability::Unavailable
+                    } else {
+                        lease.enter_filesystem(128 * 1024, super::availability::WORKSPACE)?;
+                        let mut budget = super::availability::ScanBudget::default();
+                        let (mut state, present) = super::availability::scan(
+                            &metadata,
+                            &hash.to_string(),
+                            &cut,
+                            &mut budget,
+                        )?;
+                        drop(present);
+                        #[cfg(test)]
+                        lease.pause_after_probe();
+                        // WHY: a physical-only change during a scheduling gap
+                        // must not turn stale absence into creation permission.
+                        // Both passes share one work budget. After the final
+                        // probe neither capacity nor content admission may wait.
+                        if state == emulebb_metadata::LocalContentAvailability::ConfirmedAbsent {
+                            let (fresh, present) = super::availability::scan(
+                                &metadata,
+                                &hash.to_string(),
+                                &cut,
+                                &mut budget,
+                            )?;
+                            drop(present);
+                            state = fresh;
+                        }
+                        lease.try_enter_publication(CONTROL_WORKSPACE)?;
+                        state
+                    };
+                    Some((cut, root_cut, state))
+                } else {
+                    None
+                };
+                let content_lock = transfer::store::scoped_lock(&locks, hash.to_string());
+                let content = if matches!(&change, OwnedControl::Admit(..)) {
+                    content_lock
+                        .try_lock_owned()
+                        .ok_or(LocalMutationError::Busy)?
+                } else {
+                    content_lock.blocking_lock_owned()
+                };
                 let stripe = eligibility.begin_mutation(&[hash.0])?;
                 let result = match &change {
-                    OwnedControl::Admit(request) => {
-                        let value = metadata.admit_download_job(request)?;
+                    OwnedControl::Admit(request, redownload, aich) => {
+                        let (cut, root_cut, state) = availability.as_ref().expect("admission cut");
+                        let value = metadata.admit_available_download_job(
+                            request,
+                            emulebb_metadata::DownloadAvailabilityAdmission {
+                                cut,
+                                availability: *state,
+                                redownload: *redownload,
+                                aich_root: aich.as_deref(),
+                                root_epoch: (&epoch, *root_cut),
+                            },
+                        )?;
                         committed = value.created;
                         ControlResult::Admission(value)
                     }
@@ -200,7 +263,7 @@ impl LocalMutationRegistry {
                     tracing::error!(%error, "job control committed but publication failed");
                     (Err(LocalMutationError::Committed.into()), 1)
                 }
-                Ok(Err(error)) => (Err(error), 0),
+                Ok(Err(error)) => (Err(super::availability::changed_to_busy(error)), 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
             if outcome != 0 {
@@ -219,10 +282,12 @@ impl transfer::Ed2kTransferRuntime {
     pub async fn admit_download_job(
         &self,
         request: &DownloadJobRequest,
+        redownload: bool,
+        aich_root: Option<&str>,
     ) -> Result<RetainedRead<DownloadJobAdmission>> {
         let result = self
             .local_mutations
-            .submit_control(self, Control::Admit(request))?
+            .submit_control(self, Control::Admit(request, redownload, aich_root))?
             .await
             .map_err(|_| LocalMutationError::Unknown)??;
         Ok(result.map(|result| match result {
@@ -303,7 +368,10 @@ mod tests {
     async fn control_returns_actual_tokens_preserves_duplicates_and_fences_late_faults() {
         let root = tempfile::tempdir().unwrap();
         let runtime = transfer::Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
-        let admitted = runtime.admit_download_job(&request()).await.unwrap();
+        let admitted = runtime
+            .admit_download_job(&request(), false, None)
+            .await
+            .unwrap();
         assert!(admitted.created);
         let token = admitted.job.token;
         drop(admitted);
@@ -340,7 +408,10 @@ mod tests {
         let mut duplicate = request();
         duplicate.display_name = "other.bin".into();
         duplicate.intent = emulebb_metadata::DownloadIntent::Stopped;
-        let duplicate = runtime.admit_download_job(&duplicate).await.unwrap();
+        let duplicate = runtime
+            .admit_download_job(&duplicate, true, None)
+            .await
+            .unwrap();
         assert!(!duplicate.created);
         assert_eq!(duplicate.job.token, failed_token);
         assert_eq!(duplicate.job.display_name, "sample.bin");
@@ -367,7 +438,10 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let next = runtime.admit_download_job(&request()).await.unwrap();
+        let next = runtime
+            .admit_download_job(&request(), false, None)
+            .await
+            .unwrap();
         assert!(next.created);
         let next_token = next.job.token;
         assert_ne!(next_token.job_id, restarted.job_id);
@@ -401,7 +475,7 @@ mod tests {
         let (release, gate) = std::sync::mpsc::channel();
         registry.install_publication_gate(reached, gate);
         let receipt = registry
-            .submit_control(&runtime, Control::Admit(&request()))
+            .submit_control(&runtime, Control::Admit(&request(), false, None))
             .unwrap();
         ready.await.unwrap();
         drop(receipt);
