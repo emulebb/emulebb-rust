@@ -9,6 +9,7 @@ fn current_marker_cannot_hide_missing_indexes_triggers_or_wrong_columns() {
         "ALTER TABLE known_files ADD COLUMN obsolete_value TEXT",
         "DELETE FROM profile",
         "DELETE FROM library_catalog_revision",
+        "DELETE FROM download_job_counts",
         "DELETE FROM discovery_initialization WHERE domain = 'kad'",
         "DELETE FROM kad_routing_revision",
     ] {

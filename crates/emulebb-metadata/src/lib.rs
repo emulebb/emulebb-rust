@@ -11,6 +11,10 @@ mod download_hash_store;
 mod download_history_model;
 mod download_history_store;
 mod download_job_model;
+mod download_job_query;
+pub use download_job_query::{
+    DownloadJobCounts, DownloadJobPage, DownloadJobQuery, DownloadJobView,
+};
 mod download_job_store;
 mod download_payload_store;
 mod download_peer_store;

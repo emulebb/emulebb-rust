@@ -91,7 +91,7 @@ pub(crate) fn bounded_uuid_from_row(
     })
 }
 
-const JOB_COLUMNS: &str = "j.id,j.execution_generation,lower(hex(k.ed2k_hash)),
+pub(crate) const JOB_COLUMNS: &str = "j.id,j.execution_generation,lower(hex(k.ed2k_hash)),
     CASE WHEN length(CAST(j.display_name AS BLOB))<=65536 THEN j.display_name END,
     k.size_bytes,j.expected_size_bytes,j.category_id,j.intent,p.platform,
     CASE WHEN length(p.native_path)<=65536 THEN p.native_path END,
@@ -104,7 +104,7 @@ const JOB_COLUMNS: &str = "j.id,j.execution_generation,lower(hex(k.ed2k_hash)),
     CASE WHEN length(CAST(j.storage_failure_message AS BLOB))<=4096 THEN j.storage_failure_message END,
     j.storage_failed_at_s,length(CAST(j.storage_failure_code AS BLOB)),length(CAST(j.storage_failure_message AS BLOB)),j.checkpointed_bytes";
 
-fn job_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
+pub(crate) fn job_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
     bounded_row_bytes(
         row,
         &[
@@ -118,7 +118,7 @@ fn job_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
     )
 }
 
-fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJobRecord> {
+pub(crate) fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJobRecord> {
     job_row_bytes(row)?;
     let intent: String = row.get(7)?;
     let delivery: String = row.get(12)?;

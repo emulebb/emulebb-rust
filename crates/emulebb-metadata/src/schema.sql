@@ -329,6 +329,14 @@ CREATE TABLE shared_file_memberships (
 CREATE INDEX shared_file_memberships_root_content_idx
     ON shared_file_memberships(root_id, known_file_id, path_id);
 
+-- Fixed dashboard summary, maintained only by download job lifecycle triggers.
+CREATE TABLE download_job_counts (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    unfinished INTEGER NOT NULL DEFAULT 0 CHECK(unfinished >= 0),
+    completed INTEGER NOT NULL DEFAULT 0 CHECK(completed >= 0)
+) STRICT;
+INSERT INTO download_job_counts(id) VALUES(1);
+
 CREATE TABLE download_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE RESTRICT,
@@ -421,8 +429,53 @@ WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
 CREATE INDEX download_jobs_visible_page_idx ON download_jobs(id) WHERE removed_at_s IS NULL;
 CREATE INDEX download_jobs_work_page_idx ON download_jobs(intent, id)
 WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND storage_failure_code IS NULL;
+CREATE INDEX download_jobs_unfinished_page_idx ON download_jobs(id)
+WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
+CREATE INDEX download_jobs_completed_page_idx ON download_jobs(id)
+WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NOT NULL;
+CREATE INDEX download_jobs_category_page_idx ON download_jobs(category_id, id)
+WHERE removed_at_s IS NULL;
+CREATE INDEX download_jobs_category_unfinished_page_idx ON download_jobs(category_id, id)
+WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
+CREATE INDEX download_jobs_category_completed_page_idx ON download_jobs(category_id, id)
+WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NOT NULL;
 CREATE INDEX download_jobs_removed_page_idx ON download_jobs(id) WHERE removed_at_s IS NOT NULL;
 CREATE INDEX download_jobs_content_history_idx ON download_jobs(known_file_id, id);
+-- Subtract the old bucket before adding the new one. Explicit capacity guards
+-- prevent SQLite from promoting an overflowing increment to REAL.
+CREATE TRIGGER download_jobs_counts_insert AFTER INSERT ON download_jobs
+WHEN new.removed_at_s IS NULL
+BEGIN
+    SELECT CASE WHEN (new.terminal_completed_at_s IS NULL AND unfinished=9223372036854775807)
+        OR (new.terminal_completed_at_s IS NOT NULL AND completed=9223372036854775807)
+        THEN RAISE(ABORT, 'download job count overflow') END FROM download_job_counts WHERE id=1;
+    UPDATE download_job_counts SET unfinished=unfinished+(new.terminal_completed_at_s IS NULL),
+        completed=completed+(new.terminal_completed_at_s IS NOT NULL) WHERE id=1;
+END;
+CREATE TRIGGER download_jobs_counts_update AFTER UPDATE OF removed_at_s, terminal_completed_at_s ON download_jobs
+WHEN (old.removed_at_s IS NULL) != (new.removed_at_s IS NULL)
+    OR (old.terminal_completed_at_s IS NULL) != (new.terminal_completed_at_s IS NULL)
+BEGIN
+    SELECT CASE WHEN
+        (new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL
+            AND NOT(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NULL) AND unfinished=9223372036854775807)
+        OR (new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NOT NULL
+            AND NOT(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NOT NULL) AND completed=9223372036854775807)
+        THEN RAISE(ABORT, 'download job count overflow') END FROM download_job_counts WHERE id=1;
+    UPDATE download_job_counts SET unfinished=unfinished
+        -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NULL)
+        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL),
+        completed=completed
+        -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NOT NULL)
+        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NOT NULL) WHERE id=1;
+END;
+CREATE TRIGGER download_jobs_counts_delete AFTER DELETE ON download_jobs
+WHEN old.removed_at_s IS NULL
+BEGIN
+    UPDATE download_job_counts SET unfinished=unfinished-(old.terminal_completed_at_s IS NULL),
+        completed=completed-(old.terminal_completed_at_s IS NOT NULL) WHERE id=1;
+END;
+
 CREATE TRIGGER download_jobs_fixed_physical_storage BEFORE UPDATE OF storage_path_id, storage_directory_identity, storage_directory_marker_id ON download_jobs
 WHEN (old.storage_path_id IS NOT NULL AND new.storage_path_id IS NOT old.storage_path_id)
   OR (old.storage_directory_marker_id IS NOT NULL AND new.storage_directory_marker_id IS NOT old.storage_directory_marker_id)

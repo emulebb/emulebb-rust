@@ -30,6 +30,14 @@ pub(crate) fn validate(conn: &Connection) -> Result<()> {
             "metadata schema structure differs at {key}; create an entirely fresh profile for this build"
         );
     }
+    ensure!(
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_job_counts WHERE id=1)",
+            [],
+            |row| row.get::<_, bool>(0)
+        )?,
+        "metadata download job counts are missing"
+    );
     let profile: Option<String> = conn
         .query_row("SELECT uuid FROM profile WHERE id = 1", [], |row| {
             row.get(0)
