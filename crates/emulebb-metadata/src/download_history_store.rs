@@ -226,9 +226,6 @@ mod tests {
                 .token,
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             display_name: "completed.bin".to_string(),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
             expected_size_bytes: Some(1024),
             piece_size: 1024,
             completed: true,
@@ -251,7 +248,6 @@ mod tests {
                 block_bitmap: None,
                 ich_corrupted: false,
             }],
-            sources: Vec::new(),
             upload_priority: "normal".to_string(),
             auto_upload_priority: false,
             comment: String::new(),
@@ -356,7 +352,16 @@ mod tests {
             .download_history_by_hash(&manifest.file_hash)
             .unwrap()
             .unwrap();
-        assert_eq!(metadata_refresh.display_name, "renamed.bin");
+        // Checkpoint replay cannot rename the chosen job or its completion fact.
+        assert_eq!(metadata_refresh.display_name, "completed.bin");
+        assert_eq!(
+            store
+                .download_job(manifest.token.job_id)
+                .unwrap()
+                .unwrap()
+                .display_name,
+            "completed.bin"
+        );
         assert_eq!(
             metadata_refresh.aich_root.as_deref(),
             Some("1111111111111111111111111111111111111111")
@@ -439,6 +444,15 @@ mod tests {
         );
         manifest.completed = true;
         manifest.display_name = "completed-again.bin".into();
+        assert!(
+            store
+                .apply_download_peer_delta(
+                    manifest.token,
+                    &crate::MetadataDownloadPeerDelta::Rename(manifest.display_name.clone()),
+                )
+                .unwrap()
+                .changed
+        );
         manifest.verified_ranges = vec![MetadataTransferRange {
             start: 0,
             end: 1024,

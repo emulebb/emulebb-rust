@@ -1,5 +1,5 @@
 use super::*;
-use crate::MetadataStore;
+use crate::{MetadataStore, MetadataTransferSource};
 use std::{
     fs,
     path::PathBuf,
@@ -38,9 +38,6 @@ fn completed_download_manifest(store: &MetadataStore) -> MetadataTransferManifes
             .token,
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Concurrent.Sample.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
         expected_size_bytes: Some(16),
         piece_size: 16,
         completed: true,
@@ -54,7 +51,6 @@ fn completed_download_manifest(store: &MetadataStore) -> MetadataTransferManifes
         aich_hashset: Vec::new(),
         verified_ranges: vec![MetadataTransferRange { start: 0, end: 16 }],
         pieces: Vec::new(),
-        sources: Vec::new(),
         upload_priority: "normal".to_string(),
         auto_upload_priority: false,
         comment: String::new(),
@@ -72,7 +68,6 @@ fn completed_download_manifest(store: &MetadataStore) -> MetadataTransferManifes
 
 fn completed_pending_download_manifest(store: &MetadataStore) -> MetadataTransferManifest {
     let mut manifest = completed_download_manifest(store);
-    manifest.display_name = "Delivery.Attempt.bin".to_string();
     manifest.delivery_state = MetadataTransferDeliveryState::Pending;
     manifest.source_fingerprint = None;
     manifest.payload_fingerprint = Some(fingerprint(manifest.expected_size_bytes.unwrap(), 91));
@@ -179,6 +174,7 @@ fn recovery_settlement_rejects_changed_generation_and_journal_snapshot() {
         store
             .mark_transfer_delivery_attempt_staged(recovery_token, attempt, &proof)
             .unwrap()
+            .is_some()
     );
     assert!(
         !store
@@ -198,6 +194,7 @@ fn recovery_settlement_rejects_changed_generation_and_journal_snapshot() {
         store
             .mark_transfer_delivery_attempt_published(recovery_token, attempt, &proof)
             .unwrap()
+            .is_some()
     );
     assert!(
         !store
@@ -258,12 +255,14 @@ fn live_journal_callbacks_cannot_advance_or_release_after_stop() {
         !store
             .mark_transfer_delivery_attempt_staged(manifest.token, attempt, &proof)
             .unwrap()
+            .is_some()
     );
     let stopped = store.download_job(manifest.token.job_id).unwrap().unwrap();
     assert!(
         !store
             .mark_transfer_delivery_attempt_staged(stopped.token, attempt, &proof)
             .unwrap()
+            .is_some()
     );
     let resumed = store
         .start_download_job(stopped.token, &std::env::temp_dir())
@@ -273,6 +272,7 @@ fn live_journal_callbacks_cannot_advance_or_release_after_stop() {
         store
             .mark_transfer_delivery_attempt_staged(resumed.token, attempt, &proof)
             .unwrap()
+            .is_some()
     );
     assert!(
         store
@@ -292,11 +292,13 @@ fn live_journal_callbacks_cannot_advance_or_release_after_stop() {
         !store
             .mark_transfer_delivery_attempt_published(resumed.token, attempt, &proof)
             .unwrap()
+            .is_some()
     );
     assert!(
         !store
             .publish_reserved_delivery_attempt(resumed.token, attempt, &proof)
             .unwrap()
+            .is_some()
     );
     assert!(
         !store
@@ -425,6 +427,15 @@ fn publication_collapses_history_and_preserves_current_partial_claim_size() {
     }
     let mut current = completed_download_manifest(&store);
     current.display_name = "current-partial.bin".into();
+    assert!(
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &crate::MetadataDownloadPeerDelta::Rename(current.display_name.clone()),
+            )
+            .unwrap()
+            .changed
+    );
     current.completed = false;
     current.verified_ranges = vec![MetadataTransferRange { start: 0, end: 8 }];
     store.upsert_transfer_manifest(&current).unwrap();
@@ -563,7 +574,7 @@ fn old_generation_cannot_checkpoint_or_begin_delivery_after_stop() {
     assert!(store.upsert_transfer_manifest(&manifest).is_err());
     assert!(
         !store
-            .checkpoint_transfer_piece_progress(manifest.token, &manifest.pieces[0])
+            .checkpoint_download_progress(manifest.token, &manifest.pieces[..1])
             .unwrap()
     );
     let attempt = Uuid::new_v4();
@@ -675,7 +686,7 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
     store.upsert_transfer_manifest(&new_manifest).unwrap();
     assert!(
         !store
-            .checkpoint_transfer_piece_progress(manifest.token, &manifest.pieces[0])
+            .checkpoint_download_progress(manifest.token, &manifest.pieces[..1])
             .unwrap()
     );
     assert_eq!(
@@ -1198,14 +1209,22 @@ fn transfer_snapshots_keep_unchanged_children_and_source_first_seen() {
         ich_corrupted: false,
     });
     manifest.md4_hashset.push("11".repeat(16));
-    manifest.sources.push(MetadataTransferSource {
-        ip: "192.0.2.1".into(),
-        tcp_port: 4662,
-        user_hash: None,
-        connect_options: None,
-        file_comment: String::new(),
-        file_rating: 0,
-    });
+    store
+        .apply_download_peer_delta(
+            manifest.token,
+            &crate::MetadataDownloadPeerDelta::Source {
+                source: MetadataTransferSource {
+                    ip: "192.0.2.1".into(),
+                    tcp_port: 4662,
+                    user_hash: None,
+                    connect_options: None,
+                    file_comment: String::new(),
+                    file_rating: 0,
+                },
+                description_only: false,
+            },
+        )
+        .unwrap();
     store.upsert_transfer_manifest(&manifest).unwrap();
     store.connection().unwrap().execute_batch(
         "UPDATE download_job_sources SET first_seen_at_s = 1;
@@ -1297,6 +1316,15 @@ fn transfer_manifest_roundtrips_sql_tables() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = completed_pending_download_manifest(&store);
     manifest.display_name = "Sample.Transfer.bin".to_string();
+    assert!(
+        store
+            .apply_download_peer_delta(
+                manifest.token,
+                &crate::MetadataDownloadPeerDelta::Rename(manifest.display_name.clone()),
+            )
+            .unwrap()
+            .changed
+    );
     manifest.aich_root = Some("1111111111111111111111111111111111111111".to_string());
     manifest.aich_root_origin = Some("operator_link".to_string());
     manifest.aich_trust_generation = 1;
@@ -1434,9 +1462,6 @@ fn upload_demand_counters_persist_on_known_files() {
             .token,
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Demand.Sample.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
         expected_size_bytes: Some(1024),
         piece_size: 1024,
         completed: true,
@@ -1459,7 +1484,6 @@ fn upload_demand_counters_persist_on_known_files() {
             block_bitmap: None,
             ich_corrupted: false,
         }],
-        sources: Vec::new(),
         upload_priority: "normal".to_string(),
         auto_upload_priority: false,
         comment: String::new(),
@@ -1704,9 +1728,6 @@ fn delete_transfer_manifest_removes_transfer_rows() {
             .token,
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         display_name: "Sample.Transfer.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
         expected_size_bytes: Some(1),
         piece_size: 1,
         completed: false,
@@ -1726,7 +1747,6 @@ fn delete_transfer_manifest_removes_transfer_rows() {
             block_bitmap: None,
             ich_corrupted: false,
         }],
-        sources: Vec::new(),
         upload_priority: "normal".to_string(),
         auto_upload_priority: false,
         comment: String::new(),
@@ -1820,16 +1840,17 @@ fn download_delivery_attempts_roundtrip_and_transition_idempotently() {
                 &staging_fingerprint,
             )
             .unwrap()
+            .is_some()
     );
+    let staged_receipt = store
+        .mark_transfer_delivery_attempt_staged(manifest.token, attempt_id, &staging_fingerprint)
+        .unwrap()
+        .unwrap();
     assert!(
         store
             .mark_transfer_delivery_attempt_staged(manifest.token, attempt_id, &staging_fingerprint)
             .unwrap()
-    );
-    assert!(
-        store
-            .mark_transfer_delivery_attempt_staged(manifest.token, attempt_id, &staging_fingerprint)
-            .unwrap()
+            .is_some()
     );
     assert!(
         !store
@@ -1839,11 +1860,13 @@ fn download_delivery_attempts_roundtrip_and_transition_idempotently() {
                 &fingerprint(manifest.expected_size_bytes.unwrap(), 93),
             )
             .unwrap()
+            .is_some()
     );
     let staged = store
         .download_job_delivery_attempt(manifest.token.job_id)
         .unwrap()
         .unwrap();
+    assert_eq!(staged_receipt, staged);
     assert_eq!(staged.phase, MetadataTransferDeliveryAttemptPhase::Staged);
     assert_eq!(
         staged.staging_fingerprint.as_ref(),
@@ -1854,6 +1877,14 @@ fn download_delivery_attempts_roundtrip_and_transition_idempotently() {
     assert!(staged.updated_at_s >= staged.created_at_s);
 
     let published_fingerprint = fingerprint(manifest.expected_size_bytes.unwrap(), 94);
+    let published_receipt = store
+        .mark_transfer_delivery_attempt_published(
+            manifest.token,
+            attempt_id,
+            &published_fingerprint,
+        )
+        .unwrap()
+        .unwrap();
     assert!(
         store
             .mark_transfer_delivery_attempt_published(
@@ -1862,15 +1893,7 @@ fn download_delivery_attempts_roundtrip_and_transition_idempotently() {
                 &published_fingerprint,
             )
             .unwrap()
-    );
-    assert!(
-        store
-            .mark_transfer_delivery_attempt_published(
-                manifest.token,
-                attempt_id,
-                &published_fingerprint,
-            )
-            .unwrap()
+            .is_some()
     );
     assert!(
         !store
@@ -1880,11 +1903,13 @@ fn download_delivery_attempts_roundtrip_and_transition_idempotently() {
                 &fingerprint(manifest.expected_size_bytes.unwrap(), 95),
             )
             .unwrap()
+            .is_some()
     );
     let published = store
         .download_job_delivery_attempt(manifest.token.job_id)
         .unwrap()
         .unwrap();
+    assert_eq!(published_receipt, published);
     assert_eq!(
         published.phase,
         MetadataTransferDeliveryAttemptPhase::Published
@@ -2096,9 +2121,6 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
             .token,
         file_hash: hash.to_string(),
         display_name: "Delete.Intent.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
         expected_size_bytes: Some(1),
         piece_size: 1,
         completed: true,
@@ -2118,7 +2140,6 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
             block_bitmap: None,
             ich_corrupted: false,
         }],
-        sources: Vec::new(),
         upload_priority: "normal".to_string(),
         auto_upload_priority: false,
         comment: String::new(),
@@ -2357,7 +2378,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     );
 
     let checkpointed = store
-        .checkpoint_transfer_piece_progress(manifest.token, &manifest.pieces[0])
+        .checkpoint_download_progress(manifest.token, &manifest.pieces[..1])
         .unwrap();
     assert!(!checkpointed);
 
@@ -2721,9 +2742,6 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
             .token,
         file_hash: hash.to_string(),
         display_name: "Scenario.File.bin".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
         expected_size_bytes: Some(1),
         piece_size: 1,
         completed: false,
@@ -2743,7 +2761,6 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
             block_bitmap: None,
             ich_corrupted: false,
         }],
-        sources: Vec::new(),
         upload_priority: "normal".to_string(),
         auto_upload_priority: false,
         comment: String::new(),
@@ -2863,9 +2880,6 @@ fn completed_catalog_supports_hash_keyset_pages() {
                     .token,
                 file_hash: file_hash.clone(),
                 display_name: format!("catalog-{sequence}.bin"),
-                display_name_pinned: false,
-                follow_majority_filename: false,
-                file_name_observations: Vec::new(),
                 expected_size_bytes: Some(sequence as u64),
                 piece_size: 1,
                 completed: true,
@@ -2882,7 +2896,6 @@ fn completed_catalog_supports_hash_keyset_pages() {
                     end: sequence as u64,
                 }],
                 pieces: Vec::new(),
-                sources: Vec::new(),
                 upload_priority: "normal".to_string(),
                 auto_upload_priority: false,
                 comment: String::new(),

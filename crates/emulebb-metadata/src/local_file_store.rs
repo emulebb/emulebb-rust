@@ -122,6 +122,53 @@ pub struct MetadataVerifiedLocalContent {
 }
 
 impl MetadataStore {
+    /// Apply content presentation to the eligible complete copy, otherwise to
+    /// the sole unremoved unfinished job. The returned token fences only that
+    /// job's cache patch; historical jobs are never selected by hash order.
+    pub fn update_shared_content_metadata(
+        &self,
+        file_hash: &str,
+        priority: Option<(&str, bool)>,
+        comment_rating: Option<(&str, u8)>,
+    ) -> Result<Option<Option<crate::JobToken>>> {
+        ensure!(
+            priority.is_none_or(|(value, _)| value.len() <= 64),
+            "upload priority exceeds allowance"
+        );
+        ensure!(
+            comment_rating.is_none_or(|(value, _)| value.len() <= 65_536),
+            "share comment exceeds allowance"
+        );
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let complete: bool = tx.query_row(
+            crate::local_catalog::VERIFIED_SHARE_EXISTS_SQL,
+            [&hash],
+            |row| row.get(0),
+        )?;
+        let token = if complete {
+            None
+        } else {
+            let current=tx.query_row("SELECT j.id,j.execution_generation FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id
+                WHERE k.ed2k_hash=?1 AND j.removed_at_s IS NULL AND j.terminal_completed_at_s IS NULL
+                AND j.delete_requested_at_s IS NULL",[&hash],|row|Ok(crate::JobToken {job_id:row.get(0)?,generation:crate::sql_value::unsigned(row,1)?})).optional()?;
+            let Some(current) = current else {
+                return Ok(None);
+            };
+            Some(current)
+        };
+        if let Some(token) = token {
+            tx.execute("UPDATE download_jobs SET upload_priority=coalesce(?2,upload_priority),auto_upload_priority=coalesce(?3,auto_upload_priority),comment=coalesce(?4,comment),rating=coalesce(?5,rating) WHERE id=?1",
+                params![token.job_id,priority.map(|v|v.0),priority.map(|v|v.1),comment_rating.map(|v|v.0),comment_rating.map(|v|v.1)])?;
+        } else {
+            tx.execute("UPDATE verified_local_content SET upload_priority=coalesce(?2,upload_priority),auto_upload_priority=coalesce(?3,auto_upload_priority),comment=coalesce(?4,comment),rating=coalesce(?5,rating) WHERE known_file_id=(SELECT id FROM known_files WHERE ed2k_hash=?1)",
+                params![hash,priority.map(|v|v.0),priority.map(|v|v.1),comment_rating.map(|v|v.0),comment_rating.map(|v|v.1)])?;
+        }
+        tx.commit()?;
+        Ok(Some(token))
+    }
+
     /// Change presentation metadata only for a currently eligible complete
     /// local file. This does not create or mutate a download job.
     pub fn update_active_local_share_metadata(

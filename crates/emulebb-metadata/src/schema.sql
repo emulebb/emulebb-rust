@@ -659,13 +659,8 @@ CREATE TABLE download_job_sources (
 CREATE UNIQUE INDEX download_job_sources_identity_idx
 ON download_job_sources(job_id, ip, tcp_port);
 
-CREATE TABLE download_job_name_state (
-    job_id INTEGER PRIMARY KEY REFERENCES download_jobs(id) ON DELETE CASCADE,
-    display_name_pinned INTEGER NOT NULL DEFAULT 0
-        CHECK(display_name_pinned IN (0, 1)),
-    follow_majority_filename INTEGER NOT NULL DEFAULT 0
-        CHECK(follow_majority_filename IN (0, 1))
-) STRICT;
+CREATE INDEX download_job_sources_page_idx ON download_job_sources(job_id, id);
+CREATE INDEX download_job_sources_user_idx ON download_job_sources(job_id, user_hash, id);
 
 CREATE TABLE download_job_file_name_observations (
     id INTEGER PRIMARY KEY,
@@ -685,6 +680,8 @@ CREATE TABLE download_job_file_name_observations (
     CHECK(length(trim(normalized_name)) > 0),
     UNIQUE(job_id, position)
 ) STRICT;
+
+CREATE INDEX download_job_file_name_observations_page_idx ON download_job_file_name_observations(job_id, id);
 
 CREATE INDEX download_job_file_name_observations_job_idx
 ON download_job_file_name_observations(job_id, observed_at_s, id);

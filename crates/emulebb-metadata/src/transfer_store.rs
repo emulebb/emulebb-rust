@@ -16,9 +16,8 @@ use crate::{
         MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
         MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
         MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
-        MetadataTransferFileNameObservation, MetadataTransferManifest,
-        MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferPublishEntry,
-        MetadataTransferRange, MetadataTransferSource,
+        MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+        MetadataTransferPublishEntry, MetadataTransferRange,
     },
 };
 
@@ -100,6 +99,7 @@ impl super::MetadataStore {
             reconciled.delivery_ownership = delivery_ownership_from_sql(&ownership)?;
             reconciled.source_fingerprint = fingerprint;
         }
+        reconciled.display_name = current.display_name;
         reconciled.expected_size_bytes = current.expected_size_bytes;
         reconciled.intent = current.intent;
         reconciled.transfer_row_removed = current.removed_at_s.is_some();
@@ -358,118 +358,10 @@ impl super::MetadataStore {
     ) -> Result<Option<MetadataTransferManifest>> {
         let mut connection = self.connection()?;
         let conn = connection.transaction()?;
-        let row = conn
-            .prepare_cached(
-                r#"
-                SELECT download_jobs.id,
-                       lower(hex(known_files.ed2k_hash)), download_jobs.display_name,
-                       download_jobs.expected_size_bytes, download_jobs.part_size_bytes,
-                       download_jobs.completed, download_jobs.md4_hashset_acquired,
-                       download_jobs.aich_hashset_acquired,
-                       CASE
-                           WHEN download_jobs.aich_root IS NULL THEN NULL
-                           ELSE lower(hex(download_jobs.aich_root))
-                       END,
-                       download_jobs.upload_priority, download_jobs.auto_upload_priority,
-                       download_jobs.comment, download_jobs.rating,
-                       download_jobs.category_id, download_jobs.intent, download_jobs.removed_at_s,
-                       delivered_paths.platform, delivered_paths.native_path,
-                       download_jobs.source_fingerprint, download_jobs.payload_fingerprint,
-                       download_jobs.final_rehash_pending, download_jobs.delivery_state,
-                       download_jobs.delivery_ownership,
-                       download_jobs.aich_root_origin,
-                       download_jobs.aich_trust_generation, download_jobs.execution_generation
-                FROM known_files
-                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
-                LEFT JOIN local_paths delivered_paths ON delivered_paths.id = download_jobs.delivered_path_id
-                WHERE download_jobs.id = ?1
-                  AND (
-                      (?2 = 0 AND download_jobs.delete_requested_at_s IS NULL)
-                      OR (?2 != 0 AND download_jobs.delete_requested_at_s IS NOT NULL)
-                  )
-                "#,
-            )?
-            .query_row(params![id, bool_to_i64(deletion_requested)], |row| {
-                Ok(TransferRow {
-                    job_id: row.get(0)?,
-                    generation: crate::sql_value::unsigned(row,25)?,
-                    file_hash: row.get(1)?,
-                    display_name: row.get(2)?,
-                    expected_size_bytes: crate::sql_value::optional_unsigned::<u64>(row, 3)?,
-                    piece_size: crate::sql_value::unsigned::<u64>(row, 4)?,
-                    completed: row.get::<_, i64>(5)? != 0,
-                    md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
-                    aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
-                    aich_root: row.get(8)?,
-                    aich_root_origin: row.get(23)?,
-                    aich_trust_generation: crate::sql_value::unsigned::<u64>(row, 24)?,
-                    upload_priority: row.get(9)?,
-                    auto_upload_priority: row.get::<_, i64>(10)? != 0,
-                    comment: row.get(11)?,
-                    rating: row.get::<_, u8>(12)?,
-                    category_id: row.get::<_, Option<i64>>(13)?,
-                    intent: row.get(14)?,
-                    transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
-                    delivered_path: optional_path_from_row(row, 16, 17)?,
-                    source_fingerprint: optional_fingerprint_from_row(row, 18)?,
-                    payload_fingerprint: optional_fingerprint_from_row(row, 19)?,
-                    final_rehash_pending: row.get::<_, i64>(20)? != 0,
-                    delivery_state: row.get(21)?,
-                    delivery_ownership: row.get(22)?,
-                })
-            })
-            .optional()?;
+        let row = read_transfer_row(&conn, id, deletion_requested)?;
         let result = row.map(|row| manifest_from_row(&conn, row)).transpose()?;
         conn.commit()?;
         Ok(result)
-    }
-
-    /// Persist ONE piece's progress fields for an already-persisted transfer
-    /// manifest - the per-block download checkpoint. This is the lightweight
-    /// sibling of `upsert_transfer_manifest`: mid-piece progress only ever
-    /// changes the piece row itself (state / bytes_written / block_bitmap /
-    /// ich_corrupted), so rewriting every child table (all pieces + both
-    /// hashsets + ranges + sources) per received block was pure write
-    /// amplification. Structural transitions (piece verified/failed, hashset
-    /// acquisition, completion, source changes) still take the full upsert.
-    ///
-    /// Returns `false` when the transfer or piece row does not exist yet, so
-    /// the caller can fall back to the full upsert.
-    pub fn checkpoint_transfer_piece_progress(
-        &self,
-        token: JobToken,
-        piece: &MetadataTransferPiece,
-    ) -> Result<bool> {
-        let now = crate::download_job_store::unix_s();
-        let conn = self.connection()?;
-        let updated = conn
-            .prepare_cached(
-                r#"
-                UPDATE download_job_pieces
-                SET state = ?3, bytes_written = ?4, block_bitmap = ?5,
-                    ich_corrupted = ?6, updated_at_s = ?7
-                WHERE piece_index = ?2
-                  AND job_id = (
-                      SELECT download_jobs.id
-                      FROM download_jobs
-                      JOIN known_files ON known_files.id = download_jobs.known_file_id
-                      WHERE download_jobs.id = ?1 AND download_jobs.execution_generation=?8
-                        AND download_jobs.removed_at_s IS NULL AND download_jobs.terminal_completed_at_s IS NULL
-                        AND download_jobs.delete_requested_at_s IS NULL
-                  )
-                "#,
-            )?
-            .execute(params![
-                token.job_id,
-                i64::from(piece.piece_index),
-                piece.state,
-                i64::try_from(piece.bytes_written)?,
-                piece.block_bitmap,
-                piece.ich_corrupted,
-                now,
-                i64::try_from(token.generation)?,
-            ])?;
-        Ok(updated != 0)
     }
 
     /// Add `delta` lifetime-uploaded bytes to a known file (eMule all-time
@@ -1024,11 +916,13 @@ impl super::MetadataStore {
         token: JobToken,
         attempt_id: Uuid,
         staging_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let id = token.job_id;
         let now = crate::download_job_store::unix_s();
         let staging_fingerprint = staging_fingerprint.storage_bytes();
-        let changed = self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             r#"
             UPDATE download_delivery_attempts
             SET phase = 'staged',
@@ -1063,7 +957,13 @@ impl super::MetadataStore {
                 i64::try_from(token.generation)?,
             ],
         )?;
-        Ok(changed != 0)
+        let snapshot = if changed != 0 {
+            delivery_attempt_by_job(&tx, id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(snapshot)
     }
 
     pub fn mark_transfer_delivery_attempt_published(
@@ -1071,11 +971,13 @@ impl super::MetadataStore {
         token: JobToken,
         attempt_id: Uuid,
         published_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let id = token.job_id;
         let now = crate::download_job_store::unix_s();
         let published_fingerprint = published_fingerprint.storage_bytes();
-        let changed = self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             r#"
             UPDATE download_delivery_attempts
             SET phase = 'published',
@@ -1110,7 +1012,13 @@ impl super::MetadataStore {
                 i64::try_from(token.generation)?,
             ],
         )?;
-        Ok(changed != 0)
+        let snapshot = if changed != 0 {
+            delivery_attempt_by_job(&tx, id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(snapshot)
     }
 
     /// Commit verified direct publication and release its sharing barrier together.
@@ -1119,7 +1027,7 @@ impl super::MetadataStore {
         token: JobToken,
         attempt_id: Uuid,
         fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let job_id = token.job_id;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1130,7 +1038,7 @@ impl super::MetadataStore {
             |row| row.get(0),
         )?;
         if !reserved {
-            return Ok(false);
+            return Ok(None);
         }
         let changed = tx.execute(
             "UPDATE download_delivery_attempts SET phase = 'published', published_fingerprint = ?3, updated_at_s = ?4
@@ -1142,14 +1050,15 @@ impl super::MetadataStore {
             params![id, job_id, fingerprint.storage_bytes(), crate::download_job_store::unix_s(),i64::try_from(token.generation)?],
         )?;
         if changed == 0 {
-            return Ok(false);
+            return Ok(None);
         }
         tx.execute(
             "DELETE FROM download_delivery_exclusions WHERE reservation_id = ?1 AND originating_job_id=?2",
             params![id,job_id],
         )?;
+        let snapshot = delivery_attempt_by_job(&tx, job_id)?;
         tx.commit()?;
-        Ok(true)
+        Ok(snapshot)
     }
 
     /// The token and journal snapshot must be captured before recovery I/O under
@@ -1910,7 +1819,6 @@ fn retire_job_children(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> 
         "download_job_md4_part_hashes",
         "download_job_aich_part_hashes",
         "download_job_verified_ranges",
-        "download_job_name_state",
         "download_job_file_name_observations",
     ] {
         tx.execute(&format!("DELETE FROM {table} WHERE job_id=?1"), [id])?;
@@ -2056,11 +1964,33 @@ fn reconcile_manifest_aich_identity(
     hash: &[u8],
     manifest: &mut MetadataTransferManifest,
 ) -> Result<()> {
+    let mut identity = MetadataTransferAichIdentity {
+        root: manifest.aich_root.take(),
+        origin: manifest.aich_root_origin.take(),
+        generation: manifest.aich_trust_generation,
+    };
+    if reconcile_aich_identity(conn, manifest.token, hash, &mut identity)? {
+        manifest.aich_hashset.clear();
+        manifest.aich_hashset_acquired = false;
+    }
+    manifest.aich_root = identity.root;
+    manifest.aich_root_origin = identity.origin;
+    manifest.aich_trust_generation = identity.generation;
+    Ok(())
+}
+
+pub(crate) fn reconcile_aich_identity(
+    conn: &rusqlite::Connection,
+    token: JobToken,
+    hash: &[u8],
+    identity: &mut MetadataTransferAichIdentity,
+) -> Result<bool> {
+    let mut invalidate_parts = false;
     let current = conn
         .query_row(
             "SELECT CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END,
         aich_root_origin,aich_trust_generation FROM download_jobs WHERE id=?1",
-            [manifest.token.job_id],
+            [token.job_id],
             |row| {
                 Ok(MetadataTransferAichIdentity {
                     root: row.get(0)?,
@@ -2071,15 +2001,14 @@ fn reconcile_manifest_aich_identity(
         )
         .optional()?;
     if let Some(current) = &current
-        && manifest.aich_trust_generation < current.generation
+        && identity.generation < current.generation
     {
         // A checkpoint may contain newer payload progress but older authority.
         // Keep the former, and never resurrect its old acquired AICH part set.
-        manifest.aich_root = current.root.clone();
-        manifest.aich_root_origin = current.origin.clone();
-        manifest.aich_trust_generation = current.generation;
-        manifest.aich_hashset.clear();
-        manifest.aich_hashset_acquired = false;
+        identity.root = current.root.clone();
+        identity.origin = current.origin.clone();
+        identity.generation = current.generation;
+        invalidate_parts = true;
     }
     let accepted = conn
         .query_row(
@@ -2090,48 +2019,45 @@ fn reconcile_manifest_aich_identity(
         )
         .optional()?;
     if let Some((root, stored_origin)) = accepted {
-        if manifest.aich_root.is_some() {
+        if identity.root.is_some() {
             ensure!(
-                manifest.aich_root.as_ref() == Some(&root),
+                identity.root.as_ref() == Some(&root),
                 crate::MetadataContentConflict("ED2K identity has conflicting AICH root")
             );
         }
         // Preserve legitimate local/import enrichment of the same accepted
         // root; lower-authority checkpoints cannot downgrade its provenance.
-        let origin = match manifest.aich_root_origin.as_deref() {
+        let origin = match identity.origin.as_deref() {
             Some("local_computed") => "local_computed".to_owned(),
             Some("stock_import") if stored_origin != "local_computed" => "stock_import".to_owned(),
             _ => stored_origin,
         };
-        if manifest.aich_root.as_ref() != Some(&root)
-            || manifest.aich_root_origin.as_ref() != Some(&origin)
-        {
-            if manifest.aich_root.as_ref() != Some(&root) {
-                manifest.aich_hashset.clear();
-                manifest.aich_hashset_acquired = false;
+        if identity.root.as_ref() != Some(&root) || identity.origin.as_ref() != Some(&origin) {
+            if identity.root.as_ref() != Some(&root) {
+                invalidate_parts = true;
             }
-            manifest.aich_trust_generation = match current.as_ref() {
+            identity.generation = match current.as_ref() {
                 Some(current)
                     if current.root.as_ref() == Some(&root)
                         && current.origin.as_ref() == Some(&origin) =>
                 {
                     current.generation
                 }
-                current => manifest.aich_trust_generation.max(
+                current => identity.generation.max(
                     current
                         .map_or(0, |current| current.generation)
                         .checked_add(1)
                         .ok_or_else(|| anyhow::anyhow!("AICH trust generation exhausted"))?,
                 ),
             };
-            i64::try_from(manifest.aich_trust_generation)?;
-            manifest.aich_root = Some(root);
-            manifest.aich_root_origin = Some(origin);
+            i64::try_from(identity.generation)?;
+            identity.root = Some(root);
+            identity.origin = Some(origin);
         }
     }
     if let Some(current) = current {
         let minimum_generation =
-            if manifest.aich_root != current.root || manifest.aich_root_origin != current.origin {
+            if identity.root != current.root || identity.origin != current.origin {
                 current
                     .generation
                     .checked_add(1)
@@ -2139,10 +2065,10 @@ fn reconcile_manifest_aich_identity(
             } else {
                 current.generation
             };
-        manifest.aich_trust_generation = manifest.aich_trust_generation.max(minimum_generation);
-        i64::try_from(manifest.aich_trust_generation)?;
+        identity.generation = identity.generation.max(minimum_generation);
+        i64::try_from(identity.generation)?;
     }
-    Ok(())
+    Ok(invalidate_parts)
 }
 
 /// Local hashing and trusted stock acceptance update the transfer in the same
@@ -2205,32 +2131,32 @@ pub(crate) fn reconcile_transfer_aich_authority_tx(
 }
 
 #[derive(Debug)]
-struct TransferRow {
-    job_id: i64,
-    generation: u64,
-    file_hash: String,
-    display_name: String,
-    expected_size_bytes: Option<u64>,
-    piece_size: u64,
-    completed: bool,
-    final_rehash_pending: bool,
-    md4_hashset_acquired: bool,
-    aich_hashset_acquired: bool,
-    aich_root: Option<String>,
-    aich_root_origin: Option<String>,
-    aich_trust_generation: u64,
-    upload_priority: String,
-    auto_upload_priority: bool,
-    comment: String,
-    rating: u8,
-    category_id: Option<i64>,
-    intent: String,
-    transfer_row_removed: bool,
-    delivered_path: Option<std::path::PathBuf>,
-    source_fingerprint: Option<NativeFileFingerprint>,
-    payload_fingerprint: Option<NativeFileFingerprint>,
-    delivery_state: String,
-    delivery_ownership: String,
+pub(crate) struct TransferRow {
+    pub(crate) job_id: i64,
+    pub(crate) generation: u64,
+    pub(crate) file_hash: String,
+    pub(crate) display_name: String,
+    pub(crate) expected_size_bytes: Option<u64>,
+    pub(crate) piece_size: u64,
+    pub(crate) completed: bool,
+    pub(crate) final_rehash_pending: bool,
+    pub(crate) md4_hashset_acquired: bool,
+    pub(crate) aich_hashset_acquired: bool,
+    pub(crate) aich_root: Option<String>,
+    pub(crate) aich_root_origin: Option<String>,
+    pub(crate) aich_trust_generation: u64,
+    pub(crate) upload_priority: String,
+    pub(crate) auto_upload_priority: bool,
+    pub(crate) comment: String,
+    pub(crate) rating: u8,
+    pub(crate) category_id: Option<i64>,
+    pub(crate) intent: String,
+    pub(crate) transfer_row_removed: bool,
+    pub(crate) delivered_path: Option<std::path::PathBuf>,
+    pub(crate) source_fingerprint: Option<NativeFileFingerprint>,
+    pub(crate) payload_fingerprint: Option<NativeFileFingerprint>,
+    pub(crate) delivery_state: String,
+    pub(crate) delivery_ownership: String,
 }
 
 fn replace_transfer_children(
@@ -2260,27 +2186,7 @@ fn replace_transfer_children(
             "download_job_verified_ranges",
             &["job_id", "start_offset", "end_offset"],
         )?,
-        crate::snapshot::SnapshotTable::begin(
-            tx,
-            "download_job_sources",
-            &["job_id", "ip", "tcp_port"],
-        )?,
-        crate::snapshot::SnapshotTable::begin(
-            tx,
-            "download_job_file_name_observations",
-            &["job_id", "position"],
-        )?,
-        crate::snapshot::SnapshotTable::begin(tx, "download_job_name_state", &["job_id"])?,
     ];
-
-    tx.prepare_cached(
-        "INSERT INTO temp.incoming_download_job_name_state(job_id, display_name_pinned, follow_majority_filename) VALUES (?1, ?2, ?3)",
-    )?
-    .execute(params![
-        job_id,
-        bool_to_i64(manifest.display_name_pinned),
-        bool_to_i64(manifest.follow_majority_filename),
-    ])?;
 
     let mut insert_piece = tx.prepare_cached(
         r#"
@@ -2343,52 +2249,6 @@ fn replace_transfer_children(
         ])?;
     }
     drop(insert_range);
-    let mut insert_source = tx.prepare_cached(
-        r#"
-        INSERT INTO temp.incoming_download_job_sources(
-            job_id, ip, tcp_port, user_hash, connect_options,
-            file_comment, file_rating, first_seen_at_s, last_seen_at_s
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-        "#,
-    )?;
-    for source in &manifest.sources {
-        insert_source.execute(params![
-            job_id,
-            source.ip,
-            i64::from(source.tcp_port),
-            optional_fixed_hex(source.user_hash.as_deref(), 16, "source user hash")?,
-            source.connect_options.map(i64::from),
-            source.file_comment,
-            i64::from(source.file_rating),
-            now,
-        ])?;
-    }
-    drop(insert_source);
-    let mut insert_name_observation = tx.prepare_cached(
-        r#"
-        INSERT INTO temp.incoming_download_job_file_name_observations(
-            job_id, source_ip, source_tcp_port, user_hash, client_software, position,
-            origin, server_endpoint, raw_name, normalized_name, observed_at_s
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?11, ?6, ?7, ?8, ?9, ?10)
-        "#,
-    )?;
-    for (position, observation) in manifest.file_name_observations.iter().enumerate() {
-        insert_name_observation.execute(params![
-            job_id,
-            observation.source_ip,
-            observation.source_tcp_port.map(i64::from),
-            optional_fixed_hex(observation.user_hash.as_deref(), 16, "source user hash")?,
-            observation.client_software,
-            observation.origin,
-            observation.server_endpoint,
-            observation.raw_name,
-            observation.normalized_name,
-            observation.observed_at_s,
-            i64::try_from(position)?,
-        ])?;
-    }
     for snapshot in snapshots {
         snapshot.finish(tx, Some(("job_id", job_id)))?;
     }
@@ -2399,14 +2259,9 @@ fn manifest_from_row(
     conn: &rusqlite::Connection,
     row: TransferRow,
 ) -> Result<MetadataTransferManifest> {
-    let (display_name_pinned, follow_majority_filename) =
-        read_download_job_name_state(conn, row.job_id)?;
     Ok(MetadataTransferManifest {
         file_hash: row.file_hash,
         display_name: row.display_name,
-        display_name_pinned,
-        follow_majority_filename,
-        file_name_observations: read_file_name_observations(conn, row.job_id)?,
         token: JobToken {
             job_id: JobId::new(row.job_id)?,
             generation: row.generation,
@@ -2432,7 +2287,6 @@ fn manifest_from_row(
         )?,
         verified_ranges: read_ranges(conn, row.job_id)?,
         pieces: read_pieces(conn, row.job_id)?,
-        sources: read_sources(conn, row.job_id)?,
         upload_priority: row.upload_priority,
         auto_upload_priority: row.auto_upload_priority,
         comment: row.comment,
@@ -2446,47 +2300,6 @@ fn manifest_from_row(
         source_fingerprint: row.source_fingerprint,
         payload_fingerprint: row.payload_fingerprint,
     })
-}
-
-fn read_download_job_name_state(conn: &rusqlite::Connection, job_id: i64) -> Result<(bool, bool)> {
-    conn.query_row(
-        "SELECT display_name_pinned, follow_majority_filename FROM download_job_name_state WHERE job_id = ?1",
-        params![job_id],
-        |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
-    )
-    .optional().map(|flags| flags.unwrap_or((false,false))).map_err(Into::into)
-}
-
-fn read_file_name_observations(
-    conn: &rusqlite::Connection,
-    job_id: i64,
-) -> Result<Vec<MetadataTransferFileNameObservation>> {
-    let mut stmt = conn.prepare_cached(
-        r#"
-        SELECT source_ip, source_tcp_port,
-               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END,
-               client_software, origin, server_endpoint, raw_name, normalized_name,
-               observed_at_s
-        FROM download_job_file_name_observations
-        WHERE job_id = ?1
-        ORDER BY observed_at_s, id
-        "#,
-    )?;
-    let rows = stmt.query_map(params![job_id], |row| {
-        Ok(MetadataTransferFileNameObservation {
-            source_ip: row.get(0)?,
-            source_tcp_port: row.get::<_, Option<u16>>(1)?,
-            user_hash: row.get(2)?,
-            client_software: row.get(3)?,
-            origin: row.get(4)?,
-            server_endpoint: row.get(5)?,
-            raw_name: row.get(6)?,
-            normalized_name: row.get(7)?,
-            observed_at_s: row.get(8)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
 }
 
 fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<MetadataTransferCounts> {
@@ -2559,31 +2372,6 @@ fn read_ranges(conn: &rusqlite::Connection, job_id: i64) -> Result<Vec<MetadataT
         Ok(MetadataTransferRange {
             start: crate::sql_value::unsigned::<u64>(row, 0)?,
             end: crate::sql_value::unsigned::<u64>(row, 1)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn read_sources(conn: &rusqlite::Connection, job_id: i64) -> Result<Vec<MetadataTransferSource>> {
-    let mut stmt = conn.prepare_cached(
-        r#"
-        SELECT ip, tcp_port,
-               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END,
-               connect_options, file_comment, file_rating
-        FROM download_job_sources
-        WHERE job_id = ?1
-        ORDER BY id
-        "#,
-    )?;
-    let rows = stmt.query_map(params![job_id], |row| {
-        Ok(MetadataTransferSource {
-            ip: row.get(0)?,
-            tcp_port: row.get::<_, u16>(1)?,
-            user_hash: row.get(2)?,
-            connect_options: row.get::<_, Option<u8>>(3)?,
-            file_comment: row.get(4)?,
-            file_rating: row.get::<_, u8>(5)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -2709,7 +2497,7 @@ fn delivery_state_to_sql(state: MetadataTransferDeliveryState) -> &'static str {
     }
 }
 
-fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState> {
+pub(crate) fn delivery_state_from_sql(value: &str) -> Result<MetadataTransferDeliveryState> {
     match value {
         "pending" => Ok(MetadataTransferDeliveryState::Pending),
         "delivered" => Ok(MetadataTransferDeliveryState::Delivered),
@@ -2725,7 +2513,9 @@ fn delivery_ownership_to_sql(ownership: MetadataTransferDeliveryOwnership) -> &'
     }
 }
 
-fn delivery_ownership_from_sql(value: &str) -> Result<MetadataTransferDeliveryOwnership> {
+pub(crate) fn delivery_ownership_from_sql(
+    value: &str,
+) -> Result<MetadataTransferDeliveryOwnership> {
     match value {
         "none" => Ok(MetadataTransferDeliveryOwnership::None),
         "owned" => Ok(MetadataTransferDeliveryOwnership::Owned),
@@ -2748,3 +2538,72 @@ fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn read_transfer_row(
+    conn: &rusqlite::Connection,
+    id: JobId,
+    deletion_requested: bool,
+) -> Result<Option<TransferRow>> {
+    let row = conn
+            .prepare_cached(
+                r#"
+                SELECT download_jobs.id,
+                       lower(hex(known_files.ed2k_hash)), download_jobs.display_name,
+                       download_jobs.expected_size_bytes, download_jobs.part_size_bytes,
+                       download_jobs.completed, download_jobs.md4_hashset_acquired,
+                       download_jobs.aich_hashset_acquired,
+                       CASE
+                           WHEN download_jobs.aich_root IS NULL THEN NULL
+                           ELSE lower(hex(download_jobs.aich_root))
+                       END,
+                       download_jobs.upload_priority, download_jobs.auto_upload_priority,
+                       download_jobs.comment, download_jobs.rating,
+                       download_jobs.category_id, download_jobs.intent, download_jobs.removed_at_s,
+                       delivered_paths.platform, delivered_paths.native_path,
+                       download_jobs.source_fingerprint, download_jobs.payload_fingerprint,
+                       download_jobs.final_rehash_pending, download_jobs.delivery_state,
+                       download_jobs.delivery_ownership,
+                       download_jobs.aich_root_origin,
+                       download_jobs.aich_trust_generation, download_jobs.execution_generation
+                FROM known_files
+                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
+                LEFT JOIN local_paths delivered_paths ON delivered_paths.id = download_jobs.delivered_path_id
+                WHERE download_jobs.id = ?1
+                  AND (
+                      (?2 = 0 AND download_jobs.delete_requested_at_s IS NULL)
+                      OR (?2 != 0 AND download_jobs.delete_requested_at_s IS NOT NULL)
+                  )
+                "#,
+            )?
+            .query_row(params![id, bool_to_i64(deletion_requested)], |row| {
+                Ok(TransferRow {
+                    job_id: row.get(0)?,
+                    generation: crate::sql_value::unsigned(row,25)?,
+                    file_hash: row.get(1)?,
+                    display_name: row.get(2)?,
+                    expected_size_bytes: crate::sql_value::optional_unsigned::<u64>(row, 3)?,
+                    piece_size: crate::sql_value::unsigned::<u64>(row, 4)?,
+                    completed: row.get::<_, i64>(5)? != 0,
+                    md4_hashset_acquired: row.get::<_, i64>(6)? != 0,
+                    aich_hashset_acquired: row.get::<_, i64>(7)? != 0,
+                    aich_root: row.get(8)?,
+                    aich_root_origin: row.get(23)?,
+                    aich_trust_generation: crate::sql_value::unsigned::<u64>(row, 24)?,
+                    upload_priority: row.get(9)?,
+                    auto_upload_priority: row.get::<_, i64>(10)? != 0,
+                    comment: row.get(11)?,
+                    rating: row.get::<_, u8>(12)?,
+                    category_id: row.get::<_, Option<i64>>(13)?,
+                    intent: row.get(14)?,
+                    transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+                    delivered_path: optional_path_from_row(row, 16, 17)?,
+                    source_fingerprint: optional_fingerprint_from_row(row, 18)?,
+                    payload_fingerprint: optional_fingerprint_from_row(row, 19)?,
+                    final_rehash_pending: row.get::<_, i64>(20)? != 0,
+                    delivery_state: row.get(21)?,
+                    delivery_ownership: row.get(22)?,
+                })
+            })
+            .optional()?;
+    Ok(row)
+}

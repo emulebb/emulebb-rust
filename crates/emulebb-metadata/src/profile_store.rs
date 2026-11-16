@@ -1297,9 +1297,6 @@ mod tests {
                 .token,
             file_hash: format!("{byte:02x}").repeat(16),
             display_name: format!("{byte:02x}.bin"),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
             expected_size_bytes: Some(10),
             piece_size: 10,
             completed: false,
@@ -1325,7 +1322,6 @@ mod tests {
             source_fingerprint: None,
             payload_fingerprint: None,
             pieces: Vec::new(),
-            sources: Vec::new(),
         }
     }
 

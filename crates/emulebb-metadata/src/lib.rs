@@ -4,13 +4,24 @@ mod aich_recovery_store;
 mod content_identity;
 mod delivery_exclusion_store;
 mod discovery_store;
+mod download_execution_store;
+mod download_hash_store;
 mod download_history_model;
 mod download_history_store;
 mod download_job_model;
 mod download_job_store;
+mod download_peer_store;
+mod download_progress_store;
+pub use download_execution_store::{
+    MetadataDownloadExecutionHeader, MetadataDownloadExecutionRow, MetadataDownloadGeometry,
+};
 pub use download_job_model::{
     DownloadIntent, DownloadJobAdmission, DownloadJobRecord, DownloadJobRequest,
     DownloadJobStorage, JobId, JobToken,
+};
+pub use download_peer_store::{
+    MetadataDownloadNameEntry, MetadataDownloadPeerChange, MetadataDownloadPeerDelta,
+    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry,
 };
 mod identity_model;
 mod identity_store;
@@ -97,3 +108,5 @@ pub use transfer_model::{
     MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
     MetadataTransferSource,
 };
+
+pub use download_hash_store::MetadataDownloadAichState;
