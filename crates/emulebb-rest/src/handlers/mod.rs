@@ -22,6 +22,7 @@ pub(crate) mod friends;
 pub(crate) mod ip_filter;
 pub(crate) mod kad;
 pub(crate) mod logs;
+pub(crate) mod persistence;
 pub(crate) mod searches;
 pub(crate) mod servers;
 pub(crate) mod shared_files;

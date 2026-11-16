@@ -53,6 +53,15 @@ pub struct RoutingZone {
 }
 
 impl RoutingZone {
+    pub(crate) fn owned_bytes(&self) -> usize {
+        let children = match &self.content {
+            ZoneContent::Leaf(bin) => bin.owned_bytes(),
+            ZoneContent::Branch { left, right } => {
+                left.owned_bytes().saturating_add(right.owned_bytes())
+            }
+        };
+        std::mem::size_of::<Self>().saturating_add(children)
+    }
     /// Create a new root zone.
     pub fn new_root() -> Self {
         RoutingZone {
@@ -87,7 +96,17 @@ impl RoutingZone {
         max_table_size: usize,
     ) -> Result<AddOutcome, RoutingError> {
         match &mut self.content {
-            ZoneContent::Leaf(_) => {
+            ZoneContent::Leaf(bin) => {
+                // At the global cap, updates and full-bin weak replacement
+                // remain valid, but an empty slot cannot grow the table.
+                if total_contacts >= max_table_size
+                    && !bin.iter().any(|existing| existing.id == contact.id)
+                    && !bin.is_full()
+                {
+                    return Err(RoutingError::TableFull {
+                        max: max_table_size,
+                    });
+                }
                 // Try adding to the leaf bin.
                 let result = {
                     let ZoneContent::Leaf(bin) = &mut self.content else {
@@ -255,6 +274,16 @@ impl RoutingZone {
         }
     }
 
+    pub(crate) fn visit_contacts(&self, visit: &mut impl FnMut(&Contact)) {
+        match &self.content {
+            ZoneContent::Leaf(bin) => bin.iter().for_each(visit),
+            ZoneContent::Branch { left, right } => {
+                left.visit_contacts(visit);
+                right.visit_contacts(visit);
+            }
+        }
+    }
+
     /// Remove a contact by ID. Returns the removed contact if found.
     pub fn remove(&mut self, id: &NodeId, own_id: &NodeId) -> Option<Contact> {
         match &mut self.content {
@@ -362,7 +391,8 @@ impl RoutingZone {
     ) {
         match &mut self.content {
             ZoneContent::Leaf(bin) => {
-                let (removed, probe) = crate::maintenance::small_timer_for_bin(bin, now);
+                let (removed, probe, changed) = crate::maintenance::small_timer_for_bin(bin, now);
+                outcome.snapshot_changed |= changed;
                 outcome.removed.extend(removed);
                 if let Some(candidate) = probe {
                     outcome.probes.push(candidate);

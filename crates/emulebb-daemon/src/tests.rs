@@ -1794,9 +1794,9 @@ async fn graceful_teardown_disconnects_and_is_idempotent() {
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
 
     let teardown = async {
-        graceful_teardown(&core).await;
+        graceful_teardown(&core).await.unwrap();
         // Second call must not panic or hang: the runtime is already gone.
-        graceful_teardown(&core).await;
+        graceful_teardown(&core).await.unwrap();
     };
     tokio::time::timeout(SHUTDOWN_TEARDOWN_TIMEOUT * 3, teardown)
         .await
@@ -1806,4 +1806,112 @@ async fn graceful_teardown_disconnects_and_is_idempotent() {
         !core.status().await.ed2k.connected,
         "ed2k must be disconnected after graceful teardown"
     );
+}
+
+#[tokio::test]
+async fn teardown_sequence_finishes_snapshot_before_timeout_and_cleans_up_after_failure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let phase = AtomicUsize::new(0);
+    let result = teardown_sequence(
+        async {
+            phase.store(1, Ordering::SeqCst);
+            Ok(())
+        },
+        async {
+            assert_eq!(phase.load(Ordering::SeqCst), 1);
+            phase.store(2, Ordering::SeqCst);
+            std::future::pending::<Result<()>>().await
+        },
+        Duration::from_millis(20),
+    )
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(phase.load(Ordering::SeqCst), 2);
+    let result = teardown_sequence(
+        async { anyhow::bail!("injected snapshot failure") },
+        async {
+            phase.store(3, Ordering::SeqCst);
+            Ok(())
+        },
+        Duration::from_secs(1),
+    )
+    .await;
+    assert!(result.unwrap_err().to_string().contains("final Kad state"));
+    assert_eq!(phase.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn daemon_finalization_drains_owner_and_stops_network_after_snapshot_sql_failure() {
+    let root = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+        .join("tmp/daemon-kad-finalization")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&root).unwrap();
+    let profile = profile_with_ed2k_network(root.clone(), Some(Ipv4Addr::LOCALHOST));
+    let store = MetadataStore::open(profile.metadata_path()).unwrap();
+    let mut network = profile
+        .ed2k_network_config_from_interfaces(&store, &[iface("loopback", "127.0.0.1")])
+        .unwrap()
+        .unwrap();
+    network.egress_route = emulebb_ed2k::networking::EgressRoute::DirectSystemRoute;
+    network.vpn_guard.mode = "off".into();
+    network.vpn_guard.enabled = false;
+    network.p2p_bind_ip = None;
+    network.p2p_bind_interface = None;
+    network.kad_bind_addr = "127.0.0.1:0".parse().unwrap();
+    network.listen_port = 0;
+    network.nat_config.enabled = false;
+    network.ed2k.server_endpoints = vec!["127.0.0.1:1".into()];
+    let core = Arc::new(
+        EmulebbCore::new_with_network(
+            "test",
+            FileIndex::from_metadata_store(store.clone()),
+            &root,
+            Some(network),
+        )
+        .unwrap(),
+    );
+    core.connect_ed2k().await.unwrap();
+    core.set_kad_running(false).await;
+    let mut source = 0u32.to_le_bytes().to_vec();
+    source.extend_from_slice(&1u32.to_le_bytes());
+    source.extend_from_slice(&1u32.to_le_bytes());
+    source.extend_from_slice(&[45; 16]);
+    source.extend_from_slice(&u32::from_be_bytes([192, 0, 2, 45]).to_le_bytes());
+    source.extend_from_slice(&4672u16.to_le_bytes());
+    source.extend_from_slice(&4662u16.to_le_bytes());
+    source.push(9);
+    assert_eq!(core.import_kad_nodes_bytes(source).await.unwrap(), 1);
+    let saved_revision = store.load_kad_routing_snapshot().unwrap().revision;
+    let fault = rusqlite::Connection::open(profile.metadata_path()).unwrap();
+    fault.execute_batch("CREATE TRIGGER fail_kad_checkpoint BEFORE UPDATE ON kad_routing_revision BEGIN SELECT RAISE(ABORT, 'injected checkpoint failure'); END;").unwrap();
+    let error = finalize_daemon(&core).await.unwrap_err();
+    assert!(format!("{error:#}").contains("failed to persist final Kad state"));
+    assert!(matches!(
+        error.downcast_ref::<emulebb_core::PersistenceError>(),
+        Some(emulebb_core::PersistenceError::Storage(_))
+    ));
+    let status = core.status().await.ed2k;
+    assert!(!status.running);
+    assert!(!status.connected);
+    let trigger_count: i64 = fault.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='fail_kad_checkpoint'", [], |row| row.get(0)).unwrap();
+    assert_eq!(trigger_count, 1);
+    assert!(matches!(
+        core.kad_discovery_pending()
+            .await
+            .unwrap_err()
+            .downcast_ref::<emulebb_core::PersistenceError>(),
+        Some(emulebb_core::PersistenceError::Closing)
+    ));
+    drop(core);
+    drop(store);
+    fault
+        .execute_batch("DROP TRIGGER fail_kad_checkpoint;")
+        .unwrap();
+    drop(fault);
+    let reopened = MetadataStore::open(profile.metadata_path()).unwrap();
+    let persisted = reopened.load_kad_routing_snapshot().unwrap();
+    assert_eq!(persisted.contacts.len(), 1);
+    assert_eq!(persisted.revision, saved_revision);
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
 }

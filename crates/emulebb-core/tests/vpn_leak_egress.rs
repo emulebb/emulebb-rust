@@ -124,7 +124,7 @@ async fn tunnel_pulled_mid_run_opens_no_new_p2p_socket() {
     egress_audit::reset();
     let _ = core.connect_ed2k().await;
     assert!(!egress_audit::snapshot().is_empty());
-    core.disconnect_ed2k().await;
+    core.disconnect_ed2k().await.unwrap();
 
     // Pull the tunnel mid-run, then attempt to re-open the data plane.
     bound.store(false, Ordering::SeqCst);
@@ -172,8 +172,6 @@ fn tunnel_network_config(
         kad_local_store: KadLocalStoreConfig::default(),
         kad_snoop_queue: SnoopQueueConfig::default(),
         kad_passive_replay_enabled: false,
-        kad_nodes_dat: None,
-        kad_nodes_dat_path: None,
         kad_bootstrap_endpoints: Vec::new(),
         kad_bootstrap_min_routing_contacts: 10,
         kad_publish_shared_files: false,

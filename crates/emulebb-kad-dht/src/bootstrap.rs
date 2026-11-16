@@ -80,6 +80,27 @@ enum NodesDatLayout {
 /// counts as version numbers corrupts the framing. Trailing and truncated data
 /// are rejected rather than using integer division to infer a record layout.
 pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
+    let mut contacts = Vec::new();
+    let mut exceeded = false;
+    visit_nodes_dat(data, |contact| {
+        if contacts.len() < emulebb_kad_routing::DEFAULT_MAX_SIZE {
+            contacts.push(contact);
+        } else {
+            exceeded = true;
+        }
+    })?;
+    if exceeded {
+        return Err(DhtError::RoutingSnapshotTooLarge);
+    }
+    Ok(contacts)
+}
+
+/// Validate every source record without allocating from its advertised count.
+/// The visitor can apply bounded routing admission while parsing large sources.
+pub fn visit_nodes_dat(
+    data: &[u8],
+    mut visit: impl FnMut(BootstrapContact),
+) -> Result<usize, DhtError> {
     use binrw::BinReaderExt;
     use std::io::Cursor;
 
@@ -98,7 +119,7 @@ pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
         // A four-byte zero is the valid empty legacy file. Any additional data
         // selects the versioned grammar used by stock RoutingZone.cpp.
         if data.len() == 4 {
-            return Ok(Vec::new());
+            return Ok(0);
         }
         let file_version: u32 = cursor.read_le().map_err(|_| DhtError::NodesDatParse)?;
         match file_version {
@@ -143,7 +164,6 @@ pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
         return Err(DhtError::NodesDatParse);
     }
 
-    let mut contacts = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let (node_id, ip, udp_port, tcp_port, version, udp_key, udp_key_ip, verified) = match layout
         {
@@ -186,7 +206,7 @@ pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
 
         // IP is stored as a little-endian u32 representing network-byte-order octets.
         // to_be_bytes() recovers the original network-order [A, B, C, D].
-        contacts.push(BootstrapContact {
+        visit(BootstrapContact {
             node_id,
             ip: std::net::Ipv4Addr::from(ip.to_be_bytes()),
             udp_port,
@@ -197,7 +217,7 @@ pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
             verified,
         });
     }
-    Ok(contacts)
+    usize::try_from(count).map_err(|_| DhtError::NodesDatParse)
 }
 
 /// Parse a plain-text node list. Each line: `ip:port` (UDP port).
@@ -392,6 +412,19 @@ mod tests {
             data.extend_from_slice(entry);
         }
         data
+    }
+
+    #[test]
+    fn streaming_parser_visits_large_source_and_rejects_truncated_tail() {
+        let data = legacy_file(13_000);
+        let mut observed = 0;
+        visit_nodes_dat(&data, |_| observed += 1).unwrap();
+        assert_eq!(observed, 13_000);
+        assert!(matches!(
+            parse_nodes_dat(&data),
+            Err(DhtError::RoutingSnapshotTooLarge)
+        ));
+        assert!(visit_nodes_dat(&data[..data.len() - 1], |_| {}).is_err());
     }
 
     #[test]

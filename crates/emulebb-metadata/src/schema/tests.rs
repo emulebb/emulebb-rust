@@ -9,6 +9,8 @@ fn current_marker_cannot_hide_missing_indexes_triggers_or_wrong_columns() {
         "ALTER TABLE known_files ADD COLUMN obsolete_value TEXT",
         "DELETE FROM profile",
         "DELETE FROM library_catalog_revision",
+        "DELETE FROM discovery_initialization WHERE domain = 'kad'",
+        "DELETE FROM kad_routing_revision",
     ] {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::SCHEMA_SQL).unwrap();
@@ -106,6 +108,8 @@ fn schema_rejects_wrong_storage_types_null_keys_and_out_of_range_values() {
         "INSERT INTO download_history(ed2k_hash,size_bytes,display_name,first_completed_at_ms,last_completed_at_ms) VALUES (NULL,1,'sample',0,0)",
         "INSERT INTO known_files(ed2k_hash,size_bytes,display_name,media_length_seconds,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES (zeroblob(16),1,'sample',4294967296,0,0,0)",
         "INSERT INTO metadata_schema(schema_id,schema_version,created_at_ms) VALUES ('second-schema',1,0)",
+        "UPDATE discovery_initialization SET status = 'invalid' WHERE domain = 'kad'",
+        "INSERT INTO discovery_initialization(domain,status) VALUES ('invalid','pending')",
         "INSERT INTO shared_file_ignore_patterns(pattern,created_at_ms) VALUES (NULL,0)",
         "INSERT INTO peers(user_hash,secure_ident_pubkey,secure_ident_pubkey_len,first_seen_at_ms,last_seen_at_ms) VALUES(zeroblob(16),x'01',2,0,0)",
         "INSERT INTO local_identities(identity_kind, public_identity, created_at_ms, updated_at_ms) VALUES('ed2k-secure-ident',zeroblob(16),0,0)",

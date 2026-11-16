@@ -33,18 +33,14 @@ pub(crate) async fn create_server(
     };
     match state.core.add_server(request).await {
         Ok(server) => api_ok(server_response(&server)).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
 pub(crate) async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.connect_ed2k().await {
         Ok(_status) => api_ok(server_connect_acknowledgement(&state).await).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -137,8 +133,6 @@ pub(crate) async fn connect_server(
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
         }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }

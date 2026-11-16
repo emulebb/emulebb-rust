@@ -2,7 +2,7 @@ use super::{
     DhtNode,
     contact_helpers::{addr_from_contact, bootstrap_ready_with_contacts},
 };
-use crate::bootstrap::{BootstrapContact, hardcoded_bootstrap, parse_nodes_dat, parse_nodes_text};
+use crate::bootstrap::{BootstrapContact, parse_nodes_text};
 use crate::error::DhtError;
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::{KadPacket, KadUdpKey, NodeId, opcode};
@@ -97,22 +97,9 @@ impl DhtNode {
     fn load_bootstrap_contacts(&self) -> Vec<BootstrapContact> {
         let mut contacts = Vec::new();
 
-        // 1. nodes.dat binary
-        if let Some(ref data) = self.inner.config.nodes_dat {
-            match parse_nodes_dat(data) {
-                Ok(c) => contacts.extend(c),
-                Err(e) => warn!("failed to parse nodes.dat: {}", e),
-            }
-        }
-
-        // 2. Text format
+        // Explicitly configured endpoints remain distinct from saved contacts.
         if let Some(ref text) = self.inner.config.nodes_text {
             contacts.extend(parse_nodes_text(text));
-        }
-
-        // 3. Hardcoded fallback
-        if contacts.is_empty() {
-            contacts.extend(hardcoded_bootstrap());
         }
 
         contacts
@@ -266,6 +253,25 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_table_has_no_hidden_seeds_but_explicit_endpoints_remain() {
+        let empty = empty_node().await;
+        assert!(empty.load_bootstrap_contacts().is_empty());
+        let configured = DhtNode::new(DhtConfig {
+            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            nodes_text: Some("192.0.2.20:4672".into()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let seeds = configured.load_bootstrap_contacts();
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(
+            seeds[0].ip,
+            "192.0.2.20".parse::<std::net::Ipv4Addr>().unwrap()
+        );
     }
 
     /// A node restored from `nodes.dat` (contacts already in the routing table,

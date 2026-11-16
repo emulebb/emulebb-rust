@@ -8,6 +8,13 @@ use crate::{
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
 };
 
+/// Time spent acquiring the shared connection and executing a friend write.
+#[derive(Debug, Clone, Copy)]
+pub struct FriendWriteTiming {
+    pub connection_wait: std::time::Duration,
+    pub execution: std::time::Duration,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CategoryDeletionWrite {
     CategoriesRetired,
@@ -384,9 +391,18 @@ impl super::MetadataStore {
     }
 
     pub fn upsert_friend(&self, friend: &MetadataFriend) -> Result<()> {
+        self.upsert_friend_timed(friend).map(|_| ())
+    }
+
+    /// Write a friend and report connection wait and statement/commit time.
+    pub fn upsert_friend_timed(&self, friend: &MetadataFriend) -> Result<FriendWriteTiming> {
         let now = unix_ms();
         let user_hash = decode_fixed_hex(&friend.user_hash, 16, "friend user hash")?;
-        self.connection()?.execute(
+        let waiting = std::time::Instant::now();
+        let conn = self.connection()?;
+        let connection_wait = waiting.elapsed();
+        let execution = std::time::Instant::now();
+        conn.execute(
             r#"
             INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_ms, last_seen_at_ms, deleted_at_ms)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
@@ -410,16 +426,58 @@ impl super::MetadataStore {
                 friend.last_seen_ms,
             ],
         )?;
-        Ok(())
+        Ok(FriendWriteTiming {
+            connection_wait,
+            execution: execution.elapsed(),
+        })
+    }
+
+    /// Check one friend without materializing an unbounded collection.
+    pub fn has_friend(&self, user_hash: &str) -> Result<bool> {
+        let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
+        self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL)",
+            [user_hash],
+            |row| row.get(0),
+        ).map_err(Into::into)
+    }
+
+    /// Compare one durable friend against a candidate without loading its strings.
+    pub fn friend_matches(
+        &self,
+        user_hash: &str,
+        name: &str,
+        address: Option<&str>,
+        port: u16,
+        last_seen_ms: Option<i64>,
+    ) -> Result<bool> {
+        let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
+        self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL AND name = ?2 AND last_address IS ?3 AND last_port = ?4 AND last_seen_at_ms IS ?5)",
+            params![user_hash, name, address, i64::from(port), last_seen_ms],
+            |row| row.get(0),
+        ).map_err(Into::into)
     }
 
     pub fn delete_friend(&self, user_hash: &str) -> Result<()> {
+        self.delete_friend_timed(user_hash).map(|_| ())
+    }
+
+    /// Delete a friend and report connection wait and statement/commit time.
+    pub fn delete_friend_timed(&self, user_hash: &str) -> Result<FriendWriteTiming> {
         let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
-        self.connection()?.execute(
+        let waiting = std::time::Instant::now();
+        let conn = self.connection()?;
+        let connection_wait = waiting.elapsed();
+        let execution = std::time::Instant::now();
+        conn.execute(
             "UPDATE friends SET deleted_at_ms = ?1 WHERE user_hash = ?2",
             params![unix_ms(), user_hash],
         )?;
-        Ok(())
+        Ok(FriendWriteTiming {
+            connection_wait,
+            execution: execution.elapsed(),
+        })
     }
 
     pub fn load_servers(&self) -> Result<Vec<MetadataServer>> {
@@ -471,8 +529,48 @@ impl super::MetadataStore {
     }
 
     pub fn upsert_server(&self, server: &MetadataServer) -> Result<()> {
-        let now = unix_ms();
-        self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        upsert_server_in_transaction(&tx, server)?;
+        Self::mark_discovery_initialized(&tx, crate::DiscoveryDomain::Servers)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Initialize servers only if no other operation has claimed the list.
+    /// Returns false when an operator or another initializer won the race.
+    pub fn initialize_servers_if_pending(&self, servers: &[MetadataServer]) -> Result<bool> {
+        ensure!(
+            !servers.is_empty(),
+            "server bootstrap list must not be empty"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status: String = tx.query_row(
+            "SELECT status FROM discovery_initialization WHERE domain = 'servers'",
+            [],
+            |row| row.get(0),
+        )?;
+        match status.as_str() {
+            "initialized" => return Ok(false),
+            "pending" => {}
+            _ => anyhow::bail!("invalid server initialization status"),
+        }
+        for server in servers {
+            upsert_server_in_transaction(&tx, server)?;
+        }
+        Self::mark_discovery_initialized(&tx, crate::DiscoveryDomain::Servers)?;
+        tx.commit()?;
+        Ok(true)
+    }
+}
+
+fn upsert_server_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    server: &MetadataServer,
+) -> Result<()> {
+    let now = unix_ms();
+    tx.execute(
             r#"
             INSERT INTO servers(
                 address, port, name, description, dynamic_host, auxiliary_ports,
@@ -535,8 +633,7 @@ impl super::MetadataStore {
                 now,
             ],
         )?;
-        Ok(())
-    }
+    Ok(())
 }
 
 fn upsert_category_in_transaction(
@@ -850,6 +947,65 @@ mod tests {
             servers[0].udp_key_ip,
             Some(u32::from_le_bytes([198, 51, 100, 9]))
         );
+    }
+
+    #[test]
+    fn server_bootstrap_rolls_back_and_respects_initialized_empty_list() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let server = MetadataServer {
+            address: "192.0.2.10".into(),
+            port: 4661,
+            name: "Sample".into(),
+            description: String::new(),
+            dynamic_host: String::new(),
+            auxiliary_ports: vec![],
+            server_priority: "normal".into(),
+            static_server: false,
+            enabled: true,
+            failed_count: 0,
+            ping_ms: None,
+            users: 0,
+            files: 0,
+            max_users: 0,
+            low_id_users: 0,
+            soft_files: 0,
+            hard_files: 0,
+            version: String::new(),
+            obfuscation_tcp_port: None,
+            obfuscation_udp_port: None,
+            udp_flags: None,
+            udp_key: None,
+            udp_key_ip: None,
+        };
+        {
+            let conn = store.connection().unwrap();
+            conn.execute_batch("CREATE TEMP TRIGGER fail_server_status BEFORE UPDATE ON discovery_initialization BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        }
+        assert!(
+            store
+                .initialize_servers_if_pending(std::slice::from_ref(&server))
+                .is_err()
+        );
+        assert!(store.load_servers().unwrap().is_empty());
+        assert_eq!(
+            store
+                .discovery_initialization_status(crate::DiscoveryDomain::Servers)
+                .unwrap(),
+            crate::DiscoveryInitializationStatus::Pending
+        );
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        {
+            let mut conn = store.connection().unwrap();
+            let tx = conn.transaction().unwrap();
+            super::super::MetadataStore::mark_discovery_initialized(
+                &tx,
+                crate::DiscoveryDomain::Servers,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(!store.initialize_servers_if_pending(&[server]).unwrap());
+        assert!(store.load_servers().unwrap().is_empty());
     }
 
     #[test]

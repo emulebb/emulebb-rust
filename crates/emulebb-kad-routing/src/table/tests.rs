@@ -21,6 +21,90 @@ fn unique_ip(i: usize) -> String {
 }
 
 #[test]
+fn global_cap_blocks_growth_but_keeps_updates_and_weak_replacement() {
+    let mut partial = RoutingTable::with_max_size(NodeId::ZERO, 1);
+    let mut first = make_contact([1; 16], "10.1.0.1");
+    partial.add_contact(first.clone()).unwrap();
+    let generation = partial.persistence_generation();
+    assert!(matches!(
+        partial.add_contact(make_contact([2; 16], "10.2.0.1")),
+        Err(RoutingError::TableFull { .. })
+    ));
+    assert_eq!(partial.persistence_generation(), generation);
+    first.tcp_port += 1;
+    partial.add_contact(first).unwrap();
+    assert_eq!(partial.persistence_generation(), Some(2));
+    let mut full = RoutingTable::with_max_size(NodeId::ZERO, K);
+    for i in 1..=K {
+        let mut weak = make_contact([i as u8; 16], &format!("10.{i}.0.1"));
+        weak.probe_type = 3;
+        weak.expires_at = Some(std::time::SystemTime::now() - Duration::from_secs(60));
+        full.add_contact(weak).unwrap();
+    }
+    let mut strong = make_contact([99; 16], "10.99.0.1");
+    strong.verified = true;
+    strong.received_hello_packet = true;
+    strong.udp_key = emulebb_kad_proto::KadUdpKey::new(123);
+    strong.probe_type = 0;
+    strong.expires_at = Some(std::time::SystemTime::now() + Duration::from_secs(3600));
+    full.add_contact(strong).unwrap();
+    assert_eq!(full.len(), K);
+    assert_eq!(full.persistence_generation(), Some((K + 1) as u64));
+    assert!(full.get(&NodeId::from_bytes([99; 16])).is_some());
+}
+
+#[test]
+fn persistence_generation_tracks_mutations_and_exhaustion() {
+    let mut table = RoutingTable::new(NodeId::ZERO);
+    let contact = make_contact([1; 16], "192.0.2.1");
+    let id = contact.id;
+    assert_eq!(table.persistence_generation(), Some(0));
+    table.add_contact(contact.clone()).unwrap();
+    assert_eq!(table.persistence_generation(), Some(1));
+    assert!(!table.remove(&NodeId::from_bytes([2; 16])));
+    assert_eq!(table.persistence_generation(), Some(1));
+    assert!(table.verify_contact(&id, contact.ip));
+    assert_eq!(table.persistence_generation(), Some(2));
+    assert!(table.verify_contact(&id, contact.ip));
+    assert_eq!(table.persistence_generation(), Some(2));
+    table.generation = Some(u64::MAX);
+    assert!(table.remove(&id));
+    assert_eq!(table.persistence_generation(), None);
+    table.add_contact(contact).unwrap();
+    assert_eq!(table.persistence_generation(), None);
+}
+
+#[test]
+fn expiry_seed_only_advances_generation_once() {
+    let mut table = RoutingTable::new(NodeId::ZERO);
+    let mut contact = make_contact([3; 16], "192.0.2.3");
+    contact.expires_at = None;
+    table.add_contact(contact).unwrap();
+    let now = std::time::SystemTime::now();
+    table.small_timer_maintenance(now);
+    assert_eq!(table.persistence_generation(), Some(2));
+    table.small_timer_maintenance(now);
+    assert_eq!(table.persistence_generation(), Some(2));
+}
+
+#[test]
+fn persistence_generation_tracks_effective_updates_and_restores() {
+    let mut table = RoutingTable::new(NodeId::ZERO);
+    let mut contact = make_contact([4; 16], "192.0.2.4");
+    table.add_contact(contact.clone()).unwrap();
+    table.add_contact(contact.clone()).unwrap();
+    assert_eq!(table.persistence_generation(), Some(1));
+    contact.tcp_port += 1;
+    table.add_contact(contact.clone()).unwrap();
+    assert_eq!(table.persistence_generation(), Some(2));
+    contact.verified = true;
+    assert!(table.merge_restored_contact(contact.clone()).unwrap());
+    assert_eq!(table.persistence_generation(), Some(3));
+    assert!(table.merge_restored_contact(contact).unwrap());
+    assert_eq!(table.persistence_generation(), Some(3));
+}
+
+#[test]
 fn bootstrap_contacts_returns_the_whole_root_leaf_uncapped_below_the_limit() {
     // A table whose contacts all fit in the root leaf (no split): the
     // bootstrap sample is simply every contact, capped at the oracle max.

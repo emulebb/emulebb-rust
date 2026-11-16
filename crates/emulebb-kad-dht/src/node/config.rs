@@ -45,8 +45,6 @@ pub struct DhtConfig {
     pub obfuscation_enabled: bool,
     /// Our UDP key (anti-spoofing). 0 = generate random.
     pub udp_key: u32,
-    /// Bootstrap sources: binary nodes.dat content.
-    pub nodes_dat: Option<Vec<u8>>,
     /// Bootstrap sources: plain text format.
     pub nodes_text: Option<String>,
     /// OS interface index of the VPN/tunnel bind interface, for `IP_UNICAST_IF`
@@ -78,7 +76,6 @@ impl Default for DhtConfig {
             notes_result_cap: 1000,
             obfuscation_enabled: true,
             udp_key: 0,
-            nodes_dat: None,
             nodes_text: None,
             bind_if_index: None,
         }

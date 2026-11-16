@@ -92,6 +92,39 @@ pub const KAD_LOCAL_QUALITY_WEAK_THRESHOLD: u32 = 260;
 pub const KAD_LOCAL_QUALITY_REPLACEMENT_MARGIN: u32 = 120;
 
 impl Contact {
+    /// Compare only fields represented in the seconds-precision durable snapshot.
+    pub(crate) fn persistence_eq(&self, other: &Self) -> bool {
+        fn second(value: SystemTime) -> Result<u64, std::time::Duration> {
+            value
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .map_err(|e| e.duration())
+        }
+        fn optional_second(value: Option<SystemTime>) -> Option<Result<u64, std::time::Duration>> {
+            value.map(second)
+        }
+        self.id == other.id
+            && self.ip == other.ip
+            && self.udp_port == other.udp_port
+            && self.tcp_port == other.tcp_port
+            && self.kad_version == other.kad_version
+            && self.udp_key == other.udp_key
+            && self.udp_key_ip == other.udp_key_ip
+            && self.hello_source_udp_port == other.hello_source_udp_port
+            && self.udp_firewalled == other.udp_firewalled
+            && self.tcp_firewalled == other.tcp_firewalled
+            && self.requests_hello_res_ack == other.requests_hello_res_ack
+            && self.received_hello_packet == other.received_hello_packet
+            && self.verified == other.verified
+            && self.contact_type == other.contact_type
+            && self.probe_type == other.probe_type
+            && self.bootstrap == other.bootstrap
+            && optional_second(self.expires_at) == optional_second(other.expires_at)
+            && optional_second(self.last_type_set_at) == optional_second(other.last_type_set_at)
+            && second(self.last_seen) == second(other.last_seen)
+            && second(self.created_at) == second(other.created_at)
+    }
+
     /// Create a new contact with default liveness state.
     pub fn new(id: NodeId, ip: Ipv4Addr, udp_port: u16, tcp_port: u16, kad_version: u8) -> Self {
         let now = SystemTime::now();

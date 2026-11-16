@@ -33,6 +33,18 @@ impl EmulebbCore {
         Ok(status)
     }
 
+    /// Stop Kad traffic and persist its current routing state.
+    pub async fn stop_kad(&self) -> Result<NetworkStatus> {
+        self.set_kad_running(false).await;
+        if let Some(dht) = self.ed2k_dht_node().await {
+            self.persistence_owner
+                .owner(&self.metadata_store, &self.state)?
+                .checkpoint_kad(&dht, false)
+                .await?;
+        }
+        Ok(self.kad_status(false).await)
+    }
+
     pub async fn bootstrap_kad(&self, address: &str, port: u16) -> Result<NetworkStatus> {
         ensure!(!address.trim().is_empty(), "address must not be empty");
         ensure!(port != 0, "port must be between 1 and 65535");
@@ -52,12 +64,15 @@ impl EmulebbCore {
         Ok(self.kad_status(true).await)
     }
 
-    pub async fn kad_nodes(&self) -> Vec<KadNode> {
+    pub async fn kad_nodes(&self) -> Result<Vec<KadNode>> {
+        self.persistence_owner.check_coherent_state()?;
         let Some(dht) = self.ed2k_dht_node().await else {
-            return Vec::new();
+            self.persistence_owner.check_coherent_state()?;
+            return Ok(Vec::new());
         };
-        dht.routing_contacts_snapshot()
-            .await
+        let contacts = dht.routing_contacts_snapshot().await;
+        self.persistence_owner.check_coherent_state()?;
+        Ok(contacts
             .into_iter()
             .map(|contact| {
                 let resolution = self.host_name_resolution_for_ip(contact.ip);
@@ -84,6 +99,6 @@ impl EmulebbCore {
                     last_seen: DateTime::<Utc>::from(contact.last_seen),
                 }
             })
-            .collect()
+            .collect())
     }
 }

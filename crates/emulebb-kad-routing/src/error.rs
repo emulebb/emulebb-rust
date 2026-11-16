@@ -21,6 +21,8 @@ pub enum RoutingSplitDeniedReason {
 /// Routing-table insertion or split failures that matter for oracle parity.
 #[derive(Debug, thiserror::Error)]
 pub enum RoutingError {
+    #[error("routing table is sealed")]
+    Sealed,
     /// The table-level hard cap blocked further growth.
     #[error("routing table is full (max {max} contacts)")]
     TableFull { max: usize },
