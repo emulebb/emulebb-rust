@@ -42,7 +42,7 @@ async fn non_utf8_shared_path_survives_restart_rename_and_delete() {
         })
         .await
         .unwrap();
-        core.stop_shared_directory_monitor();
+        core.stop_shared_directory_monitor().await.unwrap();
 
         wait_for_detached_reload(&core).await;
         let shares = core.shares().await;

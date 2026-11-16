@@ -181,8 +181,8 @@ async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
     );
 
     // --- clean teardown: stop is idempotent and must not panic ---
-    core.stop_shared_directory_monitor();
-    core.stop_shared_directory_monitor(); // second stop is a no-op, not a panic
+    core.stop_shared_directory_monitor().await.unwrap();
+    core.stop_shared_directory_monitor().await.unwrap(); // second stop is a no-op, not a panic
 
     let _ = fs::remove_dir_all(&runtime_dir);
 }

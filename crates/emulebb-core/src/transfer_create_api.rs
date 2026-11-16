@@ -60,7 +60,7 @@ impl EmulebbCore {
                 result.name,
                 result.size_bytes,
                 transfer_create_state_name(request.paused),
-                Some(category),
+                category,
                 preflight.should_redownload(&request_identity.file_hash),
             )
             .await?;
@@ -141,7 +141,7 @@ impl EmulebbCore {
                     parsed.name,
                     parsed.size_bytes,
                     state_name,
-                    Some(category.clone()),
+                    category.clone(),
                     redownload,
                 )
                 .await?;
@@ -164,22 +164,16 @@ impl EmulebbCore {
         Ok(transfers)
     }
 
-    pub async fn transfers(&self) -> Vec<Transfer> {
-        if let Err(error) = self.hydrate_persisted_transfer_rows().await {
-            tracing::warn!("failed to hydrate persisted transfer rows: {error:#}");
-        }
-        let mut transfers: Vec<Transfer> = self
-            .state
-            .lock()
-            .await
-            .transfers
-            .values()
-            .cloned()
-            .collect();
+    pub async fn transfers(&self) -> Result<Vec<Transfer>> {
+        self.hydrate_persisted_transfer_rows().await?;
+        let state = self.state.lock().await;
+        self.persistence_owner.check_coherent_state()?;
+        let mut transfers: Vec<Transfer> = state.transfers.values().cloned().collect();
+        drop(state);
         for transfer in &mut transfers {
             self.apply_live_transfer_fields(transfer);
         }
-        transfers
+        Ok(transfers)
     }
 
     /// Overlay live in-flight download state onto a (possibly stale) cached

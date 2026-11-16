@@ -393,8 +393,65 @@ async fn shared_root_api_consolidates_children_for_ui_and_direct_calls() {
             .iter()
             .any(|root| std::path::Path::new(&root.path).ends_with("Child"))
     );
-    core.stop_shared_directory_monitor();
+    core.stop_shared_directory_monitor().await.unwrap();
     std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
+async fn shared_root_mutations_report_closed_persistence() {
+    let root = unique_test_dir("closed-root-owner");
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    core.drain_persistence().await.unwrap();
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let encoded = percent_encoding::utf8_percent_encode(
+        &root.to_string_lossy(),
+        percent_encoding::NON_ALPHANUMERIC,
+    )
+    .to_string();
+    for (method, uri, body) in [
+        (
+            "PATCH",
+            "/api/v1/shared-directories".to_owned(),
+            json!({"confirmReplaceRoots":true,"roots":[{"path":root}]}).to_string(),
+        ),
+        (
+            "POST",
+            "/api/v1/shared-directories/roots".to_owned(),
+            json!({"path":root}).to_string(),
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/shared-directories/roots?path={encoded}"),
+            String::new(),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING");
+    }
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[tokio::test]

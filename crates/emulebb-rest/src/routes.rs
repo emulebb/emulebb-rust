@@ -78,7 +78,7 @@ pub fn router_with_shutdown(
         .route("/api/v1/vpn-guard/operations/probe", post(probe_vpn_guard))
         .route("/api/v1/categories", get(categories).post(create_category))
         .route(
-            "/api/v1/categories/{categoryId}",
+            "/api/v1/categories/{categoryName}",
             get(category).patch(update_category).delete(delete_category),
         )
         .route("/api/v1/friends", get(friends).post(create_friend))

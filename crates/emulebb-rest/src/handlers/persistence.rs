@@ -2,12 +2,28 @@
 
 use crate::handlers::prelude::*;
 use axum::{http::StatusCode, response::IntoResponse};
-use emulebb_core::PersistenceError;
+use emulebb_core::{LocalMutationError, PersistenceError};
 use serde_json::json;
 
 pub(crate) fn persistence_error(error: anyhow::Error) -> axum::response::Response {
+    if let Some(local) = error.downcast_ref::<LocalMutationError>() {
+        let mapped = match local {
+            LocalMutationError::Busy => PersistenceError::Busy,
+            LocalMutationError::Closing => PersistenceError::Closing,
+            LocalMutationError::TooLarge => PersistenceError::TooLarge,
+            LocalMutationError::Storage => {
+                PersistenceError::Storage("database operation failed".into())
+            }
+            LocalMutationError::Committed => PersistenceError::CommittedPublicationFailed,
+            LocalMutationError::Unknown => PersistenceError::CommitUnknown,
+        };
+        return persistence_error(mapped.into());
+    }
     match error.downcast_ref::<PersistenceError>() {
-        Some(PersistenceError::CommittedAfterWorkerFailure) => api_error_with_details(
+        Some(
+            PersistenceError::CommittedAfterWorkerFailure
+            | PersistenceError::CommittedPublicationFailed,
+        ) => api_error_with_details(
             StatusCode::SERVICE_UNAVAILABLE,
             "PERSISTENCE_COMMITTED",
             error.to_string(),

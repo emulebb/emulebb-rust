@@ -1,11 +1,10 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataCategory {
-    pub id: u32,
+    pub id: i64,
     pub name: String,
-    pub path: Option<String>,
+    pub temp_dir: Option<String>,
+    pub destination_dir: Option<String>,
     pub comment: String,
-    pub sort_order: u32,
-    pub color: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -74,8 +74,8 @@ fn populated_transfer() -> Transfer {
         ed2k_link: "ed2k://|file|Event.Stream.bin|4096|00112233445566778899aabbccddeeff|/"
             .to_string(),
         priority: "normal".to_string(),
-        category_id: 0,
-        category_name: String::new(),
+        category_id: None,
+        category_name: None,
         eta: None,
         added_at: Some(1),
         completed_at: None,

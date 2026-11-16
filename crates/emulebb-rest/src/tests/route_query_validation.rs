@@ -153,19 +153,19 @@ async fn shared_files_keyset_cursor_and_priority_are_validated() {
 }
 
 #[tokio::test]
-async fn transfers_category_id_query_uses_canonical_unsigned_validation() {
+async fn transfers_category_query_uses_name_validation() {
     let cases = [
         (
-            "/api/v1/transfers?categoryId=-1",
-            "categoryId must be an unsigned number",
+            "/api/v1/transfers?category=-invalid",
+            "category must be a valid category name",
         ),
         (
-            "/api/v1/transfers?categoryId=abc",
-            "categoryId must be an unsigned number",
+            "/api/v1/transfers?category=invalid_name",
+            "category must be a valid category name",
         ),
         (
-            "/api/v1/transfers?categoryId=4294967296",
-            "categoryId is out of range",
+            "/api/v1/transfers?category=invalid.name",
+            "category must be a valid category name",
         ),
     ];
     for (uri, expected_message) in cases {
@@ -178,7 +178,7 @@ async fn transfers_category_id_query_uses_canonical_unsigned_validation() {
     let response = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/transfers?categoryId=0")
+                .uri("/api/v1/transfers?category=Media")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),

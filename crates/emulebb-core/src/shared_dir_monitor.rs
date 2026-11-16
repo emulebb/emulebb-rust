@@ -305,16 +305,22 @@ pub(crate) struct SharedDirMonitor {
     /// Held purely for its RAII `Drop`: dropping the debouncer stops/joins the
     /// OS watcher thread. Never read after construction (the watch set is fixed
     /// at start), hence the allow.
-    _debouncer: Debouncer<notify_debouncer_full::notify::RecommendedWatcher, RecommendedCache>,
+    _debouncer:
+        Option<Debouncer<notify_debouncer_full::notify::RecommendedWatcher, RecommendedCache>>,
     consumer: tokio::task::JoinHandle<()>,
 }
 
 impl SharedDirMonitor {
     /// Stop the monitor: drop it so the debouncer's `Drop` stops the OS watcher
     /// thread and the [`SharedDirMonitor`] `Drop` aborts the consumer task.
-    pub(crate) fn stop(self) {
-        // Explicit drop documents intent; the Drop impl does the teardown.
-        drop(self);
+    pub(crate) async fn stop(&mut self) -> anyhow::Result<()> {
+        self._debouncer.take();
+        self.consumer.abort();
+        match (&mut self.consumer).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -413,7 +419,7 @@ where
 
     let consumer = tokio::spawn(run_consumer(action_rx, reconcile_required, apply));
     Some(SharedDirMonitor {
-        _debouncer: debouncer,
+        _debouncer: Some(debouncer),
         consumer,
     })
 }
@@ -484,9 +490,7 @@ use emulebb_ed2k::ed2k_transfer::{
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 
 use crate::EmulebbCore;
-use crate::shared_directories::{
-    forget_stale_shares, refresh_shared_directory_row, register_monitor_shared_hash,
-};
+use crate::shared_directories::{forget_stale_shares, register_monitor_shared_hash};
 
 /// Canonical key for the `monitor_shared_hashes` source-path -> hash map.
 ///
@@ -522,8 +526,8 @@ enum TargetedRehashOutcome {
     Retry(anyhow::Error),
 }
 
-fn start_shared_source_reconcile_worker(core: &EmulebbCore) {
-    let mut worker = core.shared_source_reconcile_worker.lock().unwrap();
+async fn start_shared_source_reconcile_worker(core: &EmulebbCore) {
+    let mut worker = core.shared_source_reconcile_worker.lock().await;
     if worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
         return;
     }
@@ -568,20 +572,76 @@ async fn run_shared_source_reconcile_worker(
     }
 }
 
-fn start_shared_root_health_worker(core: &EmulebbCore) {
-    let mut worker = core.shared_root_health_worker.lock().unwrap();
+pub(crate) async fn start_shared_root_health_worker(core: &EmulebbCore) {
+    let mut worker = core.shared_root_health_worker.lock().await;
+    if core.lifecycle_state_name() != "running" {
+        return;
+    }
     if worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
         return;
     }
     if let Some(finished) = worker.take() {
         finished.abort();
     }
-    *worker = Some(tokio::spawn(run_shared_root_health_worker(core.clone())));
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    *core.category_probe_sender.lock().unwrap() = Some(sender);
+    *worker = Some(tokio::spawn(run_shared_root_health_worker(
+        core.clone(),
+        receiver,
+    )));
 }
 
-async fn run_shared_root_health_worker(core: EmulebbCore) {
-    let mut root_availability = crate::shared_directories::effective_shared_directory_roots(&core)
-        .await
+async fn run_category_probe(
+    core: &EmulebbCore,
+    job: crate::persistence_owner::category::CategoryProbeJob,
+) {
+    // The handle survives cancellation of this health generation. A later
+    // generation waits for the same slot before starting another probe.
+    let mut slot = core.category_probe_slot.lock().await;
+    if let Some(previous) = slot.as_mut() {
+        #[cfg(test)]
+        if let Some(waiting) = core.category_probe_waiting.lock().unwrap().take() {
+            let _ = waiting.send(());
+        }
+        let _ = previous.await;
+        slot.take();
+    }
+    let crate::persistence_owner::category::CategoryProbeJob {
+        candidate,
+        lease,
+        response,
+    } = job;
+    #[cfg(test)]
+    let gate = core.category_probe_gate.lock().unwrap().take();
+    *slot = Some(tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
+        let matches = emulebb_ed2k::ed2k_transfer::category_copy_matches(&candidate);
+        (candidate, matches, lease)
+    }));
+    if let Some(task) = slot.as_mut() {
+        if let Ok(result) = task.await {
+            let _ = response.send(result);
+        }
+    }
+    slot.take();
+}
+
+async fn run_shared_root_health_worker(
+    core: EmulebbCore,
+    mut probes: tokio::sync::mpsc::Receiver<crate::persistence_owner::category::CategoryProbeJob>,
+) {
+    let roots = match crate::shared_directories::effective_shared_directory_roots(&core).await {
+        Ok(roots) => roots,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load shared roots for health monitor");
+            return;
+        }
+    };
+    let mut root_availability = roots
         .into_iter()
         .map(|root| (PathBuf::from(root.path), root.accessible))
         .collect::<HashMap<_, _>>();
@@ -591,29 +651,220 @@ async fn run_shared_root_health_worker(core: EmulebbCore) {
         Duration::from_secs(2),
     );
     loop {
-        root_check.tick().await;
-        if let Err(error) =
-            reconcile_root_availability(&core, &mut root_availability, &mut pending_rejoin).await
-        {
-            tracing::warn!(%error, "failed to reconcile shared-root availability");
+        let changed = tokio::select! {
+            _ = root_check.tick() => false,
+            _ = core.shared_root_change.notified() => true,
+            Some(job) = probes.recv() => {
+                run_category_probe(&core, job).await;
+                continue;
+            }
+        };
+        if changed {
+            root_availability.clear();
+        }
+        let health_round = async {
+            if let Err(error) =
+                reconcile_root_availability(&core, &mut root_availability, &mut pending_rejoin)
+                    .await
+            {
+                tracing::warn!(%error, "failed to reconcile shared-root availability");
+            }
+            if changed && core.lifecycle_state_name() == "running" {
+                rebuild_shared_directory_watch(&core).await;
+                if let Err(error) = core.reload_shared_directories_detached().await {
+                    tracing::warn!(%error, "failed to queue category-root scan");
+                }
+            }
+        };
+        tokio::pin!(health_round);
+        loop {
+            tokio::select! {
+                _ = &mut health_round => break,
+                Some(job) = probes.recv() => run_category_probe(&core, job).await,
+            }
         }
     }
 }
 
+pub(crate) enum RootIoRequest {
+    Inspect(Vec<SharedDirectoryRoot>),
+    InspectDelivery(Vec<SharedDirectoryRoot>, PathBuf, NativeFileFingerprint),
+    Replace(Vec<SharedDirectoryRoot>, usize),
+    Canonical(Vec<String>),
+    Remove(String, Vec<SharedDirectoryRoot>),
+}
+
+pub(crate) enum RootIoResult {
+    Inspected(Vec<(SharedDirectoryRoot, bool)>),
+    Canonical(Vec<String>),
+    Remaining(Vec<SharedDirectoryRoot>),
+}
+
+pub(crate) enum RootSqlResult {
+    Mutation(bool),
+    Descriptors(Vec<emulebb_metadata::MetadataSharedDirectoryRoot>),
+}
+
+pub(crate) async fn run_root_io(
+    core: &EmulebbCore,
+    request: RootIoRequest,
+) -> anyhow::Result<RootIoResult> {
+    let mut slot = core.shared_root_snapshot.lock().await;
+    if let Some(previous) = slot.as_mut() {
+        let _ = previous.await;
+        slot.take();
+    }
+    #[cfg(test)]
+    let gate = core.shared_root_io_gate.lock().unwrap().take();
+    *slot = Some(tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
+        let request = match request {
+            RootIoRequest::InspectDelivery(roots, path, fingerprint) => {
+                let candidate = emulebb_metadata::MetadataSharedCopyCandidate {
+                    path_id: 0,
+                    source_path: path,
+                    file_size: fingerprint.size_bytes,
+                    source_fingerprint: Some(fingerprint),
+                };
+                if !emulebb_ed2k::ed2k_transfer::category_copy_matches(&candidate) {
+                    return Ok(RootIoResult::Inspected(Vec::new()));
+                }
+                RootIoRequest::Inspect(roots)
+            }
+            request => request,
+        };
+        match request {
+            RootIoRequest::Inspect(roots) => {
+                let roots = crate::shared_directories::consolidate_shared_directory_roots(
+                    roots
+                        .into_iter()
+                        .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
+                            path: root.path,
+                            monitor_owned: root.monitor_owned,
+                            shareable: root.shareable,
+                            accessible: root.accessible,
+                        }),
+                );
+                Ok(RootIoResult::Inspected(
+                    roots
+                        .into_iter()
+                        .map(|root| {
+                            let observed = long_path(Path::new(&root.path)).is_dir();
+                            (
+                                SharedDirectoryRoot {
+                                    path: root.path,
+                                    monitor_owned: root.monitor_owned,
+                                    shareable: root.shareable,
+                                    accessible: root.accessible,
+                                },
+                                observed,
+                            )
+                        })
+                        .collect(),
+                ))
+            }
+            RootIoRequest::Replace(mut roots, first_explicit) => {
+                for root in roots.iter_mut().skip(first_explicit) {
+                    *root = crate::shared_directories::refresh_shared_directory_row(root);
+                }
+                let roots = crate::shared_directories::consolidate_shared_directory_roots(
+                    roots
+                        .into_iter()
+                        .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
+                            path: root.path,
+                            monitor_owned: root.monitor_owned,
+                            shareable: root.shareable,
+                            accessible: root.accessible,
+                        }),
+                );
+                Ok(RootIoResult::Inspected(
+                    roots
+                        .into_iter()
+                        .map(|root| {
+                            let observed = long_path(Path::new(&root.path)).is_dir();
+                            (
+                                SharedDirectoryRoot {
+                                    path: root.path,
+                                    monitor_owned: root.monitor_owned,
+                                    shareable: root.shareable,
+                                    accessible: root.accessible,
+                                },
+                                observed,
+                            )
+                        })
+                        .collect(),
+                ))
+            }
+            RootIoRequest::Canonical(paths) => Ok(RootIoResult::Canonical(
+                paths
+                    .iter()
+                    .map(|path| crate::shared_file_api::canonical_shared_directory_root(path))
+                    .collect::<anyhow::Result<_>>()?,
+            )),
+            RootIoRequest::Remove(path, roots) => {
+                let canonical = crate::shared_file_api::removable_shared_directory_root(&path)?;
+                let key =
+                    crate::shared_directories::shared_root_comparison_key(Path::new(&canonical));
+                Ok(RootIoResult::Remaining(
+                    roots
+                        .into_iter()
+                        .filter(|root| {
+                            crate::shared_directories::shared_root_comparison_key(Path::new(
+                                &root.path,
+                            )) != key
+                        })
+                        .collect(),
+                ))
+            }
+            RootIoRequest::InspectDelivery(..) => unreachable!(),
+        }
+    }));
+    let result = slot.as_mut().expect("root snapshot is installed").await;
+    slot.take();
+    result.map_err(|_| crate::persistence_owner::PersistenceError::Worker)?
+}
+
 async fn root_availability_snapshot(core: &EmulebbCore) -> anyhow::Result<HashMap<PathBuf, bool>> {
-    let roots = crate::shared_directories::effective_shared_directory_roots(core).await;
-    tokio::task::spawn_blocking(move || {
-        roots
-            .into_iter()
-            .map(|root| {
-                let path = PathBuf::from(root.path);
-                let accessible = long_path(&path).is_dir();
-                (path, accessible)
-            })
-            .collect()
-    })
-    .await
-    .map_err(Into::into)
+    let roots = crate::shared_directories::root_descriptors(core).await?;
+    let RootIoResult::Inspected(roots) = run_root_io(core, RootIoRequest::Inspect(roots)).await?
+    else {
+        unreachable!()
+    };
+    Ok(roots
+        .into_iter()
+        .map(|(root, observed)| (PathBuf::from(root.path), observed))
+        .collect())
+}
+
+/// Settle a metadata-owning root update before the profile lease is released.
+pub(crate) async fn drain_root_sql(core: &EmulebbCore) -> anyhow::Result<()> {
+    let mut slot = core.shared_root_sql.lock().await;
+    if let Some(task) = slot.as_mut() {
+        let result = task.await;
+        slot.take();
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                core.shared_root_fault.store(true, Ordering::Release);
+                return Err(error);
+            }
+            Err(error) => {
+                core.shared_root_fault.store(true, Ordering::Release);
+                return Err(error.into());
+            }
+        }
+    }
+    if core.shared_root_unpublished.load(Ordering::Acquire) {
+        anyhow::bail!("root accessibility update committed before health publication stopped");
+    }
+    if core.shared_root_fault.load(Ordering::Acquire) {
+        anyhow::bail!("root SQL worker previously failed");
+    }
+    Ok(())
 }
 
 async fn reconcile_root_availability(
@@ -648,11 +899,59 @@ async fn reconcile_root_availability(
     pending_rejoin.retain(|path, _| current.get(path) == Some(&true));
     let mut withdrawn = false;
     for root in &missing {
-        let metadata = core.metadata_store.clone();
         let root = root.clone();
-        withdrawn |=
-            tokio::task::spawn_blocking(move || metadata.set_shared_root_accessible(&root, false))
-                .await??;
+        let unpublished = Arc::clone(&core.shared_root_unpublished);
+        #[cfg(test)]
+        let gate = core.shared_root_sql_gate.lock().unwrap().take();
+        let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
+        let mut slot = core.shared_root_sql.lock().await;
+        if core.lifecycle_state_name() != "running" {
+            return Err(crate::persistence_owner::PersistenceError::Closing.into());
+        }
+        if let Some(previous) = slot.as_mut() {
+            let result = previous.await;
+            slot.take();
+            match result {
+                Ok(Ok(RootSqlResult::Mutation(changed))) => withdrawn |= changed,
+                Ok(Ok(RootSqlResult::Descriptors(_))) => {}
+                Ok(Err(error)) => {
+                    core.shared_root_fault.store(true, Ordering::Release);
+                    return Err(error);
+                }
+                Err(error) => {
+                    core.shared_root_fault.store(true, Ordering::Release);
+                    return Err(error.into());
+                }
+            }
+        }
+        if core.lifecycle_state_name() != "running" {
+            return Err(crate::persistence_owner::PersistenceError::Closing.into());
+        }
+        let metadata = core.metadata_store.clone();
+        *slot = Some(tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+            let _root_mutation = root_mutation;
+            let changed = metadata.set_shared_root_accessible(&root, false)?;
+            if changed {
+                unpublished.store(true, Ordering::Release);
+            }
+            Ok(RootSqlResult::Mutation(changed))
+        }));
+        let result = slot.as_mut().expect("root update is installed").await;
+        slot.take();
+        match result {
+            Ok(Ok(RootSqlResult::Mutation(changed))) => withdrawn |= changed,
+            Ok(Ok(RootSqlResult::Descriptors(_))) => unreachable!(),
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                core.shared_root_fault.store(true, Ordering::Release);
+                return Err(error.into());
+            }
+        }
     }
     {
         let mut state = core.state.lock().await;
@@ -671,6 +970,7 @@ async fn reconcile_root_availability(
             .refresh_complete_shared_catalog()
             .await?;
         core.queue_ed2k_shared_catalog_publish();
+        core.shared_root_unpublished.store(false, Ordering::Release);
     }
     let recovered = changed.iter().any(|(_, accessible)| *accessible);
     if !core.shared_reload_running.load(Ordering::Acquire) {
@@ -803,13 +1103,10 @@ async fn finish_unavailable_invalidated_source(
     invalidation: &Ed2kSharedSourceInvalidation,
     key: &Path,
 ) -> TargetedRehashOutcome {
-    let metadata = core.metadata_store.clone();
-    let path = key.to_path_buf();
-    if let Err(error) =
-        tokio::task::spawn_blocking(move || metadata.withdraw_local_file_path(&path))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result)
+    if let Err(error) = core
+        .ed2k_transfers
+        .withdraw_monitored_shared_path(&invalidation.file_hash, key)
+        .await
     {
         return TargetedRehashOutcome::Retry(error);
     }
@@ -856,33 +1153,125 @@ pub(crate) async fn admit_monitored_path(
     fingerprint: &NativeFileFingerprint,
     file_hash: &str,
 ) -> anyhow::Result<bool> {
-    let roots = crate::shared_directories::effective_shared_directory_roots(core).await;
-    let mut admitted = false;
-    for root in roots {
-        if !root.shareable || !root.accessible {
+    admit_verified_path(core, path, fingerprint, file_hash, false).await
+}
+
+/// Capture only matching ordinary roots using the existing tracked descriptor
+/// and filesystem providers. Ingest validates this observation again in its
+/// binding transaction; no membership handoff remains in the caller.
+pub(crate) async fn prepare_ingest_roots(
+    core: &EmulebbCore,
+    path: &Path,
+) -> anyhow::Result<Vec<emulebb_metadata::MetadataIngestRoot>> {
+    for _ in 0..16 {
+        let epoch = core.ed2k_transfers.root_observation_epoch().await;
+        let roots = crate::shared_directories::root_descriptors(core).await?;
+        let RootIoResult::Inspected(roots) =
+            run_root_io(core, RootIoRequest::Inspect(roots)).await?
+        else {
+            unreachable!()
+        };
+        let mut matching = Vec::new();
+        for (root, observed) in roots {
+            if !root.shareable || !root.accessible || !observed {
+                continue;
+            }
+            let root_path = PathBuf::from(root.path);
+            let normalized = long_path(&root_path);
+            if let Ok(relative) = path.strip_prefix(&normalized) {
+                if !relative.as_os_str().is_empty() {
+                    matching.push(emulebb_metadata::MetadataIngestRoot {
+                        root: root_path,
+                        relative: relative.to_path_buf(),
+                    });
+                }
+            }
+        }
+        if core.ed2k_transfers.root_observation_epoch().await == epoch {
+            return Ok(matching);
+        }
+    }
+    Err(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy.into())
+}
+
+pub(crate) async fn admit_delivered_path(
+    core: &EmulebbCore,
+    path: &Path,
+    fingerprint: &NativeFileFingerprint,
+    file_hash: &str,
+) -> anyhow::Result<bool> {
+    admit_verified_path(core, path, fingerprint, file_hash, true).await
+}
+
+async fn admit_verified_path(
+    core: &EmulebbCore,
+    path: &Path,
+    fingerprint: &NativeFileFingerprint,
+    file_hash: &str,
+    recover_observed_root: bool,
+) -> anyhow::Result<bool> {
+    for _ in 0..16 {
+        let epoch = if recover_observed_root {
+            Some(core.ed2k_transfers.root_observation_epoch().await)
+        } else {
+            None
+        };
+        let roots = crate::shared_directories::root_descriptors(core).await?;
+        let request = if recover_observed_root {
+            RootIoRequest::InspectDelivery(roots, path.to_path_buf(), fingerprint.clone())
+        } else {
+            RootIoRequest::Inspect(roots)
+        };
+        let RootIoResult::Inspected(roots) = run_root_io(core, request).await? else {
+            unreachable!()
+        };
+        let mut admitted = false;
+        let mut retry = false;
+        for (root, observed) in roots {
+            if !root.shareable || !observed || (!root.accessible && !recover_observed_root) {
+                continue;
+            }
+            let root_path = PathBuf::from(&root.path);
+            let normalized_root = long_path(&root_path);
+            let Ok(relative) = path.strip_prefix(&normalized_root) else {
+                continue;
+            };
+            match core
+                .ed2k_transfers
+                .admit_monitored_shared_path(
+                    file_hash,
+                    &root_path,
+                    path,
+                    relative,
+                    fingerprint,
+                    epoch,
+                )
+                .await
+            {
+                Ok(value) => admitted |= value,
+                Err(error)
+                    if recover_observed_root
+                        && matches!(
+                            error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>(),
+                            Some(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy)
+                        ) =>
+                {
+                    retry = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if retry {
+            tokio::task::yield_now().await;
             continue;
         }
-        let root_path = PathBuf::from(&root.path);
-        let normalized_root = long_path(&root_path);
-        let Ok(relative) = path.strip_prefix(&normalized_root) else {
-            continue;
-        };
-        let metadata = core.metadata_store.clone();
-        let member_path = path.to_path_buf();
-        let relative = relative.to_path_buf();
-        let fingerprint = fingerprint.clone();
-        admitted |= tokio::task::spawn_blocking(move || {
-            metadata.admit_local_path_to_root(&root_path, &member_path, &relative, &fingerprint)
-        })
-        .await??;
+        if admitted {
+            core.queue_ed2k_shared_catalog_publish();
+        }
+        return Ok(admitted);
     }
-    if admitted {
-        core.ed2k_transfers
-            .refresh_shared_catalog_entry(file_hash)
-            .await?;
-        core.queue_ed2k_shared_catalog_publish();
-    }
-    Ok(admitted)
+    Err(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy.into())
 }
 
 /// (Re)start the live shared-directory auto-pickup monitor for the configured
@@ -892,21 +1281,63 @@ pub(crate) async fn admit_monitored_path(
 /// remove/rename-away it is dropped from the shared catalog. Tolerant of a
 /// per-root watch failure (logged; that root degrades to scan-on-demand).
 pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
+    let _lifecycle = core.shared_monitor_lifecycle.lock().await;
     // Drop any existing monitor before rebuilding the watch set.
-    stop_shared_directory_monitor(core);
-    start_shared_source_reconcile_worker(core);
-    start_shared_root_health_worker(core);
+    if let Err(error) = stop_monitor_locked(core).await {
+        tracing::warn!(%error, "failed to join prior shared monitor");
+        return;
+    }
+    if core.lifecycle_state_name() != "running" {
+        return;
+    }
+    core.shared_monitor_stopped.store(false, Ordering::Release);
+    start_shared_source_reconcile_worker(core).await;
+    start_shared_root_health_worker(core).await;
 
     if let Err(error) = crate::shared_directories::sync_implicit_shared_directory_roots(core).await
     {
         tracing::warn!(%error, "failed to synchronize implicit shared roots");
         return;
     }
-    let roots = crate::shared_directories::effective_shared_directory_roots(core).await;
-    let roots = roots
-        .iter()
-        .map(refresh_shared_directory_row)
-        .collect::<Vec<_>>();
+    rebuild_shared_directory_watch(core).await;
+}
+
+async fn rebuild_shared_directory_watch(core: &EmulebbCore) {
+    let _gate = core.shared_watcher_gate.lock().await;
+    let mut slot = core.shared_dir_monitor.lock().await;
+    if let Some(monitor) = slot.as_mut() {
+        if let Err(error) = monitor.stop().await {
+            core.shared_monitor_fault.store(true, Ordering::Release);
+            tracing::warn!(%error, "failed to join shared monitor consumer");
+        }
+        slot.take();
+    }
+    if core.lifecycle_state_name() != "running"
+        || core.shared_monitor_stopped.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let roots = match crate::shared_directories::root_descriptors(core).await {
+        Ok(roots) => roots,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load roots for watcher");
+            return;
+        }
+    };
+    let roots = match run_root_io(core, RootIoRequest::Inspect(roots)).await {
+        Ok(RootIoResult::Inspected(roots)) => roots
+            .into_iter()
+            .map(|(mut root, observed)| {
+                root.accessible = observed;
+                root
+            })
+            .collect::<Vec<_>>(),
+        Ok(_) => unreachable!(),
+        Err(error) => {
+            tracing::warn!(%error, "failed to inspect watcher roots");
+            return;
+        }
+    };
     if roots.is_empty() {
         return;
     }
@@ -947,7 +1378,18 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
         }
     });
 
-    *core.shared_dir_monitor.lock().unwrap() = monitor;
+    *slot = monitor;
+    if core.lifecycle_state_name() != "running"
+        || core.shared_monitor_stopped.load(Ordering::Acquire)
+    {
+        if let Some(monitor) = slot.as_mut() {
+            if let Err(error) = monitor.stop().await {
+                core.shared_monitor_fault.store(true, Ordering::Release);
+                tracing::warn!(%error, "failed to join stopped shared monitor consumer");
+            }
+        }
+        slot.take();
+    }
 }
 
 /// Relocate an already-shared source after a paired filesystem rename.
@@ -1033,20 +1475,13 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
     }
     match admit_monitored_path(core, &new_key, fingerprint, &previous.hash).await {
         Ok(true) => {
-            let metadata = core.metadata_store.clone();
-            let old_path = old_key.clone();
-            match tokio::task::spawn_blocking(move || metadata.withdraw_local_file_path(&old_path))
+            if let Err(error) = core
+                .ed2k_transfers
+                .withdraw_monitored_shared_path(&previous.hash, &old_key)
                 .await
             {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(from = %from.display(), %error, "failed to withdraw renamed old path");
-                    return;
-                }
-                Err(error) => {
-                    tracing::warn!(from = %from.display(), %error, "renamed old path withdrawal task panicked");
-                    return;
-                }
+                tracing::warn!(from = %from.display(), %error, "failed to withdraw renamed old path");
+                return;
             }
             let current_hash = previous.hash.clone();
             let mut state = core.state.lock().await;
@@ -1075,16 +1510,55 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
 }
 
 /// Stop the live shared-directory monitor (if running). Idempotent.
-pub(crate) fn stop_shared_directory_monitor(core: &EmulebbCore) {
-    if let Some(monitor) = core.shared_dir_monitor.lock().unwrap().take() {
-        monitor.stop();
-    }
-    if let Some(worker) = core.shared_source_reconcile_worker.lock().unwrap().take() {
+pub(crate) async fn stop_shared_directory_monitor(core: &EmulebbCore) -> anyhow::Result<()> {
+    let _lifecycle = core.shared_monitor_lifecycle.lock().await;
+    stop_monitor_locked(core).await
+}
+
+async fn stop_worker(
+    slot: &tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+) -> anyhow::Result<()> {
+    let mut slot = slot.lock().await;
+    if let Some(worker) = slot.as_mut() {
         worker.abort();
+        let result = worker.await;
+        slot.take();
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            return Err(error.into());
+        }
     }
-    if let Some(worker) = core.shared_root_health_worker.lock().unwrap().take() {
-        worker.abort();
+    Ok(())
+}
+
+async fn stop_monitor_locked(core: &EmulebbCore) -> anyhow::Result<()> {
+    core.shared_monitor_stopped.store(true, Ordering::Release);
+    core.category_probe_sender.lock().unwrap().take();
+    let health = stop_worker(&core.shared_root_health_worker).await;
+    if health.is_err() {
+        core.shared_monitor_fault.store(true, Ordering::Release);
     }
+    let reconcile = stop_worker(&core.shared_source_reconcile_worker).await;
+    if reconcile.is_err() {
+        core.shared_monitor_fault.store(true, Ordering::Release);
+    }
+    let _watcher = core.shared_watcher_gate.lock().await;
+    let mut slot = core.shared_dir_monitor.lock().await;
+    let monitor = if let Some(monitor) = slot.as_mut() {
+        monitor.stop().await
+    } else {
+        Ok(())
+    };
+    if monitor.is_err() {
+        core.shared_monitor_fault.store(true, Ordering::Release);
+    }
+    slot.take();
+    health.and(reconcile).and(monitor)?;
+    if core.shared_monitor_fault.load(Ordering::Acquire) {
+        anyhow::bail!("shared monitor consumer failed during a prior rebuild");
+    }
+    Ok(())
 }
 
 /// Auto-share a file picked up by the live monitor. Goes through the same ingest
@@ -1267,11 +1741,12 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
     };
     let hash = shared_file.hash;
     let key = monitor_shared_key(path);
-    let metadata = core.metadata_store.clone();
-    let withdrawn =
-        tokio::task::spawn_blocking(move || metadata.withdraw_local_file_path(&key)).await;
+    let withdrawn = core
+        .ed2k_transfers
+        .withdraw_monitored_shared_path(&hash, &key)
+        .await;
     match withdrawn {
-        Ok(Ok(_)) => {
+        Ok(_) => {
             if let Err(error) = core
                 .ed2k_transfers
                 .refresh_shared_catalog_entry(&hash)
@@ -1283,11 +1758,8 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
                 tracing::debug!(path = %path.display(), %hash, "withdrew monitored shared path");
             }
         }
-        Ok(Err(error)) => {
-            tracing::warn!(path = %path.display(), %hash, %error, "failed to withdraw monitored path")
-        }
         Err(error) => {
-            tracing::warn!(path = %path.display(), %hash, %error, "monitored path withdrawal task panicked")
+            tracing::warn!(path = %path.display(), %hash, %error, "failed to withdraw monitored path")
         }
     }
 }
@@ -1298,8 +1770,377 @@ mod tests {
     use emulebb_metadata::MetadataSharedDirectoryRoot;
     use notify_debouncer_full::notify::Event;
     use notify_debouncer_full::notify::event::{CreateKind, Flag, RemoveKind};
+    use std::future::{Future, poll_fn};
     use std::sync::Mutex;
+    use std::task::Poll;
     use std::time::Instant;
+
+    #[tokio::test]
+    async fn cancelled_stop_retains_the_join_for_the_next_stop() {
+        let core = Arc::new(
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap(),
+        );
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *core.shared_root_health_worker.lock().await =
+            Some(tokio::task::spawn_blocking(move || {
+                let _ = entered.send(());
+                let _ = release_rx.recv();
+            }));
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut first = Box::pin(core.stop_shared_directory_monitor());
+        assert!(
+            poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        drop(first);
+        let mut second = Box::pin(core.stop_shared_directory_monitor());
+        assert!(
+            poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(core.shared_root_health_worker.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_keeps_an_already_observed_worker_failure() {
+        let core = Arc::new(
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap(),
+        );
+        let failed: tokio::task::JoinHandle<()> =
+            tokio::spawn(async { panic!("injected monitor worker failure") });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !failed.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        *core.shared_root_health_worker.lock().await = Some(failed);
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *core.shared_source_reconcile_worker.lock().await =
+            Some(tokio::task::spawn_blocking(move || {
+                let _ = entered.send(());
+                let _ = release_rx.recv();
+            }));
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut first = Box::pin(core.stop_shared_directory_monitor());
+        assert!(
+            poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        drop(first);
+        let mut second = Box::pin(core.stop_shared_directory_monitor());
+        assert!(
+            poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), second)
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn public_drain_stops_monitor_and_prevents_rearming_root_sql() {
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            core.start_shared_directory_monitor(),
+        )
+        .await
+        .unwrap();
+        assert!(core.shared_root_health_worker.lock().await.is_some());
+        tokio::time::timeout(Duration::from_secs(5), core.drain_persistence())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(core.shared_root_health_worker.lock().await.is_none());
+        assert!(core.shared_source_reconcile_worker.lock().await.is_none());
+        core.shared_root_change.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            core.start_shared_directory_monitor(),
+        )
+        .await
+        .unwrap();
+        assert!(core.shared_root_health_worker.lock().await.is_none());
+        assert!(core.shared_root_sql.lock().await.is_none());
+        assert!(
+            crate::shared_directories::implicit_shared_directory_roots(&core)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::shared_directories::sync_implicit_shared_directory_roots(&core)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_root_probe_retains_the_single_io_slot() {
+        let core = Arc::new(
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap(),
+        );
+        let root = crate::unique_runtime_dir("retained-root-probe");
+        configure_test_shared_root(&core, &root).await;
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *core.shared_root_io_gate.lock().unwrap() = Some((entered, release_rx));
+        let first = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move { root_availability_snapshot(&core).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        first.abort();
+        let _ = first.await;
+        assert!(core.shared_root_snapshot.lock().await.is_some());
+        let mut second = Box::pin(root_availability_snapshot(&core));
+        assert!(
+            poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        release.send(()).unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(observed.values().any(|accessible| *accessible));
+    }
+
+    #[tokio::test]
+    async fn terminal_drain_rejects_root_sql_after_late_path_io() {
+        let core = Arc::new(
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap(),
+        );
+        let root = crate::unique_runtime_dir("late-root-admission");
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *core.shared_root_io_gate.lock().unwrap() = Some((entered, release_rx));
+        let add = {
+            let core = Arc::clone(&core);
+            let root = root.clone();
+            tokio::spawn(async move {
+                core.add_shared_directory_root(&root.to_string_lossy())
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), core.drain_persistence())
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), add)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<crate::persistence_owner::PersistenceError>(),
+            Some(crate::persistence_owner::PersistenceError::Closing)
+        ));
+        assert!(core.shared_root_sql.lock().await.is_none());
+        assert!(
+            core.metadata_store
+                .shared_directory_roots()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_start_retains_implicit_root_sql_for_terminal_drain() {
+        let core = Arc::new(
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap(),
+        );
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *core.shared_implicit_sql_gate.lock().unwrap() = Some((entered, release_rx));
+        let start = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move { core.start_shared_directory_monitor().await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        start.abort();
+        let _ = start.await;
+        tokio::time::timeout(Duration::from_secs(5), core.stop_shared_directory_monitor())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), core.shared_root_sql.lock())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let mut drain = Box::pin(core.drain_persistence());
+        assert!(
+            poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        release.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("committed"));
+        assert!(core.shared_root_health_worker.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stopped_health_retains_actual_root_sql_until_settled() {
+        let profile = crate::unique_runtime_dir("held-root-sql-profile");
+        let lock_path = profile.join(".emulebb-profile.lock");
+        let open_lock = || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .unwrap()
+        };
+        let lease = Arc::new(emulebb_metadata::ProfileLeaseGuard::try_lock(open_lock()).unwrap());
+        let store = emulebb_metadata::MetadataStore::open_with_profile_lease(
+            profile.join("metadata.sqlite"),
+            lease,
+        )
+        .unwrap();
+        let core = Arc::new(
+            EmulebbCore::new(
+                "test",
+                emulebb_index::FileIndex::from_metadata_store(store),
+                profile.join("transfers"),
+            )
+            .unwrap(),
+        );
+        let root = crate::unique_runtime_dir("held-root-sql").join("missing");
+        std::fs::create_dir_all(&core.incoming_dir).unwrap();
+        configure_test_shared_root(&core, &root).await;
+        let roots = crate::shared_directories::effective_shared_directory_roots(&core)
+            .await
+            .unwrap();
+        let missing: Vec<_> = roots
+            .iter()
+            .filter(|item| !long_path(Path::new(&item.path)).is_dir())
+            .collect();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(
+            crate::shared_directories::shared_root_comparison_key(Path::new(&missing[0].path)),
+            crate::shared_directories::shared_root_comparison_key(&root)
+        );
+        assert!(core.metadata_store.shared_directory_roots().unwrap()[0].accessible);
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *core.shared_root_sql_gate.lock().unwrap() = Some((entered, release_rx));
+        let worker = {
+            let core = Arc::clone(&core);
+            let root = root.clone();
+            tokio::spawn(async move {
+                let mut previous = HashMap::from([(root, true)]);
+                let mut pending = HashMap::new();
+                let _ = reconcile_root_availability(&core, &mut previous, &mut pending).await;
+            })
+        };
+        *core.shared_root_health_worker.lock().await = Some(worker);
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), core.stop_shared_directory_monitor())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut drain = Box::pin(drain_root_sql(&core));
+        assert!(
+            poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(matches!(
+            emulebb_metadata::ProfileLeaseGuard::try_lock(open_lock()),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        release.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("committed"));
+        let native = emulebb_metadata::NativePath::from(root.as_path());
+        let conn = rusqlite::Connection::open(profile.join("metadata.sqlite")).unwrap();
+        let accessible: bool = conn.query_row(
+            "SELECT r.accessible FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2",
+            rusqlite::params![emulebb_metadata::NativePath::platform(), native.storage_bytes()],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(!accessible);
+        drop(conn);
+        drop(core);
+        let next = emulebb_metadata::ProfileLeaseGuard::try_lock(open_lock()).unwrap();
+        drop(next);
+    }
+
+    #[tokio::test]
+    async fn repeated_root_drains_retain_the_worker_failure() {
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        *core.shared_root_sql.lock().await = Some(tokio::task::spawn_blocking(|| {
+            Err(anyhow::anyhow!("injected root SQL failure"))
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), drain_root_sql(&core))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), drain_root_sql(&core))
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
 
     async fn configure_test_shared_root(core: &EmulebbCore, root: &Path) {
         core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {

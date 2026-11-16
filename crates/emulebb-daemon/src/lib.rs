@@ -717,14 +717,14 @@ async fn graceful_teardown(core: &Arc<EmulebbCore>) -> Result<()> {
     info!("running graceful network teardown");
     core.begin_shutdown();
     let admission = core.stop_persistence_admission();
-    core.stop_shared_directory_monitor();
+    let monitor = core.stop_shared_directory_monitor().await;
     let result = teardown_sequence(
-        core.finish_kad_persistence(),
+        async { core.finish_kad_persistence().await },
         async { core.disconnect_ed2k_after_persistence().await.map(|_| ()) },
         SHUTDOWN_TEARDOWN_TIMEOUT,
     )
     .await;
-    admission.and(result)
+    admission.and(monitor).and(result)
 }
 
 async fn teardown_sequence(

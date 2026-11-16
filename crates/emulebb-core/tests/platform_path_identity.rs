@@ -75,7 +75,7 @@ async fn case_sensitive_windows_directory_preserves_case_variant_files() {
     })
     .await
     .unwrap();
-    core.stop_shared_directory_monitor();
+    core.stop_shared_directory_monitor().await.unwrap();
 
     let mut shares = core.reload_shared_directories().await.unwrap();
     shares.sort_by(|left, right| left.name.cmp(&right.name));

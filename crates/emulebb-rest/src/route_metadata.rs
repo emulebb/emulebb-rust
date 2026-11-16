@@ -56,10 +56,13 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
         {
             return query_scalar_error_response(error).into_response();
         }
-        if name == "categoryId"
-            && let Err(error) = parse_bounded_query_value(value, 0, u32::MAX as u64, "categoryId")
-        {
-            return query_scalar_error_response(error).into_response();
+        if name == "category" && !emulebb_core::valid_category_name(value) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "category must be a valid category name",
+            )
+            .into_response();
         }
         if name == "state" && !is_transfer_state_name(value) {
             return api_error(
@@ -330,8 +333,18 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         .map(|path| path.split('/').collect::<Vec<_>>())
         .unwrap_or_default();
     match (method, segments.as_slice()) {
-        ("GET" | "PATCH" | "DELETE", ["categories", category_id]) => {
-            validate_bounded_path_uint(category_id, u32::MAX as u64, "categoryId")?
+        ("GET" | "PATCH" | "DELETE", ["categories", category]) => {
+            let category = decode_path_parameter(category, "categoryName")?;
+            if !emulebb_core::valid_category_name(&category) {
+                return Err(Box::new(
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_ARGUMENT",
+                        "categoryName must be a valid category name",
+                    )
+                    .into_response(),
+                ));
+            }
         }
         ("DELETE", ["friends", user_hash]) => validate_lowercase_md4_hex(user_hash, "userHash")?,
         ("GET" | "DELETE", ["searches", search_id]) => {
@@ -519,7 +532,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const SNAPSHOT: &[&str] = &["limit"];
     const PAGE: &[&str] = &["offset", "limit"];
     const SHARED_FILES: &[&str] = &["limit", "cursor", "q", "priority"];
-    const TRANSFERS: &[&str] = &["state", "categoryId", "offset", "limit"];
+    const TRANSFERS: &[&str] = &["state", "category", "offset", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];

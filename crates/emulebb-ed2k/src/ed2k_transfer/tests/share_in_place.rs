@@ -12,6 +12,224 @@ use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
 use emulebb_metadata::MetadataSharedDirectoryRoot;
 
+#[tokio::test]
+async fn cancelled_stale_withdrawal_and_first_drain_still_publish_before_second_drain() {
+    let root = unique_test_dir("stale-withdrawal-cancel-drain");
+    let source_dir = root.join("library");
+    fs::create_dir_all(&source_dir).unwrap();
+    let path = source_dir.join("shared.bin");
+    let original = source_dir.join("original.bin");
+    fs::write(&path, b"verified original bytes").unwrap();
+    let runtime = std::sync::Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let shared = runtime
+        .ingest_local_file(&path, "shared.bin")
+        .await
+        .unwrap();
+    admit_local_share(&runtime, &source_dir, &path).await;
+    let hash = Ed2kHash::from_str(&shared.file_hash).unwrap();
+    let (reached, reached_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, release_rx);
+    fs::rename(&path, &original).unwrap();
+    fs::write(&path, b"different replacement bytes").unwrap();
+    let caller = {
+        let runtime = std::sync::Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.read_verified_range(&hash, 0, 4).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), reached_rx)
+        .await
+        .expect("withdrawal did not reach publication")
+        .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    let first_pending = runtime.local_mutations.signal_next_pending_drain();
+    let first = {
+        let runtime = std::sync::Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.drain_local_mutations().await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), first_pending)
+        .await
+        .expect("first drain did not reach the pending join")
+        .unwrap();
+    assert!(!first.is_finished());
+    first.abort();
+    let _ = first.await;
+    let second_pending = runtime.local_mutations.signal_next_pending_drain();
+    let second = {
+        let runtime = std::sync::Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.drain_local_mutations().await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), second_pending)
+        .await
+        .expect("second drain did not reach the pending join")
+        .unwrap();
+    assert!(!second.is_finished());
+    release.send(()).unwrap();
+    second.await.unwrap().unwrap();
+    assert!(
+        runtime
+            .metadata
+            .next_shared_copy(&shared.file_hash, 0, 65_536)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .shared_catalog()
+            .read()
+            .await
+            .entry_by_hash(&hash)
+            .is_none()
+    );
+    assert!(
+        runtime
+            .shared_source_invalidation_signal()
+            .try_recv()
+            .is_some()
+    );
+    assert_eq!(fs::read(&original).unwrap(), b"verified original bytes");
+    assert_eq!(fs::read(&path).unwrap(), b"different replacement bytes");
+}
+
+#[tokio::test]
+async fn stale_withdrawal_rereads_projection_after_overlapping_root_change() {
+    let root = unique_test_dir("stale-withdrawal-root-overlap");
+    let source_dir = root.join("library");
+    fs::create_dir_all(&source_dir).unwrap();
+    let path = source_dir.join("shared.bin");
+    let original = source_dir.join("original.bin");
+    fs::write(&path, b"verified original bytes").unwrap();
+    let runtime = std::sync::Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let shared = runtime
+        .ingest_local_file(&path, "shared.bin")
+        .await
+        .unwrap();
+    admit_local_share(&runtime, &source_dir, &path).await;
+    let hash = Ed2kHash::from_str(&shared.file_hash).unwrap();
+    let (reached, reached_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, release_rx);
+    fs::rename(&path, &original).unwrap();
+    fs::write(&path, b"different replacement bytes").unwrap();
+    let caller = {
+        let runtime = std::sync::Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.read_verified_range(&hash, 0, 4).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), reached_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let mutation = runtime.begin_category_root_mutation().await.unwrap();
+    runtime
+        .metadata
+        .set_shared_root_accessible(&source_dir, false)
+        .unwrap();
+    drop(mutation);
+    release.send(()).unwrap();
+    assert!(caller.await.unwrap().unwrap().is_none());
+    runtime.drain_local_mutations().await.unwrap();
+    assert!(
+        !runtime
+            .share_publication_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        runtime
+            .shared_catalog()
+            .read()
+            .await
+            .entry_by_hash(&hash)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn monitored_withdrawal_waits_for_capacity_and_converges() {
+    let root = unique_test_dir("monitored-withdrawal-capacity");
+    let source_dir = root.join("library");
+    fs::create_dir_all(&source_dir).unwrap();
+    let first_path = source_dir.join("first.bin");
+    let second_path = source_dir.join("second.bin");
+    fs::write(&first_path, b"first shared content").unwrap();
+    fs::write(&second_path, b"second shared content").unwrap();
+    let runtime = std::sync::Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let first = runtime
+        .ingest_local_file(&first_path, "first.bin")
+        .await
+        .unwrap();
+    let second = runtime
+        .ingest_local_file(&second_path, "second.bin")
+        .await
+        .unwrap();
+    admit_local_share(&runtime, &source_dir, &first_path).await;
+    admit_local_share(&runtime, &source_dir, &second_path).await;
+    let (reached, reached_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, release_rx);
+    let first_path = crate::long_path::long_path(&first_path);
+    let second_path = crate::long_path::long_path(&second_path);
+    let first_task = {
+        let runtime = std::sync::Arc::clone(&runtime);
+        let hash = first.file_hash.clone();
+        tokio::spawn(async move {
+            runtime
+                .withdraw_monitored_shared_path(&hash, &first_path)
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), reached_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let waiting = runtime.local_mutations.signal_next_pending_wait();
+    let second_task = {
+        let runtime = std::sync::Arc::clone(&runtime);
+        let hash = second.file_hash.clone();
+        tokio::spawn(async move {
+            runtime
+                .withdraw_monitored_shared_path(&hash, &second_path)
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!second_task.is_finished());
+    assert!(
+        runtime
+            .metadata
+            .next_shared_copy(&second.file_hash, 0, 65_536)
+            .unwrap()
+            .is_some()
+    );
+    release.send(()).unwrap();
+    first_task.await.unwrap().unwrap();
+    second_task.await.unwrap().unwrap();
+    assert!(
+        runtime
+            .metadata
+            .next_shared_copy(&second.file_hash, 0, 65_536)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .shared_catalog()
+            .read()
+            .await
+            .entry_by_hash(&second.file_hash.parse().unwrap())
+            .is_none()
+    );
+    runtime.drain_local_mutations().await.unwrap();
+}
+
 #[cfg(unix)]
 use emulebb_metadata::NativePath;
 

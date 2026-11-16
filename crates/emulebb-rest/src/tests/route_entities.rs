@@ -160,25 +160,7 @@ async fn servers_use_canonical_crud_routes() {
 
 #[tokio::test]
 async fn categories_use_canonical_crud_routes() {
-    let runtime_dir = unique_test_dir("categories");
     let app = test_router();
-
-    let list = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/categories")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list.status(), StatusCode::OK);
-    let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["items"][0]["id"], 0);
-
     let create = app
         .clone()
         .oneshot(
@@ -187,10 +169,9 @@ async fn categories_use_canonical_crud_routes() {
                 .uri("/api/v1/categories")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"name":" Media ","path":"{}","comment":"queue","color":65280,"priority":"high"}}"#,
-                    runtime_dir.display().to_string().replace('\\', "\\\\")
-                )))
+                .body(Body::from(
+                    r#"{"name":"Media","tempDir":null,"destinationDir":null,"comment":"queue"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -198,73 +179,51 @@ async fn categories_use_canonical_crud_routes() {
     assert_eq!(create.status(), StatusCode::OK);
     let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["id"], 1);
     assert_eq!(value["data"]["name"], "Media");
-    assert_eq!(value["data"]["priority"], 2);
-    assert_eq!(value["data"]["color"], 65280);
-
-    let update = app
+    assert!(value["data"]["tempDir"].is_null());
+    let conflict = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/categories")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name":"MEDIA"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let body = to_bytes(conflict.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "CATEGORY_NAME_CONFLICT");
+    let updated = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/api/v1/categories/1")
+                .uri("/api/v1/categories/media")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name":"Archive","path":null,"color":null,"priority":"verylow"}"#,
-                ))
+                .body(Body::from(r#"{"tempDir":null}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(update.status(), StatusCode::OK);
-    let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["name"], "Archive");
-    assert_eq!(value["data"]["path"], Value::Null);
-    assert_eq!(value["data"]["color"], Value::Null);
-    assert_eq!(value["data"]["priority"], 4);
-
-    let protected = app
-        .clone()
+    assert_eq!(updated.status(), StatusCode::OK);
+    let deleted = app
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/api/v1/categories/0")
+                .uri("/api/v1/categories/Media")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(protected.status(), StatusCode::BAD_REQUEST);
-
-    let delete = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/v1/categories/1")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(delete.status(), StatusCode::OK);
-
-    let missing = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/categories/1")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(deleted.status(), StatusCode::OK);
 }
 
 #[tokio::test]

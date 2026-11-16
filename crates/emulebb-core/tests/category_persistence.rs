@@ -1,8 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use emulebb_core::{
-    CategoryCreate, EmulebbCore, NullableStringField, NullableU32Field, TransferCreate,
-};
+use emulebb_core::{CategoryCreate, EmulebbCore, NullableStringField, TransferCreate};
 use emulebb_index::FileIndex;
 
 #[tokio::test]
@@ -18,11 +16,10 @@ async fn transfer_category_survives_restart() {
     .unwrap();
     let category = core
         .create_category(CategoryCreate {
-            name: "Queued Samples".to_string(),
-            path: NullableStringField::Missing,
+            name: "Queued-Samples".to_string(),
+            temp_dir: NullableStringField::Missing,
+            destination_dir: NullableStringField::Missing,
             comment: None,
-            color: NullableU32Field::Missing,
-            priority: None,
         })
         .await
         .unwrap();
@@ -41,8 +38,11 @@ async fn transfer_category_survives_restart() {
         })
         .await
         .unwrap();
-    assert_eq!(transfer.category_id, category.id);
-    assert_eq!(transfer.category_name, category.name);
+    assert_eq!(transfer.category_id, Some(category.id));
+    assert_eq!(
+        transfer.category_name.as_deref(),
+        Some(category.name.as_str())
+    );
 
     let reloaded = EmulebbCore::new(
         "test",
@@ -53,15 +53,19 @@ async fn transfer_category_survives_restart() {
     let reloaded_transfer = reloaded
         .transfer("00112233445566778899aabbccddeeff")
         .await
+        .unwrap()
         .unwrap();
 
-    assert_eq!(reloaded_transfer.category_id, category.id);
-    assert_eq!(reloaded_transfer.category_name, category.name);
+    assert_eq!(reloaded_transfer.category_id, Some(category.id));
+    assert_eq!(
+        reloaded_transfer.category_name.as_deref(),
+        Some(category.name.as_str())
+    );
 }
 
 #[tokio::test]
-async fn deleting_category_reindexes_later_transfer_categories() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-category-delete-reindex");
+async fn deleting_category_preserves_other_transfer_categories() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-category-delete-stable");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
     let core = EmulebbCore::new(
@@ -70,35 +74,48 @@ async fn deleting_category_reindexes_later_transfer_categories() {
         &transfer_root,
     )
     .unwrap();
-    let first = create_category(&core, "First Samples").await;
-    let deleted = create_category(&core, "Deleted Samples").await;
-    let shifted = create_category(&core, "Shifted Samples").await;
+    let first = create_category(&core, "First-Samples").await;
+    let deleted = create_category(&core, "Deleted-Samples").await;
+    let surviving = create_category(&core, "Surviving-Samples").await;
     let first_hash = "00112233445566778899aabbccddeeff";
     let deleted_hash = "102132435465768798a9babbdcddedef";
-    let shifted_hash = "ffeeddccbbaa99887766554433221100";
+    let surviving_hash = "ffeeddccbbaa99887766554433221100";
 
     create_transfer(&core, first_hash, "First.Category.bin", first.id).await;
     create_transfer(&core, deleted_hash, "Deleted.Category.bin", deleted.id).await;
-    create_transfer(&core, shifted_hash, "Shifted.Category.bin", shifted.id).await;
+    create_transfer(
+        &core,
+        surviving_hash,
+        "Surviving.Category.bin",
+        surviving.id,
+    )
+    .await;
 
     let removed = core.delete_category(deleted.id).await.unwrap().unwrap();
     assert_eq!(removed.name, deleted.name);
 
     assert_eq!(
-        core.transfer(first_hash).await.unwrap().category_id,
-        first.id,
-        "categories before the deleted index stay unchanged"
+        core.transfer(first_hash)
+            .await
+            .unwrap()
+            .unwrap()
+            .category_id,
+        Some(first.id),
+        "other category assignments stay unchanged"
     );
-    let deleted_transfer = core.transfer(deleted_hash).await.unwrap();
-    assert_eq!(deleted_transfer.category_id, 0);
+    let deleted_transfer = core.transfer(deleted_hash).await.unwrap().unwrap();
+    assert_eq!(deleted_transfer.category_id, None);
     // A transfer reset to uncategorized has its category name cleared (consistent
     // with profile_persistence::delete_category_resets_referencing_transfers_to_uncategorized).
-    assert_eq!(deleted_transfer.category_name, "");
-    let shifted_transfer = core.transfer(shifted_hash).await.unwrap();
-    assert_eq!(shifted_transfer.category_id, deleted.id);
-    assert_eq!(shifted_transfer.category_name, shifted.name);
+    assert_eq!(deleted_transfer.category_name, None);
+    let surviving_transfer = core.transfer(surviving_hash).await.unwrap().unwrap();
+    assert_eq!(surviving_transfer.category_id, Some(surviving.id));
+    assert_eq!(
+        surviving_transfer.category_name.as_deref(),
+        Some(surviving.name.as_str())
+    );
 
-    let categories = core.categories().await;
+    let categories = core.categories().await.unwrap();
     assert!(
         categories
             .iter()
@@ -107,7 +124,7 @@ async fn deleting_category_reindexes_later_transfer_categories() {
     assert!(
         categories
             .iter()
-            .any(|category| category.id == deleted.id && category.name == shifted.name)
+            .any(|category| category.id == surviving.id && category.name == surviving.name)
     );
 
     let reloaded = EmulebbCore::new(
@@ -117,27 +134,34 @@ async fn deleting_category_reindexes_later_transfer_categories() {
     )
     .unwrap();
     assert_eq!(
-        reloaded.transfer(deleted_hash).await.unwrap().category_id,
-        0
+        reloaded
+            .transfer(deleted_hash)
+            .await
+            .unwrap()
+            .unwrap()
+            .category_id,
+        None
     );
-    let reloaded_shifted = reloaded.transfer(shifted_hash).await.unwrap();
-    assert_eq!(reloaded_shifted.category_id, deleted.id);
-    assert_eq!(reloaded_shifted.category_name, shifted.name);
+    let reloaded_surviving = reloaded.transfer(surviving_hash).await.unwrap().unwrap();
+    assert_eq!(reloaded_surviving.category_id, Some(surviving.id));
+    assert_eq!(
+        reloaded_surviving.category_name.as_deref(),
+        Some(surviving.name.as_str())
+    );
 }
 
 async fn create_category(core: &EmulebbCore, name: &str) -> emulebb_core::Category {
     core.create_category(CategoryCreate {
         name: name.to_string(),
-        path: NullableStringField::Missing,
+        temp_dir: NullableStringField::Missing,
+        destination_dir: NullableStringField::Missing,
         comment: None,
-        color: NullableU32Field::Missing,
-        priority: None,
     })
     .await
     .unwrap()
 }
 
-async fn create_transfer(core: &EmulebbCore, hash: &str, name: &str, category_id: u32) {
+async fn create_transfer(core: &EmulebbCore, hash: &str, name: &str, category_id: i64) {
     core.create_transfer(TransferCreate {
         known_file_policy: Default::default(),
         link: Some(format!("ed2k://|file|{name}|4096|{hash}|/")),

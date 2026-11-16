@@ -1,83 +1,124 @@
 use super::*;
+use crate::persistence_owner::category::{CategoryCommand, CategorySharingContext};
 
 impl EmulebbCore {
-    pub async fn categories(&self) -> Vec<Category> {
-        category_runtime::categories(&self.state).await
+    pub async fn categories(&self) -> Result<Vec<Category>> {
+        let state = self.state.lock().await;
+        self.persistence_owner.check_coherent_state()?;
+        Ok(state.categories.values().cloned().collect())
     }
 
-    pub async fn category(&self, category_id: u32) -> Option<Category> {
-        category_runtime::category(&self.state, category_id).await
+    pub async fn category(&self, category_id: i64) -> Result<Option<Category>> {
+        let state = self.state.lock().await;
+        self.persistence_owner.check_coherent_state()?;
+        Ok(state.categories.get(&category_id).cloned())
+    }
+
+    pub async fn category_by_name(&self, name: &str) -> Result<Option<Category>> {
+        anyhow::ensure!(
+            emulebb_metadata::valid_category_name(name),
+            "invalid category name"
+        );
+        let state = self.state.lock().await;
+        self.persistence_owner.check_coherent_state()?;
+        Ok(state
+            .categories
+            .values()
+            .find(|category| category.name.eq_ignore_ascii_case(name))
+            .cloned())
     }
 
     pub async fn create_category(&self, request: CategoryCreate) -> Result<Category> {
-        let _category_guard = self.category_mutation_gate.lock().await;
-        let category =
-            category_runtime::create_category(&self.state, &self.metadata_store, request).await?;
-        drop(_category_guard);
-        if category
-            .path
-            .as_ref()
-            .is_some_and(|path| !path.trim().is_empty())
-        {
-            self.refresh_category_share_roots().await?;
-        }
-        Ok(category)
+        let draft = Category {
+            id: 0,
+            name: categories::normalize_category_name(request.name)?,
+            temp_dir: categories::resolve_category_path(&self.profile_dir, request.temp_dir, None)?,
+            destination_dir: categories::resolve_category_path(
+                &self.profile_dir,
+                request.destination_dir,
+                None,
+            )?,
+            comment: request.comment.unwrap_or_default(),
+        };
+        let sharing = self.category_sharing_context();
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        owner
+            .category(CategoryCommand::Create {
+                value: draft,
+                sharing,
+            })
+            .await??
+            .context("category was not created")
     }
 
     pub async fn update_category(
         &self,
-        category_id: u32,
+        id: i64,
         request: CategoryUpdate,
     ) -> Result<Option<Category>> {
-        let _category_guard = self.category_mutation_gate.lock().await;
-        let previous_path = self
-            .category(category_id)
-            .await
-            .and_then(|category| category.path);
-        let category = category_runtime::update_category(
-            &self.state,
-            &self.metadata_store,
-            category_id,
-            request,
-        )
-        .await?;
-        drop(_category_guard);
-        if category
-            .as_ref()
-            .is_some_and(|category| category.path != previous_path)
-        {
-            self.refresh_category_share_roots().await?;
-        }
-        Ok(category)
+        let path = |value| -> Result<Option<Option<String>>> {
+            if matches!(value, NullableStringField::Missing) {
+                Ok(None)
+            } else {
+                Ok(Some(categories::resolve_category_path(
+                    &self.profile_dir,
+                    value,
+                    None,
+                )?))
+            }
+        };
+        let sharing = self.category_sharing_context();
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .category(CategoryCommand::Update {
+                id,
+                temp: path(request.temp_dir)?,
+                destination: path(request.destination_dir)?,
+                comment: request.comment,
+                sharing,
+            })
+            .await??)
     }
 
-    pub async fn delete_category(&self, category_id: u32) -> Result<Option<Category>> {
-        let state = Arc::clone(&self.state);
-        let transfer_runtime = Arc::clone(&self.ed2k_transfers);
-        let category_gate = Arc::clone(&self.category_mutation_gate);
-        let category = tokio::spawn(async move {
-            let _category_guard = category_gate.lock_owned().await;
-            category_runtime::delete_category(&state, &transfer_runtime, category_id).await
-        })
-        .await
-        .context("category deletion task panicked")??;
-        if category
-            .as_ref()
-            .and_then(|category| category.path.as_ref())
-            .is_some_and(|path| !path.trim().is_empty())
-        {
-            self.refresh_category_share_roots().await?;
-        }
-        Ok(category)
+    pub async fn delete_category(&self, id: i64) -> Result<Option<Category>> {
+        let sharing = self.category_sharing_context();
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .category(CategoryCommand::Delete { id, sharing })
+            .await??)
     }
 
-    async fn refresh_category_share_roots(&self) -> Result<()> {
-        shared_directories::sync_implicit_shared_directory_roots(self).await?;
-        self.ed2k_transfers
-            .refresh_complete_shared_catalog()
-            .await?;
-        self.start_shared_directory_monitor().await;
-        self.reload_shared_directories_detached().await?;
-        Ok(())
+    pub(crate) fn category_sharing_context(&self) -> CategorySharingContext {
+        CategorySharingContext {
+            runtime: Arc::clone(&self.ed2k_transfers),
+            incoming: Arc::clone(&self.category_incoming_dir),
+            root_change: Arc::clone(&self.shared_root_change),
+            probe_sender: Arc::downgrade(&self.category_probe_sender),
+        }
+    }
+
+    pub(crate) async fn assign_transfer_category(
+        &self,
+        hash: &str,
+        id: Option<i64>,
+    ) -> Result<Option<Category>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        let result = owner
+            .category(CategoryCommand::Assign {
+                hash: hash.to_owned(),
+                id,
+                runtime: Arc::clone(&self.ed2k_transfers),
+            })
+            .await??;
+        ensure!(id.is_none() || result.is_some(), "category does not exist");
+        Ok(result)
     }
 }

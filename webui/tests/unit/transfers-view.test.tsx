@@ -9,6 +9,27 @@ afterEach(() => {
 });
 
 describe("TransfersView", () => {
+  it("assigns a category by name and clears it with null", async () => {
+    const hash = "00112233445566778899aabbccddeeff";
+    const client = new RestClient();
+    const patch = vi.spyOn(client, "patch").mockResolvedValue({});
+    render(<TransfersView
+      transfers={[{ hash, displayName: "Sample.bin", category: "Sample-Category" }]}
+      categories={[
+        { name: "Sample-Category", tempDir: null, destinationDir: null, comment: "" },
+        { name: "Other-Category", tempDir: null, destinationDir: null, comment: "" }
+      ]}
+      client={client}
+      run={async (operation) => { await operation(); }}
+    />);
+
+    const category = screen.getByRole("option", { name: "Other-Category" }).closest("select")!;
+    fireEvent.input(category, { target: { value: "Other-Category" } });
+    await waitFor(() => expect(patch).toHaveBeenCalledWith(`transfers/${hash}`, { category: "Other-Category" }));
+    fireEvent.input(category, { target: { value: "" } });
+    await waitFor(() => expect(patch).toHaveBeenLastCalledWith(`transfers/${hash}`, { category: null }));
+  });
+
   it("prefills an encoded external link, waits for submission and consumes the fragment", async () => {
     const link = "ed2k://|file|Sample%20%26%20Guide.bin|42|00112233445566778899aabbccddeeff|/";
     window.history.replaceState(null, "", `/transfers#ed2k=${encodeURIComponent(link)}`);

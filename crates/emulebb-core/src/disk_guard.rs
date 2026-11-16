@@ -171,7 +171,7 @@ impl EmulebbCore {
         &self,
         manifests: &[Ed2kResumeManifest],
         settings: &Ed2kSettings,
-        categories: &std::collections::BTreeMap<u32, crate::Category>,
+        categories: &std::collections::BTreeMap<i64, crate::Category>,
     ) -> HashMap<String, ProtectedVolume> {
         let mut volumes = HashMap::new();
         reserve_on_volume(
@@ -191,7 +191,7 @@ impl EmulebbCore {
         volumes: &mut HashMap<String, ProtectedVolume>,
         manifest: &Ed2kResumeManifest,
         settings: &Ed2kSettings,
-        categories: &std::collections::BTreeMap<u32, crate::Category>,
+        categories: &std::collections::BTreeMap<i64, crate::Category>,
     ) {
         if manifest.completed {
             return;
@@ -207,8 +207,8 @@ impl EmulebbCore {
         );
 
         let destination = categories
-            .get(&manifest.category_id)
-            .and_then(|category| category.path.as_deref())
+            .get(&manifest.category_id.unwrap_or_default())
+            .and_then(|category| category.destination_dir.as_deref())
             .filter(|path| !path.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| self.incoming_dir.clone());
@@ -345,7 +345,10 @@ mod tests {
         }
         core.mark_active_downloads_insufficient().await;
         for hash in hashes {
-            assert_eq!(core.transfer(hash).await.unwrap().state, "insufficient");
+            assert_eq!(
+                core.transfer(hash).await.unwrap().unwrap().state,
+                "insufficient"
+            );
         }
     }
 }

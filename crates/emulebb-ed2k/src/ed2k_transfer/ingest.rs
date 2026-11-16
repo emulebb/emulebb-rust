@@ -10,8 +10,6 @@ use emulebb_metadata::{
     NativePath,
 };
 
-use crate::long_path::long_path;
-
 use super::hashset::build_md4_and_aich_hashsets_from_reader_with_progress;
 use super::{ED2K_PART_SIZE, Ed2kLocalIngestSummary, Ed2kTransferRuntime};
 
@@ -43,16 +41,42 @@ pub struct LocalIngestProgressEvent {
 
 pub type LocalIngestProgressObserver = Arc<dyn Fn(LocalIngestProgressEvent) + Send + Sync>;
 
+pub(super) fn encode_hashset<const N: usize>(hashes: &[[u8; N]]) -> Vec<String> {
+    let mut encoded = Vec::with_capacity(hashes.len());
+    for hash in hashes {
+        encoded.push(hex::encode(hash));
+    }
+    encoded
+}
+
+/// Internal publication intent supplied by Core before owned ingestion begins.
+#[derive(Default)]
+pub struct LocalIngestOptions<'a> {
+    pub roots: &'a [emulebb_metadata::MetadataIngestRoot],
+    pub index_type: Option<&'a str>,
+}
+
+pub(super) struct PreparedLocalIngest {
+    pub content: MetadataVerifiedLocalContent,
+    pub recovery: emulebb_metadata::MetadataAichRecoverySet,
+    pub media: emulebb_metadata::MetadataTransferMediaMetadata,
+    pub summary: Ed2kLocalIngestSummary,
+}
+
 impl Ed2kTransferRuntime {
-    /// Hash a local payload and persist its verified identity independently of
-    /// download jobs. Root membership controls when it is shared.
+    /// Hash and register local content; root membership remains independent.
     pub async fn ingest_local_file(
         &self,
         source_path: &Path,
         display_name: &str,
     ) -> Result<Ed2kLocalIngestSummary> {
-        self.ingest_local_file_inner(source_path, display_name, None)
-            .await
+        self.ingest_local_file_owned(
+            source_path,
+            display_name,
+            None,
+            LocalIngestOptions::default(),
+        )
+        .await
     }
 
     pub async fn ingest_local_file_with_progress(
@@ -61,205 +85,205 @@ impl Ed2kTransferRuntime {
         display_name: &str,
         observer: LocalIngestProgressObserver,
     ) -> Result<Ed2kLocalIngestSummary> {
-        self.ingest_local_file_inner(source_path, display_name, Some(observer))
-            .await
+        self.ingest_local_file_owned(
+            source_path,
+            display_name,
+            Some(observer),
+            LocalIngestOptions::default(),
+        )
+        .await
     }
 
-    async fn ingest_local_file_inner(
+    /// One retained blocking unit owns preparation, SQL, and publication after
+    /// admission. Dropping this future cannot detach a metadata-store owner.
+    pub async fn ingest_local_file_owned(
         &self,
         source_path: &Path,
         display_name: &str,
         observer: Option<LocalIngestProgressObserver>,
+        options: LocalIngestOptions<'_>,
     ) -> Result<Ed2kLocalIngestSummary> {
         let display_name = display_name.trim();
-        if display_name.is_empty() {
-            anyhow::bail!("local ED2K ingest requires a non-empty canonical name");
-        }
-        // Operator-facing shared-file ingest boundary: normalize the operator's
-        // source path to the long-path (`\\?\`) form before it is opened/hashed,
-        // so a shared file under a deep operator tree (beyond the legacy
-        // MAX_PATH limit) can still be read for ingest. The internal piece-store
-        // destination (`transfer_dir`/`pieces.bin`) below is deliberately left
-        // short-path. (Operator-rule scope: shared-directory trees -- see
-        // long_path.rs.)
-        //
-        // WHY (no canonicalize): we used to `canonicalize()` the verbatim path
-        // here, but that silently dropped shared files whose paths carry
-        // non-ASCII characters (accents/CJK), brackets, or live in subfolders.
-        // On Windows `canonicalize` resolves via `GetFinalPathNameByHandle` and
-        // returns an OS-re-normalized verbatim (`\\?\`) path; a verbatim path is
-        // NOT re-normalized by the OS on later access, so when the canonical
-        // Unicode form differs from the form the directory walk produced, the
-        // returned path no longer resolves and the subsequent stat fails
-        // ("failed to stat local ingest source"), skipping the file. The walk
-        // (`collect_shared_directory_files`) already hands us an absolute
-        // verbatim path read straight from the on-disk directory entries, so we
-        // stat/hash it directly and let the manifest record that same exact path
-        // for in-place upload serving -- no canonicalize round-trip is needed.
-        let source_path = long_path(source_path);
-        // Hash OFF the manifest lock AND off the async runtime. MD4/AICH hash
-        // the whole (potentially many-GB) file with blocking `std::fs`,
-        // which on a slow disk takes far longer than any HTTP timeout. Holding
-        // the manifest lock across that froze every REST read (they funneled through
-        // `manifests()`), and running the blocking hash inline starved a tokio
-        // worker. We therefore compute both hashsets in one sequential read under
-        // `spawn_blocking` with no lock held, and only take the manifest lock for the
-        // short write below.
-        let hash_path = source_path.clone();
-        let hash_observer = observer.clone();
-        let (hashsets, source_fingerprint) = tokio::task::spawn_blocking(move || {
-            let mut file = open_stable_read_file_without_follow(&hash_path).with_context(|| {
-                format!(
-                    "failed to open local ingest source without following links {}",
-                    hash_path.display()
-                )
-            })?;
-            let opened_metadata = file.metadata().with_context(|| {
-                format!(
-                    "failed to inspect opened local ingest source {}",
-                    hash_path.display()
-                )
-            })?;
-            let source_fingerprint = native_file_fingerprint_from_handle(&file, &opened_metadata)
-                .with_context(|| {
-                format!(
-                    "local ingest source is not a regular file with stable native identity {}",
-                    hash_path.display()
-                )
-            })?;
-            let hash_len = source_fingerprint.size_bytes;
-            if hash_len == 0 {
-                anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
-            }
-            let mut bytes_read_total = 0u64;
-            let progress_observer = hash_observer.clone();
-            let mut progress = move |read_delta: u64| {
-                bytes_read_total = bytes_read_total.saturating_add(read_delta);
-                if let Some(observer) = progress_observer.as_ref() {
-                    observer(LocalIngestProgressEvent {
-                        stage: LocalIngestProgressStage::Md4,
-                        stage_bytes_read: bytes_read_total,
-                        stage_bytes_total: hash_len,
-                        file_bytes_read: bytes_read_total,
-                        file_bytes_total: hash_len,
-                    });
+        anyhow::ensure!(
+            !display_name.is_empty(),
+            "local ED2K ingest requires a non-empty canonical name"
+        );
+        loop {
+            match self.local_mutations.submit_ingest(
+                self,
+                source_path,
+                display_name,
+                observer.as_ref(),
+                &options,
+            ) {
+                Ok(receive) => {
+                    return receive
+                        .await
+                        .map_err(|_| super::LocalMutationError::Unknown)?;
                 }
-            };
-            let hashsets = build_md4_and_aich_hashsets_from_reader_with_progress(
-                &mut file,
-                hash_len,
-                Some(&mut progress),
-            )?;
-            if let Some(observer) = hash_observer.as_ref() {
-                observer(LocalIngestProgressEvent {
-                    stage: LocalIngestProgressStage::Aich,
-                    stage_bytes_read: hash_len,
-                    stage_bytes_total: hash_len,
-                    file_bytes_read: hash_len,
-                    file_bytes_total: hash_len,
-                });
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<super::LocalMutationError>(),
+                        Some(super::LocalMutationError::Busy)
+                    ) =>
+                {
+                    // No manifest/stripe guard or cloned request is held while
+                    // waiting. In particular a second disk must not lose work.
+                    self.local_mutations.wait_for_completion().await?;
+                }
+                Err(error) => return Err(error),
             }
-            let final_metadata = file.metadata().with_context(|| {
-                format!(
-                    "failed to re-inspect opened local ingest source {}",
-                    hash_path.display()
-                )
-            })?;
-            let final_fingerprint = native_file_fingerprint_from_handle(&file, &final_metadata)
-                .context("opened local ingest source lost regular-file identity while hashing")?;
-            if source_fingerprint != final_fingerprint {
-                anyhow::bail!(
-                    "local ingest source changed while hashing {}",
-                    hash_path.display()
-                );
-            }
-            let current_fingerprint = native_file_fingerprint(&hash_path).with_context(|| {
-                format!(
-                    "local ingest source path no longer names a regular file {}",
-                    hash_path.display()
-                )
-            })?;
-            if source_fingerprint != current_fingerprint {
-                anyhow::bail!(
-                    "local ingest source path was replaced while hashing {}",
-                    hash_path.display()
-                );
-            }
-            Ok::<_, anyhow::Error>((hashsets, source_fingerprint))
-        })
-        .await
-        .context("ED2K/AICH hashing task panicked")??;
-        let file_hash = hashsets.file_hash.to_string();
-        let aich_root = hex::encode(hashsets.aich_hashset.master_hash);
-        let content = MetadataVerifiedLocalContent {
-            file_hash: file_hash.clone(),
-            display_name: display_name.to_string(),
-            file_size: source_fingerprint.size_bytes,
-            part_size: ED2K_PART_SIZE,
-            md4_hashset: hashsets.md4_hashset.iter().map(hex::encode).collect(),
-            aich_root: Some(aich_root.clone()),
-            aich_hashset: hashsets
-                .aich_hashset
-                .part_hashes
-                .iter()
-                .map(hex::encode)
-                .collect(),
-            path: source_path.clone(),
-            fingerprint: source_fingerprint.clone(),
-            upload_priority: "normal".to_string(),
-            auto_upload_priority: false,
-            comment: String::new(),
-            rating: 0,
-        };
-        let metadata = self.metadata.clone();
-        let recovery_root = hashsets.aich_hashset.master_hash;
-        let recovery_parts = hashsets.recovery_parts;
-        let recovery_roots = if hashsets.aich_hashset.part_hashes.is_empty() {
+        }
+    }
+}
+
+/// Runs only inside the registry's retained blocking unit. The representation
+/// lease covers hash buffers; Symphonia's aggregate parser allocation is not
+/// bounded by that lease. Its actual execution is nevertheless joined at drain.
+pub(super) fn prepare_local_ingest(
+    source_path: &Path,
+    display_name: &str,
+    observer: Option<LocalIngestProgressObserver>,
+) -> Result<PreparedLocalIngest> {
+    let mut file = open_stable_read_file_without_follow(source_path).with_context(|| {
+        format!(
+            "failed to open local ingest source without following links {}",
+            source_path.display()
+        )
+    })?;
+    let opened_metadata = file.metadata().with_context(|| {
+        format!(
+            "failed to inspect opened local ingest source {}",
+            source_path.display()
+        )
+    })?;
+    let source_fingerprint = native_file_fingerprint_from_handle(&file, &opened_metadata)
+        .with_context(|| {
+            format!(
+                "local ingest source is not a regular file with stable native identity {}",
+                source_path.display()
+            )
+        })?;
+    let hash_len = source_fingerprint.size_bytes;
+    if hash_len == 0 {
+        anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
+    }
+    // WHY: the prepared representation lease is sized to the existing 256 GiB
+    // recovery geometry. Reject unsupported inputs before allocating part
+    // specifications or reading even the first payload block.
+    anyhow::ensure!(
+        hash_len <= 0x4000000000,
+        "local ED2K ingest exceeds the supported 256 GiB size"
+    );
+    let mut bytes_read_total = 0u64;
+    let progress_observer = observer.clone();
+    let mut progress = move |read_delta: u64| {
+        bytes_read_total = bytes_read_total.saturating_add(read_delta);
+        if let Some(observer) = progress_observer.as_ref() {
+            observer(LocalIngestProgressEvent {
+                stage: LocalIngestProgressStage::Md4,
+                stage_bytes_read: bytes_read_total,
+                stage_bytes_total: hash_len,
+                file_bytes_read: bytes_read_total,
+                file_bytes_total: hash_len,
+            });
+        }
+    };
+    let hashsets = build_md4_and_aich_hashsets_from_reader_with_progress(
+        &mut file,
+        hash_len,
+        Some(&mut progress),
+    )?;
+    if let Some(observer) = observer.as_ref() {
+        observer(LocalIngestProgressEvent {
+            stage: LocalIngestProgressStage::Aich,
+            stage_bytes_read: hash_len,
+            stage_bytes_total: hash_len,
+            file_bytes_read: hash_len,
+            file_bytes_total: hash_len,
+        });
+    }
+    let final_metadata = file.metadata().with_context(|| {
+        format!(
+            "failed to re-inspect opened local ingest source {}",
+            source_path.display()
+        )
+    })?;
+    let final_fingerprint = native_file_fingerprint_from_handle(&file, &final_metadata)
+        .context("opened local ingest source lost regular-file identity while hashing")?;
+    if source_fingerprint != final_fingerprint {
+        anyhow::bail!(
+            "local ingest source changed while hashing {}",
+            source_path.display()
+        );
+    }
+    let current_fingerprint = native_file_fingerprint(source_path).with_context(|| {
+        format!(
+            "local ingest source path no longer names a regular file {}",
+            source_path.display()
+        )
+    })?;
+    if source_fingerprint != current_fingerprint {
+        anyhow::bail!(
+            "local ingest source path was replaced while hashing {}",
+            source_path.display()
+        );
+    }
+
+    let file_hash = hashsets.file_hash.to_string();
+    let aich_root = hex::encode(hashsets.aich_hashset.master_hash);
+    let md4_hashset_count = hashsets.md4_hashset.len();
+    let aich_hashset_count = hashsets.aich_hashset.part_hashes.len();
+    let content = MetadataVerifiedLocalContent {
+        file_hash: file_hash.clone(),
+        display_name: display_name.to_owned(),
+        file_size: source_fingerprint.size_bytes,
+        part_size: ED2K_PART_SIZE,
+        md4_hashset: encode_hashset(&hashsets.md4_hashset),
+        aich_root: Some(aich_root.clone()),
+        aich_hashset: encode_hashset(&hashsets.aich_hashset.part_hashes),
+        path: source_path.to_path_buf(),
+        fingerprint: source_fingerprint.clone(),
+        upload_priority: "normal".to_owned(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+    };
+    let recovery = emulebb_metadata::MetadataAichRecoverySet {
+        root: hashsets.aich_hashset.master_hash,
+        size: content.file_size,
+        parts: hashsets.recovery_parts,
+        part_roots: if hashsets.aich_hashset.part_hashes.is_empty() {
             vec![hashsets.aich_hashset.master_hash]
         } else {
-            hashsets.aich_hashset.part_hashes.clone()
-        };
-        tokio::task::spawn_blocking(move || {
-            let recovery = emulebb_metadata::MetadataAichRecoverySet {
-                root: recovery_root,
-                size: content.file_size,
-                parts: recovery_parts,
-                part_roots: recovery_roots,
-            };
-            if let Some(error) =
-                metadata.upsert_verified_local_content_with_recovery(&content, &recovery)?
-            {
-                tracing::warn!(%error,"Verified MD4 content retained without AICH recovery cache");
-            }
-            Ok::<(), anyhow::Error>(())
-        })
-        .await??;
-        let metadata = self.metadata.clone();
-        let media_path = source_path.clone();
-        let media_name = display_name.to_string();
-        let media_hash = file_hash.clone();
-        tokio::task::spawn_blocking(move || {
-            let media = super::media_metadata::extract_media_metadata(&media_path, &media_name);
-            metadata.update_transfer_media_metadata(
-                &media_hash,
-                &super::transfer_sql::media_to_metadata(
-                    &media,
-                    super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION,
-                ),
-            )
-        })
-        .await??;
-
-        Ok(Ed2kLocalIngestSummary {
+            hashsets.aich_hashset.part_hashes
+        },
+    };
+    // Preserve all existing format/fallback readers. Nothing holds publication
+    // locks while the parser owns its format-specific allocations.
+    let media = super::media_metadata::extract_media_metadata(source_path, display_name);
+    anyhow::ensure!(
+        native_file_fingerprint(source_path).as_ref() == Some(&source_fingerprint),
+        "local ingest source changed during media preparation"
+    );
+    let media = super::transfer_sql::media_to_metadata(
+        &media,
+        super::transfer_sql::MEDIA_METADATA_EXTRACTOR_VERSION,
+    );
+    Ok(PreparedLocalIngest {
+        content,
+        recovery,
+        media,
+        summary: Ed2kLocalIngestSummary {
             file_hash,
-            display_name: display_name.to_string(),
+            display_name: display_name.to_owned(),
             file_size: source_fingerprint.size_bytes,
-            md4_hashset_count: hashsets.md4_hashset.len(),
+            md4_hashset_count,
             aich_root,
-            aich_hashset_count: hashsets.aich_hashset.part_hashes.len(),
-            path: NativePath::from(source_path.as_path()).display_path(),
-        })
-    }
+            aich_hashset_count,
+            path: NativePath::from(source_path).display_path(),
+        },
+    })
 }
 
 /// Capture the native file identity and full-resolution filesystem timestamps

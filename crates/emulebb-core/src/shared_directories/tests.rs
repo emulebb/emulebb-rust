@@ -36,6 +36,70 @@ async fn configure_test_root(core: &EmulebbCore, root: &Path) {
 }
 
 #[tokio::test]
+async fn cancelled_direct_share_finishes_owned_index_membership_and_publication() {
+    let root = scratch_dir("owned-direct-share-cancel");
+    let source = root.join("sample.bin");
+    fs::write(&source, b"owned Core share preparation").unwrap();
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = std::sync::Mutex::new(Some((started, gate)));
+    let progress = Arc::new(move |_: LocalIngestProgressEvent| {
+        if let Some((started, gate)) = gate.lock().unwrap().take() {
+            let _ = started.send(());
+            gate.recv().unwrap();
+        }
+    });
+    // The public frontdoor delegates to this exact path; the observer only
+    // holds an actual hash read so caller cancellation is deterministic.
+    let caller = {
+        let core = core.clone();
+        let path = source.display().to_string();
+        tokio::spawn(async move {
+            core.share_local_file_inner(
+                crate::LocalShareCreate { path, name: None },
+                Some(progress),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    release.send(()).unwrap();
+    core.drain_local_share_mutations().await.unwrap();
+    let instance = core
+        .metadata_store
+        .local_file_instance(&long_path(&source))
+        .unwrap()
+        .unwrap();
+    assert!(
+        core.index
+            .lock()
+            .await
+            .find_by_hash(&instance.file_hash)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        core.metadata_store
+            .next_shared_copy(&instance.file_hash, 0, 65_536)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        core.share(&instance.file_hash).await.unwrap().hash,
+        instance.file_hash
+    );
+    core.drain_persistence().await.unwrap();
+    fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
 async fn reserved_partial_is_excluded_from_scan_and_direct_share() {
     let root = scratch_dir("reserved-partial");
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
@@ -187,7 +251,7 @@ async fn api_root_updates_collapse_recursive_children_and_keep_siblings() {
         core.metadata_store.shared_directory_roots().unwrap().len(),
         2
     );
-    core.stop_shared_directory_monitor();
+    core.stop_shared_directory_monitor().await.unwrap();
     fs::remove_dir_all(temp).ok();
 }
 
@@ -199,6 +263,8 @@ async fn api_does_not_add_children_already_shared_by_incoming() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap())
         .unwrap()
         .with_incoming_dir(temp.clone());
+    // A successfully scanned implicit parent may consolidate its child.
+    core.reload_shared_directories().await.unwrap();
     let result = core
         .add_shared_directory_root(child.to_str().unwrap())
         .await
@@ -228,6 +294,30 @@ fn unavailable_configured_parent_still_covers_its_children() {
         }));
     assert_eq!(roots.len(), 1);
     assert_eq!(Path::new(&roots[0].path), parent);
+    fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn unavailable_parent_does_not_hide_an_available_child() {
+    let temp = scratch_dir("available-child-root");
+    let parent = temp.join("Parent");
+    let child = parent.join("Child");
+    fs::create_dir_all(&child).unwrap();
+    let roots = consolidate_shared_directory_roots([
+        MetadataSharedDirectoryRoot {
+            path: parent.display().to_string(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: false,
+        },
+        MetadataSharedDirectoryRoot {
+            path: child.display().to_string(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        },
+    ]);
+    assert_eq!(roots.len(), 2);
     fs::remove_dir_all(temp).ok();
 }
 
@@ -268,10 +358,11 @@ async fn category_destination_is_shared_and_withdrawn_with_category() {
     let category = core
         .create_category(crate::CategoryCreate {
             name: "Samples".to_string(),
-            path: crate::NullableStringField::Value(category_path.to_string_lossy().into_owned()),
+            temp_dir: crate::NullableStringField::Missing,
+            destination_dir: crate::NullableStringField::Value(
+                category_path.to_string_lossy().into_owned(),
+            ),
             comment: None,
-            color: crate::NullableU32Field::Missing,
-            priority: None,
         })
         .await
         .unwrap();
@@ -341,6 +432,127 @@ async fn synchronous_and_detached_reloads_share_one_execution_gate() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_reload_drain_keeps_worker_until_final_join() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let guard = core.shared_reload_gate.lock().await;
+    core.reload_shared_directories_detached().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while core.shared_reload_pending.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    core.begin_shutdown();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        core.finish_kad_persistence(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut first = Box::pin(drain_reload(&core));
+    assert!(
+        poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(first);
+    let mut second = Box::pin(drain_reload(&core));
+    assert!(
+        poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+async fn assert_concurrent_reload_drains(cancel_latest: bool) {
+    use std::future::{Future, poll_fn};
+
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    // This holds the existing execution gate, not a filesystem operation.
+    let execution = core.shared_reload_gate.lock().await;
+    core.reload_shared_directories_detached().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while core.shared_reload_pending.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    core.begin_shutdown();
+
+    let spawn_drain = || {
+        let core = core.clone();
+        let (pending, observed) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut drain = Box::pin(drain_reload(&core));
+            let mut pending = Some(pending);
+            poll_fn(|cx| {
+                let result = drain.as_mut().poll(cx);
+                if result.is_pending() {
+                    if let Some(pending) = pending.take() {
+                        let _ = pending.send(());
+                    }
+                }
+                result
+            })
+            .await
+        });
+        (task, observed)
+    };
+    let (first, first_pending) = spawn_drain();
+    tokio::time::timeout(std::time::Duration::from_secs(5), first_pending)
+        .await
+        .unwrap()
+        .unwrap();
+    let (latest, latest_pending) = spawn_drain();
+    tokio::time::timeout(std::time::Duration::from_secs(5), latest_pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!first.is_finished());
+    assert!(!latest.is_finished());
+    if cancel_latest {
+        latest.abort();
+    }
+    drop(execution);
+    tokio::time::timeout(std::time::Duration::from_secs(5), first)
+        .await
+        .expect("first drain lost its worker wakeup")
+        .unwrap()
+        .unwrap();
+    let latest = tokio::time::timeout(std::time::Duration::from_secs(5), latest)
+        .await
+        .expect("latest drain did not settle");
+    if cancel_latest {
+        assert!(latest.unwrap_err().is_cancelled());
+    } else {
+        latest.unwrap().unwrap();
+    }
+    assert!(core.shared_reload_task.task.lock().unwrap().is_none());
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_reload_drains_both_finish() {
+    assert_concurrent_reload_drains(false).await;
+}
+
+#[tokio::test]
+async fn cancelling_latest_reload_drain_preserves_first_waiter() {
+    assert_concurrent_reload_drains(true).await;
 }
 
 #[test]
@@ -1040,6 +1252,8 @@ fn initial_publish_cohort_is_small_first_and_bounded() {
 
 #[tokio::test]
 async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
+    use std::future::{Future, poll_fn};
+
     let root = scratch_dir("initial-publish");
     for sequence in 0..3 {
         fs::write(
@@ -1066,15 +1280,30 @@ async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
         }])
         .unwrap();
 
-    let bootstrap = bootstrap_initial_publish_catalog(&core)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut bootstrap = Box::pin(bootstrap_initial_publish_catalog(&core));
+    let bootstrap = poll_fn(|cx| {
+        let result = bootstrap.as_mut().poll(cx);
+        // Check the actual producer at every suspension and completion through
+        // the same serialized progress surface consumed by REST clients.
+        let progress = serde_json::to_value(core.shared_directory_reload_progress()).unwrap();
+        assert!(
+            matches!(
+                progress["phase"].as_str(),
+                Some("idle" | "queued" | "scanning" | "planning" | "hashing")
+            ),
+            "reload phase outside the public contract: {}",
+            progress["phase"]
+        );
+        result
+    })
+    .await
+    .unwrap()
+    .unwrap();
 
     assert_eq!(bootstrap.progress.hashed_count, 3);
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 3);
     let progress = reload_progress_snapshot(&core);
-    assert_eq!(progress.phase, "bootstrapHashing");
+    assert_eq!(progress.phase, "hashing");
     assert_eq!(progress.hashed_count, 3);
     assert_eq!(progress.scanned_count, 3);
     fs::remove_dir_all(root).ok();

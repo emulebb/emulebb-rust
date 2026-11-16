@@ -78,7 +78,7 @@ const snapshot = {
       sizeBytes: 4096,
       completedBytes: 1024,
       downloadRateBytesPerSec: 2048,
-      categoryId: 1
+      category: "Sample-Category"
     }
   ],
   searches: [],
@@ -340,7 +340,7 @@ function dataFor(method: string, path: string): unknown {
     case `shared-files/${secondSharedFileHash}/comments`:
       return { items: [] };
     case "categories":
-      return { items: [{ id: 1, name: "Sample Category", priority: 0 }] };
+      return { items: [{ name: "Sample-Category", tempDir: null, destinationDir: null, comment: "" }] };
     case "friends":
       return { items: [] };
     case "ip-filter":
@@ -555,7 +555,7 @@ function dataFor(method: string, path: string): unknown {
         ],
         sectionResources: [
           sectionResource("sharedDirectories", "/api/v1/shared-directories", "Sharing", "Shared root ownership and reload operations."),
-          sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category paths and priorities."),
+          sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category destinations and temporary directories."),
           sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
           sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),
           sectionResource("network", "/api/v1/network", "Network", "Live P2P port, binding, interface, and VPN Guard status."),

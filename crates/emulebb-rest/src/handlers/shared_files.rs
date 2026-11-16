@@ -135,9 +135,7 @@ pub(crate) async fn update_shared_directories(
     };
     match state.core.set_shared_directories(request).await {
         Ok(directories) => api_ok(directories).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -151,9 +149,7 @@ pub(crate) async fn add_shared_directory_root(
     };
     match state.core.add_shared_directory_root(&request.path).await {
         Ok(directories) => api_ok(directories).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -175,9 +171,7 @@ pub(crate) async fn remove_shared_directory_root(
     };
     match state.core.remove_shared_directory_root(&path).await {
         Ok(directories) => api_ok(directories).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 

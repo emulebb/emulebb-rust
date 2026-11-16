@@ -761,7 +761,7 @@ impl Ed2kTransferRuntime {
             return;
         }
         if let Ok(mut catalog) = self.shared_catalog.try_write() {
-            catalog.update_by_hash(file_hash, |entry| {
+            catalog.update_stats_by_hash(file_hash, |entry| {
                 entry.all_time_uploaded_bytes =
                     entry.all_time_uploaded_bytes.saturating_add(amount);
                 entry.publish.session_uploaded_bytes =
@@ -808,7 +808,7 @@ impl Ed2kTransferRuntime {
         if let Some(amount) = pending.remove(&key)
             && amount > 0
         {
-            catalog.update_by_hash(file_hash, |entry| {
+            catalog.update_stats_by_hash(file_hash, |entry| {
                 entry.all_time_uploaded_bytes =
                     entry.all_time_uploaded_bytes.saturating_add(amount);
                 entry.publish.session_uploaded_bytes =
@@ -825,7 +825,7 @@ impl Ed2kTransferRuntime {
         // O(1) by-hash resolution of the unique non-hint entry, replacing the
         // former write-lock + full linear scan on every request/accept.
         let mut catalog = self.shared_catalog.write().await;
-        catalog.update_by_hash(file_hash, update);
+        catalog.update_stats_by_hash(file_hash, update);
     }
 
     /// Enable/disable the credit system live (eMule `thePrefs.GetCreditSystem()`).

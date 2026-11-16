@@ -19,3 +19,12 @@ pub struct MetadataCurrentSharedFile {
     pub source_path: PathBuf,
     pub source_fingerprint: Option<NativeFileFingerprint>,
 }
+
+/// One bounded candidate path for root-change catalog reconciliation.
+#[derive(Debug, Clone)]
+pub struct MetadataSharedCopyCandidate {
+    pub path_id: i64,
+    pub source_path: PathBuf,
+    pub file_size: u64,
+    pub source_fingerprint: Option<NativeFileFingerprint>,
+}

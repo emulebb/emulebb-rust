@@ -110,7 +110,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
         unified_run.as_ref(),
     );
     let logs = recent_log_values(MAX_LOG_RECORDS);
-    let operational_snapshots = operational_snapshots(state).await;
+    let operational_snapshots = operational_snapshots(state).await?;
 
     let payload = json!({
         "schema": DIAGNOSTIC_BUNDLE_SCHEMA,
@@ -164,7 +164,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
     encode_bounded_bundle(payload, max_bytes)
 }
 
-async fn operational_snapshots(state: &RestState) -> Value {
+async fn operational_snapshots(state: &RestState) -> Result<Value> {
     let mut servers = state.core.servers().await;
     servers.sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
     let (shared_files, shared_file_total) =
@@ -175,7 +175,7 @@ async fn operational_snapshots(state: &RestState) -> Value {
             .cmp(&right.created_at)
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut transfers = state.core.transfers().await;
+    let mut transfers = state.core.transfers().await?;
     transfers.sort_by(|left, right| {
         left.added_at
             .cmp(&right.added_at)
@@ -183,7 +183,7 @@ async fn operational_snapshots(state: &RestState) -> Value {
     });
     let uploads = state.core.uploads().await;
     let upload_queue = state.core.upload_queue().await;
-    json!({
+    Ok(json!({
         "servers": bounded_prefix_collection(
             &servers,
             servers.len(),
@@ -210,7 +210,7 @@ async fn operational_snapshots(state: &RestState) -> Value {
             MAX_UPLOAD_QUEUE_SNAPSHOTS,
             |upload| json!(upload),
         ),
-    })
+    }))
 }
 
 fn bounded_tail_collection<T>(items: &[T], limit: usize, render: impl Fn(&T) -> Value) -> Value {

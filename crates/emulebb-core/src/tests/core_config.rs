@@ -1119,6 +1119,37 @@ async fn cancelled_actual_startup_before_install_retires_owner_handoff() {
 #[tokio::test]
 async fn final_kad_capture_survives_timed_out_network_cleanup() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    // This fixture installs the existing real Kad runtime directly; it does
+    // not launch STUN, server discovery, or bootstrap against default sources.
+    // Server bootstrap intentionally rejects an empty list. An operator add
+    // initializes that domain through the normal API without connecting.
+    let server_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    core.add_server(ServerCreate {
+        address: Ipv4Addr::LOCALHOST.to_string(),
+        port: server_listener.local_addr().unwrap().port(),
+        name: Some("Local fixture".into()),
+        priority: None,
+        static_server: None,
+        connect: Some(false),
+    })
+    .await
+    .unwrap();
+    let initial_revision = core
+        .metadata_store
+        .replace_kad_routing_snapshot(0, true, &[])
+        .unwrap()
+        .unwrap();
+    for domain in [
+        emulebb_metadata::DiscoveryDomain::Servers,
+        emulebb_metadata::DiscoveryDomain::Kad,
+    ] {
+        assert_eq!(
+            core.metadata_store
+                .discovery_initialization_status(domain)
+                .unwrap(),
+            emulebb_metadata::DiscoveryInitializationStatus::Initialized
+        );
+    }
     let owner = core
         .persistence_owner
         .owner(&core.metadata_store, &core.state)
@@ -1134,7 +1165,7 @@ async fn final_kad_capture_survives_timed_out_network_cleanup() {
     owner.attach_kad(&dht).await.unwrap().commit();
     dht.add_contact(emulebb_kad_routing::Contact::new(
         emulebb_kad_proto::NodeId::from_bytes([78; 16]),
-        "192.0.2.78".parse().unwrap(),
+        Ipv4Addr::LOCALHOST,
         4672,
         4662,
         9,
@@ -1159,13 +1190,43 @@ async fn final_kad_capture_survives_timed_out_network_cleanup() {
         kad_firewall_recheck: None,
         tasks: Vec::new(),
     });
+    // Hold only the reload execution gate. This proves shutdown scheduling
+    // against owned reload work, not latency of an actual filesystem probe.
+    let execution = core.shared_reload_gate.lock().await;
+    core.reload_shared_directories_detached().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while core.shared_reload_pending.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    core.begin_shutdown();
     core.stop_persistence_admission().unwrap();
-    core.finish_kad_persistence().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), core.finish_kad_persistence())
+        .await
+        .expect("final Kad capture must not wait for the held reload")
+        .unwrap();
+    let snapshot = core.metadata_store.load_kad_routing_snapshot().unwrap();
+    assert_eq!(snapshot.revision, initial_revision + 1);
+    assert_eq!(snapshot.contacts.len(), 1);
+    assert_eq!(snapshot.contacts[0].node_id, [78; 16]);
+    assert_eq!(snapshot.contacts[0].ip, u32::from(Ipv4Addr::LOCALHOST));
+    assert!(
+        core.ed2k_runtime
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .kad_persistence_finished
+    );
+    assert!(core.shared_reload_running.load(Ordering::Acquire));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), core.disconnect_ed2k())
             .await
             .is_err()
     );
+    drop(execution);
     core.drain_persistence().await.unwrap();
     assert_eq!(
         core.metadata_store

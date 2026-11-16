@@ -31,6 +31,8 @@ mod download_throttle;
 mod file_status_parts;
 mod ich_salvage;
 mod inbound_admission;
+mod local_admission;
+mod local_ingest;
 mod progressive_catalog;
 mod reask_reciprocity;
 mod salvage;
@@ -1019,8 +1021,70 @@ fn combined_payload_hashsets_match_separate_md4_and_aich_builders() {
         assert_eq!(combined.md4_hashset, separate_md4_hashset);
         assert_eq!(combined.aich_hashset.master_hash, separate_aich.master_hash);
         assert_eq!(combined.aich_hashset.part_hashes, separate_aich.part_hashes);
+        for leaves in &combined.recovery_parts {
+            assert_eq!(leaves.capacity(), leaves.len());
+        }
         assert_eq!(progress_bytes, size as u64);
     }
+}
+
+#[test]
+fn maximum_file_hashset_capacities_follow_packed_geometry() {
+    use super::hashset::{aich_part_specs_for_size, pack_aich_block_hashes};
+    use super::ingest::encode_hashset;
+    use std::mem::size_of;
+
+    // Allocate hash representations only: never create or read a 256 GiB file.
+    let specs = aich_part_specs_for_size(0x4000000000).unwrap();
+    assert_eq!(specs.len(), 28_257);
+    assert_eq!(specs.capacity(), specs.len());
+    let mut recovery = Vec::with_capacity(specs.len());
+    let mut leaves = 0;
+    for spec in &specs {
+        let count = usize::try_from(spec.size.div_ceil(ED2K_EMBLOCK_SIZE)).unwrap();
+        let hashes = vec![[0x5a; 20]; count];
+        let packed = pack_aich_block_hashes(&hashes);
+        assert_eq!(packed.capacity(), count * 20);
+        assert!(packed.iter().all(|byte| *byte == 0x5a));
+        leaves += count;
+        recovery.push(packed);
+    }
+    assert_eq!(leaves, 1_497_588);
+    assert_eq!(recovery.capacity(), 28_257);
+    let packed_bytes: usize = recovery.iter().map(Vec::capacity).sum();
+    assert_eq!(packed_bytes, 29_951_760);
+
+    let mut md4 = Vec::with_capacity(specs.len() + 1);
+    md4.resize(specs.len(), [0x12; 16]);
+    let aich = vec![[0x34; 20]; specs.len()];
+    let raw_bytes = packed_bytes
+        + recovery.capacity() * size_of::<Vec<u8>>()
+        + md4.capacity() * size_of::<[u8; 16]>()
+        + aich.capacity() * size_of::<[u8; 20]>();
+    let hashing_peak = raw_bytes
+        + specs.capacity() * size_of::<super::hashset::AichPartSpec>()
+        + usize::try_from(ED2K_EMBLOCK_SIZE).unwrap()
+        + 53 * size_of::<[u8; 20]>();
+    // The 64-bit payload bound excludes allocator bookkeeping and stacks.
+    assert!(hashing_peak <= 32_284_688);
+    let md4_hex = encode_hashset(&md4);
+    let aich_hex = encode_hashset(&aich);
+    for (encoded, width) in [(&md4_hex, 32), (&aich_hex, 40)] {
+        assert_eq!(encoded.capacity(), specs.len());
+        assert!(encoded.iter().all(|hash| hash.capacity() == width));
+    }
+    assert_eq!(md4_hex[0], "12".repeat(16));
+    assert_eq!(aich_hex[0], "34".repeat(20));
+    let hex_bytes = [&md4_hex, &aich_hex]
+        .into_iter()
+        .map(|hashes| {
+            hashes.capacity() * size_of::<String>()
+                + hashes.iter().map(String::capacity).sum::<usize>()
+        })
+        .sum::<usize>();
+    // Metadata decodes into flat fixed-width arrays, not per-hash Vec headers.
+    let decoded_bytes = specs.len() * (size_of::<[u8; 16]>() + size_of::<[u8; 20]>());
+    assert!(raw_bytes + hex_bytes + decoded_bytes <= 36_055_288);
 }
 
 #[tokio::test]

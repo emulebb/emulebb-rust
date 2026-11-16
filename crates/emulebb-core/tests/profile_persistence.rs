@@ -5,9 +5,9 @@ use std::{
 };
 
 use emulebb_core::{
-    AppSettingsUpdate, CategoryCreate, CategoryPriorityValue, CoreSettingsUpdate, EmulebbCore,
-    FriendCreate, LocalShareCreate, NullableStringField, NullableU32Field, ServerCreate,
-    ServerUpdate, TransferCreate, TransferUpdate,
+    AppSettingsUpdate, CategoryCreate, CoreSettingsUpdate, EmulebbCore, FriendCreate,
+    LocalShareCreate, NullableStringField, ServerCreate, ServerUpdate, TransferCreate,
+    TransferUpdate,
 };
 use emulebb_index::FileIndex;
 
@@ -29,10 +29,9 @@ async fn profile_state_survives_core_restart() {
         let category = core
             .create_category(CategoryCreate {
                 name: "Samples".to_string(),
-                path: NullableStringField::Missing,
+                temp_dir: NullableStringField::Missing,
+                destination_dir: NullableStringField::Missing,
                 comment: Some("Synthetic category".to_string()),
-                color: NullableU32Field::Value(0x00aa11),
-                priority: Some(CategoryPriorityValue::Name("high".to_string())),
             })
             .await
             .unwrap();
@@ -60,10 +59,9 @@ async fn profile_state_survives_core_restart() {
     assert_eq!(core_settings.download_limit_ki_bps, 2048);
     assert!(!core_settings.network_kademlia);
 
-    let categories = reloaded.categories().await;
-    assert_eq!(categories.len(), 2);
-    assert_eq!(categories[1].name, "Samples");
-    assert_eq!(categories[1].priority, 2);
+    let categories = reloaded.categories().await.unwrap();
+    assert_eq!(categories.len(), 1);
+    assert_eq!(categories[0].name, "Samples");
 
     let friends = reloaded.friends().await.unwrap();
     assert_eq!(friends.len(), 1);
@@ -95,7 +93,7 @@ async fn profile_state_survives_core_restart() {
     reloaded.remove_server("192.0.2.10:4661").await.unwrap();
 
     let reloaded_again = open_core(&metadata_path, &transfer_root);
-    assert_eq!(reloaded_again.categories().await.len(), 1);
+    assert!(reloaded_again.categories().await.unwrap().is_empty());
     assert!(reloaded_again.friends().await.unwrap().is_empty());
     let disabled_server = reloaded_again.server("192.0.2.10:4661").await.unwrap();
     assert!(!disabled_server.enabled);
@@ -231,10 +229,9 @@ async fn delete_category_resets_referencing_transfers_to_uncategorized() {
     let category = core
         .create_category(CategoryCreate {
             name: "Movies".to_string(),
-            path: NullableStringField::Missing,
+            temp_dir: NullableStringField::Missing,
+            destination_dir: NullableStringField::Missing,
             comment: None,
-            color: NullableU32Field::Missing,
-            priority: None,
         })
         .await
         .unwrap();
@@ -244,24 +241,24 @@ async fn delete_category_resets_referencing_transfers_to_uncategorized() {
         .update_transfer(
             &share.hash,
             TransferUpdate {
-                category_id: Some(category.id),
+                category_id: Some(Some(category.id)),
                 ..TransferUpdate::default()
             },
         )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(updated.category_id, category.id);
-    assert_eq!(updated.category_name, "Movies");
+    assert_eq!(updated.category_id, Some(category.id));
+    assert_eq!(updated.category_name.as_deref(), Some("Movies"));
 
     assert!(core.delete_category(category.id).await.unwrap().is_some());
 
-    let transfer = core.transfer(&share.hash).await.unwrap();
+    let transfer = core.transfer(&share.hash).await.unwrap().unwrap();
     assert_eq!(
-        transfer.category_id, 0,
+        transfer.category_id, None,
         "transfer category_id must reset to uncategorized after its category is deleted"
     );
-    assert_eq!(transfer.category_name, "");
+    assert_eq!(transfer.category_name, None);
 
     // Idempotent: deleting an already-removed category returns None.
     assert!(core.delete_category(category.id).await.unwrap().is_none());

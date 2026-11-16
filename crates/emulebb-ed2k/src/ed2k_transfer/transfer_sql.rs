@@ -410,7 +410,7 @@ mod tests {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
-            category_id: 0,
+            category_id: None,
             control_state: None,
             transfer_row_removed: false,
             delivery_state: MetadataTransferDeliveryState::Pending,
