@@ -3,15 +3,14 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use emulebb_metadata::{
     MetadataStore, MetadataTransferCatalogEntry, MetadataTransferDeliveryOwnership,
-    MetadataTransferDeliveryState, MetadataTransferFileNameObservation, MetadataTransferManifest,
-    MetadataTransferMediaMetadata, MetadataTransferPiece, MetadataTransferRange,
-    MetadataTransferSource,
+    MetadataTransferDeliveryState, MetadataTransferManifest, MetadataTransferMediaMetadata,
+    MetadataTransferPiece, MetadataTransferRange,
 };
 
 use super::{
-    Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kFileNameObservation, Ed2kPieceState,
-    Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kSourceHint, Ed2kTransferState,
-    block_bitmap::PartBlockBitmap, catalog::Ed2kSharedPublishStats, expected_piece_length,
+    Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry,
+    Ed2kSharedRange, Ed2kTransferState, block_bitmap::PartBlockBitmap,
+    catalog::Ed2kSharedPublishStats, expected_piece_length,
 };
 
 pub(super) const MEDIA_METADATA_EXTRACTOR_VERSION: u32 = 1;
@@ -20,26 +19,10 @@ pub(super) fn manifest_to_metadata(
     manifest: &Ed2kResumeManifest,
 ) -> Result<MetadataTransferManifest> {
     Ok(MetadataTransferManifest {
+        token: manifest.token,
         file_hash: manifest.file_hash.clone(),
         display_name: manifest.display_name.clone(),
-        display_name_pinned: manifest.display_name_pinned,
-        follow_majority_filename: manifest.follow_majority_filename,
-        file_name_observations: manifest
-            .file_name_observations
-            .iter()
-            .map(|observation| MetadataTransferFileNameObservation {
-                source_ip: observation.source_ip.clone(),
-                source_tcp_port: observation.source_tcp_port,
-                user_hash: observation.user_hash.clone(),
-                client_software: observation.client_software.clone(),
-                origin: observation.origin.clone(),
-                server_endpoint: observation.server_endpoint.clone(),
-                raw_name: observation.raw_name.clone(),
-                normalized_name: observation.normalized_name.clone(),
-                observed_at_ms: observation.observed_at_ms,
-            })
-            .collect(),
-        file_size: manifest.file_size,
+        expected_size_bytes: Some(manifest.file_size),
         piece_size: manifest.piece_size,
         completed: manifest.completed,
         final_rehash_pending: manifest.final_rehash_pending,
@@ -61,24 +44,12 @@ pub(super) fn manifest_to_metadata(
             })
             .collect(),
         pieces: manifest.pieces.iter().map(piece_to_metadata).collect(),
-        sources: manifest
-            .sources
-            .iter()
-            .map(|source| MetadataTransferSource {
-                ip: source.ip.clone(),
-                tcp_port: source.tcp_port,
-                user_hash: source.user_hash.clone(),
-                connect_options: source.connect_options,
-                file_comment: source.file_comment.clone(),
-                file_rating: source.file_rating,
-            })
-            .collect(),
         upload_priority: manifest.upload_priority.clone(),
         auto_upload_priority: manifest.auto_upload_priority,
         comment: manifest.comment.clone(),
         rating: manifest.rating,
         category_id: manifest.category_id,
-        control_state: manifest.control_state.clone(),
+        intent: manifest.intent,
         transfer_row_removed: manifest.transfer_row_removed,
         delivery_state: match manifest.delivery_state {
             Ed2kDeliveryState::Pending => MetadataTransferDeliveryState::Pending,
@@ -110,41 +81,23 @@ pub(super) fn piece_to_metadata(piece: &Ed2kPieceState) -> MetadataTransferPiece
 pub(super) fn manifest_from_metadata(
     manifest: MetadataTransferManifest,
 ) -> Result<Ed2kResumeManifest> {
-    // `piece_size` is read straight from the persisted manifest row. A corrupt
-    // or hand-edited DB row with piece_size==0 while file_size>0 would later
-    // panic with a divide-by-zero in piece_count (file_size.div_ceil(0)).
-    // Reject such a row on load so it never reaches the coordinator.
-    if manifest.piece_size == 0 && manifest.file_size > 0 {
-        anyhow::bail!(
-            "invalid persisted manifest for {}: piece_size=0 with file_size={}",
-            manifest.file_hash,
-            manifest.file_size
-        );
-    }
-    let file_size = manifest.file_size;
+    let file_size = manifest.expected_size_bytes.ok_or_else(|| {
+        anyhow::anyhow!(
+            "job {} has unknown expected size and cannot execute",
+            manifest.token.job_id
+        )
+    })?;
+    anyhow::ensure!(
+        manifest.piece_size > 0 && file_size > 0,
+        "invalid executable download geometry"
+    );
     let piece_size = manifest.piece_size;
     let manifest_hash = manifest.file_hash.clone();
     Ok(Ed2kResumeManifest {
+        token: manifest.token,
         file_hash: manifest.file_hash,
         display_name: manifest.display_name,
-        display_name_pinned: manifest.display_name_pinned,
-        follow_majority_filename: manifest.follow_majority_filename,
-        file_name_observations: manifest
-            .file_name_observations
-            .into_iter()
-            .map(|observation| Ed2kFileNameObservation {
-                source_ip: observation.source_ip,
-                source_tcp_port: observation.source_tcp_port,
-                user_hash: observation.user_hash,
-                client_software: observation.client_software,
-                origin: observation.origin,
-                server_endpoint: observation.server_endpoint,
-                raw_name: observation.raw_name,
-                normalized_name: observation.normalized_name,
-                observed_at_ms: observation.observed_at_ms,
-            })
-            .collect(),
-        file_size: manifest.file_size,
+        file_size,
         piece_size: manifest.piece_size,
         completed: manifest.completed,
         final_rehash_pending: manifest.final_rehash_pending,
@@ -190,24 +143,12 @@ pub(super) fn manifest_from_metadata(
                 })
             })
             .collect::<Result<Vec<_>>>()?,
-        sources: manifest
-            .sources
-            .into_iter()
-            .map(|source| Ed2kSourceHint {
-                ip: source.ip,
-                tcp_port: source.tcp_port,
-                user_hash: source.user_hash,
-                connect_options: source.connect_options,
-                file_comment: source.file_comment,
-                file_rating: source.file_rating,
-            })
-            .collect(),
         upload_priority: manifest.upload_priority,
         auto_upload_priority: manifest.auto_upload_priority,
         comment: manifest.comment,
         rating: manifest.rating,
         category_id: manifest.category_id,
-        control_state: manifest.control_state,
+        intent: manifest.intent,
         transfer_row_removed: manifest.transfer_row_removed,
         delivery_state: match manifest.delivery_state {
             MetadataTransferDeliveryState::Pending => Ed2kDeliveryState::Pending,
@@ -224,10 +165,138 @@ pub(super) fn manifest_from_metadata(
     })
 }
 
+/// Build only selected execution geometry; each SQL row is moved directly into
+/// its final vector. Durable source/name history is read through separate pages.
+pub(super) fn stream_execution_from_metadata(
+    metadata: &MetadataStore,
+    token: emulebb_metadata::JobToken,
+) -> Result<Option<Ed2kResumeManifest>> {
+    use emulebb_metadata::MetadataDownloadExecutionRow as Row;
+    let mut result: Option<Ed2kResumeManifest> = None;
+    let found = metadata.stream_download_execution(token, |row| {
+        match row {
+            Row::Header(header, counts) => {
+                result = Some(Ed2kResumeManifest {
+                    token: header.token,
+                    file_hash: header.file_hash,
+                    display_name: header.display_name,
+                    file_size: header.file_size,
+                    piece_size: header.piece_size,
+                    completed: header.completed,
+                    final_rehash_pending: header.final_rehash_pending,
+                    md4_hashset_acquired: header.md4_hashset_acquired,
+                    md4_hashset: Vec::with_capacity(counts.md4_hashes),
+                    aich_hashset_acquired: header.aich_hashset_acquired,
+                    aich_root: header.aich_root,
+                    aich_root_origin: header
+                        .aich_root_origin
+                        .as_deref()
+                        .map(super::Ed2kAichRootOrigin::parse)
+                        .transpose()?,
+                    aich_trust_generation: header.aich_trust_generation,
+                    aich_hashset: Vec::with_capacity(counts.aich_hashes),
+                    verified_ranges: Vec::with_capacity(counts.ranges),
+                    pieces: Vec::with_capacity(counts.pieces),
+                    upload_priority: header.upload_priority,
+                    auto_upload_priority: header.auto_upload_priority,
+                    comment: header.comment,
+                    rating: header.rating,
+                    category_id: header.category_id,
+                    intent: header.intent,
+                    transfer_row_removed: false,
+                    delivery_state: match header.delivery_state {
+                        MetadataTransferDeliveryState::Pending => super::Ed2kDeliveryState::Pending,
+                        MetadataTransferDeliveryState::Delivered => {
+                            super::Ed2kDeliveryState::Delivered
+                        }
+                    },
+                    delivery_ownership: match header.delivery_ownership {
+                        MetadataTransferDeliveryOwnership::None => {
+                            super::Ed2kDeliveryOwnership::None
+                        }
+                        MetadataTransferDeliveryOwnership::Owned => {
+                            super::Ed2kDeliveryOwnership::Owned
+                        }
+                        MetadataTransferDeliveryOwnership::Unowned => {
+                            super::Ed2kDeliveryOwnership::Unowned
+                        }
+                    },
+                    delivered_path: header.delivered_path,
+                    source_fingerprint: header.source_fingerprint,
+                    payload_fingerprint: header.payload_fingerprint,
+                });
+            }
+            Row::Piece(piece) => {
+                let manifest = result.as_mut().expect("execution header precedes rows");
+                if let Some(bitmap) = piece.block_bitmap.as_deref() {
+                    let size = expected_piece_length(
+                        manifest.file_size,
+                        manifest.piece_size,
+                        u64::from(piece.piece_index),
+                    );
+                    anyhow::ensure!(
+                        PartBlockBitmap::from_hex(size, bitmap).is_some(),
+                        "invalid execution bitmap"
+                    );
+                }
+                manifest.pieces.push(Ed2kPieceState {
+                    piece_index: piece.piece_index,
+                    state: transfer_state_from_sql(&piece.state)?,
+                    bytes_written: piece.bytes_written,
+                    block_bitmap: piece.block_bitmap,
+                    ich_corrupted: piece.ich_corrupted,
+                });
+            }
+            Row::Md4(hash) => result
+                .as_mut()
+                .expect("execution header precedes rows")
+                .md4_hashset
+                .push(hex::encode(hash)),
+            Row::Aich(hash) => result
+                .as_mut()
+                .expect("execution header precedes rows")
+                .aich_hashset
+                .push(hex::encode(hash)),
+            Row::Range(range) => result
+                .as_mut()
+                .expect("execution header precedes rows")
+                .verified_ranges
+                .push(Ed2kSharedRange {
+                    start: range.start,
+                    end: range.end,
+                }),
+        }
+        Ok(())
+    })?;
+    if !found {
+        return Ok(None);
+    }
+    Ok(result)
+}
+
+/// Build directly into the one owned catalog; bounded read pages are dropped
+/// before advancing, rather than collecting a second library-sized entry list.
 pub(super) fn completed_catalog_from_metadata_store(
     metadata: &MetadataStore,
-) -> Result<Vec<Ed2kSharedEntry>> {
-    Ok(completed_catalog_page_from_metadata_store(metadata, None, usize::MAX)?.entries)
+) -> Result<super::IndexedSharedCatalog> {
+    let mut catalog = super::IndexedSharedCatalog::default();
+    let mut after = None;
+    loop {
+        let page = completed_catalog_page_from_metadata_store(
+            metadata,
+            after.as_deref(),
+            super::STARTUP_SHARED_CATALOG_BATCH,
+        )?;
+        for entry in page.entries {
+            catalog.push(entry);
+        }
+        if !page.has_more {
+            break;
+        }
+        anyhow::ensure!(page.cursor > after, "catalog page did not advance");
+        after = page.cursor;
+    }
+    Ok(catalog)
 }
 
 /// A keyset page whose cursor also advances across rejected stale candidates.
@@ -242,59 +311,49 @@ pub(super) fn completed_catalog_page_from_metadata_store(
     after_hash: Option<&str>,
     limit: usize,
 ) -> Result<CompletedCatalogPage> {
+    anyhow::ensure!((1..=256).contains(&limit), "invalid catalog page size");
+    let complete = metadata.completed_transfer_catalog_entries_after(after_hash, limit)?;
+    let local = metadata.active_local_catalog_page(after_hash, limit)?;
+    // WHY: a provider may stop at its byte allowance before reaching the row
+    // limit. Advancing past either returned frontier could skip its next rows.
+    // Only empty input establishes exhaustion; rejected stale candidates still
+    // advance the cursor and a final empty page terminates traversal.
+    let frontier = complete
+        .last()
+        .into_iter()
+        .chain(local.last())
+        .map(|entry| entry.file_hash.clone())
+        .min();
     let mut by_hash = BTreeMap::new();
-    // A completed download awaiting delivery can still serve its verified
-    // payload. A complete local file is authorized by a root membership.
-    for entry in metadata.completed_transfer_catalog_entries_after(after_hash, limit)? {
+    // Both providers describe local instances, not internal download payloads.
+    // A duplicate row is never independent fallback authority for a stale copy.
+    for entry in complete
+        .into_iter()
+        .chain(local)
+        .filter(|entry| Some(&entry.file_hash) <= frontier.as_ref())
+    {
         by_hash.insert(
             entry.file_hash.clone(),
-            (shared_entry_from_catalog_entry(entry)?, false, None),
-        );
-    }
-    for entry in metadata.active_local_catalog_page(after_hash, limit)? {
-        let download_fallback = by_hash
-            .remove(&entry.file_hash)
-            .map(|(download, _, _)| download);
-        by_hash.insert(
-            entry.file_hash.clone(),
-            (
-                shared_entry_from_catalog_entry(entry)?,
-                true,
-                download_fallback,
-            ),
+            shared_entry_from_catalog_entry(entry)?,
         );
     }
     let candidates = by_hash.into_values().take(limit).collect::<Vec<_>>();
-    let cursor = candidates
-        .last()
-        .map(|(entry, _, _)| entry.file_hash.clone());
-    let has_more = candidates.len() == limit;
+    let cursor = candidates.last().map(|entry| entry.file_hash.clone());
+    let has_more = cursor.is_some();
     let mut entries = Vec::with_capacity(candidates.len());
-    for (mut entry, local, download_fallback) in candidates {
-        if local {
-            // WHY: a persisted root membership is only a candidate after
-            // restart. Check current identity before any protocol publication.
-            let Some(source) = super::duplicate::first_present_source(
-                metadata.current_shared_files_by_hash(&entry.file_hash)?,
-            ) else {
-                if let Some(download) = download_fallback {
-                    entries.push(download);
-                }
-                continue;
-            };
-            if !metadata
-                .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
-            {
-                if let Some(download) = download_fallback {
-                    entries.push(download);
-                }
-                continue;
-            }
-            if let Some(name) =
-                emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
-            {
-                entry.display_name = name;
-            }
+    for mut entry in candidates {
+        let Some(source) = super::duplicate::first_present_source(
+            metadata.current_shared_files_by_hash(&entry.file_hash)?,
+        ) else {
+            continue;
+        };
+        if !metadata.mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)? {
+            continue;
+        }
+        if let Some(name) =
+            emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
+        {
+            entry.display_name = name;
         }
         entries.push(entry);
     }
@@ -385,14 +444,86 @@ fn transfer_state_from_sql(value: &str) -> Result<Ed2kTransferState> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn streamed_maximum_execution_capacity_fits_six_mebibytes_without_second_dto() {
+        let size = 0x4000000000u64;
+        let part_size = super::super::ED2K_PART_SIZE;
+        let count = usize::try_from(size.div_ceil(part_size)).unwrap();
+        assert_eq!(
+            count,
+            super::super::manifest::piece_count(size, part_size) as usize
+        );
+        assert_eq!(count, 28_257);
+        let mut pieces = Vec::with_capacity(count);
+        let md4_count = usize::from(super::super::hashset::expected_md4_hash_count(size));
+        let mut md4 = Vec::with_capacity(md4_count);
+        let mut aich = Vec::with_capacity(count);
+        let mut ranges = Vec::with_capacity(count.div_ceil(2));
+        let mut fragmented_blocks = 0usize;
+        for index in 0..count {
+            let start = index as u64 * part_size;
+            let length = part_size.min(size - start);
+            let mut bitmap = PartBlockBitmap::empty(length);
+            for block in (0..bitmap.block_count()).step_by(2) {
+                bitmap.set_present(block);
+                fragmented_blocks += 1;
+            }
+            // The maximal alternating part coverage is independent of the
+            // per-part bitmap backing bound. Keep both allocations charged.
+            pieces.push(Ed2kPieceState {
+                piece_index: index as u32,
+                state: if index % 2 == 0 {
+                    Ed2kTransferState::Verified
+                } else {
+                    Ed2kTransferState::Missing
+                },
+                bytes_written: if index % 2 == 0 {
+                    length
+                } else {
+                    bitmap.contiguous_prefix_bytes()
+                },
+                block_bitmap: Some(bitmap.to_hex()),
+                ich_corrupted: false,
+            });
+            md4.push(hex::encode([0u8; 16]));
+            aich.push(hex::encode([0u8; 20]));
+            if index % 2 == 0 {
+                ranges.push(Ed2kSharedRange {
+                    start,
+                    end: start + length,
+                });
+            }
+        }
+        if md4_count > count {
+            md4.push(hex::encode([0u8; 16]));
+        }
+        assert_eq!(md4.len(), md4_count);
+        assert!(fragmented_blocks > 700_000);
+        assert_eq!(ranges.len(), count.div_ceil(2));
+        let vectors = pieces.capacity() * std::mem::size_of::<Ed2kPieceState>()
+            + md4.capacity() * std::mem::size_of::<String>()
+            + aich.capacity() * std::mem::size_of::<String>()
+            + ranges.capacity() * std::mem::size_of::<Ed2kSharedRange>();
+        let backing = pieces
+            .iter()
+            .map(|piece| piece.block_bitmap.as_ref().unwrap().capacity())
+            .sum::<usize>()
+            + md4.iter().map(String::capacity).sum::<usize>()
+            + aich.iter().map(String::capacity).sum::<usize>();
+        // Three bounded 64-KiB texts plus native path conversion and constant
+        // row/bitmap decoder scratch fit the separately counted 512-KiB header.
+        assert!(vectors + backing + 512 * 1024 <= 6 * 1024 * 1024);
+    }
+
     fn manifest_row(file_size: u64, piece_size: u64) -> MetadataTransferManifest {
+        let (_profile, token) = crate::ed2k_transfer::test_support::admit_protocol_job(
+            emulebb_kad_proto::Ed2kHash::from_bytes([0; 16]),
+        );
         MetadataTransferManifest {
+            token,
             file_hash: "00000000000000000000000000000000".to_string(),
             display_name: "f.bin".to_string(),
-            display_name_pinned: false,
-            follow_majority_filename: false,
-            file_name_observations: Vec::new(),
-            file_size,
+            expected_size_bytes: Some(file_size),
             piece_size,
             completed: false,
             final_rehash_pending: false,
@@ -405,13 +536,12 @@ mod tests {
             aich_hashset: Vec::new(),
             verified_ranges: Vec::new(),
             pieces: Vec::new(),
-            sources: Vec::new(),
             upload_priority: String::new(),
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
             category_id: None,
-            control_state: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
             transfer_row_removed: false,
             delivery_state: MetadataTransferDeliveryState::Pending,
             delivery_ownership: MetadataTransferDeliveryOwnership::None,
@@ -427,17 +557,20 @@ mod tests {
         // load so the divide-by-zero in piece_count is never reached.
         let err = manifest_from_metadata(manifest_row(1024, 0)).unwrap_err();
         assert!(
-            err.to_string().contains("piece_size=0"),
+            err.to_string()
+                .contains("invalid executable download geometry"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn accepts_zero_piece_size_for_empty_file() {
-        // A zero-length file legitimately has no pieces; piece_size==0 there is
-        // harmless and must not be rejected.
-        let manifest = manifest_from_metadata(manifest_row(0, 0)).expect("empty file loads");
-        assert_eq!(manifest.file_size, 0);
+    fn zero_length_content_is_not_executable_download_geometry() {
+        let error = manifest_from_metadata(manifest_row(0, 0)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid executable download geometry")
+        );
     }
 
     #[test]

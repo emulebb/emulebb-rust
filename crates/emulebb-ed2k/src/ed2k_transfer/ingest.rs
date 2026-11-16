@@ -109,6 +109,7 @@ impl Ed2kTransferRuntime {
             "local ED2K ingest requires a non-empty canonical name"
         );
         loop {
+            let capacity_revision = self.local_mutations.capacity_revision();
             match self.local_mutations.submit_ingest(
                 self,
                 source_path,
@@ -129,7 +130,9 @@ impl Ed2kTransferRuntime {
                 {
                     // No manifest/stripe guard or cloned request is held while
                     // waiting. In particular a second disk must not lose work.
-                    self.local_mutations.wait_for_completion().await?;
+                    self.local_mutations
+                        .wait_for_completion(capacity_revision)
+                        .await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -164,6 +167,8 @@ pub(super) fn prepare_local_ingest(
                 source_path.display()
             )
         })?;
+    let identity_evidence =
+        native_file_identity_evidence_from_handle(&file, &opened_metadata, &source_fingerprint)?;
     let hash_len = source_fingerprint.size_bytes;
     if hash_len == 0 {
         anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
@@ -235,6 +240,7 @@ pub(super) fn prepare_local_ingest(
     let md4_hashset_count = hashsets.md4_hashset.len();
     let aich_hashset_count = hashsets.aich_hashset.part_hashes.len();
     let content = MetadataVerifiedLocalContent {
+        secondary_identity: identity_evidence.secondary(),
         file_hash: file_hash.clone(),
         display_name: display_name.to_owned(),
         file_size: source_fingerprint.size_bytes,
@@ -292,6 +298,35 @@ pub(crate) fn native_file_fingerprint(source_path: &Path) -> Option<NativeFileFi
     let file = open_regular_file_without_follow(source_path).ok()?;
     let opened_metadata = file.metadata().ok()?;
     native_file_fingerprint_from_handle(&file, &opened_metadata)
+}
+
+/// Mutation-bearing verification retains the actual common Windows observation.
+/// A failed secondary probe is an error/pending verification, never a fabricated
+/// non-match or an ID conversion. Ordinary fingerprint equality stays unchanged.
+pub(crate) fn native_file_identity_evidence_from_handle(
+    file: &File,
+    metadata: &Metadata,
+    fingerprint: &NativeFileFingerprint,
+) -> Result<emulebb_metadata::NativeFileIdentityEvidence> {
+    let primary = native_file_identity_from_handle(file, metadata)
+        .context("native identity observation unavailable")?;
+    anyhow::ensure!(
+        primary == fingerprint.identity,
+        "native identity changed between handle observations"
+    );
+    #[cfg(windows)]
+    let secondary = if matches!(primary, NativeFileIdentity::WindowsHighResolution { .. }) {
+        Some(native_windows_low_identity_from_handle(file).context(
+            "common Windows identity observation unavailable; verification remains pending",
+        )?)
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let secondary = None;
+    let evidence = emulebb_metadata::NativeFileIdentityEvidence::new(primary, secondary)?;
+    evidence.validate_fingerprint(fingerprint)?;
+    Ok(evidence)
 }
 
 pub(crate) fn native_directory_identity(path: &Path) -> Option<NativeFileIdentity> {
@@ -439,10 +474,7 @@ pub(crate) fn native_file_identity_from_handle(
     };
     use windows_sys::Win32::{
         Foundation::HANDLE,
-        Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
-            GetFileInformationByHandleEx,
-        },
+        Storage::FileSystem::{FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx},
     };
 
     let handle = file.as_raw_handle() as HANDLE;
@@ -466,18 +498,51 @@ pub(crate) fn native_file_identity_from_handle(
         });
     }
 
-    let mut low_resolution = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
-    // SAFETY: `handle` belongs to the borrowed open file and the output buffer
-    // has the exact type required by `GetFileInformationByHandle`.
-    if unsafe { GetFileInformationByHandle(handle, low_resolution.as_mut_ptr()) } == 0 {
+    // WHY: a transient failure must not silently change the identity mode of
+    // an otherwise supported filesystem. Only an unsupported information class
+    // can fall back to the independently observed legacy identity.
+    let error = std::io::Error::last_os_error();
+    if !windows_file_id_info_unsupported(&error) {
         return None;
     }
-    // SAFETY: the successful API call initialized the complete structure.
-    let low_resolution = unsafe { low_resolution.assume_init() };
-    Some(NativeFileIdentity::WindowsLowResolution {
-        volume_serial_number: low_resolution.dwVolumeSerialNumber,
-        file_index: (u64::from(low_resolution.nFileIndexHigh) << 32)
-            | u64::from(low_resolution.nFileIndexLow),
+    native_windows_low_identity_from_handle(file).ok()
+}
+
+#[cfg(windows)]
+fn windows_file_id_info_unsupported(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{
+        ERROR_CALL_NOT_IMPLEMENTED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
+        ERROR_NOT_SUPPORTED,
+    };
+    error.raw_os_error().is_some_and(|code| {
+        matches!(
+            code as u32,
+            ERROR_CALL_NOT_IMPLEMENTED
+                | ERROR_INVALID_FUNCTION
+                | ERROR_INVALID_PARAMETER
+                | ERROR_NOT_SUPPORTED
+        )
+    })
+}
+
+#[cfg(windows)]
+fn native_windows_low_identity_from_handle(file: &File) -> std::io::Result<NativeFileIdentity> {
+    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle},
+    };
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: the borrowed live handle and correctly sized output remain valid.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, info.as_mut_ptr()) } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the successful native call initialized the complete structure.
+    let info = unsafe { info.assume_init() };
+    Ok(NativeFileIdentity::WindowsLowResolution {
+        volume_serial_number: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
     })
 }
 
@@ -580,6 +645,54 @@ mod native_file_fingerprint_tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_native_identity_errors_do_not_switch_identity_mode() {
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
+            ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION,
+        };
+        for code in [ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED] {
+            assert!(windows_file_id_info_unsupported(
+                &std::io::Error::from_raw_os_error(code as i32)
+            ));
+        }
+        for code in [
+            ERROR_ACCESS_DENIED,
+            ERROR_INVALID_HANDLE,
+            ERROR_SHARING_VIOLATION,
+        ] {
+            assert!(!windows_file_id_info_unsupported(
+                &std::io::Error::from_raw_os_error(code as i32)
+            ));
+        }
+    }
+
+    #[test]
+    fn mutation_probe_retains_actual_identity_observations_from_the_open_handle() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("identity-evidence.bin");
+        fs::write(&source, b"evidence").unwrap();
+        let file = open_stable_read_file_without_follow(&source).unwrap();
+        let metadata = file.metadata().unwrap();
+        let fingerprint = native_file_fingerprint_from_handle(&file, &metadata).unwrap();
+        let evidence =
+            native_file_identity_evidence_from_handle(&file, &metadata, &fingerprint).unwrap();
+        evidence.validate_fingerprint(&fingerprint).unwrap();
+        #[cfg(windows)]
+        if matches!(
+            fingerprint.identity,
+            NativeFileIdentity::WindowsHighResolution { .. }
+        ) {
+            assert_eq!(
+                evidence.secondary(),
+                Some(native_windows_low_identity_from_handle(&file).unwrap())
+            );
+        }
+        #[cfg(not(windows))]
+        assert!(evidence.secondary().is_none());
+    }
 
     #[test]
     fn fingerprint_is_stable_for_the_same_file() {

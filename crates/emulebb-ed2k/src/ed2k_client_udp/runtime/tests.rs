@@ -1,6 +1,23 @@
 use super::*;
 use crate::reachability::{ReachabilityRuntimeAuthority, ReachabilityRuntimeLease};
 
+fn admitted_job(hash: Ed2kHash) -> (emulebb_metadata::MetadataStore, emulebb_metadata::JobToken) {
+    let store = emulebb_metadata::MetadataStore::in_memory().unwrap();
+    let token = store
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: hash.to_string(),
+            display_name: "reask.bin".to_owned(),
+            expected_size_bytes: Some(16),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            piece_size: crate::ed2k_transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job
+        .token;
+    (store, token)
+}
+
 fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     let authority = ReachabilityRuntimeAuthority::new();
     let public_ip = authority.reader();
@@ -191,11 +208,12 @@ async fn local_firewall_gate_blocks_buddy_reask_until_reachability_opens() {
     };
     let now = Instant::now();
     let file_hash = Ed2kHash::from_bytes([0xBC; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     let source_endpoint = (Ipv4Addr::new(198, 51, 100, 50), 4672);
     let (mut svc, _reachability) = service();
     svc.register_source(
         file_hash,
-        ReaskSource::new(source_endpoint, file_hash, 4, now).with_buddy(
+        ReaskSource::new(job_token, source_endpoint, file_hash, 4, now).with_buddy(
             true,
             Some((*buddy_addr.ip(), buddy_addr.port())),
             Some([0x99; 16]),
@@ -309,6 +327,7 @@ fn register_command_adds_a_source_and_remove_drops_it() {
     let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0xAB; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     // Distinct UDP routing port (4672) vs TCP lease port (4662): core's lease
     // sets are keyed by (ip, tcp_port), so a SourceReleased carrying the UDP
     // endpoint would never match and the lease would leak (RUST-PAR-017 DL-11).
@@ -318,6 +337,7 @@ fn register_command_adds_a_source_and_remove_drops_it() {
         &mut svc,
         &events,
         ReaskCommand::Register(ReaskDetachArgs {
+            job_token,
             file_hash,
             endpoint,
             tcp_port: lease_endpoint.1,
@@ -334,14 +354,27 @@ fn register_command_adds_a_source_and_remove_drops_it() {
     assert_eq!(svc.registered_file_hashes(), vec![file_hash]);
     assert!(rx.try_recv().is_err());
 
-    apply_reask_command(&mut svc, &events, ReaskCommand::Remove { endpoint });
+    apply_reask_command(
+        &mut svc,
+        &events,
+        ReaskCommand::Remove {
+            job_token,
+            endpoint,
+        },
+    );
     assert_eq!(svc.source_count(), 0);
     assert!(svc.registered_file_hashes().is_empty());
     match rx.try_recv().expect("a SourceReleased event") {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(
-            released, lease_endpoint,
-            "the release must carry the TCP lease key, not the UDP routing endpoint"
-        ),
+        ReaskEvent::SourceReleased {
+            job_token: released_token,
+            endpoint: released,
+        } => {
+            assert_eq!(released_token, job_token);
+            assert_eq!(
+                released, lease_endpoint,
+                "the release must carry the TCP lease key, not the UDP routing endpoint"
+            )
+        }
         other => panic!("expected SourceReleased, got {other:?}"),
     }
 }
@@ -351,11 +384,13 @@ fn register_command_respects_initial_reask_delay() {
     let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0xAC; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     let endpoint = (Ipv4Addr::new(198, 51, 100, 8), 4672);
     apply_reask_command(
         &mut svc,
         &events,
         ReaskCommand::Register(ReaskDetachArgs {
+            job_token,
             file_hash,
             endpoint,
             tcp_port: 4662,
@@ -399,9 +434,13 @@ fn reask_send_settlement_opens_pending_only_on_success() {
     let now = Instant::now();
     let timeout = Duration::from_secs(20);
     let file_hash = Ed2kHash::from_bytes([0xAD; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     let endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4672);
     let (mut svc, _reachability) = service();
-    svc.register_source(file_hash, ReaskSource::new(endpoint, file_hash, 4, now));
+    svc.register_source(
+        file_hash,
+        ReaskSource::new(job_token, endpoint, file_hash, 4, now),
+    );
 
     let failed = svc.tick(now, timeout, |_| TransferReaskInfo {
         part_status: None,
@@ -448,10 +487,12 @@ fn reask_send_settlement_opens_pending_only_on_success() {
 fn remove_command_for_unknown_endpoint_releases_no_lease() {
     let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
+    let (_job_store, job_token) = admitted_job(Ed2kHash::from_bytes([0xAA; 16]));
     apply_reask_command(
         &mut svc,
         &events,
         ReaskCommand::Remove {
+            job_token,
             endpoint: (Ipv4Addr::new(203, 0, 113, 1), 4672),
         },
     );
@@ -462,7 +503,9 @@ fn remove_command_for_unknown_endpoint_releases_no_lease() {
 fn reengage_releases_lease_before_signalling_source_ready() {
     let file_hash = Ed2kHash::from_bytes([0x33; 16]);
     let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4662);
+    let (_job_store, job_token) = admitted_job(file_hash);
     let events = routed_reply_events(
+        job_token,
         ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD),
         file_hash,
         lease_endpoint,
@@ -470,23 +513,38 @@ fn reengage_releases_lease_before_signalling_source_ready() {
     );
     assert_eq!(events.len(), 2);
     match &events[0] {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(
-            *released, lease_endpoint,
-            "the release must carry the TCP lease key, not the UDP routing endpoint"
-        ),
+        ReaskEvent::SourceReleased {
+            job_token: released_token,
+            endpoint: released,
+        } => {
+            assert_eq!(*released_token, job_token);
+            assert_eq!(
+                *released, lease_endpoint,
+                "the release must carry the TCP lease key, not the UDP routing endpoint"
+            )
+        }
         other => panic!("expected SourceReleased first, got {other:?}"),
     }
     match &events[1] {
-        ReaskEvent::SourceReady { file_hash: ready } => assert_eq!(*ready, file_hash),
+        ReaskEvent::SourceReady {
+            job_token: ready_token,
+            file_hash: ready,
+        } => {
+            assert_eq!(*ready_token, job_token);
+            assert_eq!(*ready, file_hash)
+        }
         other => panic!("expected SourceReady second, got {other:?}"),
     }
 }
 
 #[test]
 fn deep_rank_keeps_source_and_releases_no_lease() {
+    let file_hash = Ed2kHash::from_bytes([0x44; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     let events = routed_reply_events(
+        job_token,
         ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD + 1),
-        Ed2kHash::from_bytes([0x44; 16]),
+        file_hash,
         (Ipv4Addr::new(198, 51, 100, 10), 4662),
         None,
     );
@@ -505,7 +563,9 @@ fn dropped_source_is_dead_listed_then_releases_its_lease() {
     let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4662);
     let source_user_hash = [0x56; 16];
     let hash = Ed2kHash::from_bytes([0x55; 16]);
+    let (_job_store, job_token) = admitted_job(hash);
     let events = routed_reply_events(
+        job_token,
         ReaskAction::DropSource,
         hash,
         lease_endpoint,
@@ -514,10 +574,12 @@ fn dropped_source_is_dead_listed_then_releases_its_lease() {
     assert_eq!(events.len(), 2);
     match &events[0] {
         ReaskEvent::SourceDead {
+            job_token: dead_token,
             file_hash,
             source_tcp_endpoint,
             source_user_hash: dead_user_hash,
         } => {
+            assert_eq!(*dead_token, job_token);
             assert_eq!(*file_hash, hash);
             assert_eq!(*source_tcp_endpoint, lease_endpoint);
             assert_eq!(*dead_user_hash, Some(source_user_hash));
@@ -525,10 +587,16 @@ fn dropped_source_is_dead_listed_then_releases_its_lease() {
         other => panic!("expected SourceDead, got {other:?}"),
     }
     match &events[1] {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(
-            *released, lease_endpoint,
-            "the release must carry the TCP lease key, not the UDP routing endpoint"
-        ),
+        ReaskEvent::SourceReleased {
+            job_token: released_token,
+            endpoint: released,
+        } => {
+            assert_eq!(*released_token, job_token);
+            assert_eq!(
+                *released, lease_endpoint,
+                "the release must carry the TCP lease key, not the UDP routing endpoint"
+            )
+        }
         other => panic!("expected SourceReleased, got {other:?}"),
     }
 }
@@ -538,12 +606,14 @@ fn retry_tcp_timeout_releases_held_lease() {
     let (mut svc, _reachability) = service();
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0x66; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     let endpoint = (Ipv4Addr::new(198, 51, 100, 12), 4672);
     let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 12), 4662);
     apply_reask_command(
         &mut svc,
         &events,
         ReaskCommand::Register(ReaskDetachArgs {
+            job_token,
             file_hash,
             endpoint,
             tcp_port: lease_endpoint.1,
@@ -559,13 +629,20 @@ fn retry_tcp_timeout_releases_held_lease() {
     // remove_source hands back the TCP lease key the release event must carry.
     assert_eq!(
         svc.remove_source(endpoint.0, endpoint.1),
-        Some(lease_endpoint)
+        Some((job_token, lease_endpoint))
     );
     let _ = events.send(ReaskEvent::SourceReleased {
+        job_token,
         endpoint: lease_endpoint,
     });
     match rx.try_recv().expect("a SourceReleased event") {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(released, lease_endpoint),
+        ReaskEvent::SourceReleased {
+            job_token: released_token,
+            endpoint: released,
+        } => {
+            assert_eq!(released_token, job_token);
+            assert_eq!(released, lease_endpoint);
+        }
         other => panic!("expected SourceReleased, got {other:?}"),
     }
     assert_eq!(svc.remove_source(endpoint.0, endpoint.1), None);
@@ -666,7 +743,9 @@ fn empty_filter_allows_all_reask_sources() {
 fn detach_handle_register_is_received_as_a_command() {
     let (handle, mut rx) = reask_command_channel();
     let file_hash = Ed2kHash::from_bytes([0xCD; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     assert!(handle.register_kad_buddy_source(ReaskDetachArgs {
+        job_token,
         file_hash,
         endpoint: (Ipv4Addr::new(10, 0, 0, 1), 5000),
         tcp_port: 4662,
@@ -680,6 +759,7 @@ fn detach_handle_register_is_received_as_a_command() {
     }));
     match rx.try_recv().expect("a queued command") {
         ReaskCommand::Register(args) => {
+            assert_eq!(args.job_token, job_token);
             assert_eq!(args.endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
             assert_eq!(args.tcp_port, 4662);
             assert!(args.low_id);
@@ -698,7 +778,9 @@ fn detach_handle_register_is_received_as_a_command() {
 async fn diagnostic_wake_is_ordered_after_normal_registration() {
     let (handle, mut rx) = reask_command_channel();
     let file_hash = Ed2kHash::from_bytes([0xCD; 16]);
+    let (_job_store, job_token) = admitted_job(file_hash);
     assert!(handle.register_kad_buddy_source(ReaskDetachArgs {
+        job_token,
         file_hash,
         endpoint: (Ipv4Addr::new(10, 0, 0, 1), 5000),
         tcp_port: 4662,
@@ -716,6 +798,7 @@ async fn diagnostic_wake_is_ordered_after_normal_registration() {
     match rx.recv().await.expect("the queued registration") {
         ReaskCommand::Register(args) => {
             assert_eq!(args.file_hash, file_hash);
+            assert_eq!(args.job_token, job_token);
             assert_eq!(args.endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
         }
         other => panic!("expected Register before the wake, got {other:?}"),

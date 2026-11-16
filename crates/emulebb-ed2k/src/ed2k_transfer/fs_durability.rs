@@ -27,6 +27,19 @@ pub(super) async fn move_path_no_replace(
     source: &Path,
     destination: &Path,
 ) -> Result<NoReplaceMoveOutcome> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || move_path_no_replace_retained(&source, &destination))
+        .await
+        .context("no-replace move task failed")?
+}
+
+/// Run inside an already retained blocking I/O owner, without spawning a second
+/// untracked operation. Unsupported no-replace rename stays an explicit failure.
+pub(super) fn move_path_no_replace_retained(
+    source: &Path,
+    destination: &Path,
+) -> Result<NoReplaceMoveOutcome> {
     #[cfg(test)]
     if forced_unsupported_moves()
         .lock()
@@ -39,21 +52,14 @@ pub(super) async fn move_path_no_replace(
         ))
         .into());
     }
-    let source = source.to_path_buf();
-    let destination = destination.to_path_buf();
-    let sync_path = destination.clone();
-    let result =
-        tokio::task::spawn_blocking(move || move_path_no_replace_blocking(&source, &destination))
-            .await
-            .context("no-replace move task failed")?;
-    let outcome = match result {
+    let outcome = match move_path_no_replace_blocking(source, destination) {
         Err(error) if error.kind() == io::ErrorKind::Unsupported => {
             return Err(AtomicMoveUnsupported(error).into());
         }
         other => other?,
     };
     if outcome == NoReplaceMoveOutcome::Moved {
-        sync_parent_directory(&sync_path).await?;
+        sync_parent_directory_retained(destination)?;
     }
     Ok(outcome)
 }
@@ -83,42 +89,44 @@ pub(super) async fn sync_file_for_publish(file: std::fs::File) -> Result<()> {
 }
 
 pub(super) async fn sync_parent_directory(path: &Path) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_parent_directory_retained(&path))
+        .await
+        .context("directory sync task failed")?
+}
+
+/// The same nearest-existing-parent durability rule for retained blocking units.
+pub(super) fn sync_parent_directory_retained(path: &Path) -> Result<()> {
     let mut parent = path
         .parent()
         .with_context(|| format!("path {} has no parent directory", path.display()))?
         .to_path_buf();
-    let display_path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        loop {
-            match parent.symlink_metadata() {
-                Ok(metadata) if metadata.file_type().is_dir() => match sync_directory(&parent) {
-                    Ok(()) => return Ok(()),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                },
-                Ok(_) => {}
+    loop {
+        match parent.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_dir() => match sync_directory(&parent) {
+                Ok(()) => return Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
-            }
-            anyhow::ensure!(
-                parent.pop(),
-                "no existing parent directory for {}",
-                display_path.display()
-            );
+            },
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-    })
-    .await
-    .context("directory sync task failed")??;
-    Ok(())
+        anyhow::ensure!(
+            parent.pop(),
+            "no existing parent directory for {}",
+            path.display()
+        );
+    }
 }
 
 #[cfg(not(windows))]
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }
 
 #[cfg(windows)]
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{

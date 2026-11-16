@@ -1,9 +1,9 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use emulebb_metadata::{MetadataCurrentSharedFile, NativeFileFingerprint};
 
-use super::{Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRuntime};
+use super::Ed2kTransferRuntime;
 
 pub(super) struct PresentSharedSource {
     pub(super) path: PathBuf,
@@ -63,8 +63,8 @@ pub struct Ed2kPreviouslyCompletedEvidence {
     pub display_name: String,
     pub file_size: u64,
     pub aich_root: Option<String>,
-    pub first_completed_at_ms: i64,
-    pub last_completed_at_ms: i64,
+    pub first_completed_at_s: i64,
+    pub last_completed_at_s: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,8 +88,17 @@ impl Ed2kTransferRuntime {
         let file_hash = file_hash
             .parse::<emulebb_kad_proto::Ed2kHash>()?
             .to_string();
-        let _guard = self.lock_manifest(&file_hash).await;
-        let manifest = self.load_manifest_optional_unlocked(&file_hash).await?;
+        let token = self.resolve_protocol_job(&file_hash).await?;
+        let _guard = if let Some(token) = token {
+            Some(self.lock_manifest(token).await)
+        } else {
+            None
+        };
+        let manifest = if let Some(token) = token {
+            self.load_manifest_optional_unlocked(token).await?
+        } else {
+            None
+        };
         let metadata = self.metadata.clone();
         let evidence_hash = file_hash.clone();
         let (shared_files, history) = tokio::task::spawn_blocking(move || {
@@ -144,7 +153,7 @@ impl Ed2kTransferRuntime {
                     &mut seen_paths,
                     manifest.display_name.clone(),
                     manifest.file_size,
-                    self.payload_path(&file_hash),
+                    self.payload_path(manifest.token.job_id)?,
                     Ed2kCurrentLocalFileKind::ManagedPayload,
                 )
                 .await?;
@@ -158,78 +167,10 @@ impl Ed2kTransferRuntime {
                 display_name: entry.display_name,
                 file_size: entry.file_size,
                 aich_root: entry.aich_root,
-                first_completed_at_ms: entry.first_completed_at_ms,
-                last_completed_at_ms: entry.last_completed_at_ms,
+                first_completed_at_s: entry.first_completed_at_s,
+                last_completed_at_s: entry.last_completed_at_s,
             }),
         })
-    }
-
-    pub async fn replace_with_download_job(
-        &self,
-        job: &Ed2kTransferJob,
-    ) -> Result<Ed2kResumeManifest> {
-        let file_hash = job
-            .file_hash
-            .parse::<emulebb_kad_proto::Ed2kHash>()?
-            .to_string();
-        ensure!(
-            file_hash == job.file_hash,
-            "ED2K transfer job hash is not canonical"
-        );
-        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
-        ensure!(
-            !self.transfer_deletion_requested(&file_hash).await?,
-            "cannot replace ED2K transfer {file_hash} while destructive deletion is pending"
-        );
-        let _guard = self.lock_manifest(&file_hash).await;
-        let existing = self.load_manifest_optional_unlocked(&file_hash).await?;
-        if let Some(existing) = existing.as_ref() {
-            ensure!(
-                existing.completed && !existing.final_rehash_pending,
-                "cannot replace active ED2K transfer {file_hash}"
-            );
-            ensure!(
-                existing.file_size == job.file_size,
-                "cannot replace ED2K identity {file_hash} with size {} instead of {}",
-                job.file_size,
-                existing.file_size
-            );
-        }
-
-        let shared_source = self.first_present_shared_source(&file_hash).await?;
-        self.invalidate_payload_handle(&file_hash);
-        let transfer_dir = self.transfer_dir(&file_hash);
-        if tokio::fs::try_exists(&transfer_dir).await? {
-            tokio::fs::remove_dir_all(&transfer_dir)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to reset ED2K transfer directory {}",
-                        transfer_dir.display()
-                    )
-                })?;
-        }
-
-        let mut replacement = Ed2kResumeManifest::new(job);
-        if let Some(existing) = existing {
-            replacement.md4_hashset_acquired = existing.md4_hashset_acquired;
-            replacement.md4_hashset = existing.md4_hashset;
-            replacement.aich_hashset_acquired = existing.aich_hashset_acquired;
-            replacement.aich_root = existing.aich_root;
-            replacement.aich_root_origin = existing.aich_root_origin;
-            replacement.aich_trust_generation = existing.aich_trust_generation;
-            replacement.aich_hashset = existing.aich_hashset;
-            replacement.upload_priority = existing.upload_priority;
-            replacement.auto_upload_priority = existing.auto_upload_priority;
-            replacement.comment = existing.comment;
-            replacement.rating = existing.rating;
-            replacement.category_id = existing.category_id;
-        }
-        self.store_manifest_unlocked(&replacement).await?;
-        if shared_source.is_none() {
-            self.remove_verified_catalog_entry(&file_hash).await;
-        }
-        Ok(replacement)
     }
 
     pub(super) async fn first_present_shared_source(
@@ -305,10 +246,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::ed2k_transfer::ED2K_PART_SIZE;
     use crate::ed2k_transfer::test_support::admit_local_share;
-    use crate::ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kSharedRange, Ed2kTransferState, new_transfer_job,
-    };
 
     #[tokio::test]
     async fn classifies_absent_active_and_current_shared_identity() {
@@ -324,10 +263,13 @@ mod tests {
         );
 
         let active_hash = Ed2kHash([0x22; 16]);
-        runtime
-            .ensure_job(&new_transfer_job(active_hash, "active.bin".to_string(), 8))
-            .await
-            .unwrap();
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            active_hash,
+            "active.bin".to_string(),
+            8,
+        );
+        runtime.ensure_job(&job).await.unwrap();
         let active = runtime
             .download_evidence(&active_hash.to_string())
             .await
@@ -372,23 +314,27 @@ mod tests {
     #[tokio::test]
     async fn completion_history_survives_restart_and_payload_removal() {
         let root = tempdir().unwrap();
-        let file_hash = Ed2kHash([0x33; 16]);
+        let file_hash = {
+            use md4::Digest;
+            Ed2kHash::from_bytes(md4::Md4::digest(b"download").into())
+        };
         let hash = file_hash.to_string();
         let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            file_hash,
+            "download.bin".to_string(),
+            8,
+        );
+        runtime.ensure_job(&job).await.unwrap();
         runtime
-            .ensure_job(&new_transfer_job(file_hash, "download.bin".to_string(), 8))
+            .store_md4_hashset(job.token, Vec::new())
             .await
             .unwrap();
-        fs::write(runtime.payload_path(&hash), b"download").unwrap();
-        {
-            let _guard = runtime.lock_manifest(&hash).await;
-            let mut manifest = runtime.load_manifest_unlocked(&hash).await.unwrap();
-            manifest.completed = true;
-            manifest.verified_ranges = vec![Ed2kSharedRange { start: 0, end: 8 }];
-            manifest.pieces[0].state = Ed2kTransferState::Verified;
-            manifest.pieces[0].bytes_written = 8;
-            runtime.store_manifest_unlocked(&manifest).await.unwrap();
-        }
+        runtime
+            .store_piece_data(job.token, 0, b"download")
+            .await
+            .unwrap();
 
         let completed = runtime.download_evidence(&hash).await.unwrap();
         assert_eq!(completed.current_local_files.len(), 1);
@@ -400,11 +346,26 @@ mod tests {
         drop(runtime);
 
         let restarted = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        restarted
+            .prepare_download_job_storage(job.token)
+            .await
+            .unwrap();
         let after_restart = restarted.download_evidence(&hash).await.unwrap();
         assert_eq!(after_restart.current_local_files.len(), 1);
         assert!(after_restart.previously_completed.is_some());
 
-        assert!(restarted.delete_transfer_files(&hash).await.unwrap());
+        assert!(
+            restarted
+                .remove_download_job(job.token.job_id, false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            restarted
+                .cleanup_removed_download_job(job.token.job_id)
+                .await
+                .unwrap()
+        );
         let after_removal = restarted.download_evidence(&hash).await.unwrap();
         assert!(after_removal.active_transfer.is_none());
         assert!(after_removal.current_local_files.is_empty());
@@ -415,32 +376,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_deletion_rejects_job_recreation_and_replacement() {
+    async fn pending_old_cleanup_does_not_block_a_new_same_content_job() {
         let root = tempdir().unwrap();
         let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
-        let file_hash = Ed2kHash([0x44; 16]);
-        let hash = file_hash.to_string();
-        let job = new_transfer_job(file_hash, "pending-delete.bin".to_string(), 8);
-        runtime.ensure_job(&job).await.unwrap();
+        let hash = Ed2kHash([0x44; 16]);
+        let old =
+            super::super::test_support::admit_download_job(&runtime, hash, "old.bin".into(), 8);
+        runtime.ensure_job(&old).await.unwrap();
+        let old_path = runtime.transfer_dir(old.token.job_id).unwrap();
+        fs::write(old_path.join(super::super::PAYLOAD_FILE_NAME), b"old data").unwrap();
         assert!(
             runtime
-                .metadata
-                .request_transfer_deletion(&hash, None)
+                .remove_download_job(old.token.job_id, false)
+                .await
                 .unwrap()
         );
-
-        let ensure_error = runtime.ensure_job(&job).await.unwrap_err();
+        assert!(runtime.ensure_job(&old).await.is_err());
+        let new =
+            super::super::test_support::admit_download_job(&runtime, hash, "new.bin".into(), 8);
+        assert_ne!(new.token.job_id, old.token.job_id);
+        runtime.ensure_job(&new).await.unwrap();
+        let new_path = runtime.transfer_dir(new.token.job_id).unwrap();
+        assert_ne!(new_path, old_path);
+        fs::write(new_path.join(super::super::PAYLOAD_FILE_NAME), b"new data").unwrap();
         assert!(
-            ensure_error
-                .to_string()
-                .contains("destructive deletion is pending")
+            runtime
+                .cleanup_removed_download_job(old.token.job_id)
+                .await
+                .unwrap()
         );
-
-        let replacement_error = runtime.replace_with_download_job(&job).await.unwrap_err();
-        assert!(
-            replacement_error
-                .to_string()
-                .contains("destructive deletion is pending")
+        assert_eq!(
+            fs::read(new_path.join(super::super::PAYLOAD_FILE_NAME)).unwrap(),
+            b"new data"
+        );
+        assert_eq!(
+            runtime
+                .metadata
+                .latest_download_job(&hash.to_string())
+                .unwrap()
+                .unwrap()
+                .token,
+            new.token
         );
     }
 
@@ -457,19 +433,22 @@ mod tests {
             .unwrap();
         admit_local_share(&runtime, root.path(), &shared_path).await;
         let file_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
-        let published = runtime.publish_entries().await.unwrap();
+        let published = runtime
+            .publish_entries_after(None, 200)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].file_hash, shared.file_hash);
         assert_eq!(published[0].display_name, "shared-redownload.bin");
 
-        let replacement = runtime
-            .replace_with_download_job(&new_transfer_job(
-                file_hash,
-                "fresh-download.bin".to_string(),
-                payload.len() as u64,
-            ))
-            .await
-            .unwrap();
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            file_hash,
+            "fresh-download.bin".to_string(),
+            payload.len() as u64,
+        );
+        let replacement = runtime.ensure_job(&job).await.unwrap();
         assert!(!replacement.completed);
         let servable = runtime.serving_view(&shared.file_hash).await.unwrap();
         assert!(servable.completed);
@@ -490,8 +469,12 @@ mod tests {
         assert_eq!(servable.upload_priority, "release");
         assert_eq!(servable.comment, "local copy");
         assert_eq!(servable.rating, 4);
-        assert!(!runtime.manifest(&shared.file_hash).await.unwrap().completed);
-        let published = runtime.try_publish_entries().await.unwrap().unwrap();
+        assert!(!runtime.manifest(job.token).await.unwrap().completed);
+        let published = runtime
+            .publish_entries_after(None, 200)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].upload_priority, "release");
         assert_eq!(published[0].comment, "local copy");
@@ -509,6 +492,10 @@ mod tests {
         drop(runtime);
 
         let restarted = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        restarted
+            .prepare_download_job_storage(job.token)
+            .await
+            .unwrap();
         let restarted_evidence = restarted
             .download_evidence(&shared.file_hash)
             .await
@@ -553,20 +540,16 @@ mod tests {
             .map(|hash| hex::decode(hash).unwrap().try_into().unwrap())
             .collect();
 
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            shared.file_hash.parse().unwrap(),
+            "redownload.bin".to_string(),
+            payload.len() as u64,
+        );
+        runtime.ensure_job(&job).await.unwrap();
+        runtime.store_md4_hashset(job.token, hashes).await.unwrap();
         runtime
-            .replace_with_download_job(&new_transfer_job(
-                shared.file_hash.parse().unwrap(),
-                "redownload.bin".to_string(),
-                payload.len() as u64,
-            ))
-            .await
-            .unwrap();
-        runtime
-            .store_md4_hashset(&shared.file_hash, hashes)
-            .await
-            .unwrap();
-        runtime
-            .store_piece_data_unfinalized(&shared.file_hash, 0, &payload[..ED2K_PART_SIZE as usize])
+            .store_piece_data_unfinalized(job.token, 0, &payload[..ED2K_PART_SIZE as usize])
             .await
             .unwrap();
 
@@ -579,7 +562,7 @@ mod tests {
         assert_eq!(entry.display_name, "complete-local.bin");
         assert_eq!(catalog.completed_verified_len(), 1);
         drop(catalog);
-        assert!(!runtime.manifest(&shared.file_hash).await.unwrap().completed);
+        assert!(!runtime.manifest(job.token).await.unwrap().completed);
 
         let root_mutation = runtime.begin_category_root_mutation().await.unwrap();
         runtime
@@ -587,9 +570,9 @@ mod tests {
             .withdraw_local_file_path(&crate::long_path::long_path(&shared_path))
             .unwrap();
         drop(root_mutation);
-        let manifest_guard = runtime.lock_manifest(&shared.file_hash).await;
+        let manifest_guard = runtime.lock_manifest(job.token).await;
         let admitted = runtime
-            .authorize_serving_view_unlocked(&shared.file_hash, Some(local))
+            .authorize_serving_view_unlocked(&shared.file_hash, Some(job.token), Some(local))
             .await
             .unwrap()
             .unwrap();
@@ -644,23 +627,22 @@ mod tests {
         admit_local_share(&runtime, root.path(), &shared_path).await;
         let file_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
 
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            file_hash,
+            "redownloaded.bin".to_string(),
+            payload.len() as u64,
+        );
+        runtime.ensure_job(&job).await.unwrap();
         runtime
-            .replace_with_download_job(&new_transfer_job(
-                file_hash,
-                "redownloaded.bin".to_string(),
-                payload.len() as u64,
-            ))
+            .store_md4_hashset(job.token, Vec::new())
             .await
             .unwrap();
         runtime
-            .store_md4_hashset(&shared.file_hash, Vec::new())
+            .append_piece_block(job.token, 0, 0, payload.len() as u64, payload)
             .await
             .unwrap();
-        runtime
-            .append_piece_block(&shared.file_hash, 0, 0, payload.len() as u64, payload)
-            .await
-            .unwrap();
-        assert!(runtime.manifest(&shared.file_hash).await.unwrap().completed);
+        assert!(runtime.manifest(job.token).await.unwrap().completed);
 
         fs::write(&shared_path, vec![b'X'; payload.len()]).unwrap();
         runtime.refresh_complete_shared_catalog().await.unwrap();

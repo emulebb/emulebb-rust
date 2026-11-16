@@ -351,23 +351,26 @@ impl CorruptionBlackBox {
 
 impl Ed2kTransferRuntime {
     /// Record `[start, end)` (absolute file offsets, exclusive end) of
-    /// `file_hash` as sent by `ip` in the transfer's corruption blackbox
+    /// the captured job generation as sent by `ip` in the transfer's corruption blackbox
     /// (oracle `CPartFile::WriteToBuffer` -> `ReceivedData`,
     /// PartFile.cpp:4951). The hello-claimed `user_hash`, when known, is
     /// remembered per sender IP so an eventual ban covers both keys.
     pub(crate) fn cbb_record_received_data(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         start: u64,
         end: u64,
         ip: Ipv4Addr,
         user_hash: Option<[u8; 16]>,
     ) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
         if end <= start {
             return;
         }
         let mut map = self.lock_corruption_blackbox();
-        let blackbox = map.entry(file_hash.to_string()).or_default();
+        let blackbox = map.entry(token).or_default();
         if let Some(user_hash) = user_hash {
             blackbox.sender_hashes.insert(ip, user_hash);
         }
@@ -378,12 +381,20 @@ impl Ed2kTransferRuntime {
     /// verified (oracle `VerifiedData` on an MD4 part success,
     /// PartFile.cpp:5205/5225, and on each good AICH block,
     /// PartFile.cpp:6560).
-    pub(super) fn cbb_record_verified_data(&self, file_hash: &str, start: u64, end: u64) {
+    pub(super) fn cbb_record_verified_data(
+        &self,
+        token: emulebb_metadata::JobToken,
+        start: u64,
+        end: u64,
+    ) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
         if end <= start {
             return;
         }
         let mut map = self.lock_corruption_blackbox();
-        let Some(blackbox) = map.get_mut(file_hash) else {
+        let Some(blackbox) = map.get_mut(&token) else {
             return;
         };
         blackbox.verified_data(start, end - 1);
@@ -391,12 +402,20 @@ impl Ed2kTransferRuntime {
 
     /// Debit the recorded senders of `[start, end)` (exclusive end) as corrupt
     /// (oracle `CorruptedData` on each bad AICH block, PartFile.cpp:6563).
-    pub(super) fn cbb_record_corrupted_data(&self, file_hash: &str, start: u64, end: u64) {
+    pub(super) fn cbb_record_corrupted_data(
+        &self,
+        token: emulebb_metadata::JobToken,
+        start: u64,
+        end: u64,
+    ) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
         if end <= start {
             return;
         }
         let mut map = self.lock_corruption_blackbox();
-        let Some(blackbox) = map.get_mut(file_hash) else {
+        let Some(blackbox) = map.get_mut(&token) else {
             return;
         };
         blackbox.corrupted_data(start, end - 1);
@@ -407,10 +426,13 @@ impl Ed2kTransferRuntime {
     /// `CLIENTBANTIME`) every sender whose corrupt share exceeds 32% of its
     /// corrupt+verified contribution, emitting the `client_ban` bad-peer diag
     /// event with the oracle's ban reason (UploadClient.cpp:1050).
-    pub(super) fn cbb_evaluate_part(&self, file_hash: &str, part: u16) {
+    pub(super) fn cbb_evaluate_part(&self, token: emulebb_metadata::JobToken, part: u16) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
         let verdicts: Vec<(CbbEvaluation, Option<[u8; 16]>)> = {
             let map = self.lock_corruption_blackbox();
-            let Some(blackbox) = map.get(file_hash) else {
+            let Some(blackbox) = map.get(&token) else {
                 return;
             };
             blackbox
@@ -435,7 +457,8 @@ impl Ed2kTransferRuntime {
                     CORRUPT_SENDER_BAN_REASON,
                 );
                 tracing::warn!(
-                    file_hash,
+                    job_id = %token.job_id,
+                    generation = token.generation,
                     ip = %evaluation.ip,
                     corrupt_bytes = evaluation.data_corrupt,
                     total_bytes = evaluation.data_corrupt + evaluation.data_verified,
@@ -443,7 +466,8 @@ impl Ed2kTransferRuntime {
                 );
             } else {
                 tracing::debug!(
-                    file_hash,
+                    job_id = %token.job_id,
+                    generation = token.generation,
                     ip = %evaluation.ip,
                     corrupt_bytes = evaluation.data_corrupt,
                     total_bytes = evaluation.data_corrupt + evaluation.data_verified,
@@ -456,17 +480,21 @@ impl Ed2kTransferRuntime {
     /// Drop the transfer's blackbox once the file completes (oracle
     /// `m_CorruptionBlackBox.Free()` on `PerformFileComplete`,
     /// PartFile.cpp:3800).
-    pub(crate) fn cbb_free(&self, file_hash: &str) {
-        self.lock_corruption_blackbox().remove(file_hash);
+    pub(crate) fn cbb_free(&self, token: emulebb_metadata::JobToken) {
+        self.lock_corruption_blackbox().remove(&token);
     }
 
     /// Test-only: total bytes currently attributed to `ip` in the file's
     /// blackbox, across all parts and statuses. Lets tests assert that dropped
     /// stale payload is never attributed as received data.
     #[cfg(test)]
-    pub(crate) fn cbb_recorded_bytes_for_test(&self, file_hash: &str, ip: Ipv4Addr) -> u64 {
+    pub(crate) fn cbb_recorded_bytes_for_test(
+        &self,
+        token: emulebb_metadata::JobToken,
+        ip: Ipv4Addr,
+    ) -> u64 {
         let map = self.lock_corruption_blackbox();
-        map.get(file_hash).map_or(0, |blackbox| {
+        map.get(&token).map_or(0, |blackbox| {
             blackbox
                 .records
                 .iter()
@@ -481,9 +509,13 @@ impl Ed2kTransferRuntime {
     /// verdict in the file's blackbox. Lets tests assert that an ICH-salvaged
     /// part credited its recorded senders (`VerifiedData`).
     #[cfg(test)]
-    pub(crate) fn cbb_verified_bytes_for_test(&self, file_hash: &str, ip: Ipv4Addr) -> u64 {
+    pub(crate) fn cbb_verified_bytes_for_test(
+        &self,
+        token: emulebb_metadata::JobToken,
+        ip: Ipv4Addr,
+    ) -> u64 {
         let map = self.lock_corruption_blackbox();
-        map.get(file_hash).map_or(0, |blackbox| {
+        map.get(&token).map_or(0, |blackbox| {
             blackbox
                 .records
                 .iter()
@@ -496,7 +528,7 @@ impl Ed2kTransferRuntime {
 
     fn lock_corruption_blackbox(
         &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<String, CorruptionBlackBox>> {
+    ) -> std::sync::MutexGuard<'_, HashMap<emulebb_metadata::JobToken, CorruptionBlackBox>> {
         match self.corruption_blackbox.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),

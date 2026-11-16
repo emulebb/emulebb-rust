@@ -15,7 +15,6 @@ use std::net::Ipv4Addr;
 use super::super::aich_recovery::AichRecoveryHashSet;
 use super::super::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kTransferRuntime, Ed2kTransferState, PieceWriteOutcome,
-    new_transfer_job,
 };
 use crate::paths::unique_test_dir;
 use emulebb_kad_proto::Ed2kHash;
@@ -40,15 +39,22 @@ fn three_block_payload() -> Vec<u8> {
 
 /// Drive a full contiguous download of the single part with block 0 corrupted:
 /// the final append fails the MD4 check, flags the part for ICH and retains
-/// the stale bytes on disk. Returns `(runtime, file_hash_hex, good_payload)`.
-async fn corrupted_single_part_transfer(tag: &str) -> (Ed2kTransferRuntime, String, Vec<u8>) {
+/// the stale bytes on disk. Returns `(runtime, job_token, good_payload)`.
+async fn corrupted_single_part_transfer(
+    tag: &str,
+) -> (Ed2kTransferRuntime, emulebb_metadata::JobToken, Vec<u8>) {
     let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(tag)).unwrap();
     let payload = three_block_payload();
     let file_hash = Ed2kHash::from_bytes(md4(&payload));
-    let job = new_transfer_job(file_hash, "ich.bin".to_string(), payload.len() as u64);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "ich.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
 
@@ -62,7 +68,7 @@ async fn corrupted_single_part_transfer(tag: &str) -> (Ed2kTransferRuntime, Stri
         let end = start + BLOCK;
         last_outcome = runtime
             .append_piece_block(
-                &job.file_hash,
+                job.token,
                 0,
                 start,
                 end,
@@ -77,7 +83,7 @@ async fn corrupted_single_part_transfer(tag: &str) -> (Ed2kTransferRuntime, Stri
         "the corrupted part must fail its MD4 flush check"
     );
 
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, 0);
     assert!(
@@ -86,12 +92,12 @@ async fn corrupted_single_part_transfer(tag: &str) -> (Ed2kTransferRuntime, Stri
     );
     // Key ICH precondition: the stale bytes are retained on disk (the gap is
     // logical only), so replacement data overlays them.
-    let on_disk = fs::read(runtime.payload_path(&job.file_hash)).unwrap();
+    let on_disk = fs::read(runtime.payload_path(job.token.job_id).unwrap()).unwrap();
     assert_eq!(
         on_disk, corrupted,
         "the corrupted part's bytes must be preserved on disk"
     );
-    (runtime, job.file_hash, payload)
+    (runtime, job.token, payload)
 }
 
 /// Re-downloading only the corrupt prefix re-verifies the part against the
@@ -104,11 +110,11 @@ async fn ich_rehash_salvages_part_after_prefix_redownload() {
 
     // Attribute the original (corrupt) download and the re-supplied prefix to
     // two distinct senders, like the live flush layer does.
-    runtime.cbb_record_received_data(&file_hash, 0, 3 * BLOCK, IP_FIRST, None);
-    runtime.cbb_record_received_data(&file_hash, 0, BLOCK, IP_RESUPPLY, None);
+    runtime.cbb_record_received_data(file_hash, 0, 3 * BLOCK, IP_FIRST, None);
+    runtime.cbb_record_received_data(file_hash, 0, BLOCK, IP_RESUPPLY, None);
 
     let outcome = runtime
-        .append_piece_block(&file_hash, 0, 0, BLOCK, &payload[..BLOCK as usize])
+        .append_piece_block(file_hash, 0, 0, BLOCK, &payload[..BLOCK as usize])
         .await
         .unwrap();
     assert_eq!(
@@ -120,22 +126,22 @@ async fn ich_rehash_salvages_part_after_prefix_redownload() {
         "the good prefix plus the retained tail must re-verify the part early"
     );
 
-    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    let manifest = runtime.manifest(file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     assert_eq!(manifest.pieces[0].bytes_written, 3 * BLOCK);
     assert!(!manifest.pieces[0].ich_corrupted, "salvage clears the flag");
     assert!(manifest.completed, "the single-part file is now complete");
-    let on_disk = fs::read(runtime.payload_path(&file_hash)).unwrap();
+    let on_disk = fs::read(runtime.payload_path(file_hash.job_id).unwrap()).unwrap();
     assert_eq!(on_disk, payload, "gap filled from the retained good bytes");
 
     // ICH success feeds VerifiedData for the whole part (oracle
     // PartFile.cpp:5225): both recorded senders are credited.
     assert!(
-        runtime.cbb_verified_bytes_for_test(&file_hash, IP_RESUPPLY) >= BLOCK,
+        runtime.cbb_verified_bytes_for_test(file_hash, IP_RESUPPLY) >= BLOCK,
         "the re-supplying sender must be credited as verified"
     );
     assert!(
-        runtime.cbb_verified_bytes_for_test(&file_hash, IP_FIRST) > 0,
+        runtime.cbb_verified_bytes_for_test(file_hash, IP_FIRST) > 0,
         "the original sender's surviving ranges must be credited as verified"
     );
 }
@@ -146,18 +152,19 @@ async fn ich_rehash_salvages_part_after_prefix_redownload() {
 async fn ich_corrupted_flag_survives_reload() {
     let tag = "ed2k-ich-flag-reload";
     let root = unique_test_dir(tag);
-    let (file_hash, payload) = {
+    let (job, payload) = {
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         let payload = three_block_payload();
         let file_hash = Ed2kHash::from_bytes(md4(&payload));
-        let job = new_transfer_job(
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
             file_hash,
             "ich-reload.bin".to_string(),
             payload.len() as u64,
         );
         runtime.ensure_job(&job).await.unwrap();
         runtime
-            .store_md4_hashset(&job.file_hash, Vec::new())
+            .store_md4_hashset(job.token, Vec::new())
             .await
             .unwrap();
         let mut corrupted = payload.clone();
@@ -169,7 +176,7 @@ async fn ich_corrupted_flag_survives_reload() {
             let end = start + BLOCK;
             runtime
                 .append_piece_block(
-                    &job.file_hash,
+                    job.token,
                     0,
                     start,
                     end,
@@ -178,11 +185,13 @@ async fn ich_corrupted_flag_survives_reload() {
                 .await
                 .unwrap();
         }
-        (job.file_hash, payload)
+        (job, payload)
     };
 
     let reloaded = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let manifest = reloaded.manifest(&file_hash).await.unwrap();
+    reloaded.ensure_job(&job).await.unwrap();
+    let file_hash = job.token;
+    let manifest = reloaded.manifest(file_hash).await.unwrap();
     assert!(
         manifest.pieces[0].ich_corrupted,
         "the corrupted-part flag must survive a restart"
@@ -190,7 +199,7 @@ async fn ich_corrupted_flag_survives_reload() {
 
     // And ICH still salvages after the reload.
     let outcome = reloaded
-        .append_piece_block(&file_hash, 0, 0, BLOCK, &payload[..BLOCK as usize])
+        .append_piece_block(file_hash, 0, 0, BLOCK, &payload[..BLOCK as usize])
         .await
         .unwrap();
     assert!(outcome.is_completed(), "ICH salvage works after reload");
@@ -204,7 +213,7 @@ async fn ich_disabled_part_redownloads_fully() {
     runtime.set_ich_enabled(false);
 
     let outcome = runtime
-        .append_piece_block(&file_hash, 0, 0, BLOCK, &payload[..BLOCK as usize])
+        .append_piece_block(file_hash, 0, 0, BLOCK, &payload[..BLOCK as usize])
         .await
         .unwrap();
     assert_eq!(
@@ -212,7 +221,7 @@ async fn ich_disabled_part_redownloads_fully() {
         PieceWriteOutcome::Incomplete,
         "with ICH disabled a mid-part flush must not attempt the re-hash"
     );
-    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    let manifest = runtime.manifest(file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert_eq!(manifest.pieces[0].bytes_written, BLOCK);
     assert!(manifest.pieces[0].ich_corrupted, "flag stays for later");
@@ -224,7 +233,7 @@ async fn ich_disabled_part_redownloads_fully() {
         let end = start + BLOCK;
         last_outcome = runtime
             .append_piece_block(
-                &file_hash,
+                file_hash,
                 0,
                 start,
                 end,
@@ -234,7 +243,7 @@ async fn ich_disabled_part_redownloads_fully() {
             .unwrap();
     }
     assert_eq!(last_outcome, PieceWriteOutcome::Verified);
-    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    let manifest = runtime.manifest(file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     assert!(!manifest.pieces[0].ich_corrupted);
 }
@@ -267,10 +276,15 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
     file_hasher.update(part0_hash);
     file_hasher.update(part1_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(file_hash, "ich-aich.bin".to_string(), payload.len() as u64);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "ich-aich.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![part0_hash, part1_hash])
+        .store_md4_hashset(job.token, vec![part0_hash, part1_hash])
         .await
         .unwrap();
     let aich = {
@@ -280,11 +294,11 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
         super::super::build_aich_hashset_from_payload(&path, payload.len() as u64).unwrap()
     };
     runtime
-        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .reconcile_aich_root(job.token, Some(aich.master_hash))
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&job.file_hash, aich.clone())
+        .store_aich_hashset(job.token, aich.clone())
         .await
         .unwrap();
 
@@ -304,7 +318,7 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
         let len = (ED2K_PART_SIZE - pos).min(BLOCK);
         last_outcome = runtime
             .append_piece_block(
-                &job.file_hash,
+                job.token,
                 0,
                 pos,
                 pos + len,
@@ -318,7 +332,7 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
         last_outcome,
         PieceWriteOutcome::VerificationFailed { part_index: 0 }
     );
-    assert!(runtime.manifest(&job.file_hash).await.unwrap().pieces[0].ich_corrupted);
+    assert!(runtime.manifest(job.token).await.unwrap().pieces[0].ich_corrupted);
 
     // AICH recovery answer arrives: block-level salvage starts and only the
     // two corrupt blocks stay missing (this works precisely BECAUSE the stale
@@ -329,7 +343,7 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
         sharer.create_part_recovery_data(0).unwrap()
     };
     let outcome = runtime
-        .begin_part_salvage(&job.file_hash, 0, aich.master_hash, &body)
+        .begin_part_salvage(job.token, 0, aich.master_hash, &body)
         .await
         .unwrap()
         .expect("salvage must start for the corrupt part");
@@ -341,7 +355,7 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
     let start3 = 3 * BLOCK;
     let outcome = runtime
         .write_salvage_block(
-            &job.file_hash,
+            job.token,
             0,
             start3,
             start3 + BLOCK,
@@ -354,7 +368,7 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
         PieceWriteOutcome::IchRehashFailed { part_index: 0 },
         "the ICH re-hash attempt must miss while an AICH-bad block is stale"
     );
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     let bitmap = manifest.pieces[0].resolve_block_bitmap(ED2K_PART_SIZE);
     assert!(bitmap.is_present(3), "the re-supplied block stays present");
     assert!(!bitmap.is_present(40), "the other bad block stays missing");
@@ -368,7 +382,7 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
     let start40 = 40 * BLOCK;
     let outcome = runtime
         .write_salvage_block(
-            &job.file_hash,
+            job.token,
             0,
             start40,
             start40 + BLOCK,
@@ -377,7 +391,7 @@ async fn ich_rehash_miss_keeps_aich_salvage_bitmap() {
         .await
         .unwrap();
     assert!(outcome.is_completed());
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     assert!(!manifest.pieces[0].ich_corrupted);
 }

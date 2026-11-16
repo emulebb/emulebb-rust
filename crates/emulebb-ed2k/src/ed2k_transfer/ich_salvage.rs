@@ -113,7 +113,7 @@ impl Ed2kTransferRuntime {
         // Re-read the full on-disk part: the freshly overlaid prefix plus the
         // retained stale remainder (the rust analog of `HashSinglePart`).
         let payload_path = self
-            .transfer_dir(&manifest.file_hash)
+            .transfer_dir(manifest.token.job_id)?
             .join(PAYLOAD_FILE_NAME);
         let Some(part_bytes) = read_part_bytes(&payload_path, part_start, part_len).await? else {
             // Payload missing or shorter than the part: the retained bytes are
@@ -155,7 +155,7 @@ impl Ed2kTransferRuntime {
         // `m_CorruptionBlackBox.VerifiedData`, PartFile.cpp:5225). The corrupt
         // attribution recorded by an earlier AICH verdict, if any, stays until
         // its own `EvaluateData`, matching the oracle overlay semantics.
-        self.cbb_record_verified_data(&manifest.file_hash, part_start, part_end);
+        self.cbb_record_verified_data(manifest.token, part_start, part_end);
 
         rebuild_verified_ranges(manifest);
         super::mark_final_rehash_pending(manifest);

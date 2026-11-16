@@ -1220,7 +1220,7 @@ async fn cached_offer_batch_preserves_a_copy_in_another_root() {
 
 #[tokio::test]
 async fn cached_complete_offer_uses_live_partial_fields_after_withdrawal() {
-    use crate::ed2k_transfer::{ED2K_PART_SIZE, Ed2kTransferJob};
+    use crate::ed2k_transfer::ED2K_PART_SIZE;
     let root = crate::paths::unique_test_dir("cached-offer-partial-fallback");
     let source_dir = root.join("library");
     std::fs::create_dir_all(&source_dir).unwrap();
@@ -1244,22 +1244,17 @@ async fn cached_complete_offer_uses_live_partial_fields_after_withdrawal() {
         .iter()
         .map(|hash| hex::decode(hash).unwrap().try_into().unwrap())
         .collect();
-    runtime
-        .replace_with_download_job(&Ed2kTransferJob {
-            file_hash: shared.file_hash.clone(),
-            display_name: "partial-name.bin".into(),
-            file_size: payload.len() as u64,
-            piece_size: ED2K_PART_SIZE,
-        })
-        .await
-        .unwrap();
-    runtime
-        .store_md4_hashset(&shared.file_hash, hashes)
-        .await
-        .unwrap();
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &runtime,
+        shared.file_hash.parse().unwrap(),
+        "partial-name.bin".into(),
+        payload.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime.store_md4_hashset(job.token, hashes).await.unwrap();
     runtime
         .append_piece_block(
-            &shared.file_hash,
+            job.token,
             0,
             0,
             ED2K_PART_SIZE,

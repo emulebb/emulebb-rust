@@ -47,11 +47,33 @@ fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     (ReaskService::new(OUR_HASH, 4, public_ip), lease)
 }
 
-fn register(svc: &mut ReaskService, now: Instant) {
-    let src = ReaskSource::new(peer_v4(), file_hash(), 4, now)
+fn admitted_job() -> (emulebb_metadata::MetadataStore, emulebb_metadata::JobToken) {
+    let store = emulebb_metadata::MetadataStore::in_memory().unwrap();
+    let token = store
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: file_hash().to_string(),
+            display_name: "reask.bin".to_owned(),
+            expected_size_bytes: Some(16),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            piece_size: crate::ed2k_transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job
+        .token;
+    (store, token)
+}
+
+fn register(
+    svc: &mut ReaskService,
+    now: Instant,
+) -> (emulebb_metadata::MetadataStore, emulebb_metadata::JobToken) {
+    let (store, token) = admitted_job();
+    let src = ReaskSource::new(token, peer_v4(), file_hash(), 4, now)
         .with_lease_endpoint(peer_lease_v4())
         .with_obfuscation(PEER_HASH, true);
     svc.register_source(file_hash(), src);
+    (store, token)
 }
 
 #[test]
@@ -64,7 +86,8 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
     let source_endpoint = (Ipv4Addr::new(198, 51, 100, 50), 4672);
     let buddy_endpoint = (Ipv4Addr::new(203, 0, 113, 80), 5000);
     let buddy_id = [0x99u8; 16];
-    let src = ReaskSource::new(source_endpoint, file_hash(), 4, now).with_buddy(
+    let (_job_store, job_token) = admitted_job();
+    let src = ReaskSource::new(job_token, source_endpoint, file_hash(), 4, now).with_buddy(
         true,
         Some(buddy_endpoint),
         Some(buddy_id),
@@ -102,7 +125,7 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
 fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
 
     let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
         part_status: Some(vec![true, false]),
@@ -135,6 +158,7 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
     assert_eq!(
         outcome,
         ReaskInboundOutcome::RoutedReply {
+            job_token: _job_token,
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
@@ -164,7 +188,7 @@ fn tick_routes_the_ack_only_after_the_send_is_confirmed() {
 fn v4_ack_rejects_a_nonzero_part_count_mismatch_without_consuming_pending() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
     let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
         part_status: Some(vec![false, false]),
         complete_source_count: 0,
@@ -205,11 +229,12 @@ fn v4_ack_rejects_a_nonzero_part_count_mismatch_without_consuming_pending() {
     assert!(matches!(
         svc.handle_inbound(&valid, peer_addr(), now),
         ReaskInboundOutcome::RoutedReply {
+            job_token,
             ack_part_status: Some(ReaskAckPartStatus::Bitmap(parts)),
             request_part_status: Some(request_parts),
             action: ReaskAction::UpdatedRank(12),
             ..
-        } if parts == vec![true, false] && request_parts == vec![false, false]
+        } if job_token == _job_token && parts == vec![true, false] && request_parts == vec![false, false]
     ));
 }
 
@@ -217,7 +242,7 @@ fn v4_ack_rejects_a_nonzero_part_count_mismatch_without_consuming_pending() {
 fn tick_paced_suppresses_sends_when_the_udp_cap_denies_a_file() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
     let deny = |_h: &Ed2kHash, _n: usize| false;
     let out = svc.tick_paced(
         now,
@@ -253,7 +278,7 @@ fn tick_paced_suppresses_sends_when_the_udp_cap_denies_a_file() {
 fn unsolicited_reply_without_pending_is_ignored() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
     let ack = build_reask_ack_datagram(
         None,
         1,
@@ -299,7 +324,7 @@ fn inbound_file_ping_is_handed_back_for_the_caller_to_answer() {
 fn file_not_found_drops_source_and_clears_routing() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
     let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
         part_status: None,
         complete_source_count: 0,
@@ -314,6 +339,7 @@ fn file_not_found_drops_source_and_clears_routing() {
     assert_eq!(
         outcome,
         ReaskInboundOutcome::RoutedReply {
+            job_token: _job_token,
             file_hash: file_hash(),
             endpoint: peer_v4(),
             lease_endpoint: peer_lease_v4(),
@@ -387,7 +413,7 @@ fn inbound_direct_callback_req_is_handed_back_for_connect_out() {
 fn junk_and_non_ipv4_are_ignored() {
     let now = Instant::now();
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
     assert_eq!(
         svc.handle_inbound(&[0x42; 30], peer_addr(), now),
         ReaskInboundOutcome::Ignored(ReaskIgnoredReason::Parse(
@@ -406,7 +432,7 @@ fn mark_no_needed_parts_routes_by_endpoint_and_doubles_the_cadence() {
     use crate::ed2k_client_udp::state::FILE_REASK_TIME;
     let now = Instant::now();
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
     let (ip, port) = peer_v4();
 
     assert!(svc.mark_no_needed_parts(ip, port, now));
@@ -435,7 +461,7 @@ fn timed_out_reask_surfaces_in_tick_output() {
     let now = Instant::now();
     let timeout = Duration::from_secs(20);
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
     let sent = svc.tick(now, timeout, |_| TransferReaskInfo {
         part_status: None,
         complete_source_count: 0,
@@ -459,7 +485,7 @@ fn abandoned_staged_send_stays_due_without_remote_timeout_accounting() {
     let now = Instant::now();
     let timeout = Duration::from_secs(20);
     let (mut svc, _reachability) = service();
-    register(&mut svc, now);
+    let (_job_store, _job_token) = register(&mut svc, now);
 
     let abandoned = svc.tick(now, timeout, |_| TransferReaskInfo {
         part_status: None,

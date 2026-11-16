@@ -25,6 +25,7 @@ impl Ed2kTransferRuntime {
         end: u64,
         data: &[u8],
         block_received_at: Instant,
+        guard: super::store::ScopedLockGuard<emulebb_metadata::JobId>,
     ) -> Result<PieceWriteOutcome> {
         let piece_end = piece_start + expected_piece_len;
         let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
@@ -72,7 +73,7 @@ impl Ed2kTransferRuntime {
             return Ok(PieceWriteOutcome::Incomplete);
         }
 
-        let mut file = self.take_payload_handle(file_hash).await?;
+        let mut file = self.take_payload_handle(manifest.token).await?;
         use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
         file.seek(std::io::SeekFrom::Start(start)).await?;
         file.write_all(data).await?;
@@ -96,7 +97,7 @@ impl Ed2kTransferRuntime {
             file.read_exact(&mut piece_bytes).await?;
             verified = verify_piece_against_manifest(manifest, piece_index, &piece_bytes)?;
         }
-        self.store_payload_handle(file_hash, file);
+        self.store_payload_handle(manifest.token, file);
 
         let piece = manifest
             .pieces
@@ -115,7 +116,7 @@ impl Ed2kTransferRuntime {
             // Credit every recorded sender of this part in the corruption
             // blackbox (oracle MD4 part success ->
             // `m_CorruptionBlackBox.VerifiedData`, PartFile.cpp:5205).
-            self.cbb_record_verified_data(file_hash, piece_start, piece_end);
+            self.cbb_record_verified_data(manifest.token, piece_start, piece_end);
         } else if bitmap.all_present() {
             // The on-disk bytes are retained (logical gap only) and the part
             // is flagged for MD4-only ICH salvage (oracle corrupted_list add,
@@ -162,7 +163,7 @@ impl Ed2kTransferRuntime {
         if super::mark_final_rehash_pending(manifest) {
             // No further appends will come: release the cached write handle
             // before the final whole-file reader opens the payload.
-            self.invalidate_payload_handle(file_hash);
+            self.invalidate_payload_handle(manifest.token);
         }
         if outcome.is_completed() {
             self.upsert_verified_catalog_entry(manifest).await;
@@ -182,11 +183,12 @@ impl Ed2kTransferRuntime {
         ) {
             should_checkpoint = self.should_checkpoint_manifest_unlocked(manifest).await;
             if should_checkpoint {
-                self.store_manifest_piece_progress_unlocked(manifest, piece_index)
+                self.store_manifest_piece_progress_unlocked(manifest, piece_index, guard)
                     .await?;
             } else {
                 checkpoint_reason = None;
-                self.note_dirty_piece_unlocked(manifest, piece_index).await;
+                self.note_dirty_piece_unlocked(manifest, piece_index)
+                    .await?;
                 *manifest = self.cache_manifest_unlocked(manifest).await?;
             }
         } else {

@@ -249,7 +249,13 @@ async fn same_path_rebind_preserves_independent_complete_copy_and_live_partial_p
             share(&runtime, &root, "sibling.bin").await.unwrap();
         }
         let old_hash = old.file_hash.parse().unwrap();
-        let job = new_transfer_job(old_hash, "partial.bin".into(), old.file_size);
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
+            old_hash,
+            "partial.bin".into(),
+            old.file_size,
+        );
+        runtime.ensure_job(&job).await.unwrap();
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.md4_hashset_acquired = true;
         manifest.verified_ranges = vec![Ed2kSharedRange { start: 0, end: 4 }];
@@ -257,7 +263,7 @@ async fn same_path_rebind_preserves_independent_complete_copy_and_live_partial_p
             .manifest_cache
             .lock()
             .await
-            .insert(old.file_hash.clone(), manifest.clone());
+            .insert(job.token.job_id, manifest.clone());
         {
             let mut catalog = runtime.shared_catalog.write().await;
             let mut entry = catalog.entry_by_hash(&old_hash).unwrap().clone();
@@ -284,7 +290,7 @@ async fn same_path_rebind_preserves_independent_complete_copy_and_live_partial_p
         );
         drop(catalog);
         assert_eq!(
-            runtime.manifest_cache.lock().await[&old.file_hash].verified_ranges,
+            runtime.manifest_cache.lock().await[&job.token.job_id].verified_ranges,
             manifest.verified_ranges
         );
         runtime.drain_local_mutations().await.unwrap();

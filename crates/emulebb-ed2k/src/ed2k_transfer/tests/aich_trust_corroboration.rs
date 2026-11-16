@@ -9,7 +9,7 @@
 
 use std::net::IpAddr;
 
-use super::super::{Ed2kAichHashset, Ed2kAichRootOrigin, Ed2kTransferRuntime, new_transfer_job};
+use super::super::{Ed2kAichHashset, Ed2kAichRootOrigin, Ed2kTransferJob, Ed2kTransferRuntime};
 use crate::paths::unique_test_dir;
 use emulebb_kad_proto::Ed2kHash;
 
@@ -17,16 +17,21 @@ fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
     IpAddr::from([a, b, c, d])
 }
 
-async fn runtime_with_job() -> (Ed2kTransferRuntime, String) {
+async fn runtime_with_job() -> (Ed2kTransferRuntime, Ed2kTransferJob) {
     let root = unique_test_dir("ed2k-aich-corroboration");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let file_hash = Ed2kHash::from_bytes([0x11; 16]);
-    let job = new_transfer_job(file_hash, "corroboration.bin".to_string(), 4 * 9_728_000);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "corroboration.bin".to_string(),
+        4 * 9_728_000,
+    );
     runtime.ensure_job(&job).await.unwrap();
-    (runtime, job.file_hash)
+    (runtime, job)
 }
 
-async fn runtime_with_servable_job() -> (Ed2kTransferRuntime, String) {
+async fn runtime_with_servable_job() -> (Ed2kTransferRuntime, Ed2kTransferJob) {
     use md4::{Digest, Md4};
 
     let root = unique_test_dir("ed2k-aich-servable-corroboration");
@@ -34,24 +39,25 @@ async fn runtime_with_servable_job() -> (Ed2kTransferRuntime, String) {
     let mut part_hashes = vec![[0x31; 16]; 4];
     part_hashes.push(Md4::digest(b"").into());
     let file_hash = Ed2kHash::from_bytes(Md4::digest(part_hashes.concat()).into());
-    let job = new_transfer_job(
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "servable-corroboration.bin".to_owned(),
         4 * super::super::ED2K_PART_SIZE,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, part_hashes)
+        .store_md4_hashset(job.token, part_hashes)
         .await
         .unwrap();
-    (runtime, job.file_hash)
+    (runtime, job)
 }
 
 #[tokio::test]
 async fn single_peer_root_is_not_trusted() {
     let (runtime, file_hash) = runtime_with_job().await;
     let manifest = runtime
-        .record_network_aich_root(&file_hash, Some([0xAB; 20]), ip(203, 0, 113, 5))
+        .record_network_aich_root(file_hash.token, Some([0xAB; 20]), ip(203, 0, 113, 5))
         .await
         .unwrap();
     assert!(
@@ -59,7 +65,7 @@ async fn single_peer_root_is_not_trusted() {
         "a single peer's proposed root must not be promoted"
     );
     // And it must not be persisted either.
-    let reloaded = runtime.manifest(&file_hash).await.unwrap();
+    let reloaded = runtime.manifest(file_hash.token).await.unwrap();
     assert!(reloaded.aich_root.is_none());
 }
 
@@ -112,13 +118,16 @@ fn accept_independent_root(
                     last_upload_request_ms: 0,
                 },
                 path,
-                fingerprint,
+                fingerprint.clone(),
+                emulebb_metadata::NativeFileIdentityEvidence::new(fingerprint.identity, None)
+                    .unwrap(),
             )])
             .unwrap();
     } else {
         runtime
             .metadata
             .upsert_verified_local_content(&emulebb_metadata::MetadataVerifiedLocalContent {
+                secondary_identity: None,
                 file_hash: manifest.file_hash.clone(),
                 display_name: "accepted-local.bin".to_owned(),
                 file_size: manifest.file_size,
@@ -146,11 +155,11 @@ async fn accepted_authority_retires_old_parts_without_another_vote_and_after_res
             .map(|signer| (old.master_hash, ip(203, signer, 0, 1)))
             .collect::<Vec<_>>();
         runtime
-            .record_network_aich_observations(&file_hash, &observations)
+            .record_network_aich_observations(file_hash.token, &observations)
             .await
             .unwrap();
         let mut stale = runtime
-            .store_aich_hashset(&file_hash, old.clone())
+            .store_aich_hashset(file_hash.token, old.clone())
             .await
             .unwrap();
         // Simulate a newer cache-only append: identity refresh must not reload
@@ -170,11 +179,22 @@ async fn accepted_authority_retires_old_parts_without_another_vote_and_after_res
         // cold loaders must see one coherent accepted decision.
         let persisted = runtime
             .metadata
-            .transfer_manifest_by_hash(&file_hash)
+            .download_job_manifest(file_hash.token.job_id)
             .unwrap()
             .unwrap();
-        let listed = runtime.metadata.incomplete_transfer_manifests().unwrap();
-        assert_eq!(listed[0].aich_root, persisted.aich_root);
+        let mut streamed_root = None;
+        assert!(
+            runtime
+                .metadata
+                .stream_download_execution(file_hash.token, |row| {
+                    if let emulebb_metadata::MetadataDownloadExecutionRow::Header(header, _) = row {
+                        streamed_root = Some(header.aich_root);
+                    }
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(streamed_root, Some(persisted.aich_root.clone()));
         assert_eq!(
             persisted.aich_root,
             Some(hex::encode(replacement.master_hash))
@@ -182,25 +202,29 @@ async fn accepted_authority_retires_old_parts_without_another_vote_and_after_res
         assert!(persisted.aich_trust_generation > stale.aich_trust_generation);
         assert!(!persisted.aich_hashset_acquired);
         assert!(persisted.aich_hashset.is_empty());
-        let current = runtime.manifest(&file_hash).await.unwrap();
+        let current = runtime.manifest(file_hash.token).await.unwrap();
         assert_eq!(current.pieces[0].bytes_written, 123);
         assert_eq!(current.aich_root, persisted.aich_root);
         assert!(!current.aich_hashset_acquired);
         let rejected = runtime
-            .store_aich_hashset_for_generation(&file_hash, old, stale.aich_trust_generation)
+            .store_aich_hashset_for_generation(file_hash.token, old, stale.aich_trust_generation)
             .await
             .unwrap();
         assert!(!rejected.aich_hashset_acquired);
 
         // A delayed full checkpoint also cannot restore its old root, origin,
         // generation or acquired set. Its independent piece progress survives.
-        let guard = runtime.lock_manifest(&file_hash).await;
+        let guard = runtime.lock_manifest(file_hash.token).await;
         runtime.store_manifest_unlocked(&stale).await.unwrap();
         drop(guard);
         let directory = runtime.root_dir.clone();
         drop(runtime);
         let resumed = Ed2kTransferRuntime::load_or_create(&directory).unwrap();
-        let cold = resumed.manifest(&file_hash).await.unwrap();
+        resumed
+            .prepare_download_job_storage(file_hash.token)
+            .await
+            .unwrap();
+        let cold = resumed.manifest(file_hash.token).await.unwrap();
         assert_eq!(cold.aich_root, persisted.aich_root);
         assert_eq!(cold.aich_trust_generation, persisted.aich_trust_generation);
         assert_eq!(cold.pieces[0].bytes_written, 123);
@@ -214,7 +238,11 @@ async fn accepted_authority_retires_old_parts_without_another_vote_and_after_res
             })
         );
         let acquired = resumed
-            .store_aich_hashset_for_generation(&file_hash, replacement, cold.aich_trust_generation)
+            .store_aich_hashset_for_generation(
+                file_hash.token,
+                replacement,
+                cold.aich_trust_generation,
+            )
             .await
             .unwrap();
         assert!(acquired.aich_hashset_acquired);
@@ -226,15 +254,19 @@ async fn internally_consistent_peer_hashset_does_not_establish_trust() {
     let (runtime, file_hash) = runtime_with_job().await;
     let candidate = consistent_candidate();
     runtime
-        .record_network_aich_root(&file_hash, Some(candidate.master_hash), ip(203, 0, 113, 5))
+        .record_network_aich_root(
+            file_hash.token,
+            Some(candidate.master_hash),
+            ip(203, 0, 113, 5),
+        )
         .await
         .unwrap();
     let error = runtime
-        .store_aich_hashset(&file_hash, candidate)
+        .store_aich_hashset(file_hash.token, candidate)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("independently trusted master"));
-    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    let manifest = runtime.manifest(file_hash.token).await.unwrap();
     assert!(manifest.aich_root.is_none());
     assert!(manifest.aich_hashset.is_empty());
     assert!(!manifest.aich_hashset_acquired);
@@ -247,7 +279,7 @@ async fn consistent_part_set_activates_only_after_independent_corroboration() {
     for signer in 0..9 {
         runtime
             .record_network_aich_root(
-                &file_hash,
+                file_hash.token,
                 Some(candidate.master_hash),
                 ip(203, signer, 0, 1),
             )
@@ -256,16 +288,20 @@ async fn consistent_part_set_activates_only_after_independent_corroboration() {
     }
     assert!(
         runtime
-            .store_aich_hashset(&file_hash, candidate.clone())
+            .store_aich_hashset(file_hash.token, candidate.clone())
             .await
             .is_err()
     );
     runtime
-        .record_network_aich_root(&file_hash, Some(candidate.master_hash), ip(203, 9, 0, 1))
+        .record_network_aich_root(
+            file_hash.token,
+            Some(candidate.master_hash),
+            ip(203, 9, 0, 1),
+        )
         .await
         .unwrap();
     let manifest = runtime
-        .store_aich_hashset(&file_hash, candidate.clone())
+        .store_aich_hashset(file_hash.token, candidate.clone())
         .await
         .unwrap();
     assert!(manifest.aich_hashset_acquired);
@@ -278,16 +314,16 @@ async fn conflicting_consistent_hashset_cannot_replace_authoritative_identity() 
     let (runtime, file_hash) = runtime_with_job().await;
     let authoritative = [0x99; 20];
     runtime
-        .reconcile_aich_root(&file_hash, Some(authoritative))
+        .reconcile_aich_root(file_hash.token, Some(authoritative))
         .await
         .unwrap();
     assert!(
         runtime
-            .store_aich_hashset(&file_hash, consistent_candidate())
+            .store_aich_hashset(file_hash.token, consistent_candidate())
             .await
             .is_err()
     );
-    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    let manifest = runtime.manifest(file_hash.token).await.unwrap();
     assert_eq!(manifest.aich_root, Some(hex::encode(authoritative)));
     assert!(!manifest.aich_hashset_acquired);
 }
@@ -300,7 +336,7 @@ async fn live_consensus_demotion_clears_part_set_and_rejects_aba_answer() {
         .map(|signer| (candidate.master_hash, ip(203, signer, 0, 1)))
         .collect::<Vec<_>>();
     let accepted = runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     assert_eq!(
@@ -308,11 +344,11 @@ async fn live_consensus_demotion_clears_part_set_and_rejects_aba_answer() {
         Some(Ed2kAichRootOrigin::NetworkConsensus)
     );
     runtime
-        .store_aich_hashset(&file_hash, candidate.clone())
+        .store_aich_hashset(file_hash.token, candidate.clone())
         .await
         .unwrap();
     let demoted = runtime
-        .record_network_aich_root(&file_hash, Some([0xff; 20]), ip(198, 0, 0, 1))
+        .record_network_aich_root(file_hash.token, Some([0xff; 20]), ip(198, 0, 0, 1))
         .await
         .unwrap();
     assert!(demoted.aich_root.is_none());
@@ -322,14 +358,14 @@ async fn live_consensus_demotion_clears_part_set_and_rejects_aba_answer() {
 
     let observations = [10, 11].map(|signer| (candidate.master_hash, ip(203, signer, 0, 1)));
     let renewed = runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     assert_eq!(renewed.aich_root, accepted.aich_root);
     assert!(renewed.aich_trust_generation > demoted.aich_trust_generation);
     let stale = runtime
         .store_aich_hashset_for_generation(
-            &file_hash,
+            file_hash.token,
             candidate.clone(),
             accepted.aich_trust_generation,
         )
@@ -337,7 +373,11 @@ async fn live_consensus_demotion_clears_part_set_and_rejects_aba_answer() {
         .unwrap();
     assert!(!stale.aich_hashset_acquired);
     let current = runtime
-        .store_aich_hashset_for_generation(&file_hash, candidate, renewed.aich_trust_generation)
+        .store_aich_hashset_for_generation(
+            file_hash.token,
+            candidate,
+            renewed.aich_trust_generation,
+        )
         .await
         .unwrap();
     assert!(current.aich_hashset_acquired);
@@ -351,17 +391,21 @@ async fn accepted_consensus_resumes_verified_without_erasing_network_origin() {
         .map(|signer| (root, ip(203, signer, 0, 1)))
         .collect::<Vec<_>>();
     let accepted = runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     let directory = runtime.root_dir.clone();
     drop(runtime);
     let resumed = Ed2kTransferRuntime::load_or_create(&directory).unwrap();
+    resumed
+        .prepare_download_job_storage(file_hash.token)
+        .await
+        .unwrap();
     let observations = (0..20)
         .map(|signer| ([0xff; 20], ip(198, signer, 0, 1)))
         .collect::<Vec<_>>();
     let manifest = resumed
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     assert_eq!(manifest.aich_root, accepted.aich_root);
@@ -386,7 +430,7 @@ async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
         .map(|signer| (root, ip(203, signer, 0, 1)))
         .collect::<Vec<_>>();
     runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     let barrier = Arc::new(super::super::aich_trust::AichPersistBarrier::default());
@@ -396,7 +440,7 @@ async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
         let hash = file_hash.clone();
         tokio::spawn(async move {
             runtime
-                .record_network_aich_root(&hash, Some(root), ip(203, 9, 0, 1))
+                .record_network_aich_root(hash.token, Some(root), ip(203, 9, 0, 1))
                 .await
         })
     };
@@ -408,12 +452,14 @@ async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
     caller.abort();
     assert!(caller.await.unwrap_err().is_cancelled());
     assert!(
-        runtime.manifest_locks.lock().unwrap()[&file_hash]
+        runtime.manifest_locks.lock().unwrap()[&file_hash.token.job_id]
+            .upgrade()
+            .expect("the admitted task retains the manifest lock")
             .try_lock()
             .is_err()
     );
     assert!(
-        runtime.manifest_cache.lock().await[&file_hash]
+        runtime.manifest_cache.lock().await[&file_hash.token.job_id]
             .aich_root
             .is_none()
     );
@@ -422,7 +468,7 @@ async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
         let hash = file_hash.clone();
         tokio::spawn(async move {
             runtime
-                .record_network_aich_root(&hash, Some([0xff; 20]), ip(198, 0, 0, 1))
+                .record_network_aich_root(hash.token, Some([0xff; 20]), ip(198, 0, 0, 1))
                 .await
         })
     };
@@ -436,7 +482,7 @@ async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
     assert_eq!(demoted.aich_trust_generation, 2);
     let persisted = runtime
         .metadata
-        .transfer_manifest_by_hash(&file_hash)
+        .download_job_manifest(file_hash.token.job_id)
         .unwrap()
         .unwrap();
     assert_eq!(persisted.aich_root, demoted.aich_root);
@@ -447,9 +493,13 @@ async fn canceled_acceptance_finishes_publication_before_conflicting_vote() {
     let directory = runtime.root_dir.clone();
     drop(runtime);
     let resumed = Ed2kTransferRuntime::load_or_create(&directory).unwrap();
+    resumed
+        .prepare_download_job_storage(file_hash.token)
+        .await
+        .unwrap();
     assert!(
         resumed
-            .manifest(&file_hash)
+            .manifest(file_hash.token)
             .await
             .unwrap()
             .aich_root
@@ -471,7 +521,7 @@ async fn seed_servable_catalog(
     assert!(entry.is_servable());
     // The catalog must represent actual durable/cache MD4 authority, not a
     // catalog-only entry that a valid later manifest refresh must remove.
-    let guard = runtime.lock_manifest(&manifest.file_hash).await;
+    let guard = runtime.lock_manifest(manifest.token).await;
     runtime.store_manifest_unlocked(&servable).await.unwrap();
     drop(guard);
     runtime
@@ -498,7 +548,7 @@ async fn canceled_demotion_retires_advertised_root_before_releasing_guard() {
         .map(|signer| ([0x42; 20], ip(203, signer, 0, 1)))
         .collect::<Vec<_>>();
     let accepted = runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     seed_servable_catalog(&runtime, &accepted).await;
@@ -509,7 +559,7 @@ async fn canceled_demotion_retires_advertised_root_before_releasing_guard() {
         let hash = file_hash.clone();
         tokio::spawn(async move {
             runtime
-                .record_network_aich_root(&hash, Some([0xff; 20]), ip(198, 0, 0, 1))
+                .record_network_aich_root(hash.token, Some([0xff; 20]), ip(198, 0, 0, 1))
                 .await
         })
     };
@@ -519,17 +569,20 @@ async fn canceled_demotion_retires_advertised_root_before_releasing_guard() {
     caller.abort();
     assert!(caller.await.unwrap_err().is_cancelled());
     barrier.release.notify_one();
-    let guard = tokio::time::timeout(Duration::from_secs(10), runtime.lock_manifest(&file_hash))
-        .await
-        .unwrap();
+    let guard = tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.lock_manifest(file_hash.token),
+    )
+    .await
+    .unwrap();
     assert!(
-        runtime.manifest_cache.lock().await[&file_hash]
+        runtime.manifest_cache.lock().await[&file_hash.token.job_id]
             .aich_root
             .is_none()
     );
     let catalog = runtime.shared_catalog.read().await;
     let entry = catalog
-        .entry_by_hash(&file_hash.parse::<Ed2kHash>().unwrap())
+        .entry_by_hash(&file_hash.file_hash.parse::<Ed2kHash>().unwrap())
         .unwrap();
     assert!(
         entry.is_servable(),
@@ -554,7 +607,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
             .map(|signer| ([0x42; 20], ip(203, signer, 0, 1)))
             .collect::<Vec<_>>();
         let previous = runtime
-            .record_network_aich_observations(&file_hash, &observations)
+            .record_network_aich_observations(file_hash.token, &observations)
             .await
             .unwrap();
         seed_servable_catalog(&runtime, &previous).await;
@@ -565,7 +618,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
             let hash = file_hash.clone();
             tokio::spawn(async move {
                 runtime
-                    .record_network_aich_root(&hash, Some([0x42; 20]), ip(203, 9, 0, 1))
+                    .record_network_aich_root(hash.token, Some([0x42; 20]), ip(203, 9, 0, 1))
                     .await
             })
         };
@@ -575,7 +628,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
         let stale_projection = super::super::transfer_sql::manifest_from_metadata(
             runtime
                 .metadata
-                .transfer_manifest_by_hash(&file_hash)
+                .download_job_manifest(file_hash.token.job_id)
                 .unwrap()
                 .unwrap(),
         )
@@ -593,7 +646,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
         accept_independent_root(&runtime, &previous, [0x77; 20], stock);
         let canonical = runtime
             .metadata
-            .transfer_aich_identity_by_hash(&file_hash)
+            .download_job_aich_identity(file_hash.token)
             .unwrap()
             .unwrap();
         barrier.release.notify_one();
@@ -605,12 +658,12 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
         assert_eq!(published.aich_root, canonical.root);
         assert_eq!(published.aich_trust_generation, canonical.generation);
         assert_eq!(
-            runtime.manifest_cache.lock().await[&file_hash].aich_root,
+            runtime.manifest_cache.lock().await[&file_hash.token.job_id].aich_root,
             canonical.root
         );
         let catalog = runtime.shared_catalog.read().await;
         let entry = catalog
-            .entry_by_hash(&file_hash.parse::<Ed2kHash>().unwrap())
+            .entry_by_hash(&file_hash.file_hash.parse::<Ed2kHash>().unwrap())
             .unwrap();
         assert!(entry.is_servable());
         assert_eq!(entry.aich_root, canonical.root);
@@ -619,7 +672,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
                 .aich_root_corroboration
                 .lock()
                 .unwrap()
-                .contains_key(&file_hash)
+                .contains_key(&file_hash.token)
         );
         drop(catalog);
         // A later generic refresh retaining the old manifest must preserve its
@@ -629,7 +682,7 @@ async fn authority_committed_before_publication_fences_older_task_and_catalog() 
             .await;
         let catalog = runtime.shared_catalog.read().await;
         let entry = catalog
-            .entry_by_hash(&file_hash.parse::<Ed2kHash>().unwrap())
+            .entry_by_hash(&file_hash.file_hash.parse::<Ed2kHash>().unwrap())
             .unwrap();
         assert!(entry.is_servable());
         assert_eq!(entry.aich_root, canonical.root);
@@ -644,16 +697,16 @@ async fn operator_identity_supersedes_live_consensus_without_peer_veto() {
         .map(|signer| (candidate.master_hash, ip(203, signer, 0, 1)))
         .collect::<Vec<_>>();
     runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&file_hash, candidate)
+        .store_aich_hashset(file_hash.token, candidate)
         .await
         .unwrap();
     let root = [0x77; 20];
     let manifest = runtime
-        .reconcile_aich_root(&file_hash, Some(root))
+        .reconcile_aich_root(file_hash.token, Some(root))
         .await
         .unwrap();
     assert_eq!(
@@ -666,13 +719,13 @@ async fn operator_identity_supersedes_live_consensus_without_peer_veto() {
             .aich_root_corroboration
             .lock()
             .unwrap()
-            .contains_key(&file_hash)
+            .contains_key(&file_hash.token)
     );
     let observations = (0..20)
         .map(|signer| ([0xff; 20], ip(198, signer, 0, 1)))
         .collect::<Vec<_>>();
     let manifest = runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     assert_eq!(manifest.aich_root, Some(hex::encode(root)));
@@ -682,7 +735,7 @@ async fn operator_identity_supersedes_live_consensus_without_peer_veto() {
 async fn deleting_transfer_releases_its_bounded_votes() {
     let (runtime, file_hash) = runtime_with_job().await;
     runtime
-        .record_network_aich_root(&file_hash, Some([1; 20]), ip(203, 0, 0, 1))
+        .record_network_aich_root(file_hash.token, Some([1; 20]), ip(203, 0, 0, 1))
         .await
         .unwrap();
     assert!(
@@ -690,15 +743,20 @@ async fn deleting_transfer_releases_its_bounded_votes() {
             .aich_root_corroboration
             .lock()
             .unwrap()
-            .contains_key(&file_hash)
+            .contains_key(&file_hash.token)
     );
-    assert!(runtime.delete_transfer_files(&file_hash).await.unwrap());
+    assert!(
+        runtime
+            .remove_download_job(file_hash.token.job_id, false)
+            .await
+            .unwrap()
+    );
     assert!(
         !runtime
             .aich_root_corroboration
             .lock()
             .unwrap()
-            .contains_key(&file_hash)
+            .contains_key(&file_hash.token)
     );
 }
 
@@ -710,11 +768,11 @@ async fn new_local_authority_replaces_cached_consensus_before_more_network_votes
         .map(|signer| (candidate.master_hash, ip(203, signer, 0, 1)))
         .collect::<Vec<_>>();
     let accepted = runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&file_hash, candidate)
+        .store_aich_hashset(file_hash.token, candidate)
         .await
         .unwrap();
     let root = [0x77; 20];
@@ -723,7 +781,8 @@ async fn new_local_authority_replaces_cached_consensus_before_more_network_votes
     runtime
         .metadata
         .upsert_verified_local_content(&emulebb_metadata::MetadataVerifiedLocalContent {
-            file_hash: file_hash.clone(),
+            secondary_identity: None,
+            file_hash: file_hash.file_hash.clone(),
             display_name: "accepted-local.bin".to_owned(),
             file_size: accepted.file_size,
             part_size: accepted.piece_size,
@@ -747,7 +806,7 @@ async fn new_local_authority_replaces_cached_consensus_before_more_network_votes
         })
         .unwrap();
     let manifest = runtime
-        .record_network_aich_root(&file_hash, Some([0xff; 20]), ip(198, 0, 0, 1))
+        .record_network_aich_root(file_hash.token, Some([0xff; 20]), ip(198, 0, 0, 1))
         .await
         .unwrap();
     assert_eq!(manifest.aich_root, Some(hex::encode(root)));
@@ -762,7 +821,7 @@ async fn new_local_authority_replaces_cached_consensus_before_more_network_votes
             .aich_root_corroboration
             .lock()
             .unwrap()
-            .contains_key(&file_hash)
+            .contains_key(&file_hash.token)
     );
 }
 
@@ -775,7 +834,7 @@ async fn ten_unique_ip_majority_root_is_promoted() {
     for i in 0..10u8 {
         last = Some(
             runtime
-                .record_network_aich_root(&file_hash, Some(root), ip(203, i, 0, 9))
+                .record_network_aich_root(file_hash.token, Some(root), ip(203, i, 0, 9))
                 .await
                 .unwrap(),
         );
@@ -787,7 +846,7 @@ async fn ten_unique_ip_majority_root_is_promoted() {
         "a 10-unique-IP unanimous root must be promoted"
     );
     // Persisted.
-    let reloaded = runtime.manifest(&file_hash).await.unwrap();
+    let reloaded = runtime.manifest(file_hash.token).await.unwrap();
     assert_eq!(
         reloaded.aich_root.as_deref(),
         Some(hex::encode(root).as_str())
@@ -802,7 +861,7 @@ async fn batched_independent_observations_promote_once() {
         .map(|index| (root, ip(203, index, 0, 9)))
         .collect::<Vec<_>>();
     let manifest = runtime
-        .record_network_aich_observations(&file_hash, &observations)
+        .record_network_aich_observations(file_hash.token, &observations)
         .await
         .unwrap();
     assert_eq!(
@@ -817,11 +876,11 @@ async fn nine_unique_ips_below_threshold_not_trusted() {
     let root = [0x42; 20];
     for i in 0..9u8 {
         runtime
-            .record_network_aich_root(&file_hash, Some(root), ip(198, i, 0, 1))
+            .record_network_aich_root(file_hash.token, Some(root), ip(198, i, 0, 1))
             .await
             .unwrap();
     }
-    let reloaded = runtime.manifest(&file_hash).await.unwrap();
+    let reloaded = runtime.manifest(file_hash.token).await.unwrap();
     assert!(
         reloaded.aich_root.is_none(),
         "nine unique IPs is below MINUNIQUEIPS_TOTRUST (10)"
@@ -835,11 +894,11 @@ async fn same_subnet_floods_do_not_promote() {
     // Twenty addresses, all within the same /20 -> one unique signer.
     for d in 0..20u8 {
         runtime
-            .record_network_aich_root(&file_hash, Some(root), ip(10, 0, 0, d))
+            .record_network_aich_root(file_hash.token, Some(root), ip(10, 0, 0, d))
             .await
             .unwrap();
     }
-    let reloaded = runtime.manifest(&file_hash).await.unwrap();
+    let reloaded = runtime.manifest(file_hash.token).await.unwrap();
     assert!(
         reloaded.aich_root.is_none(),
         "a single-subnet flood must not count as 10 unique IPs"
@@ -851,7 +910,7 @@ async fn authoritative_seed_root_is_trusted_immediately() {
     let (runtime, file_hash) = runtime_with_job().await;
     let root = [0x77; 20];
     let manifest = runtime
-        .reconcile_aich_root(&file_hash, Some(root))
+        .reconcile_aich_root(file_hash.token, Some(root))
         .await
         .unwrap();
     assert_eq!(
@@ -866,18 +925,18 @@ async fn network_proposals_ignored_once_authoritative_root_present() {
     let (runtime, file_hash) = runtime_with_job().await;
     let authoritative = [0x01; 20];
     runtime
-        .reconcile_aich_root(&file_hash, Some(authoritative))
+        .reconcile_aich_root(file_hash.token, Some(authoritative))
         .await
         .unwrap();
     // A flood of peers proposing a DIFFERENT root must not displace it.
     let attacker = [0xFF; 20];
     for i in 0..15u8 {
         runtime
-            .record_network_aich_root(&file_hash, Some(attacker), ip(203, i, 16, 3))
+            .record_network_aich_root(file_hash.token, Some(attacker), ip(203, i, 16, 3))
             .await
             .unwrap();
     }
-    let reloaded = runtime.manifest(&file_hash).await.unwrap();
+    let reloaded = runtime.manifest(file_hash.token).await.unwrap();
     assert_eq!(
         reloaded.aich_root.as_deref(),
         Some(hex::encode(authoritative).as_str()),

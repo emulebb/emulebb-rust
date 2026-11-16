@@ -626,7 +626,7 @@ mod tests {
     use super::{
         complete_authorized_kad_callback, kad_callback_check_matches, kad_callback_is_authorized,
     };
-    use crate::ed2k_transfer::{Ed2kTransferRuntime, new_transfer_job};
+    use crate::ed2k_transfer::Ed2kTransferRuntime;
 
     fn callback(buddy_check: [u8; 16], file_hash: Ed2kHash) -> KadCallbackRequest {
         KadCallbackRequest {
@@ -732,7 +732,12 @@ mod tests {
         // Wrong uCheck (echoes our id verbatim) is rejected even for a file we own.
         let owned = Ed2kHash::from_bytes([0x11; 16]);
         runtime
-            .ensure_job(&new_transfer_job(owned, "owned".into(), 1))
+            .ensure_job(&crate::ed2k_transfer::test_support::admit_download_job(
+                &runtime,
+                owned,
+                "owned".into(),
+                1,
+            ))
             .await
             .unwrap();
         assert!(!kad_callback_is_authorized(own, &runtime, &callback(own, owned)).await);
@@ -753,7 +758,12 @@ mod tests {
         let own = [0xABu8; 16];
         let owned = Ed2kHash::from_bytes([0x33; 16]);
         runtime
-            .ensure_job(&new_transfer_job(owned, "owned".into(), 1))
+            .ensure_job(&crate::ed2k_transfer::test_support::admit_download_job(
+                &runtime,
+                owned,
+                "owned".into(),
+                1,
+            ))
             .await
             .unwrap();
         assert!(kad_callback_is_authorized(own, &runtime, &callback(own.map(|b| !b), owned)).await);
@@ -777,7 +787,12 @@ mod tests {
         let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap());
         let owned = Ed2kHash::from_bytes([0x44; 16]);
         runtime
-            .ensure_job(&new_transfer_job(owned, "owned".into(), 1))
+            .ensure_job(&crate::ed2k_transfer::test_support::admit_download_job(
+                &runtime,
+                owned,
+                "owned".into(),
+                1,
+            ))
             .await
             .unwrap();
         let (callback_sessions, _callback_session_inbox) =

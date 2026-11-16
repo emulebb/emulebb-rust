@@ -193,7 +193,7 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
     {
         if manifest.file_size <= ED2K_PART_SIZE {
             *manifest = transfer_runtime
-                .store_md4_hashset(file_hash_hex, Vec::new())
+                .store_md4_hashset(manifest.token, Vec::new())
                 .await?;
         } else {
             let hashset_request = if session_state.remote_supports_file_identifiers {

@@ -24,7 +24,6 @@ use super::{
 struct VerifiedRecoveryPayload {
     path: PathBuf,
     fingerprint: Option<NativeFileFingerprint>,
-    exact_recorded_identity: bool,
 }
 
 #[derive(Debug)]
@@ -44,203 +43,212 @@ impl Ed2kTransferRuntime {
     /// verified delivered output when one exists; otherwise completion and every
     /// piece claim are demoted so the transfer can resume. Invalid regular files
     /// are quarantined, while wrong filesystem types fail startup untouched.
-    pub async fn reconcile_managed_download_storage(
+    pub async fn reconcile_download_storage(
         &self,
+        token: emulebb_metadata::JobToken,
     ) -> Result<Ed2kDownloadStorageReconciliation> {
-        let candidates = self.managed_download_manifests_snapshot().await?;
         let mut reconciliation = Ed2kDownloadStorageReconciliation::default();
-
-        for candidate in candidates {
-            let file_hash = candidate.file_hash;
-            let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
-            self.recover_delivery_attempt_unlocked(&file_hash).await?;
-            let snapshot = {
-                let _manifest_guard = self.lock_manifest(&file_hash).await;
-                let Some(manifest) = self.load_manifest_optional_unlocked(&file_hash).await? else {
-                    continue;
-                };
-                manifest
+        let metadata = self.metadata.clone();
+        let job = tokio::task::spawn_blocking(move || metadata.download_job(token.job_id))
+            .await
+            .context("job reconciliation lookup failed")??
+            .context("missing job")?;
+        anyhow::ensure!(
+            job.token == token,
+            "stale storage reconciliation generation"
+        );
+        // Historical completion is never revoked by a later missing/replaced
+        // output or pending internal retirement. Explicit re-download is a new job.
+        if job.completed_at_s.is_some() || job.removed_at_s.is_some() {
+            return Ok(reconciliation);
+        }
+        self.prepare_download_job_storage(token).await?;
+        let file_hash = job.file_hash;
+        let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
+        self.recover_delivery_attempt_unlocked(token).await?;
+        let snapshot = {
+            let _manifest_guard = self.lock_manifest(token).await;
+            let Some(manifest) = self.load_manifest_optional_unlocked(token).await? else {
+                return Ok(reconciliation);
             };
+            manifest
+        };
 
-            reconciliation.inspected_downloads =
-                reconciliation.inspected_downloads.saturating_add(1);
-            let transfer_dir = self.transfer_dir(&file_hash);
-            let transfer_dir_id = match tokio::fs::symlink_metadata(&transfer_dir).await {
-                Ok(metadata) => {
-                    anyhow::ensure!(
-                        metadata.file_type().is_dir(),
-                        "persisted ED2K download {file_hash} owns {}, but the path is not a directory",
-                        transfer_dir.display()
-                    );
-                    file_id::get_file_id(long_path(&transfer_dir)).with_context(|| {
-                        format!(
-                            "failed to identify ED2K transfer directory {}",
-                            transfer_dir.display()
-                        )
-                    })?
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tokio::fs::create_dir_all(&transfer_dir)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "failed to recreate ED2K transfer directory {}",
-                                transfer_dir.display()
-                            )
-                        })?;
-                    reconciliation.recreated_directories =
-                        reconciliation.recreated_directories.saturating_add(1);
-                    file_id::get_file_id(long_path(&transfer_dir)).with_context(|| {
-                        format!(
-                            "failed to identify recreated ED2K transfer directory {}",
-                            transfer_dir.display()
-                        )
-                    })?
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "failed to inspect ED2K transfer directory {}",
-                            transfer_dir.display()
-                        )
-                    });
-                }
-            };
-
-            let payload_path = transfer_dir.join(PAYLOAD_FILE_NAME);
-            let payload_len = match tokio::fs::symlink_metadata(&payload_path).await {
-                Ok(metadata) => {
-                    anyhow::ensure!(
-                        metadata.file_type().is_file(),
-                        "persisted ED2K download {file_hash} owns {}, but the payload is not a regular file",
-                        payload_path.display()
-                    );
-                    Some(metadata.len())
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to inspect ED2K payload {}", payload_path.display())
-                    });
-                }
-            };
-
-            if !snapshot.completed {
-                let _manifest_guard = self.lock_manifest(&file_hash).await;
-                let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
+        reconciliation.inspected_downloads = reconciliation.inspected_downloads.saturating_add(1);
+        let transfer_dir = self.transfer_dir(token.job_id)?;
+        let transfer_dir_id = match tokio::fs::symlink_metadata(&transfer_dir).await {
+            Ok(metadata) => {
                 anyhow::ensure!(
-                    manifest == snapshot,
-                    "persisted ED2K download {file_hash} changed during storage reconciliation"
+                    metadata.file_type().is_dir(),
+                    "persisted ED2K download {file_hash} owns {}, but the path is not a directory",
+                    transfer_dir.display()
                 );
-                let reset_pieces =
-                    reconcile_manifest_payload_len(&mut manifest, payload_len.unwrap_or(0));
-                if persist_reconciled_manifest(self, &manifest, reset_pieces).await? {
-                    reconciliation.demoted_downloads =
-                        reconciliation.demoted_downloads.saturating_add(1);
-                    reconciliation.reset_pieces =
-                        reconciliation.reset_pieces.saturating_add(reset_pieces);
-                }
-                continue;
+                file_id::get_file_id(long_path(&transfer_dir)).with_context(|| {
+                    format!(
+                        "failed to identify ED2K transfer directory {}",
+                        transfer_dir.display()
+                    )
+                })?
             }
-
-            let expected_hash = Ed2kHash::from_str(&snapshot.file_hash)
-                .with_context(|| format!("invalid ED2K file hash {}", snapshot.file_hash))?
-                .0;
-            if payload_len == Some(snapshot.file_size) {
-                let identity = classify_delivered_output(
-                    &payload_path,
-                    snapshot.payload_fingerprint.as_ref(),
-                    snapshot.file_size,
-                    expected_hash,
-                )
-                .await?;
-                if let DeliveredOutputIdentity::Matching(payload_fingerprint) = identity {
-                    persist_verified_canonical_state(self, &snapshot, payload_fingerprint).await?;
-                    continue;
-                }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(error)
+                    .context("established job directory disappeared before reconciliation");
             }
-
-            if let Some(recovery) = verified_recovery_payload(&snapshot).await? {
-                let staged = stage_verified_payload(
-                    &recovery.path,
-                    &transfer_dir,
-                    snapshot.file_size,
-                    expected_hash,
-                )
-                .await?;
-                let restore_result = async {
-                    let _manifest_guard = self.lock_manifest(&file_hash).await;
-                    let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
-                    anyhow::ensure!(
-                        manifest == snapshot,
-                        "persisted ED2K download {file_hash} changed during payload restoration"
-                    );
-                    self.invalidate_payload_handle(&file_hash);
-                    ensure_transfer_directory_identity(&transfer_dir, &transfer_dir_id).await?;
-                    if quarantine_payload_if_present(&payload_path)
-                        .await?
-                        .is_some()
-                    {
-                        reconciliation.quarantined_payloads =
-                            reconciliation.quarantined_payloads.saturating_add(1);
-                    }
-                    replace_file_atomically_async(&staged.path, &payload_path).await?;
-                    manifest.payload_fingerprint = verified_replaced_payload_fingerprint(
-                        &payload_path,
-                        staged.fingerprint.as_ref(),
-                    );
-                    if manifest.source_fingerprint != recovery.fingerprint {
-                        manifest.source_fingerprint = recovery.fingerprint.clone();
-                    }
-                    if manifest.delivery_ownership == super::Ed2kDeliveryOwnership::Owned
-                        && !recovery.exact_recorded_identity
-                    {
-                        manifest.delivery_ownership = super::Ed2kDeliveryOwnership::Unowned;
-                    }
-                    if manifest != snapshot {
-                        self.store_manifest_unlocked(&manifest).await?;
-                    }
-                    Ok::<_, anyhow::Error>(())
-                }
-                .await;
-                if restore_result.is_err()
-                    && let Err(error) = remove_file_if_exists(&staged.path).await
-                {
-                    tracing::warn!(
-                        %error,
-                        path = %staged.path.display(),
-                        "failed to remove payload recovery temporary"
-                    );
-                }
-                restore_result?;
-                reconciliation.restored_payloads =
-                    reconciliation.restored_payloads.saturating_add(1);
-                continue;
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect ED2K transfer directory {}",
+                        transfer_dir.display()
+                    )
+                });
             }
+        };
 
-            let _manifest_guard = self.lock_manifest(&file_hash).await;
-            let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
+        let payload_path = transfer_dir.join(PAYLOAD_FILE_NAME);
+        let payload_len = match tokio::fs::symlink_metadata(&payload_path).await {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_file(),
+                    "persisted ED2K download {file_hash} owns {}, but the payload is not a regular file",
+                    payload_path.display()
+                );
+                Some(metadata.len())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect ED2K payload {}", payload_path.display())
+                });
+            }
+        };
+
+        if !snapshot.completed {
+            let _manifest_guard = self.lock_manifest(token).await;
+            let mut manifest = self.load_manifest_unlocked(token).await?;
             anyhow::ensure!(
                 manifest == snapshot,
-                "persisted ED2K download {file_hash} changed during completion demotion"
+                "persisted ED2K download {file_hash} changed during storage reconciliation"
             );
-            self.invalidate_payload_handle(&file_hash);
-            ensure_transfer_directory_identity(&transfer_dir, &transfer_dir_id).await?;
-            if quarantine_payload_if_present(&payload_path)
-                .await?
-                .is_some()
-            {
-                reconciliation.quarantined_payloads =
-                    reconciliation.quarantined_payloads.saturating_add(1);
+            let reset_pieces =
+                reconcile_manifest_payload_len(&mut manifest, payload_len.unwrap_or(0));
+            if persist_reconciled_manifest(self, &manifest, reset_pieces).await? {
+                reconciliation.demoted_downloads =
+                    reconciliation.demoted_downloads.saturating_add(1);
+                reconciliation.reset_pieces =
+                    reconciliation.reset_pieces.saturating_add(reset_pieces);
             }
-            create_empty_payload(&payload_path).await?;
-            let reset_pieces = demote_completed_manifest(&mut manifest);
-            self.store_manifest_unlocked(&manifest).await?;
-            self.upsert_verified_catalog_entry(&manifest).await;
-            reconciliation.demoted_downloads = reconciliation.demoted_downloads.saturating_add(1);
-            reconciliation.reset_pieces = reconciliation.reset_pieces.saturating_add(reset_pieces);
+            return Ok(reconciliation);
         }
 
+        let expected_hash = Ed2kHash::from_str(&snapshot.file_hash)
+            .with_context(|| format!("invalid ED2K file hash {}", snapshot.file_hash))?
+            .0;
+        if payload_len == Some(snapshot.file_size) {
+            let identity = classify_delivered_output(
+                &payload_path,
+                snapshot.payload_fingerprint.as_ref(),
+                snapshot.file_size,
+                expected_hash,
+            )
+            .await?;
+            if let DeliveredOutputIdentity::Matching(payload_fingerprint) = identity {
+                persist_verified_canonical_state(self, &snapshot, payload_fingerprint).await?;
+                return Ok(reconciliation);
+            }
+        }
+
+        if let Some(recovery) = verified_recovery_payload(&snapshot).await? {
+            let staged = stage_verified_payload(
+                &recovery.path,
+                &transfer_dir,
+                snapshot.file_size,
+                expected_hash,
+            )
+            .await?;
+            let restore_result = async {
+                let manifest_guard = self.lock_manifest(token).await;
+                let mut manifest = self.load_manifest_unlocked(token).await?;
+                anyhow::ensure!(
+                    manifest == snapshot,
+                    "persisted ED2K download {file_hash} changed during payload restoration"
+                );
+                self.invalidate_payload_handle(token);
+                ensure_transfer_directory_identity(&transfer_dir, &transfer_dir_id).await?;
+                if quarantine_payload_if_present(&payload_path)
+                    .await?
+                    .is_some()
+                {
+                    reconciliation.quarantined_payloads =
+                        reconciliation.quarantined_payloads.saturating_add(1);
+                }
+                replace_file_atomically_async(&staged.path, &payload_path).await?;
+                manifest.payload_fingerprint = verified_replaced_payload_fingerprint(
+                    &payload_path,
+                    staged.fingerprint.as_ref(),
+                );
+                // Payload checkpoints cannot replace persisted Delivered authority.
+                // Keep that evidence intact until the retained, exact-snapshot
+                // verification transition publishes the content-only proof.
+                if manifest != snapshot {
+                    self.store_manifest_unlocked(&manifest).await?;
+                }
+                if manifest.delivery_state == Ed2kDeliveryState::Delivered
+                    && manifest.source_fingerprint != recovery.fingerprint
+                {
+                    let verified = recovery.fingerprint.as_ref().context(
+                        "recovered delivered bytes lack stable native verification evidence",
+                    )?;
+                    let receipt = self.local_mutations.submit_delivery_verification(
+                        self,
+                        token,
+                        &recovery.path,
+                        snapshot.source_fingerprint.as_ref(),
+                        snapshot.delivery_ownership,
+                        verified,
+                        manifest_guard,
+                    )?;
+                    receipt
+                        .await
+                        .context("delivery verification owner stopped")??;
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if restore_result.is_err()
+                && let Err(error) = remove_file_if_exists(&staged.path).await
+            {
+                tracing::warn!(
+                    %error,
+                    path = %staged.path.display(),
+                    "failed to remove payload recovery temporary"
+                );
+            }
+            restore_result?;
+            reconciliation.restored_payloads = reconciliation.restored_payloads.saturating_add(1);
+            return Ok(reconciliation);
+        }
+
+        let _manifest_guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_manifest_unlocked(token).await?;
+        anyhow::ensure!(
+            manifest == snapshot,
+            "persisted ED2K download {file_hash} changed during completion demotion"
+        );
+        self.invalidate_payload_handle(token);
+        ensure_transfer_directory_identity(&transfer_dir, &transfer_dir_id).await?;
+        if quarantine_payload_if_present(&payload_path)
+            .await?
+            .is_some()
+        {
+            reconciliation.quarantined_payloads =
+                reconciliation.quarantined_payloads.saturating_add(1);
+        }
+        create_empty_payload(&payload_path).await?;
+        let reset_pieces = demote_completed_manifest(&mut manifest);
+        self.store_manifest_unlocked(&manifest).await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
+        reconciliation.demoted_downloads = reconciliation.demoted_downloads.saturating_add(1);
+        reconciliation.reset_pieces = reconciliation.reset_pieces.saturating_add(reset_pieces);
         Ok(reconciliation)
     }
 }
@@ -271,14 +279,9 @@ async fn verified_recovery_payload(
     )
     .await?
     {
-        DeliveredOutputIdentity::Matching(fingerprint) => Ok(Some(VerifiedRecoveryPayload {
-            exact_recorded_identity: recorded_fingerprint
-                .as_ref()
-                .zip(fingerprint.as_ref())
-                .is_some_and(|(recorded, current)| recorded.safely_matches(current)),
-            path,
-            fingerprint,
-        })),
+        DeliveredOutputIdentity::Matching(fingerprint) => {
+            Ok(Some(VerifiedRecoveryPayload { path, fingerprint }))
+        }
         DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign => Ok(None),
     }
 }
@@ -289,8 +292,8 @@ async fn persist_verified_canonical_state(
     payload_fingerprint: Option<NativeFileFingerprint>,
 ) -> Result<()> {
     {
-        let _manifest_guard = runtime.lock_manifest(&snapshot.file_hash).await;
-        let mut manifest = runtime.load_manifest_unlocked(&snapshot.file_hash).await?;
+        let _manifest_guard = runtime.lock_manifest(snapshot.token).await;
+        let mut manifest = runtime.load_manifest_unlocked(snapshot.token).await?;
         anyhow::ensure!(
             manifest == *snapshot,
             "persisted ED2K download {} changed during canonical payload verification",
@@ -641,7 +644,7 @@ async fn persist_reconciled_manifest(
     manifest: &Ed2kResumeManifest,
     reset_pieces: usize,
 ) -> Result<bool> {
-    let persisted = runtime.load_manifest_unlocked(&manifest.file_hash).await?;
+    let persisted = runtime.load_manifest_unlocked(manifest.token).await?;
     if reset_pieces == 0
         && persisted.verified_ranges == manifest.verified_ranges
         && persisted.final_rehash_pending == manifest.final_rehash_pending
@@ -663,10 +666,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::ed2k_transfer::{
-        Ed2kDeliveryOutcome, Ed2kPieceState, Ed2kTransferJob,
-        deliver::{DELIVERY_PENDING_FILE_NAME, persist_pending_delivery_path},
-    };
+    use crate::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kPieceState, Ed2kTransferJob};
     use crate::paths::unique_test_dir;
 
     async fn seed_manifest(
@@ -675,11 +675,8 @@ mod tests {
         pieces: Vec<Ed2kPieceState>,
     ) {
         runtime.ensure_job(job).await.unwrap();
-        let _guard = runtime.lock_manifest(&job.file_hash).await;
-        let mut manifest = runtime
-            .load_manifest_unlocked(&job.file_hash)
-            .await
-            .unwrap();
+        let _guard = runtime.lock_manifest(job.token).await;
+        let mut manifest = runtime.load_manifest_unlocked(job.token).await.unwrap();
         manifest.pieces = pieces;
         rebuild_verified_ranges(&mut manifest);
         runtime.store_manifest_unlocked(&manifest).await.unwrap();
@@ -700,22 +697,22 @@ mod tests {
         display_name: &str,
         payload: &[u8],
     ) -> Ed2kTransferJob {
-        let job = Ed2kTransferJob {
-            file_hash: Ed2kHash::from_bytes(Md4::digest(payload).into()).to_string(),
-            display_name: display_name.to_string(),
-            file_size: payload.len() as u64,
-            piece_size: payload.len() as u64,
-        };
+        let job = super::super::test_support::admit_download_job(
+            runtime,
+            Ed2kHash::from_bytes(Md4::digest(payload).into()),
+            display_name.to_string(),
+            payload.len() as u64,
+        );
         runtime.ensure_job(&job).await.unwrap();
         runtime
-            .store_md4_hashset(&job.file_hash, Vec::new())
+            .store_md4_hashset(job.token, Vec::new())
             .await
             .unwrap();
         runtime
-            .store_piece_data(&job.file_hash, 0, payload)
+            .store_piece_data(job.token, 0, payload)
             .await
             .unwrap();
-        let completed = runtime.manifest(&job.file_hash).await.unwrap();
+        let completed = runtime.manifest(job.token).await.unwrap();
         assert!(completed.completed);
         assert!(completed.payload_fingerprint.is_some());
         job
@@ -724,14 +721,25 @@ mod tests {
     #[tokio::test]
     async fn missing_payload_demotes_all_claimed_progress_before_publication() {
         let root = unique_test_dir("ed2k-missing-incomplete-payload");
-        let job = Ed2kTransferJob {
-            file_hash: Ed2kHash::from_bytes([0x71; 16]).to_string(),
-            display_name: "missing.bin".to_string(),
-            file_size: 24,
-            piece_size: 8,
-        };
+        let job;
+        let storage_path;
         {
             let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            job = super::super::test_support::admit_download_job_with_piece_size(
+                &runtime,
+                Ed2kHash::from_bytes([0x71; 16]),
+                "missing.bin".to_string(),
+                24,
+                8,
+            );
+            storage_path = runtime
+                .metadata
+                .download_job(job.token.job_id)
+                .unwrap()
+                .unwrap()
+                .storage
+                .unwrap()
+                .path;
             seed_manifest(
                 &runtime,
                 &job,
@@ -742,26 +750,30 @@ mod tests {
                 ],
             )
             .await;
-            fs::write(runtime.payload_path(&job.file_hash), vec![0xA5; 12]).unwrap();
+            fs::write(
+                runtime.payload_path(job.token.job_id).unwrap(),
+                vec![0xA5; 12],
+            )
+            .unwrap();
         }
-        fs::remove_file(root.join(&job.file_hash).join(PAYLOAD_FILE_NAME)).unwrap();
+        fs::remove_file(storage_path.join(PAYLOAD_FILE_NAME)).unwrap();
 
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.inspected_downloads, 1);
         assert_eq!(report.demoted_downloads, 1);
         assert_eq!(report.reset_pieces, 2);
-        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+        let manifest = runtime.manifest(job.token).await.unwrap();
         assert!(manifest.verified_ranges.is_empty());
         assert!(manifest.pieces.iter().all(|piece| {
             piece.state == Ed2kTransferState::Missing && piece.bytes_written == 0
         }));
-        runtime.incomplete_manifests().await.unwrap();
+        runtime.manifest(job.token).await.unwrap();
         assert!(runtime.shared_catalog().read().await.is_empty());
         assert_eq!(
             runtime
-                .reconcile_managed_download_storage()
+                .reconcile_download_storage(job.token)
                 .await
                 .unwrap()
                 .demoted_downloads,
@@ -772,14 +784,25 @@ mod tests {
     #[tokio::test]
     async fn truncated_payload_demotes_all_claimed_progress() {
         let root = unique_test_dir("ed2k-truncated-incomplete-payload");
-        let job = Ed2kTransferJob {
-            file_hash: Ed2kHash::from_bytes([0x72; 16]).to_string(),
-            display_name: "truncated.bin".to_string(),
-            file_size: 24,
-            piece_size: 8,
-        };
+        let job;
+        let storage_path;
         {
             let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            job = super::super::test_support::admit_download_job_with_piece_size(
+                &runtime,
+                Ed2kHash::from_bytes([0x72; 16]),
+                "truncated.bin".to_string(),
+                24,
+                8,
+            );
+            storage_path = runtime
+                .metadata
+                .download_job(job.token.job_id)
+                .unwrap()
+                .unwrap()
+                .storage
+                .unwrap()
+                .path;
             seed_manifest(
                 &runtime,
                 &job,
@@ -790,21 +813,25 @@ mod tests {
                 ],
             )
             .await;
-            fs::write(runtime.payload_path(&job.file_hash), vec![0x5A; 20]).unwrap();
+            fs::write(
+                runtime.payload_path(job.token.job_id).unwrap(),
+                vec![0x5A; 20],
+            )
+            .unwrap();
         }
         fs::OpenOptions::new()
             .write(true)
-            .open(root.join(&job.file_hash).join(PAYLOAD_FILE_NAME))
+            .open(storage_path.join(PAYLOAD_FILE_NAME))
             .unwrap()
             .set_len(9)
             .unwrap();
 
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.demoted_downloads, 1);
         assert_eq!(report.reset_pieces, 3);
-        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+        let manifest = runtime.manifest(job.token).await.unwrap();
         assert!(manifest.verified_ranges.is_empty());
         assert!(manifest.pieces.iter().all(|piece| {
             piece.state == Ed2kTransferState::Missing && piece.bytes_written == 0
@@ -814,14 +841,16 @@ mod tests {
     #[tokio::test]
     async fn intact_partial_payload_preserves_verified_progress() {
         let root = unique_test_dir("ed2k-intact-incomplete-payload");
-        let job = Ed2kTransferJob {
-            file_hash: Ed2kHash::from_bytes([0x76; 16]).to_string(),
-            display_name: "intact.bin".to_string(),
-            file_size: 24,
-            piece_size: 8,
-        };
+        let job;
         {
             let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            job = super::super::test_support::admit_download_job_with_piece_size(
+                &runtime,
+                Ed2kHash::from_bytes([0x76; 16]),
+                "intact.bin".to_string(),
+                24,
+                8,
+            );
             seed_manifest(
                 &runtime,
                 &job,
@@ -832,15 +861,19 @@ mod tests {
                 ],
             )
             .await;
-            fs::write(runtime.payload_path(&job.file_hash), vec![0xA5; 8]).unwrap();
+            fs::write(
+                runtime.payload_path(job.token.job_id).unwrap(),
+                vec![0xA5; 8],
+            )
+            .unwrap();
         }
 
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.demoted_downloads, 0);
         assert_eq!(report.reset_pieces, 0);
-        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+        let manifest = runtime.manifest(job.token).await.unwrap();
         assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
         assert_eq!(manifest.pieces[0].bytes_written, 8);
         assert_eq!(manifest.verified_ranges.len(), 1);
@@ -848,16 +881,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_transfer_directory_is_recreated_and_progress_is_demoted() {
+    async fn missing_established_directory_fails_without_recreating_ownership() {
         let root = unique_test_dir("ed2k-missing-incomplete-directory");
-        let job = Ed2kTransferJob {
-            file_hash: Ed2kHash::from_bytes([0x73; 16]).to_string(),
-            display_name: "missing-directory.bin".to_string(),
-            file_size: 8,
-            piece_size: 8,
-        };
+        let job;
+        let storage_path;
         {
             let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            job = super::super::test_support::admit_download_job_with_piece_size(
+                &runtime,
+                Ed2kHash::from_bytes([0x73; 16]),
+                "missing-directory.bin".to_string(),
+                8,
+                8,
+            );
+            storage_path = runtime
+                .metadata
+                .download_job(job.token.job_id)
+                .unwrap()
+                .unwrap()
+                .storage
+                .unwrap()
+                .path;
             seed_manifest(
                 &runtime,
                 &job,
@@ -865,17 +909,23 @@ mod tests {
             )
             .await;
         }
-        fs::remove_dir_all(root.join(&job.file_hash)).unwrap();
+        fs::remove_dir_all(&storage_path).unwrap();
 
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
-
-        assert_eq!(report.recreated_directories, 1);
-        assert_eq!(report.demoted_downloads, 1);
-        assert!(root.join(&job.file_hash).is_dir());
+        let before = runtime
+            .metadata
+            .download_job_manifest(job.token.job_id)
+            .unwrap()
+            .unwrap();
+        assert!(runtime.reconcile_download_storage(job.token).await.is_err());
+        assert!(!storage_path.exists());
         assert_eq!(
-            runtime.manifest(&job.file_hash).await.unwrap().pieces[0].state,
-            Ed2kTransferState::Missing
+            runtime
+                .metadata
+                .download_job_manifest(job.token.job_id)
+                .unwrap()
+                .unwrap(),
+            before
         );
     }
 
@@ -890,27 +940,27 @@ mod tests {
             let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
             job = complete_download(&runtime, "recovered.bin", payload).await;
             delivered_path = match runtime
-                .materialize_completed_payload(&job.file_hash, &incoming)
+                .materialize_completed_payload(job.token, &incoming)
                 .await
                 .unwrap()
             {
                 Ed2kDeliveryOutcome::Delivered(path) => path,
                 outcome => panic!("unexpected delivery outcome: {outcome:?}"),
             };
-            fs::remove_dir_all(runtime.transfer_dir(&job.file_hash)).unwrap();
+            fs::remove_file(runtime.payload_path(job.token.job_id).unwrap()).unwrap();
         }
 
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.restored_payloads, 1);
         assert_eq!(report.demoted_downloads, 0);
-        assert_eq!(report.recreated_directories, 1);
+        assert_eq!(report.recreated_directories, 0);
         assert_eq!(
-            fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
+            fs::read(runtime.payload_path(job.token.job_id).unwrap()).unwrap(),
             payload
         );
-        assert!(runtime.manifest(&job.file_hash).await.unwrap().completed);
+        assert!(runtime.manifest(job.token).await.unwrap().completed);
         let hash = job.file_hash.parse::<Ed2kHash>().unwrap();
         assert_eq!(
             runtime
@@ -923,7 +973,7 @@ mod tests {
         assert_eq!(fs::read(&delivered_path).unwrap(), payload);
         assert!(
             runtime
-                .manifest(&job.file_hash)
+                .manifest(job.token)
                 .await
                 .unwrap()
                 .payload_fingerprint
@@ -932,14 +982,14 @@ mod tests {
 
         fs::OpenOptions::new()
             .write(true)
-            .open(runtime.payload_path(&job.file_hash))
+            .open(runtime.payload_path(job.token.job_id).unwrap())
             .unwrap()
             .set_len(3)
             .unwrap();
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
         assert_eq!(report.restored_payloads, 1);
         assert_eq!(
-            fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
+            fs::read(runtime.payload_path(job.token.job_id).unwrap()).unwrap(),
             payload
         );
     }
@@ -956,14 +1006,14 @@ mod tests {
             let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
             job = complete_download(&runtime, "replaced.bin", payload).await;
             delivered_path = match runtime
-                .materialize_completed_payload(&job.file_hash, &incoming)
+                .materialize_completed_payload(job.token, &incoming)
                 .await
                 .unwrap()
             {
                 Ed2kDeliveryOutcome::Delivered(path) => path,
                 outcome => panic!("unexpected delivery outcome: {outcome:?}"),
             };
-            let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+            let manifest = runtime.manifest(job.token).await.unwrap();
             assert_eq!(
                 manifest.delivery_ownership,
                 super::super::Ed2kDeliveryOwnership::Owned
@@ -975,13 +1025,13 @@ mod tests {
             let replacement_fingerprint =
                 super::super::ingest::native_file_fingerprint(&delivered_path).unwrap();
             assert!(!recorded_fingerprint.safely_matches(&replacement_fingerprint));
-            fs::remove_dir_all(runtime.transfer_dir(&job.file_hash)).unwrap();
+            fs::remove_file(runtime.payload_path(job.token.job_id).unwrap()).unwrap();
         }
 
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
         assert_eq!(report.restored_payloads, 1);
-        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+        let manifest = runtime.manifest(job.token).await.unwrap();
         assert_eq!(
             manifest.delivery_ownership,
             super::super::Ed2kDeliveryOwnership::Unowned
@@ -990,51 +1040,25 @@ mod tests {
             !recorded_fingerprint.safely_matches(manifest.source_fingerprint.as_ref().unwrap())
         );
 
-        assert!(runtime.delete_transfer_files(&job.file_hash).await.unwrap());
+        assert!(
+            runtime
+                .remove_download_job(job.token.job_id, true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .cleanup_removed_download_job(job.token.job_id)
+                .await
+                .unwrap()
+        );
         assert_eq!(fs::read(&delivered_path).unwrap(), payload);
         drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
-    async fn legacy_pending_delivery_intent_is_preserved_without_adoption() {
-        let root = unique_test_dir("ed2k-restore-pending-delivery");
-        let incoming = root.join("incoming");
-        let payload = b"pending delivery recovery authority";
-        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-        let job = complete_download(&runtime, "pending.bin", payload).await;
-        fs::create_dir_all(&incoming).unwrap();
-        let delivered_path = incoming.join("pending.bin");
-        fs::write(&delivered_path, payload).unwrap();
-        let pending_path = runtime
-            .transfer_dir(&job.file_hash)
-            .join(DELIVERY_PENDING_FILE_NAME);
-        persist_pending_delivery_path(&pending_path, &delivered_path)
-            .await
-            .unwrap();
-        fs::remove_file(runtime.payload_path(&job.file_hash)).unwrap();
-
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
-
-        assert_eq!(report.restored_payloads, 0);
-        assert_eq!(report.demoted_downloads, 1);
-        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
-        assert!(!manifest.completed);
-        assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
-        assert!(manifest.delivered_path.is_none());
-        assert!(manifest.source_fingerprint.is_none());
-        assert!(manifest.payload_fingerprint.is_none());
-        assert!(pending_path.exists());
-        assert_eq!(fs::read(&delivered_path).unwrap(), payload);
-        assert!(
-            fs::read(runtime.payload_path(&job.file_hash))
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn staged_delivery_attempt_restores_payload_and_commits_hidden_row() {
+    async fn staged_delivery_attempt_restores_payload_for_exact_live_job() {
         let root = unique_test_dir("ed2k-adopt-pending-delivery-hidden-row");
         let incoming = root.join("incoming");
         let payload = b"hidden completed delivery recovery";
@@ -1049,40 +1073,23 @@ mod tests {
         let staging_path = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
         runtime
             .metadata
-            .begin_transfer_delivery_attempt(
-                &job.file_hash,
-                attempt_id,
-                &delivered_path,
-                &staging_path,
-            )
+            .begin_transfer_delivery_attempt(job.token, attempt_id, &delivered_path, &staging_path)
             .unwrap();
         assert!(
             runtime
                 .metadata
-                .mark_transfer_delivery_attempt_staged(
-                    &job.file_hash,
-                    attempt_id,
-                    &staging_fingerprint,
-                )
+                .mark_transfer_delivery_attempt_staged(job.token, attempt_id, &staging_fingerprint,)
                 .unwrap()
+                .is_some()
         );
-        {
-            let _guard = runtime.lock_manifest(&job.file_hash).await;
-            let mut manifest = runtime
-                .load_manifest_unlocked(&job.file_hash)
-                .await
-                .unwrap();
-            manifest.transfer_row_removed = true;
-            runtime.store_manifest_unlocked(&manifest).await.unwrap();
-        }
-        fs::remove_file(runtime.payload_path(&job.file_hash)).unwrap();
+        fs::remove_file(runtime.payload_path(job.token.job_id).unwrap()).unwrap();
 
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.restored_payloads, 1);
-        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+        let manifest = runtime.manifest(job.token).await.unwrap();
         assert!(manifest.completed);
-        assert!(manifest.transfer_row_removed);
+        assert!(!manifest.transfer_row_removed);
         assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
         assert_eq!(
             manifest.delivered_path.as_deref(),
@@ -1093,14 +1100,111 @@ mod tests {
         assert!(
             runtime
                 .metadata
-                .transfer_delivery_attempt_by_hash(&job.file_hash)
+                .download_job_delivery_attempt(job.token.job_id)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            fs::read(runtime.payload_path(&job.file_hash)).unwrap(),
+            fs::read(runtime.payload_path(job.token.job_id).unwrap()).unwrap(),
             payload
         );
+    }
+
+    #[tokio::test]
+    async fn removed_staged_attempt_cannot_resurrect_job_and_recovery_preserves_output() {
+        let root = unique_test_dir("ed2k-removed-staged-delivery");
+        let incoming = root.join("incoming");
+        let payload = b"staged attempt removal authority";
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let job = complete_download(&runtime, "removed.bin", payload).await;
+        let storage = runtime.transfer_dir(job.token.job_id).unwrap();
+        fs::create_dir_all(&incoming).unwrap();
+        let target = incoming.join("removed.bin");
+        let attempt_id = Uuid::new_v4();
+        let staging = incoming.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+        runtime
+            .metadata
+            .begin_transfer_delivery_attempt(job.token, attempt_id, &target, &staging)
+            .unwrap();
+        fs::write(&staging, payload).unwrap();
+        let proof = super::super::ingest::native_file_fingerprint(&staging).unwrap();
+        let captured = runtime
+            .metadata
+            .mark_transfer_delivery_attempt_staged(job.token, attempt_id, &proof)
+            .unwrap()
+            .unwrap();
+        // The target is independent, not the staged object. False removal must
+        // preserve it even while settling the captured staging journal.
+        fs::write(&target, b"operator output").unwrap();
+        assert!(
+            runtime
+                .remove_download_job(job.token.job_id, false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .metadata
+                .mark_transfer_delivery_attempt_published(job.token, attempt_id, &proof,)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !runtime
+                .metadata
+                .settle_recovered_delivery_attempt(job.token, &captured)
+                .unwrap()
+        );
+        let next = super::super::test_support::admit_download_job(
+            &runtime,
+            job.file_hash.parse().unwrap(),
+            "new.bin".into(),
+            payload.len() as u64,
+        );
+        runtime.ensure_job(&next).await.unwrap();
+        let next_storage = runtime.transfer_dir(next.token.job_id).unwrap();
+        assert_ne!(next_storage, storage);
+        drop(runtime);
+
+        let reopened = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        assert!(
+            reopened
+                .reconcile_download_storage(job.token)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            reopened
+                .metadata
+                .download_job_delivery_attempt(job.token.job_id)
+                .unwrap(),
+            Some(captured)
+        );
+        let (_, report) = reopened
+            .recover_removed_download_jobs_page(None, 16)
+            .await
+            .unwrap();
+        assert_eq!(report.recovered, 1, "{:?}", report.failures);
+        assert!(report.failures.is_empty());
+        assert!(!storage.exists());
+        assert!(!staging.exists());
+        assert!(next_storage.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"operator output");
+        assert!(!incoming.join("removed_01.bin").exists());
+        assert!(
+            reopened
+                .metadata
+                .download_job(job.token.job_id)
+                .unwrap()
+                .is_none()
+        );
+        let current = reopened
+            .metadata
+            .download_job(next.token.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.token, next.token);
+        assert!(current.completed_at_s.is_none() && current.removed_at_s.is_none());
     }
 
     #[tokio::test]
@@ -1111,24 +1215,24 @@ mod tests {
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         let job = complete_download(&runtime, "same-length.bin", payload).await;
         let delivered_path = match runtime
-            .materialize_completed_payload(&job.file_hash, &incoming)
+            .materialize_completed_payload(job.token, &incoming)
             .await
             .unwrap()
         {
             Ed2kDeliveryOutcome::Delivered(path) => path,
             outcome => panic!("unexpected delivery outcome: {outcome:?}"),
         };
-        let payload_path = runtime.payload_path(&job.file_hash);
+        let payload_path = runtime.payload_path(job.token.job_id).unwrap();
         let foreign = vec![b'X'; payload.len()];
         fs::write(&payload_path, &foreign).unwrap();
 
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.restored_payloads, 1);
         assert_eq!(report.quarantined_payloads, 1);
         assert_eq!(fs::read(&payload_path).unwrap(), payload);
         assert_eq!(fs::read(&delivered_path).unwrap(), payload);
-        let quarantined = fs::read_dir(runtime.transfer_dir(&job.file_hash))
+        let quarantined = fs::read_dir(runtime.transfer_dir(job.token.job_id).unwrap())
             .unwrap()
             .filter_map(Result::ok)
             .find(|entry| {
@@ -1139,7 +1243,7 @@ mod tests {
             })
             .expect("corrupt canonical payload must be preserved");
         assert_eq!(fs::read(quarantined.path()).unwrap(), foreign);
-        assert!(runtime.manifest(&job.file_hash).await.unwrap().completed);
+        assert!(runtime.manifest(job.token).await.unwrap().completed);
     }
 
     #[tokio::test]
@@ -1149,20 +1253,17 @@ mod tests {
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         let job = complete_download(&runtime, "missing-fingerprint.bin", payload).await;
         {
-            let _guard = runtime.lock_manifest(&job.file_hash).await;
-            let mut manifest = runtime
-                .load_manifest_unlocked(&job.file_hash)
-                .await
-                .unwrap();
+            let _guard = runtime.lock_manifest(job.token).await;
+            let mut manifest = runtime.load_manifest_unlocked(job.token).await.unwrap();
             manifest.payload_fingerprint = None;
             runtime.store_manifest_unlocked(&manifest).await.unwrap();
         }
 
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.restored_payloads, 0);
         assert_eq!(report.demoted_downloads, 0);
-        let refreshed = runtime.manifest(&job.file_hash).await.unwrap();
+        let refreshed = runtime.manifest(job.token).await.unwrap();
         assert!(refreshed.completed);
         assert!(refreshed.payload_fingerprint.is_some());
     }
@@ -1174,74 +1275,70 @@ mod tests {
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         let job = complete_download(&runtime, "stale-fingerprint.bin", payload).await;
         let before = runtime
-            .manifest(&job.file_hash)
+            .manifest(job.token)
             .await
             .unwrap()
             .payload_fingerprint
             .unwrap();
-        let payload_path = runtime.payload_path(&job.file_hash);
+        let payload_path = runtime.payload_path(job.token.job_id).unwrap();
         let replacement = payload_path.with_extension("replacement");
         fs::write(&replacement, payload).unwrap();
         fs::remove_file(&payload_path).unwrap();
         fs::rename(&replacement, &payload_path).unwrap();
 
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.restored_payloads, 0);
         assert_eq!(report.demoted_downloads, 0);
-        let refreshed = runtime.manifest(&job.file_hash).await.unwrap();
+        let refreshed = runtime.manifest(job.token).await.unwrap();
         assert!(refreshed.completed);
         assert_ne!(refreshed.payload_fingerprint, Some(before));
         assert!(refreshed.payload_fingerprint.is_some());
     }
 
     #[tokio::test]
-    async fn completed_payload_without_valid_recovery_is_demoted() {
+    async fn terminal_completion_survives_missing_payload_and_foreign_output() {
         let root = unique_test_dir("ed2k-demote-completed-payload");
         let incoming = root.join("incoming");
         let payload = b"completed payload lost authority";
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         let job = complete_download(&runtime, "foreign.bin", payload).await;
         let delivered_path = match runtime
-            .materialize_completed_payload(&job.file_hash, &incoming)
+            .materialize_completed_payload(job.token, &incoming)
             .await
             .unwrap()
         {
             Ed2kDeliveryOutcome::Delivered(path) => path,
             outcome => panic!("unexpected delivery outcome: {outcome:?}"),
         };
-        {
-            let _guard = runtime.lock_manifest(&job.file_hash).await;
-            let mut manifest = runtime
-                .load_manifest_unlocked(&job.file_hash)
-                .await
-                .unwrap();
-            manifest.transfer_row_removed = true;
-            runtime.store_manifest_unlocked(&manifest).await.unwrap();
-        }
-        fs::remove_file(runtime.payload_path(&job.file_hash)).unwrap();
+        runtime
+            .register_delivered_local_content(job.token)
+            .await
+            .unwrap();
+        let payload_path = runtime.payload_path(job.token.job_id).unwrap();
+        assert!(runtime.complete_download_job(job.token).await.unwrap());
+        let before = runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap();
+        fs::remove_file(&payload_path).unwrap();
         let foreign = vec![b'X'; payload.len()];
         fs::write(&delivered_path, &foreign).unwrap();
 
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
+        let report = runtime.reconcile_download_storage(job.token).await.unwrap();
 
         assert_eq!(report.restored_payloads, 0);
-        assert_eq!(report.demoted_downloads, 1);
-        assert_eq!(report.reset_pieces, 1);
-        let manifest = runtime.manifest(&job.file_hash).await.unwrap();
-        assert!(!manifest.completed);
-        assert!(!manifest.transfer_row_removed);
-        assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Pending);
-        assert!(manifest.delivered_path.is_none());
-        assert!(manifest.source_fingerprint.is_none());
-        assert!(manifest.payload_fingerprint.is_none());
-        assert!(manifest.verified_ranges.is_empty());
-        assert!(manifest.pieces.iter().all(|piece| {
-            piece.state == Ed2kTransferState::Missing
-                && piece.bytes_written == 0
-                && piece.block_bitmap.is_none()
-                && !piece.ich_corrupted
-        }));
+        assert_eq!(report.demoted_downloads, 0);
+        assert_eq!(report.reset_pieces, 0);
+        let after = runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(after.completed_at_s.is_some());
+        assert!(!payload_path.exists());
         assert_eq!(fs::read(&delivered_path).unwrap(), foreign);
         assert!(
             runtime
@@ -1259,19 +1356,19 @@ mod tests {
         let payload = b"completed wrong payload type";
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         let job = complete_download(&runtime, "wrong-completed.bin", payload).await;
-        let payload_path = runtime.payload_path(&job.file_hash);
+        let payload_path = runtime.payload_path(job.token.job_id).unwrap();
         fs::remove_file(&payload_path).unwrap();
         fs::create_dir(&payload_path).unwrap();
 
         let error = runtime
-            .reconcile_managed_download_storage()
+            .reconcile_download_storage(job.token)
             .await
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("payload is not a regular file"));
         assert!(payload_path.is_dir());
-        assert!(runtime.manifest(&job.file_hash).await.unwrap().completed);
+        assert!(runtime.manifest(job.token).await.unwrap().completed);
     }
 
     #[tokio::test]
@@ -1286,9 +1383,13 @@ mod tests {
             .unwrap();
         super::super::test_support::admit_local_share(&runtime, &root, &source).await;
 
-        let report = runtime.reconcile_managed_download_storage().await.unwrap();
-
-        assert_eq!(report.inspected_downloads, 0);
+        assert!(
+            runtime
+                .metadata
+                .latest_download_job(&shared.file_hash)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             runtime
                 .serving_view(&shared.file_hash)
@@ -1297,7 +1398,7 @@ mod tests {
                 .local_fingerprint
                 .is_some()
         );
-        assert!(!runtime.transfer_dir(&shared.file_hash).exists());
+        assert!(runtime.job_storage.lock().unwrap().is_empty());
         assert_eq!(
             runtime
                 .read_verified_range(
@@ -1315,54 +1416,67 @@ mod tests {
     #[tokio::test]
     async fn wrong_payload_type_fails_closed_without_removing_the_occupant() {
         let root = unique_test_dir("ed2k-wrong-incomplete-payload-type");
-        let job = Ed2kTransferJob {
-            file_hash: Ed2kHash::from_bytes([0x74; 16]).to_string(),
-            display_name: "wrong-type.bin".to_string(),
-            file_size: 8,
-            piece_size: 8,
-        };
+
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let job = super::super::test_support::admit_download_job_with_piece_size(
+            &runtime,
+            Ed2kHash::from_bytes([0x74; 16]),
+            "wrong-type.bin".to_string(),
+            8,
+            8,
+        );
         runtime.ensure_job(&job).await.unwrap();
-        let payload_path = runtime.payload_path(&job.file_hash);
+        let payload_path = runtime.payload_path(job.token.job_id).unwrap();
         fs::create_dir(&payload_path).unwrap();
 
         let error = runtime
-            .reconcile_managed_download_storage()
+            .reconcile_download_storage(job.token)
             .await
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("payload is not a regular file"));
         assert!(payload_path.is_dir());
-        assert!(runtime.manifest(&job.file_hash).await.is_ok());
+        assert!(runtime.manifest(job.token).await.is_ok());
     }
 
     #[tokio::test]
     async fn wrong_transfer_directory_type_fails_closed_without_removing_the_occupant() {
         let root = unique_test_dir("ed2k-wrong-incomplete-directory-type");
-        let job = Ed2kTransferJob {
-            file_hash: Ed2kHash::from_bytes([0x75; 16]).to_string(),
-            display_name: "wrong-directory-type.bin".to_string(),
-            file_size: 8,
-            piece_size: 8,
-        };
+        let job;
+        let storage_path;
         {
             let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            job = super::super::test_support::admit_download_job_with_piece_size(
+                &runtime,
+                Ed2kHash::from_bytes([0x75; 16]),
+                "wrong-directory-type.bin".to_string(),
+                8,
+                8,
+            );
+            storage_path = runtime
+                .metadata
+                .download_job(job.token.job_id)
+                .unwrap()
+                .unwrap()
+                .storage
+                .unwrap()
+                .path;
             runtime.ensure_job(&job).await.unwrap();
         }
-        let transfer_path = root.join(&job.file_hash);
-        fs::remove_dir(&transfer_path).unwrap();
+        let transfer_path = storage_path;
+        fs::remove_dir_all(&transfer_path).unwrap();
         fs::write(&transfer_path, b"foreign occupant").unwrap();
 
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
         let error = runtime
-            .reconcile_managed_download_storage()
+            .reconcile_download_storage(job.token)
             .await
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("path is not a directory"));
+        assert!(error.contains("job storage directory identity changed"));
         assert_eq!(fs::read(&transfer_path).unwrap(), b"foreign occupant");
-        assert!(runtime.manifest(&job.file_hash).await.is_ok());
+        assert!(runtime.manifest(job.token).await.is_ok());
     }
 }

@@ -20,6 +20,7 @@ use super::{
 const UPLOAD_READ_AHEAD_BYTES: u64 = ED2K_EMBLOCK_SIZE * 3;
 
 struct IncompletePayloadAuthority {
+    token: emulebb_metadata::JobToken,
     file_hash: String,
     file_size: u64,
     piece_size: u64,
@@ -54,6 +55,7 @@ impl IncompletePayloadAuthority {
                 .collect::<Result<Vec<_>>>()?
         };
         Ok(Self {
+            token: manifest.token,
             file_hash: manifest.file_hash.clone(),
             file_size: manifest.file_size,
             piece_size: manifest.piece_size,
@@ -64,6 +66,7 @@ impl IncompletePayloadAuthority {
 
 #[derive(Debug)]
 pub(super) struct Ed2kIncompletePayloadFailure {
+    pub(super) token: emulebb_metadata::JobToken,
     pub(super) file_hash: String,
     pub(super) piece_index: Option<u32>,
     pub(super) reason: String,
@@ -86,8 +89,11 @@ impl std::error::Error for Ed2kIncompletePayloadFailure {}
 
 #[derive(Clone)]
 enum VerifiedPayloadAuthority {
-    ManagedIncomplete,
+    ManagedIncomplete {
+        token: emulebb_metadata::JobToken,
+    },
     ManagedCompleted {
+        token: emulebb_metadata::JobToken,
         expected: Option<NativeFileFingerprint>,
     },
     LocalInstance {
@@ -99,19 +105,19 @@ enum VerifiedPayloadAuthority {
 impl VerifiedPayloadAuthority {
     fn expected_fingerprint(&self) -> Option<&NativeFileFingerprint> {
         match self {
-            Self::ManagedIncomplete => None,
-            Self::ManagedCompleted { expected } => expected.as_ref(),
+            Self::ManagedIncomplete { .. } => None,
+            Self::ManagedCompleted { expected, .. } => expected.as_ref(),
             Self::LocalInstance { expected, .. } => Some(expected),
         }
     }
 
     const fn requires_fingerprint(&self) -> bool {
-        !matches!(self, Self::ManagedIncomplete)
+        !matches!(self, Self::ManagedIncomplete { .. })
     }
 
     const fn label(&self) -> &'static str {
         match self {
-            Self::ManagedIncomplete => "managed_incomplete",
+            Self::ManagedIncomplete { .. } => "managed_incomplete",
             Self::ManagedCompleted { .. } => "managed_completed",
             Self::LocalInstance { .. } => "local_instance",
         }
@@ -200,12 +206,12 @@ impl Ed2kVerifiedRangeReader {
         if start == end {
             return Ok(Some(Vec::new()));
         }
-        let (file_size, piece_size) = {
+        let (token, file_size, piece_size) = {
             let authority = self
                 .incomplete_authority
                 .as_ref()
                 .context("missing incomplete ED2K payload authority")?;
-            (authority.file_size, authority.piece_size)
+            (authority.token, authority.file_size, authority.piece_size)
         };
         anyhow::ensure!(
             piece_size != 0,
@@ -235,6 +241,7 @@ impl Ed2kVerifiedRangeReader {
                 .seek(std::io::SeekFrom::Start(piece_start))
                 .await
                 .map_err(|error| Ed2kIncompletePayloadFailure {
+                    token,
                     file_hash: self
                         .incomplete_authority
                         .as_ref()
@@ -247,6 +254,7 @@ impl Ed2kVerifiedRangeReader {
                 .read_exact(&mut piece_bytes)
                 .await
                 .map_err(|error| Ed2kIncompletePayloadFailure {
+                    token,
                     file_hash: self
                         .incomplete_authority
                         .as_ref()
@@ -274,6 +282,7 @@ impl Ed2kVerifiedRangeReader {
                     .file_hash
                     .clone();
                 return Err(Ed2kIncompletePayloadFailure {
+                    token,
                     file_hash,
                     piece_index: Some(piece_index),
                     reason: "changed before upload serving".to_string(),
@@ -357,11 +366,33 @@ impl Ed2kTransferRuntime {
     /// holds the handle at a time; hand it back with
     /// [`Self::store_payload_handle`] after use. On an IO error, drop it
     /// instead (the next take re-opens a fresh handle).
-    pub(super) async fn take_payload_handle(&self, file_hash: &str) -> Result<tokio::fs::File> {
-        if let Some(file) = self.payload_handles.lock().unwrap().remove(file_hash) {
+    pub(super) async fn take_payload_handle(
+        &self,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<tokio::fs::File> {
+        {
+            let manifests = self.manifest_cache.lock().await;
+            anyhow::ensure!(
+                manifests
+                    .get(&token.job_id)
+                    .is_some_and(|manifest| manifest.token == token
+                        && !manifest.transfer_row_removed
+                        && manifest.intent == emulebb_metadata::DownloadIntent::Started),
+                "stale download job cannot open writable payload"
+            );
+        }
+        anyhow::ensure!(
+            self.job_storage
+                .lock()
+                .unwrap()
+                .get(&token.job_id)
+                .is_some_and(|session| session.token == token),
+            "payload writer belongs to an inactive job generation"
+        );
+        if let Some(file) = self.payload_handles.lock().unwrap().remove(&token) {
             return Ok(file);
         }
-        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
+        let payload_path = self.transfer_dir(token.job_id)?.join(PAYLOAD_FILE_NAME);
         tokio::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -374,18 +405,27 @@ impl Ed2kTransferRuntime {
 
     /// Return a payload handle taken with [`Self::take_payload_handle`] so the
     /// next block append reuses it instead of re-opening the piece store.
-    pub(super) fn store_payload_handle(&self, file_hash: &str, file: tokio::fs::File) {
-        self.payload_handles
-            .lock()
-            .unwrap()
-            .insert(file_hash.to_string(), file);
+    pub(super) fn store_payload_handle(
+        &self,
+        token: emulebb_metadata::JobToken,
+        file: tokio::fs::File,
+    ) {
+        // The short resident-session fence is shared with logical removal. A
+        // late I/O completion may close its handle, never resurrect its session.
+        let storage = self.job_storage.lock().unwrap();
+        if storage
+            .get(&token.job_id)
+            .is_some_and(|session| session.token == token)
+        {
+            self.payload_handles.lock().unwrap().insert(token, file);
+        }
     }
 
     /// Drop the cached payload handle. Must run before the payload file is
     /// deleted: on Windows a pending handle leaves the file delete-pending and
     /// the transfer directory undeletable.
-    pub(super) fn invalidate_payload_handle(&self, file_hash: &str) {
-        self.payload_handles.lock().unwrap().remove(file_hash);
+    pub(super) fn invalidate_payload_handle(&self, token: emulebb_metadata::JobToken) {
+        self.payload_handles.lock().unwrap().remove(&token);
     }
 
     /// Re-verify every on-disk part of a transfer against the MD4 hashset and
@@ -398,33 +438,35 @@ impl Ed2kTransferRuntime {
     /// re-verification authority) — without it there is nothing to check against,
     /// so the manifest is returned unchanged. Returns the recomputed `completed`
     /// flag (true == still a complete, fully verified file).
-    pub async fn recheck_transfer(&self, file_hash: &str) -> Result<bool> {
-        self.final_recheck_transfer(file_hash).await
+    pub async fn recheck_transfer(&self, token: emulebb_metadata::JobToken) -> Result<bool> {
+        self.final_recheck_transfer(token).await
     }
 
     /// Persist one downloaded piece into the local piece store.
     pub async fn store_piece_data(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         piece_index: u32,
         data: &[u8],
     ) -> Result<()> {
-        self.store_piece_data_unfinalized(file_hash, piece_index, data)
+        self.store_piece_data_unfinalized(token, piece_index, data)
             .await?;
-        if self.manifest(file_hash).await?.final_rehash_pending {
-            self.finalize_pending_transfer(file_hash).await?;
+        if self.manifest(token).await?.final_rehash_pending {
+            self.finalize_pending_transfer(token).await?;
         }
         Ok(())
     }
 
     pub(super) async fn store_piece_data_unfinalized(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         piece_index: u32,
         data: &[u8],
     ) -> Result<()> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let _guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let hash = manifest.file_hash.clone();
+        let file_hash = hash.as_str();
         let piece_size = manifest.piece_size;
         let expected_piece_len =
             expected_piece_length(manifest.file_size, piece_size, u64::from(piece_index));
@@ -437,7 +479,7 @@ impl Ed2kTransferRuntime {
                 expected_piece_len
             );
         }
-        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
+        let payload_path = self.transfer_dir(token.job_id)?.join(PAYLOAD_FILE_NAME);
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -482,17 +524,17 @@ impl Ed2kTransferRuntime {
     /// block bitmap until the missing prefix arrives.
     pub(crate) async fn append_piece_block(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         piece_index: u32,
         start: u64,
         end: u64,
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
         let (outcome, manifest) = self
-            .append_piece_block_inner(file_hash, piece_index, start, end, data)
+            .append_piece_block_inner(token, piece_index, start, end, data)
             .await?;
         if manifest.final_rehash_pending {
-            self.finalize_pending_transfer(file_hash).await?;
+            self.finalize_pending_transfer(token).await?;
         }
         Ok(outcome)
     }
@@ -502,14 +544,16 @@ impl Ed2kTransferRuntime {
     /// manifest for every accepted block.
     async fn append_piece_block_inner(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         piece_index: u32,
         start: u64,
         end: u64,
         data: &[u8],
     ) -> Result<(PieceWriteOutcome, Ed2kResumeManifest)> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let hash = manifest.file_hash.clone();
+        let file_hash = hash.as_str();
         let block_received_at = Instant::now();
         let piece_size = manifest.piece_size;
         let piece_start = u64::from(piece_index) * piece_size;
@@ -546,12 +590,13 @@ impl Ed2kTransferRuntime {
                     end,
                     data,
                     block_received_at,
+                    guard,
                 )
                 .await?;
             return Ok((outcome, manifest));
         }
 
-        let mut file = self.take_payload_handle(file_hash).await?;
+        let mut file = self.take_payload_handle(token).await?;
         use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
         file.seek(std::io::SeekFrom::Start(start)).await?;
         file.write_all(data).await?;
@@ -570,7 +615,7 @@ impl Ed2kTransferRuntime {
             let mut piece_bytes = vec![0u8; usize::try_from(expected_piece_len).unwrap_or(0)];
             file.seek(std::io::SeekFrom::Start(piece_start)).await?;
             file.read_exact(&mut piece_bytes).await?;
-            self.store_payload_handle(file_hash, file);
+            self.store_payload_handle(token, file);
             let verified = verify_piece_against_manifest(&manifest, piece_index, &piece_bytes)?;
             let piece = manifest
                 .pieces
@@ -586,7 +631,7 @@ impl Ed2kTransferRuntime {
                 // Credit every recorded sender of this part in the corruption
                 // blackbox (oracle MD4 part success ->
                 // `m_CorruptionBlackBox.VerifiedData`, PartFile.cpp:5205).
-                self.cbb_record_verified_data(file_hash, piece_start, piece_end);
+                self.cbb_record_verified_data(manifest.token, piece_start, piece_end);
             } else {
                 // MD4 failure alone never bans: the part is gapped for
                 // re-download and the caller solicits AICH recovery
@@ -607,7 +652,7 @@ impl Ed2kTransferRuntime {
             if super::mark_final_rehash_pending(&mut manifest) {
                 // No further appends will come: release the cached write
                 // handle before the final whole-file reader opens the payload.
-                self.invalidate_payload_handle(file_hash);
+                self.invalidate_payload_handle(token);
             }
             if outcome.is_completed() {
                 self.upsert_verified_catalog_entry(&manifest).await;
@@ -664,9 +709,9 @@ impl Ed2kTransferRuntime {
                     checkpoint_reason = Some("periodic_progress");
                 }
                 file.flush().await?;
-                self.store_payload_handle(file_hash, file);
+                self.store_payload_handle(token, file);
                 if progress_only {
-                    self.store_manifest_piece_progress_unlocked(&manifest, piece_index)
+                    self.store_manifest_piece_progress_unlocked(&manifest, piece_index, guard)
                         .await?;
                 } else {
                     self.store_manifest_unlocked(&manifest).await?;
@@ -683,8 +728,9 @@ impl Ed2kTransferRuntime {
                 return Ok((outcome, manifest));
             }
 
-            self.store_payload_handle(file_hash, file);
-            self.note_dirty_piece_unlocked(&manifest, piece_index).await;
+            self.store_payload_handle(token, file);
+            self.note_dirty_piece_unlocked(&manifest, piece_index)
+                .await?;
             manifest = self.cache_manifest_unlocked(&manifest).await?;
             log_append_piece_block(AppendPieceBlockLog {
                 manifest: &manifest,
@@ -718,18 +764,18 @@ impl Ed2kTransferRuntime {
     /// it from the cache per block.
     pub(crate) async fn append_piece_block_with_manifest(
         &self,
-        file_hash: &str,
+        token: emulebb_metadata::JobToken,
         piece_index: u32,
         start: u64,
         end: u64,
         data: &[u8],
     ) -> Result<(PieceWriteOutcome, Ed2kResumeManifest)> {
         let (outcome, mut manifest) = self
-            .append_piece_block_inner(file_hash, piece_index, start, end, data)
+            .append_piece_block_inner(token, piece_index, start, end, data)
             .await?;
         if manifest.final_rehash_pending {
-            self.finalize_pending_transfer(file_hash).await?;
-            manifest = self.manifest(file_hash).await?;
+            self.finalize_pending_transfer(token).await?;
+            manifest = self.manifest(token).await?;
         }
         Ok((outcome, manifest))
     }
@@ -781,51 +827,68 @@ impl Ed2kTransferRuntime {
         // the per-file manifest lock, then drop it before touching the payload, so
         // the file open/seek/read does not hold the lock and serialize concurrent
         // uploads/downloads against each other (FIX B4b).
-        let (payload_path, verified_ranges, authority, incomplete_authority) =
-            if let Some(local) = local {
-                let path = long_path(&local.path);
-                (
-                    path.clone(),
-                    vec![Ed2kSharedRange {
-                        start: 0,
-                        end: local.file_size,
-                    }],
-                    VerifiedPayloadAuthority::LocalInstance {
-                        path,
-                        expected: local.verified_fingerprint,
-                    },
-                    None,
-                )
-            } else {
-                let _guard = self.lock_manifest(&hash_hex).await;
-                let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
-                    return Ok(None);
-                };
-                match manifest.verified_ranges.is_empty() {
-                    false => {
-                        let (authority, incomplete_authority) = if manifest.completed {
-                            (
-                                VerifiedPayloadAuthority::ManagedCompleted {
-                                    expected: manifest.payload_fingerprint.clone(),
-                                },
-                                None,
-                            )
-                        } else {
-                            (
-                                VerifiedPayloadAuthority::ManagedIncomplete,
-                                Some(IncompletePayloadAuthority::from_manifest(&manifest)?),
-                            )
-                        };
-                        (
-                            self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
-                            manifest.verified_ranges.clone(),
-                            authority,
-                            incomplete_authority,
-                        )
-                    }
-                    true => return Ok(None),
-                }
+        let (payload_path, verified_ranges, authority, incomplete_authority) = if let Some(local) =
+            local
+        {
+            let path = long_path(&local.path);
+            (
+                path.clone(),
+                vec![Ed2kSharedRange {
+                    start: 0,
+                    end: local.file_size,
+                }],
+                VerifiedPayloadAuthority::LocalInstance {
+                    path,
+                    expected: local.verified_fingerprint,
+                },
+                None,
+            )
+        } else {
+            let Some(token) = self.resolve_protocol_job(&hash_hex).await? else {
+                return Ok(None);
             };
+            let _guard = self.lock_manifest(token).await;
+            // A stopped job retains verified partial bytes but has no active
+            // writer session. Read its persisted allocation, never reconstruct
+            // a path or require a resident writer to serve those bytes.
+            let Some(job) = self.download_job(token.job_id).await? else {
+                return Ok(None);
+            };
+            if job.token != token || job.removed_at_s.is_some() || job.internal_storage_retired {
+                return Ok(None);
+            }
+            let Some(storage) = job.storage.filter(|storage| storage.identity.is_some()) else {
+                return Ok(None);
+            };
+            let Some(manifest) = self.load_manifest_optional_unlocked(token).await? else {
+                return Ok(None);
+            };
+            match manifest.verified_ranges.is_empty() {
+                false => {
+                    let (authority, incomplete_authority) = if manifest.completed {
+                        (
+                            VerifiedPayloadAuthority::ManagedCompleted {
+                                token,
+                                expected: manifest.payload_fingerprint.clone(),
+                            },
+                            None,
+                        )
+                    } else {
+                        (
+                            VerifiedPayloadAuthority::ManagedIncomplete { token },
+                            Some(IncompletePayloadAuthority::from_manifest(&manifest)?),
+                        )
+                    };
+                    (
+                        storage.path.join(PAYLOAD_FILE_NAME),
+                        manifest.verified_ranges.clone(),
+                        authority,
+                        incomplete_authority,
+                    )
+                }
+                true => return Ok(None),
+            }
+        };
 
         if authority.requires_fingerprint() && authority.expected_fingerprint().is_none() {
             warn!(
@@ -889,7 +952,15 @@ impl Ed2kTransferRuntime {
                     .await?;
                 return Ok(None);
             }
-            Err(error) if matches!(authority, VerifiedPayloadAuthority::ManagedIncomplete) => {
+            Err(error)
+                if matches!(
+                    authority,
+                    VerifiedPayloadAuthority::ManagedIncomplete { .. }
+                ) =>
+            {
+                let VerifiedPayloadAuthority::ManagedIncomplete { token } = authority else {
+                    unreachable!()
+                };
                 warn!(
                     %error,
                     file_hash = hash_hex,
@@ -897,6 +968,7 @@ impl Ed2kTransferRuntime {
                     "withdrawing unavailable incomplete ED2K payload"
                 );
                 self.reconcile_incomplete_payload_failure(&Ed2kIncompletePayloadFailure {
+                    token,
                     file_hash: hash_hex,
                     piece_index: None,
                     reason: format!("could not be opened for upload serving: {error}"),
@@ -927,26 +999,31 @@ impl Ed2kTransferRuntime {
         authority: &VerifiedPayloadAuthority,
     ) -> Result<()> {
         match authority {
-            VerifiedPayloadAuthority::ManagedIncomplete => Ok(()),
-            VerifiedPayloadAuthority::ManagedCompleted { expected } => {
-                let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
-                let _manifest_guard = self.lock_manifest(file_hash).await;
-                let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+            VerifiedPayloadAuthority::ManagedIncomplete { .. } => Ok(()),
+            VerifiedPayloadAuthority::ManagedCompleted { token, expected } => {
+                let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
+                let _manifest_guard = self.lock_manifest(*token).await;
+                let mut manifest = self.load_manifest_unlocked(*token).await?;
                 if !manifest.completed || manifest.payload_fingerprint.as_ref() != expected.as_ref()
                 {
+                    return Ok(());
+                }
+                if manifest.delivery_state == super::Ed2kDeliveryState::Delivered {
+                    // Internal bytes are no longer the historical delivery fact.
+                    // The changed handle is rejected without restarting the job.
                     return Ok(());
                 }
                 manifest.completed = false;
                 manifest.final_rehash_pending = true;
                 manifest.payload_fingerprint = None;
-                self.invalidate_payload_handle(file_hash);
+                self.invalidate_payload_handle(*token);
                 self.store_manifest_unlocked(&manifest).await?;
                 self.upsert_verified_catalog_entry(&manifest).await;
                 Ok(())
             }
             VerifiedPayloadAuthority::LocalInstance { path, expected } => {
                 let hash: Ed2kHash = file_hash.parse()?;
-                let manifest_guard = self.lock_manifest(file_hash).await;
+                let manifest_guard = self.lock_content(file_hash).await;
                 let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
                 let receive = self.local_mutations.submit_withdrawal(
                     self,
@@ -974,13 +1051,13 @@ impl Ed2kTransferRuntime {
         &self,
         failure: &Ed2kIncompletePayloadFailure,
     ) -> Result<()> {
-        let _lifecycle_guard = self.lock_lifecycle(&failure.file_hash).await;
-        let _manifest_guard = self.lock_manifest(&failure.file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(&failure.file_hash).await?;
+        let _lifecycle_guard = self.lock_lifecycle(failure.token.job_id).await;
+        let _manifest_guard = self.lock_manifest(failure.token).await;
+        let mut manifest = self.load_manifest_unlocked(failure.token).await?;
         if manifest.completed || manifest.final_rehash_pending {
             return Ok(());
         }
-        self.invalidate_payload_handle(&failure.file_hash);
+        self.invalidate_payload_handle(failure.token);
 
         let mut damaged_pieces = BTreeSet::new();
         if let Some(piece_index) = failure.piece_index {
@@ -1063,7 +1140,7 @@ impl Ed2kTransferRuntime {
             u64::from(piece_index),
         );
         let payload_path = self
-            .transfer_dir(&manifest.file_hash)
+            .transfer_dir(manifest.token.job_id)?
             .join(PAYLOAD_FILE_NAME);
         tokio::task::spawn_blocking(move || -> Result<bool> {
             use std::io::{Read, Seek};

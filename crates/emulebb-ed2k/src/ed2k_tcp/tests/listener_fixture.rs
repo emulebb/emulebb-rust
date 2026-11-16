@@ -142,15 +142,19 @@ impl ListenerTestRuntime {
         payload: Vec<u8>,
     ) -> VerifiedUploadFile {
         let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-        let file_hash_hex = file_hash.to_string();
-        let job = new_transfer_job(file_hash, name.to_string(), payload.len() as u64);
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            &self.transfer_runtime,
+            file_hash,
+            name.to_string(),
+            payload.len() as u64,
+        );
         self.transfer_runtime.ensure_job(&job).await.unwrap();
         self.transfer_runtime
-            .store_md4_hashset(&file_hash_hex, Vec::new())
+            .store_md4_hashset(job.token, Vec::new())
             .await
             .unwrap();
         self.transfer_runtime
-            .store_piece_data(&file_hash_hex, 0, &payload)
+            .store_piece_data(job.token, 0, &payload)
             .await
             .unwrap();
 

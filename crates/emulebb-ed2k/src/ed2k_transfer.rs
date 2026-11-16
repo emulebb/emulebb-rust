@@ -23,7 +23,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use emulebb_metadata::MetadataStore;
+use emulebb_metadata::{JobId, JobToken, MetadataStore};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig};
@@ -118,9 +118,9 @@ pub use model::{
     ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kAichRootOrigin, Ed2kCallbackDispatchOutcome,
     Ed2kCallbackDispatchPermit, Ed2kCallbackDownload, Ed2kCallbackReservation, Ed2kCallbackRoute,
     Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest,
-    Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kFileNameObservation, Ed2kFileServingView,
-    Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest,
-    Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
+    Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kFileServingView, Ed2kLocalIngestSummary,
+    Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob,
+    Ed2kTransferState,
 };
 pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,
@@ -281,7 +281,6 @@ pub struct Ed2kTransferRetirementRecoveryReport {
 pub struct Ed2kTransferRuntime {
     root_dir: PathBuf,
     metadata: MetadataStore,
-    file_name_policy: Ed2kFileNamePolicy,
     shared_catalog: Ed2kSharedCatalog,
     share_eligibility: Arc<catalog::SharedEligibility>,
     local_mutations: Arc<local_mutation::LocalMutationRegistry>,
@@ -290,15 +289,18 @@ pub struct Ed2kTransferRuntime {
     /// the first publishable startup cohort. `pending` is claimed atomically so
     /// at most one background hydration pass can append the remaining pages.
     shared_catalog_hydration_cursor: StdMutex<Option<String>>,
+    shared_payload_hydration_cursor: StdMutex<Option<emulebb_metadata::JobId>>,
+    shared_local_hydration_done: AtomicBool,
     shared_catalog_hydration_pending: AtomicBool,
     servable_shared_hash_cache: Arc<StdMutex<ServableSharedHashCache>>,
     callback_tickets: Arc<StdMutex<callback::CallbackTicketStore>>,
-    /// Per-file-hash manifest IO locks (see [`Self::lock_manifest`]). Manifest
-    /// state is keyed by one file hash everywhere, so transfers only serialize
-    /// against themselves; a single global lock here used to serialize every
-    /// block append of every concurrent download (and upload reader opens)
-    /// behind one mutex.
-    manifest_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Exact job I/O locks. Generations of one job drain before physical reuse;
+    /// a removed job's slow cleanup never locks a newer same-content job.
+    manifest_locks: Arc<StdMutex<HashMap<JobId, std::sync::Weak<Mutex<()>>>>>,
+    /// Short content publication serialization, independent of job I/O/lifecycle.
+    content_locks: Arc<StdMutex<HashMap<String, std::sync::Weak<Mutex<()>>>>>,
+    /// Only selected executions are resident; historical cleanup owns its snapshot.
+    job_storage: Arc<StdMutex<HashMap<JobId, store::JobStorageSession>>>,
     /// Serializes category selection against compound category deletion. The
     /// delete path takes this gate before locking every affected manifest, so
     /// no assignment can be resolved against one category snapshot and commit
@@ -311,9 +313,9 @@ pub struct Ed2kTransferRuntime {
     /// Per-transfer lifecycle serialization for delivery, row removal, and
     /// destructive deletion. Unlike the manifest IO lock this may be held
     /// across slow filesystem work without delaying unrelated manifest reads.
-    lifecycle_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
-    manifest_cache: Arc<Mutex<HashMap<String, Ed2kResumeManifest>>>,
-    manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
+    lifecycle_locks: Arc<StdMutex<HashMap<JobId, std::sync::Weak<Mutex<()>>>>>,
+    manifest_cache: Arc<Mutex<HashMap<JobId, Ed2kResumeManifest>>>,
+    manifest_checkpoint_state: Arc<Mutex<HashMap<JobToken, Ed2kManifestCheckpointState>>>,
     /// Process-local download block reservations. Durable manifests describe
     /// bytes which reached the piece store; they never own network work. This
     /// registry therefore disappears on restart and its lease guards release
@@ -328,7 +330,7 @@ pub struct Ed2kTransferRuntime {
     /// deletion so a pending handle cannot leave the transfer directory
     /// undeletable on Windows. A `std` Mutex held only for instant map ops,
     /// never across an `.await`.
-    payload_handles: Arc<StdMutex<HashMap<String, tokio::fs::File>>>,
+    payload_handles: Arc<StdMutex<HashMap<JobToken, tokio::fs::File>>>,
     source_exchange: SourceExchangeState,
     /// Per-file accumulator of network-proposed AICH roots and their distinct
     /// proposing IPs. A network-learned root is only promoted to the
@@ -336,14 +338,14 @@ pub struct Ed2kTransferRuntime {
     /// `MINUNIQUEIPS_TOTRUST`/`MINPERCENTAGE_TOTRUST` corroboration gate. The
     /// signer set lives here (in-memory, live session state, never persisted);
     /// the durable trust decision is the promoted `manifest.aich_root`.
-    aich_root_corroboration: Arc<StdMutex<HashMap<String, aich_trust::AichRootCorroboration>>>,
+    aich_root_corroboration: Arc<StdMutex<HashMap<JobToken, aich_trust::AichRootCorroboration>>>,
     #[cfg(test)]
     aich_persist_barrier: Arc<StdMutex<Option<Arc<aich_trust::AichPersistBarrier>>>>,
-    download_activity: Arc<StdMutex<HashMap<String, Ed2kDownloadActivity>>>,
+    download_activity: Arc<StdMutex<HashMap<JobToken, Ed2kDownloadActivity>>>,
     /// Live per-source download state keyed by file hash -> peer endpoint, used
     /// to surface sourcesTransferring/partsAvailable and live transfer-source
     /// detail. In-memory only (live session state, never persisted).
-    download_sources: Arc<StdMutex<HashMap<String, HashMap<String, Ed2kSourceActivity>>>>,
+    download_sources: Arc<StdMutex<HashMap<JobToken, HashMap<String, Ed2kSourceActivity>>>>,
     /// Cross-connection download-source anti-abuse counters (queue-rank flood
     /// bad requests plus OP_OUTOFPARTREQS cooldown/quarantine state). MFC keeps
     /// these on its long-lived client object; Rust keeps the equivalent bounded
@@ -447,37 +449,8 @@ pub struct Ed2kTransferRuntime {
     /// AICH block verdicts, evaluated for the 32%-corrupt-share ban. In-memory
     /// only (live per part file at runtime, never persisted), matching the
     /// master.
-    corruption_blackbox: Arc<StdMutex<HashMap<String, corruption_blackbox::CorruptionBlackBox>>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Ed2kFileNamePolicy {
-    follow_majority_for_new_downloads: bool,
-    minimum_votes: usize,
-    required_percent: u32,
-}
-
-impl Default for Ed2kFileNamePolicy {
-    fn default() -> Self {
-        Self {
-            follow_majority_for_new_downloads: false,
-            minimum_votes: 0,
-            required_percent: 51,
-        }
-    }
-}
-
-impl From<&Ed2kRuntimeConfig> for Ed2kFileNamePolicy {
-    fn from(config: &Ed2kRuntimeConfig) -> Self {
-        Self {
-            follow_majority_for_new_downloads: config.follow_majority_filename_for_new_downloads,
-            minimum_votes: usize::try_from(config.follow_majority_filename_minimum_votes)
-                .unwrap_or(usize::MAX),
-            required_percent: config
-                .follow_majority_filename_required_percent
-                .clamp(1, 100),
-        }
-    }
+    corruption_blackbox:
+        Arc<StdMutex<HashMap<emulebb_metadata::JobToken, corruption_blackbox::CorruptionBlackBox>>>,
 }
 
 /// Lightweight notification handle for shared-file demand changes that can
@@ -495,16 +468,34 @@ const SHARED_SOURCE_INVALIDATION_CAPACITY: usize = 256;
 /// The path is already normalized for platform-native access. Core owns the
 /// recovery policy; the transfer runtime only reports the source identity that
 /// it withdrew before serving any bytes under the stale hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Ed2kSharedSourceInvalidation {
     pub file_hash: String,
     pub source_path: PathBuf,
 }
 
+/// One native backing allocation shared with the coalescing key. The charge
+/// follows the reservation, queue and consumer, and drops after the value.
+#[derive(Debug)]
+struct OwnedSharedSourceInvalidation {
+    value: Arc<Ed2kSharedSourceInvalidation>,
+    _charge: local_mutation::capacity::CapacityLease,
+}
+impl Ed2kSharedSourceInvalidation {
+    fn backing_bytes(&self) -> anyhow::Result<usize> {
+        self.source_path
+            .capacity()
+            .checked_add(self.file_hash.capacity())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+            .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+            .ok_or_else(|| anyhow::anyhow!("invalidation backing exceeds capacity"))
+    }
+}
 #[derive(Debug, Default)]
 struct Ed2kSharedSourceInvalidationState {
-    pending: VecDeque<Ed2kSharedSourceInvalidation>,
-    scheduled: HashSet<(PathBuf, String)>,
+    // Drop coalescing references before queued values and their byte leases.
+    scheduled: HashSet<Arc<Ed2kSharedSourceInvalidation>>,
+    pending: VecDeque<OwnedSharedSourceInvalidation>,
 }
 
 /// Bounded, path-coalesced local invalidation signal consumed by core.
@@ -527,27 +518,31 @@ impl Ed2kSharedSourceInvalidationSignal {
     fn reserve(
         &self,
         invalidation: Ed2kSharedSourceInvalidation,
+        lease: &mut local_mutation::capacity::CapacityLease,
     ) -> anyhow::Result<Ed2kSharedSourceInvalidationReservation> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("shared invalidation queue failed"))?;
-        let key = (
-            invalidation.source_path.clone(),
-            invalidation.file_hash.clone(),
-        );
         anyhow::ensure!(
-            !state.scheduled.contains(&key),
+            !state.scheduled.contains(&invalidation),
             "shared invalidation is already pending"
         );
         anyhow::ensure!(
             state.scheduled.len() < SHARED_SOURCE_INVALIDATION_CAPACITY,
             "shared invalidation queue is busy"
         );
-        state.scheduled.insert(key);
+        // Reuse the already admitted ordinary allowance; there is no queue pool.
+        // The fixed 256-entry containers retain their existing bounded baseline.
+        let charge = lease.split_retained_bytes(invalidation.backing_bytes()?)?;
+        let value = Arc::new(invalidation);
+        state.scheduled.insert(Arc::clone(&value));
         Ok(Ed2kSharedSourceInvalidationReservation {
             signal: self.clone(),
-            invalidation: Some(invalidation),
+            invalidation: Some(OwnedSharedSourceInvalidation {
+                value,
+                _charge: charge,
+            }),
         })
     }
     /// Wait for the next distinct invalidated path.
@@ -575,21 +570,26 @@ impl Ed2kSharedSourceInvalidationSignal {
     }
 
     fn acknowledge(&self, invalidation: &Ed2kSharedSourceInvalidation) {
-        self.state.lock().unwrap().scheduled.remove(&(
-            invalidation.source_path.clone(),
-            invalidation.file_hash.clone(),
-        ));
+        // Borrow the exact key: no temporary native-path clone at acknowledgement.
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .scheduled
+            .remove(invalidation);
     }
-
-    fn requeue(&self, invalidation: Ed2kSharedSourceInvalidation) {
-        self.state.lock().unwrap().pending.push_front(invalidation);
+    fn requeue(&self, invalidation: OwnedSharedSourceInvalidation) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pending
+            .push_front(invalidation);
         self.notify.notify_one();
     }
 }
 
 struct Ed2kSharedSourceInvalidationReservation {
     signal: Ed2kSharedSourceInvalidationSignal,
-    invalidation: Option<Ed2kSharedSourceInvalidation>,
+    invalidation: Option<OwnedSharedSourceInvalidation>,
 }
 impl Ed2kSharedSourceInvalidationReservation {
     fn commit(mut self) -> anyhow::Result<()> {
@@ -609,16 +609,7 @@ impl Ed2kSharedSourceInvalidationReservation {
 impl Drop for Ed2kSharedSourceInvalidationReservation {
     fn drop(&mut self) {
         if let Some(invalidation) = self.invalidation.take() {
-            match self.signal.state.lock() {
-                Ok(mut state) => {
-                    state
-                        .scheduled
-                        .remove(&(invalidation.source_path, invalidation.file_hash));
-                }
-                Err(_) => {
-                    tracing::error!("shared invalidation queue failed while releasing reservation")
-                }
-            }
+            self.signal.acknowledge(&invalidation.value);
         }
     }
 }
@@ -627,7 +618,7 @@ impl Drop for Ed2kSharedSourceInvalidationReservation {
 #[derive(Debug)]
 pub struct Ed2kSharedSourceInvalidationLease {
     signal: Ed2kSharedSourceInvalidationSignal,
-    invalidation: Option<Ed2kSharedSourceInvalidation>,
+    invalidation: Option<OwnedSharedSourceInvalidation>,
 }
 
 impl Ed2kSharedSourceInvalidationLease {
@@ -636,6 +627,8 @@ impl Ed2kSharedSourceInvalidationLease {
         self.invalidation
             .as_ref()
             .expect("invalidation lease must remain populated until acknowledgement")
+            .value
+            .as_ref()
     }
 
     pub fn acknowledge(mut self) {
@@ -643,7 +636,7 @@ impl Ed2kSharedSourceInvalidationLease {
             .invalidation
             .take()
             .expect("invalidation lease must remain populated until acknowledgement");
-        self.signal.acknowledge(&invalidation);
+        self.signal.acknowledge(&invalidation.value);
     }
 }
 
@@ -722,7 +715,6 @@ impl Ed2kTransferRuntime {
             upload_queue_config_from_policy(&config.upload_queue),
             config.download_limit_bytes_per_sec,
             download_coordinator_config_from_policy(config),
-            Ed2kFileNamePolicy::from(config),
             defer_completed_catalog,
         )
     }
@@ -759,7 +751,6 @@ impl Ed2kTransferRuntime {
             upload_queue_config,
             download_limit_bytes_per_sec,
             coordinator_config,
-            Ed2kFileNamePolicy::default(),
             false,
         )
     }
@@ -770,14 +761,13 @@ impl Ed2kTransferRuntime {
         upload_queue_config: Ed2kUploadQueueConfig,
         download_limit_bytes_per_sec: u64,
         coordinator_config: Ed2kDownloadCoordinatorConfig,
-        file_name_policy: Ed2kFileNamePolicy,
         defer_completed_catalog: bool,
     ) -> Result<Self> {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())
         })?;
         let (initial_catalog, hydration_pending) = if defer_completed_catalog {
-            (Vec::new(), true)
+            (IndexedSharedCatalog::default(), true)
         } else {
             (
                 transfer_sql::completed_catalog_from_metadata_store(&metadata)?,
@@ -789,6 +779,7 @@ impl Ed2kTransferRuntime {
         let share_publication_failed = Arc::new(AtomicBool::new(false));
         let manifest_cache = Arc::new(Mutex::new(HashMap::new()));
         let stripes = Arc::new(std::sync::Mutex::new(catalog::ShareStripes::default()));
+        let local_mutations = Arc::new(local_mutation::LocalMutationRegistry::default());
         let share_eligibility = Arc::new(catalog::SharedEligibility::new(
             metadata.clone(),
             Arc::clone(&category_root_epoch),
@@ -796,8 +787,9 @@ impl Ed2kTransferRuntime {
             Arc::clone(&share_publication_failed),
             stripes,
             Arc::clone(&manifest_cache),
+            Arc::clone(&local_mutations),
         ));
-        let mut initial_catalog = IndexedSharedCatalog::from_entries(initial_catalog);
+        let mut initial_catalog = initial_catalog;
         initial_catalog.set_eligibility(Arc::clone(&share_eligibility));
         let shared_catalog = Arc::new(RwLock::new(initial_catalog));
         // The ban store is built before the upload queue so the queue state can
@@ -811,16 +803,19 @@ impl Ed2kTransferRuntime {
         let runtime = Self {
             root_dir: root_dir.to_path_buf(),
             metadata,
-            file_name_policy,
             shared_catalog,
             share_eligibility,
-            local_mutations: Arc::new(local_mutation::LocalMutationRegistry::default()),
+            local_mutations,
             shared_catalog_generation: Arc::new(AtomicU64::new(0)),
             shared_catalog_hydration_cursor: StdMutex::new(None),
+            shared_payload_hydration_cursor: StdMutex::new(None),
+            shared_local_hydration_done: AtomicBool::new(false),
             shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_tickets: Arc::new(StdMutex::new(callback::CallbackTicketStore::default())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            content_locks: Arc::new(StdMutex::new(HashMap::new())),
+            job_storage: Arc::new(StdMutex::new(HashMap::new())),
             category_assignment_gate: Arc::new(RwLock::new(())),
             category_root_epoch,
             category_root_dirty,
@@ -1108,22 +1103,27 @@ impl Ed2kTransferRuntime {
 
     pub(crate) async fn should_request_source_exchange(
         &self,
-        file_hash: &str,
+        token: JobToken,
         peer_addr: SocketAddr,
         user_hash: Option<[u8; 16]>,
         current_source_count: usize,
         now: Instant,
     ) -> bool {
+        let Some(_session) = self.active_job_session(token) else {
+            return false;
+        };
         if !self.can_engage_file_source(current_source_count) {
             return false;
         }
         self.source_exchange
-            .should_request(file_hash, peer_addr, user_hash, current_source_count, now)
-            .await
+            .should_request(token, peer_addr, user_hash, current_source_count, now)
     }
 
-    pub(crate) async fn note_source_exchange_answer(&self, file_hash: &str, now: Instant) {
-        self.source_exchange.note_answer(file_hash, now).await;
+    pub(crate) async fn note_source_exchange_answer(&self, token: JobToken, now: Instant) {
+        let Some(_session) = self.active_job_session(token) else {
+            return;
+        };
+        self.source_exchange.note_answer(token, now);
     }
 }
 

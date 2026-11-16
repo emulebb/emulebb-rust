@@ -45,12 +45,15 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
             }
         })
         .collect();
+    let (_profile, job) = super::super::test_support::admit_unallocated_job(
+        emulebb_kad_proto::Ed2kHash::from_bytes([0; 16]),
+        "f".into(),
+        file_size,
+    );
     Ed2kResumeManifest {
+        token: job.token,
         file_hash: "0".repeat(32),
         display_name: "f".to_string(),
-        display_name_pinned: false,
-        follow_majority_filename: false,
-        file_name_observations: Vec::new(),
         file_size,
         piece_size: ED2K_PART_SIZE,
         completed,
@@ -64,13 +67,12 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         aich_hashset: Vec::new(),
         verified_ranges: ranges,
         pieces,
-        sources: Vec::new(),
         upload_priority: "auto".to_string(),
         auto_upload_priority: true,
         comment: String::new(),
         rating: 0,
         category_id: None,
-        control_state: None,
+        intent: emulebb_metadata::DownloadIntent::Started,
         transfer_row_removed: false,
         delivery_state: Ed2kDeliveryState::Pending,
         delivery_ownership: super::super::Ed2kDeliveryOwnership::None,

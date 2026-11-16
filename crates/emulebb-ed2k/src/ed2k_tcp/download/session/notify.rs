@@ -143,6 +143,7 @@ pub(super) async fn handle_file_desc(
     peer_addr: SocketAddr,
     transfer_runtime: &Ed2kTransferRuntime,
     file_hash_hex: &str,
+    job_token: emulebb_metadata::JobToken,
     mut source: Ed2kSourceHint,
     payload: &[u8],
     encoding: Ed2kStringEncoding,
@@ -163,7 +164,7 @@ pub(super) async fn handle_file_desc(
     source.file_comment = comment;
     source.file_rating = file_desc.rating;
     transfer_runtime
-        .remember_source_file_description(file_hash_hex, source)
+        .remember_source_file_description(job_token, source)
         .await?;
     Ok(())
 }

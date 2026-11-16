@@ -83,15 +83,13 @@ async fn stale_block_packet_dropped_without_ending_session() {
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5A; 32_768];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "stale-drop.epub".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "stale-drop.epub".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -142,7 +140,10 @@ async fn stale_block_packet_dropped_without_ending_session() {
     .unwrap();
 
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(manifest.completed);
     server.await.unwrap();
 }
@@ -156,15 +157,13 @@ async fn sustained_stale_block_packets_cancel_transfer() {
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5A; 32_768];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "stale-cancel.epub".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "stale-cancel.epub".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -209,11 +208,14 @@ async fn sustained_stale_block_packets_cancel_transfer() {
     .unwrap();
 
     assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!manifest.completed);
     // Dropped stale payload must never be attributed as received data.
     assert_eq!(
-        transfer_runtime.cbb_recorded_bytes_for_test(&file_hash_hex, test_bind_ip()),
+        transfer_runtime.cbb_recorded_bytes_for_test(file_hash_job.token, test_bind_ip()),
         0
     );
     server.await.unwrap();
@@ -228,15 +230,13 @@ async fn duplicate_block_payload_consumed_without_error() {
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x6B; 32_768];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "duplicate.epub".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "duplicate.epub".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -290,7 +290,10 @@ async fn duplicate_block_payload_consumed_without_error() {
     .unwrap();
 
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(manifest.completed);
     server.await.unwrap();
 }
@@ -305,15 +308,13 @@ async fn inflate_error_skips_stream_but_session_continues() {
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x7C; 32_768];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "zstream-error.epub".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "zstream-error.epub".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -360,11 +361,14 @@ async fn inflate_error_skips_stream_but_session_continues() {
     // The zlib error is NOT a session error: the attempt ends as a normal
     // incomplete session when the peer goes away.
     assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!manifest.completed);
     assert_eq!(manifest.pieces[0].bytes_written, 0);
     assert_eq!(
-        transfer_runtime.cbb_recorded_bytes_for_test(&file_hash_hex, test_bind_ip()),
+        transfer_runtime.cbb_recorded_bytes_for_test(file_hash_job.token, test_bind_ip()),
         0
     );
     server.await.unwrap();

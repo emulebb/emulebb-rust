@@ -11,28 +11,28 @@ async fn listener_hashset_request2_returns_aich_when_available() {
     let file_hash = Ed2kHash::from_bytes(
         Md4::digest(md4_hashset.iter().flatten().copied().collect::<Vec<u8>>()).into(),
     );
-    let file_hash_hex = file_hash.to_string();
     let root = unique_test_dir("ed2k-upload-listener-modern-aich");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
         file_hash,
         "listener-aich.iso".to_string(),
         payload.len() as u64,
     );
     transfer_runtime.ensure_job(&job).await.unwrap();
     transfer_runtime
-        .store_md4_hashset(&file_hash_hex, md4_hashset.clone())
+        .store_md4_hashset(job.token, md4_hashset.clone())
         .await
         .unwrap();
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 0, &payload[..ED2K_PART_SIZE as usize])
+        .store_piece_data(job.token, 0, &payload[..ED2K_PART_SIZE as usize])
         .await
         .unwrap();
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 1, &payload[ED2K_PART_SIZE as usize..])
+        .store_piece_data(job.token, 1, &payload[ED2K_PART_SIZE as usize..])
         .await
         .unwrap();
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime.manifest(job.token).await.unwrap();
     assert!(manifest.aich_hashset_acquired);
     let requested_identifier = super::Ed2kFileIdentifier::from_manifest(&manifest).unwrap();
 

@@ -62,7 +62,7 @@ use super::super::{
     OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
     OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID,
-    OP_SIGNATURE, OP_STARTUPLOADREQ, enrich_hello_identity, handle_aich_recovery_answer,
+    OP_SIGNATURE, OP_STARTUPLOADREQ, enrich_hello_identity,
 };
 
 mod browse;
@@ -695,6 +695,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             secure_ident: secure_ident.as_ref(),
                             transfer_runtime,
                             file_hash: download.file_hash,
+                            job_token: download.job_token,
                             file_hash_hex: &file_hash_hex,
                             timeout: ED2K_CONNECTION_IDLE_TIMEOUT,
                             send_initial_requests: true,
@@ -1373,16 +1374,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         answer.recovery_payload_len
                     ),
                 );
-                let answer_file_hash = answer.file_hash.to_string();
-                handle_aich_recovery_answer(
-                    transfer_runtime,
-                    &answer_file_hash,
-                    &answer,
-                    &packet.payload,
-                    peer_addr,
-                    transport.mode,
-                )
-                .await?;
+                // This listener branch has no admitted download request. A
+                // response cannot resolve a newer same-hash job and authorize
+                // salvage; ticketed downloads use their captured session token.
+
             }
             (OP_EMULEPROT, OP_PEERCACHE_QUERY)
             | (OP_EMULEPROT, OP_PEERCACHE_ANSWER)

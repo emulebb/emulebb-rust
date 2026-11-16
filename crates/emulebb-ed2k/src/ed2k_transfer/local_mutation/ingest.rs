@@ -12,7 +12,7 @@ const HASH_REPRESENTATION: usize = 36_055_288;
 // deliberately NOT described by this representation allowance.
 const COPY_PATHS_AND_CONTROL: usize = 2 * 1024 * 1024 + 65_536;
 
-struct PreparationLease(Arc<AtomicBool>);
+pub(super) struct PreparationLease(Arc<AtomicBool>);
 impl Drop for PreparationLease {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
@@ -61,7 +61,7 @@ fn preparation_charge(
     Ok(charge)
 }
 
-fn live_partial(
+pub(super) fn live_partial(
     manifest: Option<&transfer::Ed2kResumeManifest>,
 ) -> Result<Option<Option<MetadataPartialShare>>> {
     let Some(manifest) = manifest else {
@@ -95,6 +95,7 @@ fn live_partial(
         });
     }
     Ok(Some(Some(MetadataPartialShare {
+        job_token: manifest.token,
         file_hash: manifest.file_hash.clone(),
         display_name: manifest.display_name.clone(),
         file_size: manifest.file_size,
@@ -125,9 +126,11 @@ impl LocalMutationRegistry {
         if state.faulted {
             return Err(LocalMutationError::Unknown.into());
         }
-        if state.tasks.len() >= MAX_UNITS || self.preparation.swap(true, Ordering::AcqRel) {
+        if self.preparation.load(Ordering::Acquire) {
             return Err(LocalMutationError::Busy.into());
         }
+        let capacity_lease = Self::reserve_long_fs(&mut state, 0)?;
+        self.preparation.store(true, Ordering::Release);
         let lease = PreparationLease(Arc::clone(&self.preparation));
         // The workspace is within the 64 MiB lease, NOT the ordinary 8 MiB
         // counter: a long hash must leave withdrawals/admissions runnable.
@@ -137,159 +140,181 @@ impl LocalMutationRegistry {
         let index_type = options.index_type.map(str::to_owned);
         let observer = observer.cloned();
         let metadata = runtime.metadata.clone();
-        let locks = Arc::clone(&runtime.manifest_locks);
+        let job_locks = Arc::clone(&runtime.manifest_locks);
+        let content_locks = Arc::clone(&runtime.content_locks);
         let manifests = Arc::clone(&runtime.manifest_cache);
-        let catalog = Arc::clone(&runtime.shared_catalog);
+        let publication = super::publication::ContentPublication::new(runtime);
         let eligibility = Arc::clone(&runtime.share_eligibility);
         let epoch = Arc::clone(&runtime.category_root_epoch);
         let dirty = Arc::clone(&runtime.category_root_dirty);
         let failed = Arc::clone(&runtime.share_publication_failed);
-        let generation = Arc::clone(&runtime.shared_catalog_generation);
-        let hashes_cache = Arc::clone(&runtime.servable_shared_hash_cache);
-        let demand = Arc::clone(&runtime.shared_publish_demand_revision);
-        let notify = Arc::clone(&runtime.shared_publish_demand_notify);
         let (response, receive) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
-        state.tasks.spawn_blocking(move || {
-            let _lease = lease;
-            let mut committed = false;
-            let operation = || {
-                let path = crate::long_path::long_path(&path);
-                let expected = metadata.local_file_instance(&path)?;
-                let prepared = transfer::ingest::prepare_local_ingest(&path, &name, observer)?;
-                let mut hashes = Vec::with_capacity(2);
-                if let Some(old) = &expected { hashes.push(old.file_hash.clone()); }
-                hashes.push(prepared.content.file_hash.clone());
-                hashes.sort_unstable(); hashes.dedup();
-                let lock_handles: Vec<_> = {
-                    let mut locks = locks.lock().map_err(|_| LocalMutationError::Unknown)?;
-                    hashes.iter().map(|hash| Arc::clone(locks.entry(hash.clone()).or_default())).collect()
-                };
-                // No SQL/root/catalog lock is held across these waits. Existing
-                // manifest->admission callers drop guards on Busy before waiting
-                // for registry capacity, so the retained slot cannot form a cycle.
-                let _guards: Vec<_> = lock_handles.into_iter().map(|lock| lock.blocking_lock_owned()).collect();
-                let raw_hashes = hashes.iter().map(|hash| hash.parse::<emulebb_kad_proto::Ed2kHash>()
-                    .map(|hash| hash.0)).collect::<Result<Vec<_>, _>>()?;
-                let stripe = eligibility.begin_mutation(&raw_hashes)?;
-                let mut cut = 0;
-                let mut committed_result = None;
-                for _ in 0..100 {
-                    cut = epoch.load(Ordering::Acquire);
-                    if cut % 2 != 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(5)); continue;
+        Self::spawn_unit_with(
+            &mut state,
+            capacity_lease,
+            lease,
+            move |_capacity, _lease| {
+                let mut committed = false;
+                let operation = || {
+                    let path = crate::long_path::long_path(&path);
+                    let expected = metadata.local_file_instance(&path)?;
+                    let prepared = transfer::ingest::prepare_local_ingest(&path, &name, observer)?;
+                    let mut hashes = Vec::with_capacity(2);
+                    if let Some(old) = &expected {
+                        hashes.push(old.file_hash.clone());
                     }
-                    // A prehash global epoch may be hours old. Revalidate only
-                    // the selected intent at a fresh cut, without rehashing or
-                    // silently changing which path/hash guards this unit owns.
-                    ensure!(transfer::ingest::native_file_fingerprint(&path).as_ref() == Some(&prepared.content.fingerprint),
-                        "local ingest source changed before binding");
-                    for root in &roots {
-                        ensure!(crate::long_path::long_path(&root.root).is_dir(),
-                            "required ingest root is no longer accessible");
+                    hashes.push(prepared.content.file_hash.clone());
+                    hashes.sort_unstable();
+                    hashes.dedup();
+                    let raw_hashes = hashes
+                        .iter()
+                        .map(|hash| {
+                            hash.parse::<emulebb_kad_proto::Ed2kHash>()
+                                .map(|hash| hash.0)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut committed_result = None;
+                    for _ in 0..100 {
+                        // Capture only after the long hash. Job guards precede
+                        // short content publication guards; no SQL/catalog/root
+                        // lock is retained while either set is acquired.
+                        let jobs = metadata.capture_local_ingest_jobs(&hashes)?;
+                        let mut tokens: Vec<_> = jobs.iter().filter_map(|job| job.token).collect();
+                        tokens.sort_unstable_by_key(|token| token.job_id);
+                        let job_guards: Vec<_> = tokens
+                            .iter()
+                            .map(|token| {
+                                transfer::store::scoped_lock(&job_locks, token.job_id)
+                                    .blocking_lock_owned()
+                            })
+                            .collect();
+                        let content_guards: Vec<_> = hashes
+                            .iter()
+                            .map(|hash| {
+                                transfer::store::scoped_lock(&content_locks, hash.clone())
+                                    .blocking_lock_owned()
+                            })
+                            .collect();
+                        let stripe = eligibility.begin_mutation(&raw_hashes)?;
+                        let cut = epoch.load(Ordering::Acquire);
+                        if cut % 2 != 0 {
+                            drop(stripe);
+                            drop(content_guards);
+                            drop(job_guards);
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        ensure!(
+                            transfer::ingest::native_file_fingerprint(&path).as_ref()
+                                == Some(&prepared.content.fingerprint),
+                            "local ingest source changed before binding"
+                        );
+                        for root in &roots {
+                            ensure!(
+                                crate::long_path::long_path(&root.root).is_dir(),
+                                "required ingest root is no longer accessible"
+                            );
+                        }
+                        match metadata.commit_local_ingest(
+                            &prepared.content,
+                            &prepared.recovery,
+                            &prepared.media,
+                            expected.as_ref(),
+                            &jobs,
+                            &roots,
+                            index_type.as_deref(),
+                            (&epoch, cut),
+                        ) {
+                            Err(error)
+                                if error.is::<emulebb_metadata::ObservedRootChanged>()
+                                    || error.is::<emulebb_metadata::MetadataIngestJobChanged>() =>
+                            {
+                                drop(stripe);
+                                drop(content_guards);
+                                drop(job_guards);
+                                continue;
+                            }
+                            result => {
+                                committed_result =
+                                    Some((result?, job_guards, content_guards, stripe));
+                                break;
+                            }
+                        }
                     }
-                    match metadata.commit_local_ingest(&prepared.content, &prepared.recovery,
-                        &prepared.media, expected.as_ref(), &roots, index_type.as_deref(), (&epoch, cut)) {
-                        Err(error) if error.is::<emulebb_metadata::ObservedRootChanged>() => continue,
-                        result => { committed_result = Some(result?); break; }
+                    let (result, _job_guards, _content_guards, stripe) = committed_result
+                        .ok_or_else(|| anyhow!("ingest binding could not stabilize"))?;
+                    committed = true;
+                    if let Some(error) = result.recovery_error {
+                        tracing::warn!(%error, "Verified MD4 content retained without AICH recovery cache");
                     }
-                }
-                let result = committed_result.ok_or_else(|| anyhow!("ingest root transaction could not stabilize"))?;
-                committed = true;
-                if let Some(error) = result.recovery_error {
-                    tracing::warn!(%error, "Verified MD4 content retained without AICH recovery cache");
-                }
-                #[cfg(test)]
-                if let Some((reached, release)) = publication_gate {
-                    let _ = reached.send(()); let _ = release.recv();
-                }
-                let mut projections = Some(result.projections);
-                for _ in 0..100 {
-                    let current = epoch.load(Ordering::Acquire);
-                    if current % 2 != 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(5)); continue;
+                    #[cfg(test)]
+                    if let Some((reached, release)) = publication_gate {
+                        let _ = reached.send(());
+                        let _ = release.recv();
                     }
-                    if current != cut || projections.is_none() {
-                        // Drop old allocations before fetching replacements.
-                        drop(projections.take());
-                        projections = Some(metadata.local_ingest_projections(&hashes)?);
-                        cut = current;
-                    }
-                    let projections = projections.take().expect("current ingest projections");
-                    let mut choices = Vec::with_capacity(projections.len());
                     {
                         let mut cache = manifests.blocking_lock();
-                        for projection in projections {
-                            if let (Some(manifest), Some(aich)) = (cache.get_mut(&projection.file_hash), projection.aich) {
+                        for projection in result.projections {
+                            let current = projection.job_token.and_then(|token| {
+                                cache
+                                    .get_mut(&token.job_id)
+                                    .filter(|manifest| manifest.token == token)
+                            });
+                            if let (Some(manifest), Some(aich)) = (current, projection.aich) {
                                 if manifest.aich_trust_generation < aich.generation {
                                     manifest.aich_root = aich.root;
-                                    manifest.aich_root_origin = aich.origin.as_deref()
-                                        .map(transfer::Ed2kAichRootOrigin::parse).transpose()?;
+                                    manifest.aich_root_origin = aich
+                                        .origin
+                                        .as_deref()
+                                        .map(transfer::Ed2kAichRootOrigin::parse)
+                                        .transpose()?;
                                     manifest.aich_trust_generation = aich.generation;
                                     manifest.aich_hashset.clear();
                                     manifest.aich_hashset_acquired = false;
                                 }
                             }
-                            let live = if projection.complete.is_none() {
-                                live_partial(cache.get(&projection.file_hash))?
-                            } else { None };
-                            choices.push((projection.file_hash, projection.complete, projection.partial, live));
                         }
                     }
-                    let mut replacements = Vec::with_capacity(choices.len());
-                    for (file_hash, complete, stored_partial, live) in choices {
-                            // Select and move one fallback outside cache locks.
-                            // Never retain two converted range alternatives.
-                            let next = if let Some(complete) = complete {
-                                drop(stored_partial);
-                                Some(transfer::transfer_sql::shared_entry_from_catalog_entry(complete)?)
-                            } else {
-                                let partial = match live {
-                                    Some(live) => { drop(stored_partial); live }
-                                    None => stored_partial,
-                                };
-                                partial.map(transfer::Ed2kSharedEntry::from_partial_share)
-                            };
-                            let hash = file_hash.parse::<emulebb_kad_proto::Ed2kHash>()?;
-                            replacements.push((hash, next));
-                    }
-                    let mut entries = catalog.blocking_write();
-                    if epoch.load(Ordering::Acquire) != cut { drop(entries); continue; }
-                    for (hash, mut next) in replacements {
-                        if let (Some(previous), Some(next)) = (entries.entry_by_hash(&hash), next.as_mut()) {
-                            next.publish = previous.publish.clone();
-                            next.all_time_uploaded_bytes = previous.all_time_uploaded_bytes;
+                    dirty.store(true, Ordering::Release);
+                    drop(stripe);
+                    drop(_content_guards);
+                    drop(_job_guards);
+                    // The real prepared lease remains alive; no hashing or binding
+                    // is replayed when fresh catalog evidence has to be retried.
+                    publication.publish_prepared_pair(&hashes, &_lease)?;
+                    Ok(prepared.summary)
+                };
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+                let (result, status) = match outcome {
+                    Ok(Ok(summary)) => (Ok(summary), 0),
+                    Ok(Err(error)) => {
+                        let unknown = error.is::<emulebb_metadata::MetadataIngestCommitUncertain>()
+                            || error.is::<LocalMutationError>()
+                                && matches!(
+                                    error.downcast_ref::<LocalMutationError>(),
+                                    Some(LocalMutationError::Unknown)
+                                );
+                        if unknown {
+                            (Err(LocalMutationError::Unknown.into()), 2)
+                        } else if committed {
+                            tracing::error!(%error, "ingest committed but publication failed");
+                            (Err(LocalMutationError::Committed.into()), 1)
+                        } else {
+                            (Err(error), 0)
                         }
-                        entries.upsert_verified(hash, next);
                     }
-                    generation.fetch_add(1, Ordering::AcqRel);
-                    hashes_cache.lock().map_err(|_| LocalMutationError::Unknown)?.hashes = None;
-                    drop(entries);
-                    drop(stripe); drop(_guards);
-                    demand.fetch_add(1, Ordering::AcqRel);
-                    notify.notify_waiters();
-                    return Ok(prepared.summary);
+                    Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
+                };
+                if status != 0 {
+                    dirty.store(true, Ordering::Release);
+                    failed.store(true, Ordering::Release);
                 }
-                Err(anyhow!("ingest committed but root publication could not stabilize"))
-            };
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
-            let (result, status) = match outcome {
-                Ok(Ok(summary)) => (Ok(summary), 0),
-                Ok(Err(error)) => {
-                    let unknown = error.is::<emulebb_metadata::MetadataIngestCommitUncertain>()
-                        || error.is::<LocalMutationError>() && matches!(error.downcast_ref::<LocalMutationError>(), Some(LocalMutationError::Unknown));
-                    if unknown { (Err(LocalMutationError::Unknown.into()), 2) }
-                    else if committed { tracing::error!(%error, "ingest committed but publication failed");
-                        (Err(LocalMutationError::Committed.into()), 1) }
-                    else { (Err(error), 0) }
-                }
-                Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
-            };
-            if status != 0 { dirty.store(true, Ordering::Release); failed.store(true, Ordering::Release); }
-            let _ = response.send(result);
-            (0, status)
-        });
+                let _ = response.send(result);
+                status
+            },
+        );
         Ok(receive)
     }
 }
@@ -309,7 +334,7 @@ mod tests {
 
     #[test]
     fn two_hash_partial_workspace_uses_actual_maximum_capacities() {
-        let job = transfer::new_transfer_job(
+        let (_job_store, job) = transfer::test_support::admit_unallocated_job(
             emulebb_kad_proto::Ed2kHash([1; 16]),
             "x".repeat(65_536),
             0x4000000000,
@@ -386,7 +411,7 @@ mod tests {
 
     #[test]
     fn mixed_complete_partial_workspace_accounts_media_clone_and_native_path_separately() {
-        let job = transfer::new_transfer_job(
+        let (_job_store, job) = transfer::test_support::admit_unallocated_job(
             emulebb_kad_proto::Ed2kHash([1; 16]),
             "n".repeat(65_536),
             0x4000000000,
