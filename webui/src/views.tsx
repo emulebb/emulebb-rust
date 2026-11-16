@@ -325,8 +325,8 @@ export function TransfersView(props: {
     setEd2kLinks("");
   };
 
-  const patchCategory = (transfer: Transfer, categoryId: string) =>
-    props.client.patch(`transfers/${transfer.hash}`, { categoryId: Number(categoryId) });
+  const patchCategory = (transfer: Transfer, category: string) =>
+    props.client.patch(`transfers/${transfer.hash}`, { category: category || null });
 
   const removeCompletedTransfer = (transfer: Transfer) => {
     const name = transfer.displayName?.trim() || transfer.hash;
@@ -435,12 +435,12 @@ export function TransfersView(props: {
                   <td>{formatKiBRate(transfer.downloadSpeedKiBps) || formatRate(transfer.downloadRateBytesPerSec)}</td>
                   <td>
                     <select class="form-select"
-                      value={String(transfer.categoryId ?? 0)}
+                      value={transfer.category ?? ""}
                       onInput={(event) => void props.run(() => patchCategory(transfer, event.currentTarget.value), "Category updated")}
                     >
-                      <option value="0">Uncategorized</option>
+                      <option value="">Uncategorized</option>
                       {props.categories.map((category) => (
-                        <option key={category.id} value={category.id}>{category.name}</option>
+                        <option key={category.name} value={category.name}>{category.name}</option>
                       ))}
                     </select>
                   </td>
@@ -576,7 +576,7 @@ export function SearchView(props: {
   const [title, setTitle] = useState("");
   const [album, setAlbum] = useState("");
   const [artist, setArtist] = useState("");
-  const [categoryId, setCategoryId] = useState("0");
+  const [category, setCategory] = useState("");
   const [paused, setPaused] = useState(false);
   const orderedSearches = useMemo(
     () => [...props.searches].sort((left, right) => Number(right.id) - Number(left.id)),
@@ -782,10 +782,10 @@ export function SearchView(props: {
         </div>
       </details>
       <div class="form-row subtle-row">
-        <select class="form-select" value={categoryId} onInput={(event) => setCategoryId(event.currentTarget.value)}>
-          <option value="0">Download uncategorized</option>
+        <select class="form-select" value={category} onInput={(event) => setCategory(event.currentTarget.value)}>
+          <option value="">Download uncategorized</option>
           {props.categories.map((category) => (
-            <option key={category.id} value={category.id}>Download to {category.name}</option>
+            <option key={category.name} value={category.name}>Download to {category.name}</option>
           ))}
         </select>
         <label class="check">
@@ -903,7 +903,7 @@ export function SearchView(props: {
                       () => createDownloadWithPolicy((knownFilePolicy) =>
                         props.client.post(`searches/${props.selectedSearch?.id}/results/${result.hash}/operations/download`, {
                           paused,
-                          categoryId: Number(categoryId),
+                          category: category || null,
                           knownFilePolicy
                         })
                       ),
@@ -2618,110 +2618,46 @@ function shortTime(value?: string | null): string {
 
 export function CategoriesView(props: { categories: Category[]; client: RestClient; run: RunFunction }) {
   const [name, setName] = useState("");
-  const [path, setPath] = useState("");
+  const [tempDir, setTempDir] = useState("");
+  const [destinationDir, setDestinationDir] = useState("");
   const [comment, setComment] = useState("");
-  const [priority, setPriority] = useState("normal");
   const nameError = categoryNameError(name);
-  const priorityError = categoryPriorityError(priority);
-
   const create = async () => {
-    if (nameError || priorityError) {
-      return;
-    }
-    await props.client.post("categories", {
-      name,
-      path: optionalString(path),
-      comment,
-      priority: categoryPriorityValue(priority)
-    });
-    setName("");
-    setPath("");
-    setComment("");
+    await props.client.post("categories", { name, tempDir: optionalString(tempDir), destinationDir: optionalString(destinationDir), comment });
+    setName(""); setTempDir(""); setDestinationDir(""); setComment("");
   };
-
-  return (
-    <section class="panel card">
-      <div class="section-title">
-        <h2>Categories</h2>
-        <span>{props.categories.length} configured</span>
-      </div>
-      <form class="form-row" onSubmit={(event) => {
-        event.preventDefault();
-        if (!nameError && !priorityError) {
-          void props.run(create, "Category created");
-        }
-      }}>
-        <input class="form-control" value={name} placeholder="Name" aria-invalid={nameError ? "true" : "false"} onInput={(event) => setName(event.currentTarget.value)} />
-        <input class="form-control" value={path} placeholder="Incoming path" onInput={(event) => setPath(event.currentTarget.value)} />
-        <input class="form-control" value={comment} placeholder="Comment" onInput={(event) => setComment(event.currentTarget.value)} />
-        <select class="form-select" value={priority} onInput={(event) => setPriority(event.currentTarget.value)}>
-          <option value="verylow">Very low</option>
-          <option value="low">Low</option>
-          <option value="normal">Normal</option>
-          <option value="high">High</option>
-          <option value="veryhigh">Very high</option>
-        </select>
-        <button class="btn" type="submit" disabled={!name.trim() || Boolean(nameError) || Boolean(priorityError)}><FolderPlus size={16} />Add</button>
-      </form>
-      {nameError && <p class="field-error">{nameError}</p>}
-      {priorityError && <p class="field-error">{priorityError}</p>}
-      <TableScroll label="Categories">
-        <table class="table table-vcenter card-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Path</th>
-              <th>Comment</th>
-              <th>Priority</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {props.categories.map((category) => (
-              <CategoryRow key={category.id} category={category} client={props.client} run={props.run} />
-            ))}
-            {props.categories.length === 0 && <EmptyRow colSpan={5} text="No categories." />}
-          </tbody>
-        </table>
-      </TableScroll>
-    </section>
-  );
+  return <section class="panel card">
+    <div class="section-title"><h2>Categories</h2><span>{props.categories.length} configured</span></div>
+    <form class="form-row" onSubmit={(event) => { event.preventDefault(); if (!nameError && name) void props.run(create, "Category created"); }}>
+      <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
+      <input class="form-control" value={tempDir} placeholder="Temporary directory" onInput={(event) => setTempDir(event.currentTarget.value)} />
+      <input class="form-control" value={destinationDir} placeholder="Destination directory" onInput={(event) => setDestinationDir(event.currentTarget.value)} />
+      <input class="form-control" value={comment} placeholder="Comment" onInput={(event) => setComment(event.currentTarget.value)} />
+      <button class="btn" type="submit" disabled={!name || Boolean(nameError)}><FolderPlus size={16} />Add</button>
+    </form>
+    {nameError && <p class="field-error">{nameError}</p>}
+    <TableScroll label="Categories"><table class="table table-vcenter card-table">
+      <thead><tr><th>Name</th><th>Temporary directory</th><th>Destination directory</th><th>Comment</th><th>Actions</th></tr></thead>
+      <tbody>{props.categories.map((category) => <CategoryRow key={category.name} category={category} client={props.client} run={props.run} />)}
+      {props.categories.length === 0 && <EmptyRow colSpan={5} text="No categories." />}</tbody>
+    </table></TableScroll>
+  </section>;
 }
 
 function CategoryRow(props: { category: Category; client: RestClient; run: RunFunction }) {
-  const [name, setName] = useState(props.category.name);
-  const [path, setPath] = useState(props.category.path ?? "");
-  const [comment, setComment] = useState(props.category.comment ?? "");
-  const [priority, setPriority] = useState(String(props.category.priority ?? "normal"));
-  const encoded = String(props.category.id);
-  const nameError = categoryNameError(name);
-  const priorityError = categoryPriorityError(priority);
-
-  return (
-    <tr>
-      <td><input class="form-control" value={name} aria-invalid={nameError ? "true" : "false"} onInput={(event) => setName(event.currentTarget.value)} /></td>
-      <td><input class="form-control" value={path} onInput={(event) => setPath(event.currentTarget.value)} /></td>
-      <td><input class="form-control" value={comment} onInput={(event) => setComment(event.currentTarget.value)} /></td>
-      <td><input class="form-control" value={priority} aria-invalid={priorityError ? "true" : "false"} onInput={(event) => setPriority(event.currentTarget.value)} /></td>
-      <td>
-        <div class="row-actions">
-          <Action title="Save" icon={<Save size={15} />} onClick={() => void props.run(() => props.client.patch(`categories/${encoded}`, {
-            name,
-            path: optionalString(path),
-            comment,
-            priority: categoryPriorityValue(priority)
-          }), "Category saved")} disabled={!name.trim() || Boolean(nameError) || Boolean(priorityError)} />
-          <Action title="Delete" icon={<Trash2 size={15} />} onClick={() => {
-            if (window.confirm("Delete this category? Later category IDs will be reindexed.")) {
-              void props.run(() => props.client.delete(`categories/${encoded}`), "Category deleted");
-            }
-          }} />
-        </div>
-        {nameError && <p class="field-error">{nameError}</p>}
-        {priorityError && <p class="field-error">{priorityError}</p>}
-      </td>
-    </tr>
-  );
+  const [tempDir, setTempDir] = useState(props.category.tempDir ?? "");
+  const [destinationDir, setDestinationDir] = useState(props.category.destinationDir ?? "");
+  const [comment, setComment] = useState(props.category.comment);
+  return <tr>
+    <td>{props.category.name}</td>
+    <td><input class="form-control" value={tempDir} onInput={(event) => setTempDir(event.currentTarget.value)} /></td>
+    <td><input class="form-control" value={destinationDir} onInput={(event) => setDestinationDir(event.currentTarget.value)} /></td>
+    <td><input class="form-control" value={comment} onInput={(event) => setComment(event.currentTarget.value)} /></td>
+    <td><div class="row-actions">
+      <Action title="Save" icon={<Save size={15} />} onClick={() => void props.run(() => props.client.patch(`categories/${encodeURIComponent(props.category.name)}`, { tempDir: optionalString(tempDir), destinationDir: optionalString(destinationDir), comment }), "Category saved")} />
+      <Action title="Delete" icon={<Trash2 size={15} />} onClick={() => { if (window.confirm("Delete this category? Its downloads will become uncategorized.")) void props.run(() => props.client.delete(`categories/${encodeURIComponent(props.category.name)}`), "Category deleted"); }} />
+    </div></td>
+  </tr>;
 }
 
 export function FriendsView(props: { friends: Friend[]; client: RestClient; run: RunFunction }) {
@@ -4042,19 +3978,11 @@ function friendNameError(value: string): string | undefined {
 }
 
 function categoryNameError(value: string): string | undefined {
-  return value && !value.trim() ? "Category name must not be empty." : undefined;
+  // WHY: JavaScript's $ also matches before a final newline, but category names must match in full.
+  return value && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}(?![\s\S])/.test(value) ? "Use 1–64 ASCII letters, digits or hyphens, starting with a letter or digit." : undefined;
 }
 
-function categoryPriorityError(value: string): string | undefined {
-  const normalized = value.trim();
-  if (["verylow", "low", "normal", "high", "veryhigh"].includes(normalized)) {
-    return undefined;
-  }
-  if (/^\d+$/.test(normalized) && Number(normalized) <= 4294967295) {
-    return undefined;
-  }
-  return "Category priority must be verylow, low, normal, high, veryhigh, or a u32 number.";
-}
+
 
 function normalizeSearchQuery(value: string): string {
   return value.trim().split(/[ \t\n\r\f\v]+/).filter(Boolean).join(" ");
@@ -4114,10 +4042,7 @@ function vpnGuardModeField(object: Record<string, unknown> | undefined): VpnGuar
   return object?.mode === "block" ? "block" : "off";
 }
 
-function categoryPriorityValue(value: string): string | number {
-  const trimmed = value.trim();
-  return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
-}
+
 
 export type EventStreamStatus = {
   mode: "polling" | "connecting" | "streaming" | "reconnecting";

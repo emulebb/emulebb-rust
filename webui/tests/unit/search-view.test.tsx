@@ -47,12 +47,12 @@ describe("SearchView", () => {
     await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
     expect(post).toHaveBeenNthCalledWith(1, `searches/7/results/${hash}/operations/download`, {
       paused: false,
-      categoryId: 0,
+      category: null,
       knownFilePolicy: "reject"
     });
     expect(post).toHaveBeenNthCalledWith(2, `searches/7/results/${hash}/operations/download`, {
       paused: false,
-      categoryId: 0,
+      category: null,
       knownFilePolicy: "redownload"
     });
     expect(confirm).toHaveBeenCalledWith(
