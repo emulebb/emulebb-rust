@@ -197,19 +197,19 @@ fn write_set(
             "known_file_id",
         )] {
             let mut ids = conn.prepare(query)?;
-            let ids = ids
-                .query_map(params![root, i64::try_from(size)?], |row| {
-                    row.get::<_, i64>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for id in ids {
+            // The query reads content identities; enrichment only writes the
+            // separate hash table, so aliases can be consumed in this same TX.
+            let mut ids = ids.query(params![root, i64::try_from(size)?])?;
+            while let Some(row) = ids.next()? {
+                let id = row.get::<_, i64>(0)?;
                 let mut hashes = conn.prepare(&format!(
                     "SELECT aich_hash FROM {table} WHERE {key}=?1 ORDER BY part_index"
                 ))?;
-                let old = hashes
-                    .query_map([id], |row| row.get::<_, Vec<u8>>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                if old.is_empty() {
+                let (count, matches) = crate::local_file_store::compare_stored_hashes(
+                    &mut hashes.query([id])?,
+                    part_roots,
+                )?;
+                if count == 0 {
                     let mut insert = conn.prepare(&format!(
                         "INSERT INTO {table}({key},part_index,aich_hash) VALUES (?1,?2,?3)"
                     ))?;
@@ -217,12 +217,7 @@ fn write_set(
                         insert.execute(params![id, i64::try_from(index)?, hash.as_slice()])?;
                     }
                 } else {
-                    ensure!(
-                        old.iter()
-                            .map(Vec::as_slice)
-                            .eq(part_roots.iter().map(|r| r.as_slice())),
-                        "conflicting existing AICH part hashes"
-                    );
+                    ensure!(matches, "conflicting existing AICH part hashes");
                 }
             }
         }
@@ -340,6 +335,9 @@ mod tests {
         };
         let mut alias = first.clone();
         alias.display_name = "Alias.bin".to_string();
+        let mut other_identity = first.clone();
+        other_identity.file_hash = "88".repeat(16);
+        other_identity.display_name = "Other Identity.bin".to_string();
         let fingerprint = crate::NativeFileFingerprint {
             identity: crate::NativeFileIdentity::Unix {
                 device_id: 1,
@@ -355,9 +353,51 @@ mod tests {
                 std::env::temp_dir().join("Sample.bin"),
                 fingerprint.clone(),
             ),
-            (alias, std::env::temp_dir().join("Alias.bin"), fingerprint),
+            (
+                alias,
+                std::env::temp_dir().join("Alias.bin"),
+                fingerprint.clone(),
+            ),
+            (
+                other_identity,
+                std::env::temp_dir().join("Other Identity.bin"),
+                fingerprint,
+            ),
         ])
         .unwrap();
+        // A later alias conflict rolls back the recovery rows and any earlier
+        // enrichment while the alias query is being streamed in the same TX.
+        db.connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO verified_local_aich_hashes(known_file_id,part_index,aich_hash)
+             SELECT id,0,?2 FROM known_files WHERE ed2k_hash=?1",
+                params![[0x88u8; 16].as_slice(), [0x99u8; 20].as_slice()],
+            )
+            .unwrap();
+        assert!(
+            db.store_aich_recovery_set(
+                &"55".repeat(20),
+                9_728_001,
+                &[vec![0; 1060], vec![0; 20]],
+                &[[0x66; 20], [0x77; 20]],
+            )
+            .is_err()
+        );
+        assert_eq!(db.table_count("aich_recovery_sets").unwrap(), 0);
+        assert_eq!(db.table_count("verified_local_aich_hashes").unwrap(), 1);
+        db.connection()
+            .unwrap()
+            .execute("DELETE FROM verified_local_aich_hashes", [])
+            .unwrap();
+        db.store_aich_recovery_set(
+            &"55".repeat(20),
+            9_728_001,
+            &[vec![0; 1060], vec![0; 20]],
+            &[[0x66; 20], [0x77; 20]],
+        )
+        .unwrap();
+        // Reimport must compare all existing roots, not append another set.
         db.store_aich_recovery_set(
             &"55".repeat(20),
             9_728_001,
@@ -371,7 +411,7 @@ mod tests {
                 .query_row("SELECT count(*) FROM verified_local_aich_hashes", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
-            2
+            4
         );
         assert_eq!(
             db.connection()

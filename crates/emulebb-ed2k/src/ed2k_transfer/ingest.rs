@@ -43,6 +43,14 @@ pub struct LocalIngestProgressEvent {
 
 pub type LocalIngestProgressObserver = Arc<dyn Fn(LocalIngestProgressEvent) + Send + Sync>;
 
+pub(super) fn encode_hashset<const N: usize>(hashes: &[[u8; N]]) -> Vec<String> {
+    let mut encoded = Vec::with_capacity(hashes.len());
+    for hash in hashes {
+        encoded.push(hex::encode(hash));
+    }
+    encoded
+}
+
 impl Ed2kTransferRuntime {
     /// Hash a local payload and persist its verified identity independently of
     /// download jobs. Root membership controls when it is shared.
@@ -191,19 +199,16 @@ impl Ed2kTransferRuntime {
         .context("ED2K/AICH hashing task panicked")??;
         let file_hash = hashsets.file_hash.to_string();
         let aich_root = hex::encode(hashsets.aich_hashset.master_hash);
+        let md4_hashset_count = hashsets.md4_hashset.len();
+        let aich_hashset_count = hashsets.aich_hashset.part_hashes.len();
         let content = MetadataVerifiedLocalContent {
             file_hash: file_hash.clone(),
             display_name: display_name.to_string(),
             file_size: source_fingerprint.size_bytes,
             part_size: ED2K_PART_SIZE,
-            md4_hashset: hashsets.md4_hashset.iter().map(hex::encode).collect(),
+            md4_hashset: encode_hashset(&hashsets.md4_hashset),
             aich_root: Some(aich_root.clone()),
-            aich_hashset: hashsets
-                .aich_hashset
-                .part_hashes
-                .iter()
-                .map(hex::encode)
-                .collect(),
+            aich_hashset: encode_hashset(&hashsets.aich_hashset.part_hashes),
             path: source_path.clone(),
             fingerprint: source_fingerprint.clone(),
             upload_priority: "normal".to_string(),
@@ -217,7 +222,7 @@ impl Ed2kTransferRuntime {
         let recovery_roots = if hashsets.aich_hashset.part_hashes.is_empty() {
             vec![hashsets.aich_hashset.master_hash]
         } else {
-            hashsets.aich_hashset.part_hashes.clone()
+            hashsets.aich_hashset.part_hashes
         };
         tokio::task::spawn_blocking(move || {
             let recovery = emulebb_metadata::MetadataAichRecoverySet {
@@ -254,9 +259,9 @@ impl Ed2kTransferRuntime {
             file_hash,
             display_name: display_name.to_string(),
             file_size: source_fingerprint.size_bytes,
-            md4_hashset_count: hashsets.md4_hashset.len(),
+            md4_hashset_count,
             aich_root,
-            aich_hashset_count: hashsets.aich_hashset.part_hashes.len(),
+            aich_hashset_count,
             path: NativePath::from(source_path.as_path()).display_path(),
         })
     }

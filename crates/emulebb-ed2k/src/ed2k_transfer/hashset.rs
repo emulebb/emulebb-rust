@@ -152,7 +152,7 @@ pub(super) fn build_md4_and_aich_hashsets_from_reader_with_progress(
             &block_hashes,
             0,
         )?);
-        recovery_parts.push(block_hashes.into_iter().flatten().collect());
+        recovery_parts.push(pack_aich_block_hashes(&block_hashes));
     }
 
     let (file_hash, md4_hashset) = if file_size < ED2K_PART_SIZE {
@@ -187,6 +187,16 @@ pub(super) fn build_md4_and_aich_hashsets_from_reader_with_progress(
         md4_hashset,
         aich_hashset,
     })
+}
+
+pub(super) fn pack_aich_block_hashes(hashes: &[[u8; 20]]) -> Vec<u8> {
+    // WHY: flatten/collect may grow each part geometrically. Reserve the exact
+    // packed geometry so a maximum-size file retains only its actual leaves.
+    let mut packed = Vec::with_capacity(std::mem::size_of_val(hashes));
+    for hash in hashes {
+        packed.extend_from_slice(hash);
+    }
+    packed
 }
 
 pub(super) struct AichPartSpec {
