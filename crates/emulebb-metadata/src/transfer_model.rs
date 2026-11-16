@@ -93,7 +93,7 @@ pub struct MetadataTransferManifest {
     pub auto_upload_priority: bool,
     pub comment: String,
     pub rating: u8,
-    pub category_id: u32,
+    pub category_id: Option<i64>,
     pub control_state: Option<String>,
     pub transfer_row_removed: bool,
     /// Explicit lifecycle for materializing a download outside the internal
@@ -122,6 +122,20 @@ pub struct MetadataTransferFileNameObservation {
     pub raw_name: String,
     pub normalized_name: String,
     pub observed_at_ms: i64,
+}
+
+/// Compact bounded transfer state used to preserve partial exchange.
+#[derive(Debug, Clone)]
+pub struct MetadataPartialShare {
+    pub file_hash: String,
+    pub display_name: String,
+    pub file_size: u64,
+    pub aich_root: Option<String>,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
+    pub ranges: Vec<MetadataTransferRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

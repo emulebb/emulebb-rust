@@ -40,6 +40,41 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
+    /// Find the next eligible copy by path key, checking blob lengths before allocation.
+    pub fn next_shared_copy(
+        &self,
+        file_hash: &str,
+        after_path_id: i64,
+        max_path_bytes: usize,
+    ) -> Result<Option<crate::MetadataSharedCopyCandidate>> {
+        ensure!(
+            after_path_id >= 0 && max_path_bytes > 0,
+            "invalid shared-copy cursor"
+        );
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare_cached("SELECT i.path_id,length(p.native_path),length(i.verified_fingerprint),i.size_bytes,p.platform,p.native_path,i.verified_fingerprint FROM known_files k JOIN local_file_instances i ON i.known_file_id=k.id JOIN local_paths p ON p.id=i.path_id WHERE k.ed2k_hash=?1 AND i.path_id>?2 AND EXISTS (SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL AND r.accessible=1 AND r.shareable=1) ORDER BY i.path_id LIMIT 1")?;
+        let mut rows = stmt.query(params![hash, after_path_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let path_bytes: i64 = row.get(1)?;
+        let fingerprint_bytes: i64 = row.get(2)?;
+        ensure!(
+            usize::try_from(path_bytes)
+                .ok()
+                .is_some_and(|value| value <= max_path_bytes)
+                && (0..=1024).contains(&fingerprint_bytes),
+            "shared copy exceeds reconciliation budget"
+        );
+        Ok(Some(crate::MetadataSharedCopyCandidate {
+            path_id: row.get(0)?,
+            file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
+            source_path: path_from_row(row, 4, 5)?,
+            source_fingerprint: optional_fingerprint_from_row(row, 6)?,
+        }))
+    }
+
     pub fn current_shared_files_by_hash(
         &self,
         file_hash: &str,
@@ -199,7 +234,7 @@ mod tests {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
-            category_id: 0,
+            category_id: None,
             control_state: None,
             transfer_row_removed: false,
             delivery_state: MetadataTransferDeliveryState::Delivered,

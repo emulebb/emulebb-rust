@@ -197,7 +197,6 @@ impl super::MetadataStore {
                 visible_state = excluded.visible_state,
                 final_rehash_pending = excluded.final_rehash_pending,
                 control_state = excluded.control_state,
-                category_id = excluded.category_id,
                 display_name = excluded.display_name,
                 part_size_bytes = excluded.part_size_bytes, part_count = excluded.part_count,
                 upload_priority = excluded.upload_priority, auto_upload_priority = excluded.auto_upload_priority,
@@ -219,7 +218,7 @@ impl super::MetadataStore {
             known_file_id,
             visible_state(manifest),
             manifest.control_state,
-            (manifest.category_id != 0).then_some(i64::from(manifest.category_id)),
+            manifest.category_id,
             manifest.display_name,
             delivered_path_id,
             now,
@@ -254,8 +253,106 @@ impl super::MetadataStore {
             completed_at_ms,
             completion_transition,
         )?;
+        // A stale progress snapshot must not restore an old assignment.
+        reconciled.category_id = tx.query_row(
+            "SELECT category_id FROM transfers WHERE id=?1",
+            [transfer_id],
+            |row| row.get(0),
+        )?;
         tx.commit()?;
         Ok(reconciled)
+    }
+
+    /// Assign a transfer without replacing unrelated progress or content state.
+    pub fn assign_transfer_category(
+        &self,
+        file_hash: &str,
+        category_id: Option<i64>,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        let changed = conn.execute("UPDATE transfers SET category_id=?1 WHERE known_file_id=(SELECT id FROM known_files WHERE ed2k_hash=?2)", params![category_id, hash])?;
+        Ok(changed != 0)
+    }
+
+    /// Read the current assignment without loading transfer children.
+    pub fn transfer_category_by_hash(&self, file_hash: &str) -> Result<Option<Option<i64>>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        conn.query_row("SELECT t.category_id FROM transfers t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1", [hash], |row| row.get(0)).optional().map_err(Into::into)
+    }
+
+    /// Bounded transfer-only projection for restoring a partial share after a root change.
+    pub fn partial_share_for_category_reconciliation(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<crate::MetadataPartialShare>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let result = Self::partial_share_on_connection(&tx, file_hash)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub(crate) fn partial_share_on_connection(
+        conn: &rusqlite::Connection,
+        file_hash: &str,
+    ) -> Result<Option<crate::MetadataPartialShare>> {
+        const MAX_TEXT_BYTES: i64 = 65_536;
+        const MAX_RANGES: i64 = 28_258;
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let header: Option<(i64, i64, i64, i64)> = conn.query_row(
+            "SELECT t.id,length(CAST(t.display_name AS BLOB)),length(CAST(t.comment AS BLOB)),length(CAST(t.upload_priority AS BLOB)) FROM transfers t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_ms IS NULL AND t.delete_requested_at_ms IS NULL",
+            [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).optional()?;
+        let Some((id, name_len, comment_len, priority_len)) = header else {
+            return Ok(None);
+        };
+        ensure!(
+            [name_len, comment_len, priority_len]
+                .into_iter()
+                .all(|n| (0..=MAX_TEXT_BYTES).contains(&n)),
+            "partial share text exceeds reconciliation budget"
+        );
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM verified_ranges WHERE transfer_id=?1 LIMIT 28259)",
+            [id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            count <= MAX_RANGES,
+            "partial share ranges exceed reconciliation budget"
+        );
+        if count == 0 {
+            return Ok(None);
+        }
+        let (display_name,file_size,aich_root,upload_priority,auto_upload_priority,comment,rating) = conn.query_row(
+            "SELECT t.display_name,k.size_bytes,CASE WHEN t.aich_root IS NULL THEN NULL ELSE lower(hex(t.aich_root)) END,t.upload_priority,t.auto_upload_priority,t.comment,t.rating FROM transfers t JOIN known_files k ON k.id=t.known_file_id WHERE t.id=?1", [id],
+            |row| Ok((row.get::<_,String>(0)?,crate::sql_value::unsigned::<u64>(row,1)?,row.get::<_,Option<String>>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)? != 0,row.get::<_,String>(5)?,row.get::<_,u8>(6)?)),
+        )?;
+        let mut stmt = conn.prepare_cached("SELECT start_offset,end_offset FROM verified_ranges WHERE transfer_id=?1 ORDER BY start_offset,end_offset")?;
+        let rows = stmt.query_map([id], |row| {
+            Ok(crate::MetadataTransferRange {
+                start: crate::sql_value::unsigned::<u64>(row, 0)?,
+                end: crate::sql_value::unsigned::<u64>(row, 1)?,
+            })
+        })?;
+        let mut ranges = Vec::with_capacity(usize::try_from(count)?);
+        for row in rows {
+            ranges.push(row?);
+        }
+        drop(stmt);
+        Ok(Some(crate::MetadataPartialShare {
+            file_hash: file_hash.to_owned(),
+            display_name,
+            file_size,
+            aich_root,
+            upload_priority,
+            auto_upload_priority,
+            comment,
+            rating,
+            ranges,
+        }))
     }
 
     /// Indexed identity-only read for cached transfer users. Do not load piece,
@@ -357,7 +454,7 @@ impl super::MetadataStore {
                     auto_upload_priority: row.get::<_, i64>(10)? != 0,
                     comment: row.get(11)?,
                     rating: row.get::<_, u8>(12)?,
-                    category_id: row.get::<_, Option<u32>>(13)?.unwrap_or_default(),
+                    category_id: row.get::<_, Option<i64>>(13)?,
                     control_state: row.get(14)?,
                     transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
                     delivered_path: optional_path_from_row(row, 16, 17)?,
@@ -599,7 +696,7 @@ impl super::MetadataStore {
                 auto_upload_priority: row.get::<_, i64>(10)? != 0,
                 comment: row.get(11)?,
                 rating: row.get::<_, u8>(12)?,
-                category_id: row.get::<_, Option<u32>>(13)?.unwrap_or_default(),
+                category_id: row.get::<_, Option<i64>>(13)?,
                 control_state: row.get(14)?,
                 transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
                 delivered_path: optional_path_from_row(row, 16, 17)?,
@@ -2122,7 +2219,7 @@ struct TransferRow {
     auto_upload_priority: bool,
     comment: String,
     rating: u8,
-    category_id: u32,
+    category_id: Option<i64>,
     control_state: Option<String>,
     transfer_row_removed: bool,
     delivered_path: Option<std::path::PathBuf>,

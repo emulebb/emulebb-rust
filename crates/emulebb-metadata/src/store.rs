@@ -400,6 +400,22 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Commit explicit roots only if the implicit-root snapshot is still current.
+    pub fn replace_explicit_roots_if_implicit_matches(
+        &self,
+        expected: &[MetadataSharedDirectoryRoot],
+        roots: &[MetadataSharedDirectoryRoot],
+    ) -> Result<bool> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if Self::implicit_roots_on_connection(&tx)? != expected {
+            return Ok(false);
+        }
+        Self::replace_root_origins_in_transaction(&tx, roots, "explicit", unix_ms())?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn search_index_by_origin(
         &self,
         query: &str,
@@ -529,6 +545,17 @@ impl MetadataStore {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        Self::replace_root_origins_in_transaction(&tx, roots, origin, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn replace_root_origins_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        roots: &[MetadataSharedDirectoryRoot],
+        origin: &str,
+        now: i64,
+    ) -> Result<()> {
         tx.execute(
             "DELETE FROM shared_directory_root_origins WHERE origin = ?1",
             params![origin],
@@ -571,25 +598,7 @@ impl MetadataStore {
                 ],
             )?;
         }
-        tx.execute(
-            "UPDATE shared_directory_roots SET
-                monitor_owned = coalesce((SELECT max(monitor_owned) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
-                shareable = coalesce((SELECT max(shareable) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
-                accessible = coalesce((SELECT max(shareable * accessible) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
-                enabled = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN 1 ELSE 0 END,
-                deleted_at_ms = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE ?1 END",
-            params![now],
-        )?;
-        tx.execute(
-            "UPDATE shared_file_memberships SET removed_at_ms = ?1
-             WHERE removed_at_ms IS NULL
-               AND root_id IN (
-                   SELECT id FROM shared_directory_roots
-                   WHERE accessible = 0 OR shareable = 0 OR enabled = 0
-               )",
-            params![now],
-        )?;
-        tx.commit()?;
+        refresh_shared_root_eligibility(&tx, now)?;
         Ok(())
     }
 
@@ -609,6 +618,35 @@ impl MetadataStore {
               AND shared_directory_root_origins.origin = 'explicit'
             ORDER BY shared_directory_roots.id
             "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataSharedDirectoryRoot {
+                path: row.get(0)?,
+                monitor_owned: row.get::<_, i64>(1)? != 0,
+                shareable: row.get::<_, i64>(2)? != 0,
+                accessible: row.get::<_, i64>(3)? != 0,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Current mandatory roots and their durable aggregate health.
+    pub fn implicit_shared_directory_roots(&self) -> Result<Vec<MetadataSharedDirectoryRoot>> {
+        let conn = self.connection()?;
+        Self::implicit_roots_on_connection(&conn)
+    }
+
+    fn implicit_roots_on_connection(
+        conn: &rusqlite::Connection,
+    ) -> Result<Vec<MetadataSharedDirectoryRoot>> {
+        let mut stmt = conn.prepare(
+            "SELECT p.display_path, r.monitor_owned, r.shareable, r.accessible
+             FROM shared_directory_roots r
+             JOIN local_paths p ON p.id=r.path_id
+             JOIN shared_directory_root_origins o ON o.root_id=r.id
+             WHERE o.origin='implicit' AND r.enabled=1 AND r.deleted_at_ms IS NULL
+             ORDER BY r.id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MetadataSharedDirectoryRoot {
@@ -696,6 +734,32 @@ impl MetadataStore {
             })
             .with_context(|| format!("failed to count {table_name}"))
     }
+}
+
+/// Reconcile aggregate root and membership eligibility after origin changes.
+pub(crate) fn refresh_shared_root_eligibility(
+    tx: &rusqlite::Transaction<'_>,
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+            "UPDATE shared_directory_roots SET
+                monitor_owned = coalesce((SELECT max(monitor_owned) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                shareable = coalesce((SELECT max(shareable) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                accessible = coalesce((SELECT max(shareable * accessible) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
+                enabled = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN 1 ELSE 0 END,
+                deleted_at_ms = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE ?1 END",
+        params![now],
+    )?;
+    tx.execute(
+        "UPDATE shared_file_memberships SET removed_at_ms = ?1
+             WHERE removed_at_ms IS NULL
+               AND root_id IN (
+                   SELECT id FROM shared_directory_roots
+                   WHERE accessible = 0 OR shareable = 0 OR enabled = 0
+               )",
+        params![now],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn upsert_local_path(tx: &rusqlite::Transaction<'_>, path: &Path) -> Result<i64> {

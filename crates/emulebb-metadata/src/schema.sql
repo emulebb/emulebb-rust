@@ -47,15 +47,11 @@ CREATE TABLE settings (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE categories (
-    id INTEGER PRIMARY KEY CHECK(id BETWEEN 1 AND 4294967295),
-    name TEXT NOT NULL,
-    path_id INTEGER REFERENCES local_paths(id),
-    comment TEXT NOT NULL DEFAULT '',
-    sort_order INTEGER NOT NULL DEFAULT 0 CHECK(sort_order BETWEEN 0 AND 4294967295),
-    color INTEGER CHECK(color IS NULL OR color BETWEEN 0 AND 4294967295),
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(instr(name, char(0)) = 0 AND length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[A-Za-z0-9]' AND name NOT GLOB '*[^A-Za-z0-9-]*'),
+    temp_path_id INTEGER REFERENCES local_paths(id),
+    destination_path_id INTEGER REFERENCES local_paths(id),
+    comment TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE TABLE friends (
@@ -271,6 +267,8 @@ CREATE TABLE local_file_instances (
 
 CREATE INDEX local_file_instances_content_idx
     ON local_file_instances(known_file_id);
+CREATE UNIQUE INDEX local_file_instances_path_content_idx
+    ON local_file_instances(path_id, known_file_id);
 
 CREATE INDEX local_file_instances_identity_idx
     ON local_file_instances(native_identity, size_bytes);
@@ -313,13 +311,18 @@ CREATE TABLE shared_default_ignore_overrides (
 
 CREATE TABLE shared_file_memberships (
     root_id INTEGER NOT NULL REFERENCES shared_directory_roots(id),
-    path_id INTEGER NOT NULL REFERENCES local_file_instances(path_id) ON DELETE CASCADE,
+    path_id INTEGER NOT NULL,
+    known_file_id INTEGER NOT NULL,
     relative_path TEXT NOT NULL,
     first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
     last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
     removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
-    PRIMARY KEY(root_id, path_id)
+    PRIMARY KEY(root_id, path_id),
+    FOREIGN KEY(path_id, known_file_id) REFERENCES local_file_instances(path_id, known_file_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX shared_file_memberships_root_content_idx
+    ON shared_file_memberships(root_id, known_file_id, path_id);
 
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
@@ -763,7 +766,7 @@ CREATE TABLE search_result_observations (
 ) STRICT;
 
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
-CREATE INDEX shared_file_memberships_path_idx ON shared_file_memberships(path_id);
+CREATE INDEX shared_file_memberships_path_content_idx ON shared_file_memberships(path_id, known_file_id);
 CREATE INDEX transfers_pending_delete_idx
 ON transfers(delete_requested_at_ms)
 WHERE delete_requested_at_ms IS NOT NULL;
@@ -773,7 +776,8 @@ CREATE INDEX kad_note_file_idx ON kad_note_publishes(ed2k_hash, observed_at_ms);
 CREATE INDEX search_results_session_idx ON search_results(session_id, id);
 CREATE INDEX search_result_observations_result_idx
 ON search_result_observations(result_id, observed_at_ms, id);
-CREATE INDEX categories_path_id_idx ON categories(path_id);
+CREATE INDEX categories_temp_path_id_idx ON categories(temp_path_id);
+CREATE INDEX categories_destination_path_id_idx ON categories(destination_path_id);
 CREATE INDEX transfers_category_id_idx ON transfers(category_id);
 CREATE INDEX transfers_delivered_path_id_idx ON transfers(delivered_path_id);
 CREATE INDEX delivery_attempts_target_path_id_idx ON delivery_attempts(target_path_id);

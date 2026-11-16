@@ -65,7 +65,7 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
             [&fingerprint],
         )
         .unwrap();
-        tx.execute_batch("INSERT INTO shared_file_memberships SELECT 1,id+1,'sample',0,0,NULL FROM known_files;
+        tx.execute_batch("INSERT INTO shared_file_memberships SELECT 1,id+1,id,'sample',0,0,NULL FROM known_files;
             INSERT INTO temp.session_verified_local_paths SELECT path_id,verified_fingerprint FROM local_file_instances;
             ANALYZE;").unwrap();
         for exact in [false, true] {
@@ -91,6 +91,17 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         }
         tx.commit().unwrap();
     }
+    // Withdrawn memberships remain enumerable for bounded root reconciliation.
+    store.connection().unwrap().execute("UPDATE shared_file_memberships SET removed_at_ms=1 WHERE root_id=1 AND known_file_id=1", []).unwrap();
+    let affected_first = store.category_root_hash_page(&root, 0, 128).unwrap();
+    let affected_next = store
+        .category_root_hash_page(&root, affected_first.last().unwrap().0, 128)
+        .unwrap();
+    assert_eq!(affected_first.len(), 128);
+    assert_eq!(affected_next.len(), 128);
+    assert_eq!(affected_first[0].0, 1);
+    assert!(affected_next[0].0 > affected_first.last().unwrap().0);
+    store.connection().unwrap().execute("UPDATE shared_file_memberships SET removed_at_ms=NULL WHERE root_id=1 AND known_file_id=1", []).unwrap();
     let first = store
         .query_active_local_share_entries(&MetadataSharedFileQuery {
             limit: 2,
@@ -144,6 +155,101 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         UPDATE local_file_instances SET known_file_id = 1 WHERE known_file_id != 1;",
         )
         .unwrap();
+    let root_page = store.category_root_hash_page(&root, 0, 128).unwrap();
+    assert_eq!(
+        root_page.len(),
+        1,
+        "all copies now belong to one content identity"
+    );
+    assert_eq!(root_page[0].0, 1);
+    let hash = hex::encode(root_page[0].1);
+    assert!(
+        store.next_shared_copy(&hash, 0, 1).is_err(),
+        "oversized path must fail before allocation"
+    );
+    let first_copy = store.next_shared_copy(&hash, 0, 65_536).unwrap().unwrap();
+    assert_eq!(
+        store
+            .try_verified_share_batch(&[root_page[0].1, [0xff; 16]])
+            .unwrap(),
+        Some(vec![(true, None), (false, None)])
+    );
+    assert!(store.try_verified_share_batch(&[[0; 16]; 201]).is_err());
+    let second_copy = store
+        .next_shared_copy(&hash, first_copy.path_id, 65_536)
+        .unwrap()
+        .unwrap();
+    assert!(second_copy.path_id > first_copy.path_id);
+    let conn = store.connection().unwrap();
+    let query = format!("EXPLAIN QUERY PLAN {}", super::VERIFIED_SHARE_EXISTS_SQL);
+    let mut query_plan = conn.prepare(&query).unwrap();
+    let eligibility_plan = query_plan
+        .query_map([root_page[0].1.as_slice()], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        eligibility_plan
+            .iter()
+            .any(|line| line.contains("local_file_instances_content_idx")),
+        "{eligibility_plan:#?}"
+    );
+    assert!(
+        eligibility_plan
+            .iter()
+            .all(|line| !line.contains("TEMP B-TREE")),
+        "{eligibility_plan:#?}"
+    );
+    drop(query_plan);
+    let mismatches: i64 = conn.query_row("SELECT count(*) FROM shared_file_memberships m JOIN local_file_instances i ON i.path_id=m.path_id WHERE m.known_file_id != i.known_file_id", [], |row| row.get(0)).unwrap();
+    assert_eq!(
+        mismatches, 0,
+        "content reassignment cascades to memberships"
+    );
+    let sql = format!(
+        "EXPLAIN QUERY PLAN {}",
+        crate::profile_store::CATEGORY_ROOT_HASH_PAGE_SQL
+    );
+    let mut explain = conn.prepare(&sql).unwrap();
+    let plan = explain
+        .query_map(
+            params![
+                NativePath::platform(),
+                NativePath::from(root.as_path()).storage_bytes(),
+                0,
+                128
+            ],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("shared_file_memberships_root_content_idx"))
+    );
+    assert!(
+        plan.iter().all(|line| !line.contains("TEMP B-TREE")),
+        "query plan: {plan:#?}"
+    );
+    drop(explain);
+    conn.execute(
+        "DELETE FROM local_file_instances WHERE path_id=?1",
+        [first_copy.path_id],
+    )
+    .unwrap();
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM shared_file_memberships WHERE path_id=?1",
+            [first_copy.path_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "deleting an instance cascades to its memberships"
+    );
+    drop(conn);
     let aliases = store
         .query_active_local_share_entries(&MetadataSharedFileQuery {
             limit: 2,
@@ -165,6 +271,16 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
     assert_ne!(next_alias.entries[0].path, chosen);
     let other = MetadataStore::from_connection(open()).unwrap();
     other.set_shared_root_accessible(&root, false).unwrap();
+    assert_eq!(
+        store.try_verified_share_batch(&[root_page[0].1]).unwrap(),
+        Some(vec![(false, None)])
+    );
+    assert_eq!(
+        store.category_root_hash_page(&root, 0, 128).unwrap().len(),
+        1,
+        "withdrawn memberships remain enumerable"
+    );
+    assert!(store.next_shared_copy(&hash, 0, 65_536).unwrap().is_none());
     assert!(
         store
             .query_active_local_share_entries(&MetadataSharedFileQuery {

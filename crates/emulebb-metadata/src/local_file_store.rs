@@ -775,6 +775,15 @@ impl MetadataStore {
         let Some(instance) = self.active_local_file_by_hash(file_hash)? else {
             return Ok(None);
         };
+        self.verified_local_content_for_instance(instance).map(Some)
+    }
+
+    /// Hydrate known content for an already selected instance without sorting all copies.
+    pub fn verified_local_content_for_instance(
+        &self,
+        instance: MetadataLocalFileInstance,
+    ) -> Result<MetadataVerifiedLocalContent> {
+        let file_hash = &instance.file_hash;
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
         let (name, size, part_size, aich_root, priority, auto_priority, comment, rating):
@@ -813,7 +822,7 @@ impl MetadataStore {
         let aich_hashset = aich_stmt
             .query_map(params![hash], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Some(MetadataVerifiedLocalContent {
+        Ok(MetadataVerifiedLocalContent {
             file_hash: instance.file_hash,
             display_name: name,
             file_size: instance.file_size,
@@ -827,7 +836,7 @@ impl MetadataStore {
             auto_upload_priority: auto_priority,
             comment,
             rating,
-        }))
+        })
     }
 }
 

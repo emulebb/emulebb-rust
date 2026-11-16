@@ -5,23 +5,20 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     profile_model::{MetadataCategory, MetadataFriend, MetadataServer},
-    store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
+    store::{
+        bool_to_i64, decode_fixed_hex, refresh_shared_root_eligibility, unix_ms, upsert_local_path,
+    },
 };
+
+// A root path and its root row are each unique. Scalar lookups keep the
+// membership scan constrained to one root and ordered by the covering index.
+pub(crate) const CATEGORY_ROOT_HASH_PAGE_SQL: &str = "SELECT m.known_file_id,(SELECT k.ed2k_hash FROM known_files k WHERE k.id=m.known_file_id) FROM shared_file_memberships m INDEXED BY shared_file_memberships_root_content_idx WHERE m.root_id=(SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2) AND m.known_file_id>?3 GROUP BY m.known_file_id ORDER BY m.known_file_id LIMIT ?4";
 
 /// Time spent acquiring the shared connection and executing a friend write.
 #[derive(Debug, Clone, Copy)]
 pub struct FriendWriteTiming {
     pub connection_wait: std::time::Duration,
     pub execution: std::time::Duration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CategoryDeletionWrite {
-    CategoriesRetired,
-    LocalPathUpserted,
-    CategoryReplaced,
-    TransfersRemapped,
-    ReadyToCommit,
 }
 
 pub(crate) fn seed_host_storage_defaults(
@@ -248,122 +245,145 @@ impl super::MetadataStore {
     pub fn load_categories(&self) -> Result<Vec<MetadataCategory>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            r#"
-            SELECT categories.id, categories.name, local_paths.display_path,
-                   categories.comment, categories.sort_order, categories.color
-            FROM categories
-            LEFT JOIN local_paths ON local_paths.id = categories.path_id
-            WHERE deleted_at_ms IS NULL
-            ORDER BY categories.id
-            "#,
+            "SELECT c.id,c.name,t.display_path,d.display_path,c.comment FROM categories c \
+             LEFT JOIN local_paths t ON t.id=c.temp_path_id \
+             LEFT JOIN local_paths d ON d.id=c.destination_path_id ORDER BY c.id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MetadataCategory {
-                id: row.get::<_, u32>(0)?,
+                id: row.get(0)?,
                 name: row.get(1)?,
-                path: row.get(2)?,
-                comment: row.get(3)?,
-                sort_order: row.get::<_, u32>(4)?,
-                color: row.get::<_, Option<u32>>(5)?,
+                temp_dir: row.get(2)?,
+                destination_dir: row.get(3)?,
+                comment: row.get(4)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
-    pub fn upsert_category(&self, category: &MetadataCategory) -> Result<()> {
-        let now = unix_ms();
+    /// Allocate an immutable ID and persist the category in one transaction.
+    pub fn create_category(
+        &self,
+        name: &str,
+        temp_dir: Option<&str>,
+        destination_dir: Option<&str>,
+        comment: &str,
+        incoming: &Path,
+    ) -> Result<MetadataCategory> {
+        ensure!(valid_category_name(name), "invalid category name");
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        upsert_category_in_transaction(&tx, category, now, |_| Ok(()))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let temp_id = temp_dir
+            .map(|path| upsert_local_path(&tx, Path::new(path)))
+            .transpose()?;
+        let destination_id = destination_dir
+            .map(|path| upsert_local_path(&tx, Path::new(path)))
+            .transpose()?;
+        tx.execute("INSERT INTO categories(name,temp_path_id,destination_path_id,comment) VALUES (?1,?2,?3,?4)", params![name, temp_id, destination_id, comment])?;
+        let id = tx.last_insert_rowid();
+        ensure!(id > 0, "category ID exhausted");
+        if destination_id.is_some() {
+            sync_category_roots(&tx, incoming)?;
+        }
         tx.commit()?;
-        Ok(())
+        Ok(MetadataCategory {
+            id,
+            name: name.to_owned(),
+            temp_dir: temp_dir.map(str::to_owned),
+            destination_dir: destination_dir.map(str::to_owned),
+            comment: comment.to_owned(),
+        })
     }
 
-    pub fn transfer_hashes_requiring_category_remap(
-        &self,
-        deleted_category_id: u32,
-    ) -> Result<Vec<String>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT lower(hex(known_files.ed2k_hash))
-            FROM transfers
-            JOIN known_files ON known_files.id = transfers.known_file_id
-            WHERE transfers.category_id >= ?1
-            ORDER BY known_files.ed2k_hash
-            "#,
-        )?;
-        let rows = stmt.query_map(params![i64::from(deleted_category_id)], |row| row.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
-    pub fn delete_category_and_remap_transfers(
-        &self,
-        deleted_category_id: u32,
-        shifted_categories: &[MetadataCategory],
-    ) -> Result<()> {
-        self.delete_category_and_remap_transfers_with(
-            deleted_category_id,
-            shifted_categories,
-            |_| Ok(()),
-        )
-    }
-
-    fn delete_category_and_remap_transfers_with(
-        &self,
-        deleted_category_id: u32,
-        shifted_categories: &[MetadataCategory],
-        mut after_write: impl FnMut(CategoryDeletionWrite) -> Result<()>,
-    ) -> Result<()> {
+    pub fn update_category(&self, category: &MetadataCategory, incoming: &Path) -> Result<bool> {
         ensure!(
-            deleted_category_id != 0,
-            "default category cannot be deleted"
+            category.id > 0 && valid_category_name(&category.name),
+            "invalid category"
         );
-        let mut expected_id = deleted_category_id;
-        for category in shifted_categories {
-            ensure!(
-                category.id == expected_id,
-                "shifted category snapshot must be contiguous from deleted category {deleted_category_id}"
-            );
-            expected_id = expected_id
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("shifted category id overflow"))?;
-        }
-
-        let now = unix_ms();
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        tx.execute(
-            r#"
-            UPDATE categories
-            SET deleted_at_ms = ?1, updated_at_ms = ?1
-            WHERE id >= ?2 AND deleted_at_ms IS NULL
-            "#,
-            params![now, i64::from(deleted_category_id)],
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT destination_path_id FROM categories WHERE id=?1",
+                [category.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let temp_id = category
+            .temp_dir
+            .as_deref()
+            .map(|path| upsert_local_path(&tx, Path::new(path)))
+            .transpose()?;
+        let destination_id = category
+            .destination_dir
+            .as_deref()
+            .map(|path| upsert_local_path(&tx, Path::new(path)))
+            .transpose()?;
+        let changed = tx.execute(
+            "UPDATE categories SET temp_path_id=?1,destination_path_id=?2,comment=?3 WHERE id=?4",
+            params![temp_id, destination_id, category.comment, category.id],
         )?;
-        after_write(CategoryDeletionWrite::CategoriesRetired)?;
-
-        for category in shifted_categories {
-            upsert_category_in_transaction(&tx, category, now, &mut after_write)?;
+        if changed != 0 && previous.flatten() != destination_id {
+            sync_category_roots(&tx, incoming)?;
         }
-
-        tx.execute(
-            r#"
-            UPDATE transfers
-            SET category_id = CASE
-                WHEN category_id = ?1 THEN NULL
-                ELSE category_id - 1
-            END
-            WHERE category_id >= ?1
-            "#,
-            params![i64::from(deleted_category_id)],
-        )?;
-        after_write(CategoryDeletionWrite::TransfersRemapped)?;
-        after_write(CategoryDeletionWrite::ReadyToCommit)?;
         tx.commit()?;
-        Ok(())
+        Ok(changed != 0)
+    }
+
+    /// Clear only assignments to this category and delete it atomically.
+    pub fn delete_category(&self, id: i64, incoming: &Path) -> Result<bool> {
+        ensure!(id > 0, "invalid category ID");
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT destination_path_id FROM categories WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            "UPDATE transfers SET category_id=NULL WHERE category_id=?1",
+            [id],
+        )?;
+        let changed = tx.execute("DELETE FROM categories WHERE id=?1", [id])?;
+        if changed != 0 && previous.flatten().is_some() {
+            sync_category_roots(&tx, incoming)?;
+        }
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+
+    /// Traverse one root's membership keys without collecting the affected library.
+    pub fn category_root_hash_page(
+        &self,
+        root: &Path,
+        after_known_file_id: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, [u8; 16])>> {
+        ensure!(
+            (1..=128).contains(&limit) && after_known_file_id >= 0,
+            "invalid category root page"
+        );
+        let native = crate::NativePath::from(root);
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare_cached(CATEGORY_ROOT_HASH_PAGE_SQL)?;
+        let mut rows = stmt.query(params![
+            crate::NativePath::platform(),
+            native.storage_bytes(),
+            after_known_file_id,
+            i64::try_from(limit)?
+        ])?;
+        let mut page = Vec::with_capacity(limit);
+        while let Some(row) = rows.next()? {
+            let hash: Vec<u8> = row.get(1)?;
+            let hash: [u8; 16] = hash
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid content hash"))?;
+            page.push((row.get(0)?, hash));
+        }
+        Ok(page)
     }
 
     pub fn load_friends(&self) -> Result<Vec<MetadataFriend>> {
@@ -636,48 +656,76 @@ fn upsert_server_in_transaction(
     Ok(())
 }
 
-fn upsert_category_in_transaction(
-    tx: &rusqlite::Transaction<'_>,
-    category: &MetadataCategory,
-    now: i64,
-    mut after_write: impl FnMut(CategoryDeletionWrite) -> Result<()>,
-) -> Result<()> {
-    let path_id = if let Some(path) = category
-        .path
-        .as_deref()
-        .filter(|path| !path.trim().is_empty())
-    {
-        let path_id = upsert_local_path(tx, Path::new(path))?;
-        after_write(CategoryDeletionWrite::LocalPathUpserted)?;
-        Some(path_id)
-    } else {
-        None
-    };
+/// Rebuild implicit root origins within the category transaction, using only SQL
+/// rows. A new root remains unavailable until the existing health owner verifies it.
+fn sync_category_roots(tx: &rusqlite::Transaction<'_>, incoming: &Path) -> Result<()> {
+    let incoming_id = upsert_local_path(tx, incoming)?;
+    let now = unix_ms();
     tx.execute(
-        r#"
-        INSERT INTO categories(id, name, path_id, comment, sort_order, color, created_at_ms, updated_at_ms, deleted_at_ms)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL)
-        ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            path_id = excluded.path_id,
-            comment = excluded.comment,
-            sort_order = excluded.sort_order,
-            color = excluded.color,
-            updated_at_ms = excluded.updated_at_ms,
-            deleted_at_ms = NULL
-        "#,
-        params![
-            i64::from(category.id),
-            category.name,
-            path_id,
-            category.comment,
-            i64::from(category.sort_order),
-            category.color.map(i64::from),
-            now,
-        ],
+        "DELETE FROM shared_directory_root_origins WHERE origin='implicit'",
+        [],
     )?;
-    after_write(CategoryDeletionWrite::CategoryReplaced)?;
+    tx.execute("INSERT INTO shared_directory_roots(path_id,monitor_owned,shareable,accessible,enabled,created_at_ms,deleted_at_ms) SELECT path_id,0,1,0,1,?2,NULL FROM (SELECT ?1 AS path_id UNION SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL) WHERE true ON CONFLICT(path_id) DO NOTHING", params![incoming_id, now])?;
+    tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) SELECT r.id,'implicit',0,1,r.accessible FROM shared_directory_roots r WHERE r.path_id=?1 OR r.path_id IN (SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL)", [incoming_id])?;
+    refresh_shared_root_eligibility(tx, now)?;
     Ok(())
+}
+
+impl super::MetadataStore {
+    /// Refresh mandatory roots from the category rows in this same transaction.
+    pub fn sync_profile_category_roots(&self, incoming: &Path) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        sync_category_roots(&tx, incoming)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// Category and tag names share this ASCII grammar.
+#[must_use]
+pub fn valid_category_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+}
+
+#[cfg(test)]
+mod category_name_tests {
+    use super::valid_category_name;
+
+    #[test]
+    fn accepts_only_the_current_ascii_category_grammar() {
+        for name in ["A", "9", "Media-2026", &"a".repeat(64)] {
+            assert!(valid_category_name(name), "{name:?}");
+        }
+        for name in [
+            "",
+            "-A",
+            "A B",
+            " A",
+            "A ",
+            "A_B",
+            "A.B",
+            "ä",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_category_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn schema_rejects_embedded_nul_in_category_name() {
+        let store = crate::MetadataStore::in_memory().unwrap();
+        let result = store.connection().unwrap().execute(
+            "INSERT INTO categories(name,comment) VALUES ('Alpha' || char(0) || 'invalid','')",
+            [],
+        );
+        assert!(result.is_err());
+    }
 }
 
 fn encode_auxiliary_ports(ports: &[u16]) -> String {
@@ -703,8 +751,6 @@ fn decode_auxiliary_ports(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use super::*;
 
     #[test]
@@ -842,18 +888,15 @@ mod tests {
             vec!["192.0.2.10:4672".to_string(), "192.0.2.11:4672".to_string()]
         );
 
-        store
-            .upsert_category(&MetadataCategory {
-                id: 7,
-                name: "Samples".to_string(),
-                path: None,
-                comment: "Synthetic".to_string(),
-                sort_order: 2,
-                color: Some(0x00aa11),
-            })
+        let category = store
+            .create_category("Samples", None, None, "Synthetic", Path::new("incoming"))
             .unwrap();
-        assert_eq!(store.load_categories().unwrap()[0].id, 7);
-        store.delete_category_and_remap_transfers(7, &[]).unwrap();
+        assert_eq!(store.load_categories().unwrap()[0], category);
+        assert!(
+            store
+                .delete_category(category.id, Path::new("incoming"))
+                .unwrap()
+        );
         assert!(store.load_categories().unwrap().is_empty());
 
         store
@@ -1009,159 +1052,214 @@ mod tests {
     }
 
     #[test]
-    fn category_delete_remaps_categories_and_transfers_in_one_commit() {
-        let path = unique_metadata_path("category-delete-success");
-        let store = super::super::MetadataStore::open(&path).unwrap();
-        let shifted = seed_category_delete_fixture(&store, &path);
-
-        store
-            .delete_category_and_remap_transfers(2, &shifted)
+    fn categories_keep_ids_and_clear_only_deleted_assignments() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let first = store
+            .create_category("First", None, None, "", Path::new("incoming"))
             .unwrap();
-        drop(store);
-
-        let reopened = super::super::MetadataStore::open(&path).unwrap();
-        assert_category_delete_committed(&reopened);
-        drop(reopened);
-        std::fs::remove_file(path).unwrap();
+        let second = store
+            .create_category("Media", None, None, "", Path::new("incoming"))
+            .unwrap();
+        let third = store
+            .create_category("Third", None, None, "", Path::new("incoming"))
+            .unwrap();
+        assert!(
+            store
+                .create_category("MEDIA", None, None, "", Path::new("incoming"))
+                .is_err()
+        );
+        store
+            .upsert_transfer_manifest(&test_transfer_manifest(1, Some(second.id)))
+            .unwrap();
+        store
+            .upsert_transfer_manifest(&test_transfer_manifest(2, Some(third.id)))
+            .unwrap();
+        assert!(
+            store
+                .delete_category(second.id, Path::new("incoming"))
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .transfer_manifest_by_hash(&"01".repeat(16))
+                .unwrap()
+                .unwrap()
+                .category_id,
+            None
+        );
+        assert_eq!(
+            store
+                .transfer_manifest_by_hash(&"02".repeat(16))
+                .unwrap()
+                .unwrap()
+                .category_id,
+            Some(third.id)
+        );
+        let next = store
+            .create_category("Next", None, None, "", Path::new("incoming"))
+            .unwrap();
+        assert!(next.id > third.id);
+        assert_eq!(
+            store
+                .load_categories()
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![first.id, third.id, next.id]
+        );
     }
 
     #[test]
-    fn category_delete_rolls_back_after_every_write_boundary() {
-        let count_path = unique_metadata_path("category-delete-write-count");
-        let count_store = super::super::MetadataStore::open(&count_path).unwrap();
-        let shifted = seed_category_delete_fixture(&count_store, &count_path);
-        let write_count = Cell::new(0usize);
-        count_store
-            .delete_category_and_remap_transfers_with(2, &shifted, |_| {
-                write_count.set(write_count.get() + 1);
-                Ok(())
-            })
+    fn delayed_root_sync_uses_committed_category_rows() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let incoming = std::path::PathBuf::from("incoming");
+        let mut category = store
+            .create_category("Media", None, Some("old-root"), "", &incoming)
             .unwrap();
-        drop(count_store);
-        std::fs::remove_file(count_path).unwrap();
-
-        assert_eq!(write_count.get(), 5);
-        for failed_write in 0..write_count.get() {
-            let path = unique_metadata_path(&format!("category-delete-fail-{failed_write}"));
-            let store = super::super::MetadataStore::open(&path).unwrap();
-            let shifted = seed_category_delete_fixture(&store, &path);
-            let current_write = Cell::new(0usize);
-            let error = store
-                .delete_category_and_remap_transfers_with(2, &shifted, |_| {
-                    let write = current_write.get();
-                    current_write.set(write + 1);
-                    anyhow::ensure!(
-                        write != failed_write,
-                        "injected category-delete failure after write {write}"
-                    );
-                    Ok(())
-                })
-                .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("injected category-delete failure")
-            );
-            drop(store);
-
-            let reopened = super::super::MetadataStore::open(&path).unwrap();
-            assert_category_delete_rolled_back(&reopened);
-            drop(reopened);
-            std::fs::remove_file(path).unwrap();
-        }
+        let (ready, ready_rx) = std::sync::mpsc::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let store = store.clone();
+            let incoming = incoming.clone();
+            std::thread::spawn(move || {
+                ready.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                store.sync_profile_category_roots(&incoming).unwrap();
+            })
+        };
+        ready_rx.recv().unwrap();
+        category.destination_dir = Some("new-root".into());
+        store.update_category(&category, &incoming).unwrap();
+        resume.send(()).unwrap();
+        worker.join().unwrap();
+        let roots = store.implicit_shared_directory_roots().unwrap();
+        assert!(roots.iter().any(|root| root.path == "new-root"));
+        assert!(!roots.iter().any(|root| root.path == "old-root"));
+        assert!(
+            roots
+                .iter()
+                .find(|root| root.path == "new-root")
+                .is_some_and(|root| !root.accessible)
+        );
     }
 
-    fn seed_category_delete_fixture(
-        store: &super::super::MetadataStore,
-        database_path: &Path,
-    ) -> Vec<MetadataCategory> {
-        let categories = [
-            MetadataCategory {
-                id: 1,
-                name: "One".to_string(),
-                path: None,
-                comment: String::new(),
-                sort_order: 1,
-                color: None,
-            },
-            MetadataCategory {
-                id: 2,
-                name: "Two".to_string(),
-                path: None,
-                comment: String::new(),
-                sort_order: 1,
-                color: None,
-            },
-            MetadataCategory {
-                id: 3,
-                name: "Three".to_string(),
-                path: Some(
-                    database_path
-                        .with_extension("category-three")
-                        .display()
-                        .to_string(),
-                ),
-                comment: "survivor".to_string(),
-                sort_order: 2,
-                color: Some(0x123456),
-            },
-        ];
-        for category in &categories {
-            store.upsert_category(category).unwrap();
-        }
-        for (byte, category_id) in [(0x11, 1), (0x22, 2), (0x33, 3)] {
+    #[test]
+    fn explicit_root_commit_rejects_stale_implicit_roots() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let incoming = Path::new("incoming");
+        let mut category = store
+            .create_category("Media", None, Some("old-root"), "", incoming)
+            .unwrap();
+        let expected = store.implicit_shared_directory_roots().unwrap();
+        category.destination_dir = Some("new-root".into());
+        store.update_category(&category, incoming).unwrap();
+        let explicit = crate::MetadataSharedDirectoryRoot {
+            path: "explicit".into(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        };
+        assert!(
+            !store
+                .replace_explicit_roots_if_implicit_matches(
+                    &expected,
+                    std::slice::from_ref(&explicit)
+                )
+                .unwrap()
+        );
+        assert!(store.shared_directory_roots().unwrap().is_empty());
+        let current = store.implicit_shared_directory_roots().unwrap();
+        assert!(
             store
-                .upsert_transfer_manifest(&test_transfer_manifest(byte, category_id))
-                .unwrap();
-        }
-
-        vec![MetadataCategory {
-            id: 2,
-            name: categories[2].name.clone(),
-            path: categories[2].path.clone(),
-            comment: categories[2].comment.clone(),
-            sort_order: categories[2].sort_order,
-            color: categories[2].color,
-        }]
-    }
-
-    fn assert_category_delete_committed(store: &super::super::MetadataStore) {
-        let categories = store.load_categories().unwrap();
-        assert_eq!(
-            categories
-                .iter()
-                .map(|category| (category.id, category.name.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(1, "One"), (2, "Three")]
+                .replace_explicit_roots_if_implicit_matches(
+                    &current,
+                    std::slice::from_ref(&explicit)
+                )
+                .unwrap()
         );
-        assert_eq!(transfer_category(store, 0x11), 1);
-        assert_eq!(transfer_category(store, 0x22), 0);
-        assert_eq!(transfer_category(store, 0x33), 2);
+        assert_eq!(store.shared_directory_roots().unwrap(), vec![explicit]);
     }
 
-    fn assert_category_delete_rolled_back(store: &super::super::MetadataStore) {
-        let categories = store.load_categories().unwrap();
-        assert_eq!(
-            categories
-                .iter()
-                .map(|category| (category.id, category.name.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(1, "One"), (2, "Two"), (3, "Three")]
+    #[test]
+    fn category_allocator_does_not_reuse_deleted_committed_ids_after_reopen() {
+        let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+            .join("tmp/category-metadata-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("metadata.sqlite");
+        let store = super::super::MetadataStore::open(&path).unwrap();
+        let first = store.create_category("One", None, None, "", &root).unwrap();
+        let second = store.create_category("Two", None, None, "", &root).unwrap();
+        assert!(store.delete_category(second.id, &root).unwrap());
+        drop(store);
+        let store = super::super::MetadataStore::open(&path).unwrap();
+        let third = store
+            .create_category("Three", None, None, "", &root)
+            .unwrap();
+        assert!(third.id > second.id && second.id > first.id);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_transfer_progress_cannot_restore_deleted_category() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let category = store
+            .create_category("Retired", None, None, "", Path::new("incoming"))
+            .unwrap();
+        let stale = test_transfer_manifest(4, Some(category.id));
+        store.upsert_transfer_manifest(&stale).unwrap();
+        assert!(
+            store
+                .delete_category(category.id, Path::new("incoming"))
+                .unwrap()
         );
-        assert_eq!(transfer_category(store, 0x11), 1);
-        assert_eq!(transfer_category(store, 0x22), 2);
-        assert_eq!(transfer_category(store, 0x33), 3);
+        let stored = store.upsert_transfer_manifest_reconciled(&stale).unwrap();
+        assert_eq!(stored.category_id, None);
+        assert_eq!(
+            store
+                .transfer_manifest_by_hash(&"04".repeat(16))
+                .unwrap()
+                .unwrap()
+                .category_id,
+            None
+        );
     }
 
-    fn transfer_category(store: &super::super::MetadataStore, byte: u8) -> u32 {
+    #[test]
+    fn category_delete_rolls_back_assignment_when_delete_fails() {
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let category = store
+            .create_category("Keep", None, None, "", Path::new("incoming"))
+            .unwrap();
         store
-            .transfer_manifest_by_hash(&format!("{byte:02x}").repeat(16))
-            .unwrap()
-            .unwrap()
-            .category_id
+            .upsert_transfer_manifest(&test_transfer_manifest(3, Some(category.id)))
+            .unwrap();
+        {
+            let conn = store.connection().unwrap();
+            conn.execute_batch("CREATE TEMP TRIGGER fail_category_delete BEFORE DELETE ON categories BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        }
+        assert!(
+            store
+                .delete_category(category.id, Path::new("incoming"))
+                .is_err()
+        );
+        assert_eq!(store.load_categories().unwrap()[0].id, category.id);
+        assert_eq!(
+            store
+                .transfer_manifest_by_hash(&"03".repeat(16))
+                .unwrap()
+                .unwrap()
+                .category_id,
+            Some(category.id)
+        );
     }
 
-    fn test_transfer_manifest(byte: u8, category_id: u32) -> crate::MetadataTransferManifest {
+    fn test_transfer_manifest(
+        byte: u8,
+        category_id: Option<i64>,
+    ) -> crate::MetadataTransferManifest {
         crate::MetadataTransferManifest {
             file_hash: format!("{byte:02x}").repeat(16),
             display_name: format!("{byte:02x}.bin"),

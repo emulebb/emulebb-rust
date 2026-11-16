@@ -39,6 +39,60 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
     store
         .upsert_local_file_instance(&file, hash, &fingerprint)
         .unwrap();
+    store.connection().unwrap().execute_batch(
+        "CREATE TEMP TRIGGER fail_session_verification BEFORE INSERT ON session_verified_local_paths
+         BEGIN SELECT RAISE(ABORT, 'injected verification failure'); END;",
+    ).unwrap();
+    assert!(
+        store
+            .admit_local_path_to_root(&root, &file, Path::new("nested/Sample.bin"), &fingerprint)
+            .is_err()
+    );
+    let count: i64 = store
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM shared_file_memberships", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "membership and verification must roll back together"
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_session_verification;")
+        .unwrap();
+    // This fixture has no verified-content row. The bounded admission
+    // projection must fail before membership or session verification commits.
+    assert!(
+        store
+            .admit_shared_path_with_projection(
+                &root,
+                &file,
+                Path::new("nested/Sample.bin"),
+                &fingerprint,
+                hash,
+                None,
+            )
+            .is_err()
+    );
+    let counts: (i64, i64) = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM shared_file_memberships),
+                (SELECT count(*) FROM temp.session_verified_local_paths)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        counts,
+        (0, 0),
+        "projection failure must roll back admission"
+    );
     let verified_file = (
         file.clone(),
         PathBuf::from("nested/Sample.bin"),
@@ -65,7 +119,12 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         .unwrap()
         .execute_batch("DROP TRIGGER keep_active_membership;")
         .unwrap();
-    assert_eq!(store.withdraw_local_file_path(&file).unwrap(), 2);
+    let (withdrawn, complete, partial) = store
+        .withdraw_shared_path_with_projection(&file, hash, Some(&fingerprint))
+        .unwrap();
+    assert_eq!(withdrawn, 2);
+    assert!(!complete);
+    assert!(partial.is_none());
     assert_eq!(store.active_shared_content_count().unwrap(), 0);
     assert!(store.local_file_instance(&file).unwrap().is_some());
     store

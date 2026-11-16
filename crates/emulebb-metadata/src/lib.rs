@@ -13,6 +13,7 @@ mod kad_publish_store;
 mod kad_routing_store;
 mod library_projection;
 mod local_catalog;
+pub use local_catalog::MetadataPartialOffer;
 mod local_file_store;
 mod model;
 mod native_file;
@@ -38,7 +39,9 @@ mod transfer_validation;
 
 pub use aich_recovery_store::MetadataAichRecoverySet;
 pub use discovery_store::{DiscoveryDomain, DiscoveryInitializationStatus};
-pub use download_history_model::{MetadataCurrentSharedFile, MetadataDownloadHistoryEntry};
+pub use download_history_model::{
+    MetadataCurrentSharedFile, MetadataDownloadHistoryEntry, MetadataSharedCopyCandidate,
+};
 pub use identity_model::MetadataLocalIdentity;
 pub use identity_store::KadNodeId;
 pub use kad_publish_model::{
@@ -60,21 +63,22 @@ pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use profile_ownership::ProfileLeaseGuard;
-pub use profile_store::FriendWriteTiming;
+pub use profile_store::{FriendWriteTiming, valid_category_name};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
     MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,
 };
 pub use search_store::normalized_search_query;
+pub use shared_membership_store::ObservedRootChanged;
 pub use store::{InitialProfileStorage, MetadataStore};
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataFileImportRecord, MetadataSharedSourceFailure, MetadataTransferAichIdentity,
-    MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferDeletionTombstone,
-    MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
-    MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
-    MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
-    MetadataTransferFileNameObservation, MetadataTransferManifest, MetadataTransferMediaMetadata,
-    MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
-    MetadataTransferSource,
+    MetadataFileImportRecord, MetadataPartialShare, MetadataSharedSourceFailure,
+    MetadataTransferAichIdentity, MetadataTransferCatalogEntry, MetadataTransferCounts,
+    MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
+    MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
+    MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
+    MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
+    MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+    MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferSource,
 };
