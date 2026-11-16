@@ -54,13 +54,12 @@ async fn adopted_callback_session_serves_after_hello_answer() {
         .write_all(&encode_hello_answer(peer_hello_identity()))
         .await
         .unwrap();
-    let manifest = runtime
-        .transfer_runtime
-        .manifest(&file.file_hash.to_string())
-        .await
-        .unwrap();
     stream
-        .write_all(&encode_request_filename(&file.file_hash, &manifest))
+        .write_all(&encode_packet(
+            OP_EDONKEYPROT,
+            OP_REQUESTFILENAME,
+            &file.file_hash.0,
+        ))
         .await
         .unwrap();
     let filename_answer =
@@ -142,13 +141,12 @@ async fn adopted_callback_session_accepts_simultaneous_hello() {
         .unwrap();
     let _hello_answer = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLOANSWER).await;
 
-    let manifest = runtime
-        .transfer_runtime
-        .manifest(&file.file_hash.to_string())
-        .await
-        .unwrap();
     stream
-        .write_all(&encode_request_filename(&file.file_hash, &manifest))
+        .write_all(&encode_packet(
+            OP_EDONKEYPROT,
+            OP_REQUESTFILENAME,
+            &file.file_hash.0,
+        ))
         .await
         .unwrap();
     let filename_answer =
@@ -177,22 +175,26 @@ async fn inbound_callback_claim_is_scoped_to_the_server_route() {
     let other_server_endpoint = SocketAddr::from((other_server_ip, 4661));
     let ticket_hash = Ed2kHash::from_bytes([0x31; 16]);
     let other_server_hash = Ed2kHash::from_bytes([0x32; 16]);
+    let ticket_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &runtime.transfer_runtime,
+        ticket_hash,
+        "ticketed.bin".to_string(),
+        1,
+    );
     runtime
         .transfer_runtime
-        .ensure_job(&new_transfer_job(
-            ticket_hash,
-            "ticketed.bin".to_string(),
-            1,
-        ))
+        .ensure_job(&ticket_hash_job)
         .await
         .unwrap();
+    let other_server_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &runtime.transfer_runtime,
+        other_server_hash,
+        "other-server.bin".to_string(),
+        1,
+    );
     runtime
         .transfer_runtime
-        .ensure_job(&new_transfer_job(
-            other_server_hash,
-            "other-server.bin".to_string(),
-            1,
-        ))
+        .ensure_job(&other_server_hash_job)
         .await
         .unwrap();
 
@@ -213,6 +215,7 @@ async fn inbound_callback_claim_is_scoped_to_the_server_route() {
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    job_token: ticket_hash_job.token,
                     file_hash: ticket_hash,
                     display_name: "ticketed.bin".to_string(),
                     file_size: 1,
@@ -243,6 +246,7 @@ async fn inbound_callback_claim_is_scoped_to_the_server_route() {
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    job_token: other_server_hash_job.token,
                     file_hash: other_server_hash,
                     display_name: "other-server.bin".to_string(),
                     file_size: 1,
@@ -349,12 +353,17 @@ async fn inbound_ticketed_callback_switches_a4af_after_file_not_found() {
         file_comment: String::new(),
         file_rating: 0,
     };
-    for (hash, name) in [(first_hash, "first.bin"), (second_hash, "second.bin")] {
-        runtime
-            .transfer_runtime
-            .ensure_job(&new_transfer_job(hash, name.to_string(), 1))
-            .await
-            .unwrap();
+    let [first_hash_job, second_hash_job] =
+        [(first_hash, "first.bin"), (second_hash, "second.bin")].map(|(hash, name)| {
+            crate::ed2k_transfer::test_support::admit_download_job(
+                &runtime.transfer_runtime,
+                hash,
+                name.to_string(),
+                1,
+            )
+        });
+    for job in [&first_hash_job, &second_hash_job] {
+        runtime.transfer_runtime.ensure_job(job).await.unwrap();
     }
 
     let first_reservation = runtime
@@ -366,6 +375,7 @@ async fn inbound_ticketed_callback_switches_a4af_after_file_not_found() {
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    job_token: first_hash_job.token,
                     file_hash: first_hash,
                     display_name: "first.bin".to_string(),
                     file_size: 1,
@@ -397,6 +407,7 @@ async fn inbound_ticketed_callback_switches_a4af_after_file_not_found() {
                     None,
                     peer_tcp_port,
                     Ed2kCallbackDownload {
+                        job_token: second_hash_job.token,
                         file_hash: second_hash,
                         display_name: "second.bin".to_string(),
                         file_size: 1,
@@ -476,16 +487,21 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
         file_comment: String::new(),
         file_rating: 0,
     };
-    for (hash, name) in [
+    let [first_hash_job, second_hash_job, retry_hash_job] = [
         (first_hash, "first.bin"),
         (second_hash, "second.bin"),
         (retry_hash, "retry.bin"),
-    ] {
-        runtime
-            .transfer_runtime
-            .ensure_job(&new_transfer_job(hash, name.to_string(), 1))
-            .await
-            .unwrap();
+    ]
+    .map(|(hash, name)| {
+        crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime.transfer_runtime,
+            hash,
+            name.to_string(),
+            1,
+        )
+    });
+    for job in [&first_hash_job, &second_hash_job, &retry_hash_job] {
+        runtime.transfer_runtime.ensure_job(job).await.unwrap();
     }
 
     let first_reservation = runtime
@@ -497,6 +513,7 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    job_token: first_hash_job.token,
                     file_hash: first_hash,
                     display_name: "first.bin".to_string(),
                     file_size: 1,
@@ -528,6 +545,7 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
                     None,
                     peer_tcp_port,
                     Ed2kCallbackDownload {
+                        job_token: second_hash_job.token,
                         file_hash: second_hash,
                         display_name: "second.bin".to_string(),
                         file_size: 1,
@@ -583,6 +601,7 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    job_token: retry_hash_job.token,
                     file_hash: retry_hash,
                     display_name: "retry.bin".to_string(),
                     file_size: 1,

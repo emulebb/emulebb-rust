@@ -17,7 +17,7 @@ use super::super::aich_recovery::AichRecoveryHashSet;
 use super::super::block_bitmap::PartBlockBitmap;
 use super::super::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kAichHashset, Ed2kTransferRuntime, Ed2kTransferState,
-    PAYLOAD_FILE_NAME, new_transfer_job,
+    PAYLOAD_FILE_NAME,
 };
 use crate::paths::unique_test_dir;
 use emulebb_kad_proto::Ed2kHash;
@@ -93,41 +93,51 @@ fn recovery_body_for(data: &[u8], part: u64) -> Vec<u8> {
 
 async fn initialized_salvage_transfer(
     tag: &str,
-) -> (Ed2kTransferRuntime, String, Vec<u8>, Ed2kAichHashset) {
+) -> (
+    Ed2kTransferRuntime,
+    emulebb_metadata::JobToken,
+    Vec<u8>,
+    Ed2kAichHashset,
+) {
     let runtime = Ed2kTransferRuntime::load_or_create(&unique_test_dir(tag)).unwrap();
     let data = build_two_part_payload();
     let (file_hash, md4_parts) = md4_hashset(&data);
     let aich = aich_hashset(&data);
-    let job = new_transfer_job(file_hash, "proof.bin".to_string(), data.len() as u64);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "proof.bin".to_string(),
+        data.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, md4_parts)
+        .store_md4_hashset(job.token, md4_parts)
         .await
         .unwrap();
     runtime
-        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .reconcile_aich_root(job.token, Some(aich.master_hash))
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&job.file_hash, aich.clone())
+        .store_aich_hashset(job.token, aich.clone())
         .await
         .unwrap();
-    fs::write(runtime.payload_path(&job.file_hash), &data).unwrap();
-    (runtime, job.file_hash, data, aich)
+    fs::write(runtime.payload_path(job.token.job_id).unwrap(), &data).unwrap();
+    (runtime, job.token, data, aich)
 }
 
 #[tokio::test]
 async fn rejected_recovery_proofs_never_attempt_raw_payload_reads_or_change_state() {
     let (runtime, file_hash, data, aich) =
         initialized_salvage_transfer("ed2k-salvage-proof-before-io").await;
-    runtime.cbb_record_received_data(&file_hash, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
-    let mut before = runtime.manifest(&file_hash).await.unwrap();
+    runtime.cbb_record_received_data(file_hash, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
+    let mut before = runtime.manifest(file_hash).await.unwrap();
     let mut bitmap = PartBlockBitmap::empty(ED2K_PART_SIZE);
     bitmap.set_present(1);
     before.pieces[0].apply_block_bitmap(&bitmap);
     before.pieces[0].ich_corrupted = true;
     {
-        let _guard = runtime.lock_manifest(&file_hash).await;
+        let _guard = runtime.lock_manifest(file_hash).await;
         runtime.store_manifest_unlocked(&before).await.unwrap();
     }
     let attribution = format!("{:?}", runtime.corruption_blackbox.lock().unwrap());
@@ -208,7 +218,7 @@ async fn rejected_recovery_proofs_never_attempt_raw_payload_reads_or_change_stat
     }
     for (name, body, message) in cases {
         let error = runtime
-            .begin_part_salvage(&file_hash, 0, aich.master_hash, &body)
+            .begin_part_salvage(file_hash, 0, aich.master_hash, &body)
             .await
             .unwrap_err();
         assert!(error.to_string().contains(message), "{name}: {error:#}");
@@ -217,11 +227,7 @@ async fn rejected_recovery_proofs_never_attempt_raw_payload_reads_or_change_stat
             0,
             "{name}"
         );
-        assert_eq!(
-            runtime.manifest(&file_hash).await.unwrap(),
-            before,
-            "{name}"
-        );
+        assert_eq!(runtime.manifest(file_hash).await.unwrap(), before, "{name}");
         assert_eq!(
             format!("{:?}", runtime.corruption_blackbox.lock().unwrap()),
             attribution,
@@ -232,42 +238,40 @@ async fn rejected_recovery_proofs_never_attempt_raw_payload_reads_or_change_stat
     for (part, master) in [(0, [0xAB; 20]), (u16::MAX, aich.master_hash)] {
         assert!(
             runtime
-                .begin_part_salvage(&file_hash, part, master, &body16)
+                .begin_part_salvage(file_hash, part, master, &body16)
                 .await
                 .unwrap()
                 .is_none()
         );
         assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 0);
-        assert_eq!(runtime.manifest(&file_hash).await.unwrap(), before);
+        assert_eq!(runtime.manifest(file_hash).await.unwrap(), before);
         assert_eq!(
             format!("{:?}", runtime.corruption_blackbox.lock().unwrap()),
             attribution
         );
     }
-    assert_eq!(fs::read(runtime.payload_path(&file_hash)).unwrap(), data);
+    assert_eq!(
+        fs::read(runtime.payload_path(file_hash.job_id).unwrap()).unwrap(),
+        data
+    );
 }
 
 #[tokio::test]
 async fn recovery_proof_errors_precede_payload_errors_but_valid_proofs_keep_storage_errors() {
     let (runtime, file_hash, data, aich) =
         initialized_salvage_transfer("ed2k-salvage-proof-storage-errors").await;
-    let before = runtime.manifest(&file_hash).await.unwrap();
+    let before = runtime.manifest(file_hash).await.unwrap();
     // Separate from the intact-payload rejection fixtures: deliberately make
     // storage unreadable as a complete part to pin the error precedence.
-    fs::write(runtime.payload_path(&file_hash), []).unwrap();
+    fs::write(runtime.payload_path(file_hash.job_id).unwrap(), []).unwrap();
     let proof_error = runtime
-        .begin_part_salvage(&file_hash, 0, aich.master_hash, &[0])
+        .begin_part_salvage(file_hash, 0, aich.master_hash, &[0])
         .await
         .unwrap_err();
     assert_eq!(proof_error.to_string(), "AICH reader: short u16");
     assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 0);
     let storage_error = runtime
-        .begin_part_salvage(
-            &file_hash,
-            0,
-            aich.master_hash,
-            &recovery_body_for(&data, 0),
-        )
+        .begin_part_salvage(file_hash, 0, aich.master_hash, &recovery_body_for(&data, 0))
         .await
         .unwrap_err();
     assert_eq!(
@@ -278,7 +282,7 @@ async fn recovery_proof_errors_precede_payload_errors_but_valid_proofs_keep_stor
         std::io::ErrorKind::UnexpectedEof,
     );
     assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 1);
-    assert_eq!(runtime.manifest(&file_hash).await.unwrap(), before);
+    assert_eq!(runtime.manifest(file_hash).await.unwrap(), before);
 }
 
 #[tokio::test]
@@ -287,9 +291,9 @@ async fn salvage_repair_still_requires_final_part_md4_verification() {
         initialized_salvage_transfer("ed2k-salvage-md4-required").await;
     let body = recovery_body_for(&data, 0);
     data[0] ^= 0xFF;
-    fs::write(runtime.payload_path(&file_hash), &data).unwrap();
+    fs::write(runtime.payload_path(file_hash.job_id).unwrap(), &data).unwrap();
     let outcome = runtime
-        .begin_part_salvage(&file_hash, 0, aich.master_hash, &body)
+        .begin_part_salvage(file_hash, 0, aich.master_hash, &body)
         .await
         .unwrap()
         .unwrap();
@@ -297,7 +301,7 @@ async fn salvage_repair_still_requires_final_part_md4_verification() {
     assert_eq!(outcome.needed_ranges, vec![(0, ED2K_EMBLOCK_SIZE)]);
     let repair = runtime
         .write_salvage_block(
-            &file_hash,
+            file_hash,
             0,
             0,
             ED2K_EMBLOCK_SIZE,
@@ -309,7 +313,7 @@ async fn salvage_repair_still_requires_final_part_md4_verification() {
         repair,
         super::super::PieceWriteOutcome::VerificationFailed { part_index: 0 }
     );
-    let manifest = runtime.manifest(&file_hash).await.unwrap();
+    let manifest = runtime.manifest(file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert!(manifest.pieces[0].ich_corrupted);
     assert!(!manifest.completed);
@@ -323,18 +327,23 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     let data = build_two_part_payload();
     let (file_hash, md4_parts) = md4_hashset(&data);
     let aich = aich_hashset(&data);
-    let job = new_transfer_job(file_hash, "salvage.bin".to_string(), data.len() as u64);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "salvage.bin".to_string(),
+        data.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, md4_parts)
+        .store_md4_hashset(job.token, md4_parts)
         .await
         .unwrap();
     runtime
-        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .reconcile_aich_root(job.token, Some(aich.master_hash))
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&job.file_hash, aich.clone())
+        .store_aich_hashset(job.token, aich.clone())
         .await
         .unwrap();
 
@@ -348,7 +357,8 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
         *byte ^= 0xFF;
     }
     let payload_path = runtime
-        .transfer_dir_path(&job.file_hash)
+        .transfer_dir_path(job.token.job_id)
+        .unwrap()
         .join(PAYLOAD_FILE_NAME);
     fs::write(&payload_path, &on_disk).unwrap();
 
@@ -363,16 +373,10 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
 
     // Begin salvage with a valid recovery answer for part 0.
     let body = recovery_body_for(&data, 0);
-    runtime.cbb_record_received_data(&job.file_hash, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
-    runtime.cbb_record_received_data(
-        &job.file_hash,
-        cb_start as u64,
-        cb_end as u64,
-        BAD_SENDER,
-        None,
-    );
+    runtime.cbb_record_received_data(job.token, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
+    runtime.cbb_record_received_data(job.token, cb_start as u64, cb_end as u64, BAD_SENDER, None);
     let outcome = runtime
-        .begin_part_salvage(&job.file_hash, 0, aich.master_hash, &body)
+        .begin_part_salvage(job.token, 0, aich.master_hash, &body)
         .await
         .unwrap()
         .expect("salvage should start for a corrupt part with a trusted AICH root");
@@ -380,11 +384,11 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     assert!(!runtime.is_client_banned(Some(GOOD_SENDER), None));
     assert!(runtime.is_client_banned(Some(BAD_SENDER), None));
     assert_eq!(
-        runtime.cbb_verified_bytes_for_test(&job.file_hash, GOOD_SENDER),
+        runtime.cbb_verified_bytes_for_test(job.token, GOOD_SENDER),
         ED2K_PART_SIZE - ED2K_EMBLOCK_SIZE
     );
     assert_eq!(
-        runtime.cbb_verified_bytes_for_test(&job.file_hash, BAD_SENDER),
+        runtime.cbb_verified_bytes_for_test(job.token, BAD_SENDER),
         0
     );
 
@@ -403,7 +407,7 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     assert_eq!(outcome.recovered_ranges.len(), total_blocks - 1);
 
     // The persisted bitmap reflects only the corrupt block missing.
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     let piece0 = &manifest.pieces[0];
     assert_eq!(piece0.state, Ed2kTransferState::Missing);
     let bitmap = piece0.resolve_block_bitmap(ED2K_PART_SIZE);
@@ -423,13 +427,7 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     // Verified.
     let good_block = &data[cb_start..cb_end];
     let verified = runtime
-        .write_salvage_block(
-            &job.file_hash,
-            0,
-            cb_start as u64,
-            cb_end as u64,
-            good_block,
-        )
+        .write_salvage_block(job.token, 0, cb_start as u64, cb_end as u64, good_block)
         .await
         .unwrap();
     assert!(
@@ -437,7 +435,7 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
         "part must MD4-verify after the last block is re-supplied"
     );
 
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     assert!(
         manifest.pieces[0].block_bitmap.is_none(),
@@ -457,18 +455,23 @@ async fn block_bitmap_persists_round_trip() {
     let data = build_two_part_payload();
     let (file_hash, md4_parts) = md4_hashset(&data);
     let aich = aich_hashset(&data);
-    let job = new_transfer_job(file_hash, "persist.bin".to_string(), data.len() as u64);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "persist.bin".to_string(),
+        data.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, md4_parts)
+        .store_md4_hashset(job.token, md4_parts)
         .await
         .unwrap();
     runtime
-        .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+        .reconcile_aich_root(job.token, Some(aich.master_hash))
         .await
         .unwrap();
     runtime
-        .store_aich_hashset(&job.file_hash, aich.clone())
+        .store_aich_hashset(job.token, aich.clone())
         .await
         .unwrap();
 
@@ -482,13 +485,14 @@ async fn block_bitmap_persists_round_trip() {
         }
     }
     let payload_path = runtime
-        .transfer_dir_path(&job.file_hash)
+        .transfer_dir_path(job.token.job_id)
+        .unwrap()
         .join(PAYLOAD_FILE_NAME);
     fs::write(&payload_path, &on_disk).unwrap();
 
     let body = recovery_body_for(&data, 0);
     let outcome = runtime
-        .begin_part_salvage(&job.file_hash, 0, aich.master_hash, &body)
+        .begin_part_salvage(job.token, 0, aich.master_hash, &body)
         .await
         .unwrap()
         .unwrap();
@@ -496,15 +500,15 @@ async fn block_bitmap_persists_round_trip() {
 
     // Capture present-block set, force a fresh reload from the metadata store,
     // and assert the present-block set is identical after reload.
-    let before = runtime.manifest(&job.file_hash).await.unwrap().pieces[0]
-        .resolve_block_bitmap(ED2K_PART_SIZE);
+    let before =
+        runtime.manifest(job.token).await.unwrap().pieces[0].resolve_block_bitmap(ED2K_PART_SIZE);
 
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let after = reloaded_runtime
-        .manifest(&job.file_hash)
+    reloaded_runtime
+        .prepare_download_job_storage(job.token)
         .await
-        .unwrap()
-        .pieces[0]
+        .unwrap();
+    let after = reloaded_runtime.manifest(job.token).await.unwrap().pieces[0]
         .resolve_block_bitmap(ED2K_PART_SIZE);
 
     assert_eq!(before, after, "bitmap survives save -> reload unchanged");
@@ -529,10 +533,15 @@ async fn contiguous_download_still_verifies_with_block_bitmap() {
     file_hasher.update(first_hash);
     file_hasher.update(last_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let job = new_transfer_job(file_hash, "seq.bin".to_string(), ED2K_PART_SIZE + 9);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "seq.bin".to_string(),
+        ED2K_PART_SIZE + 9,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_hash, last_hash])
+        .store_md4_hashset(job.token, vec![first_hash, last_hash])
         .await
         .unwrap();
 
@@ -543,7 +552,7 @@ async fn contiguous_download_still_verifies_with_block_bitmap() {
         let len = (ED2K_PART_SIZE - pos).min(ED2K_EMBLOCK_SIZE);
         completed = runtime
             .append_piece_block(
-                &job.file_hash,
+                job.token,
                 0,
                 pos,
                 pos + len,
@@ -556,7 +565,7 @@ async fn contiguous_download_still_verifies_with_block_bitmap() {
     }
     assert!(completed, "contiguous part completes on the final block");
 
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     // The contiguous fast path keeps the compact representation (no bitmap).
     assert!(manifest.pieces[0].block_bitmap.is_none());
@@ -580,14 +589,15 @@ async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
     payload.extend(std::iter::repeat_n(0x31u8, ED2K_EMBLOCK_SIZE as usize));
     payload.extend(std::iter::repeat_n(0x92u8, ED2K_EMBLOCK_SIZE as usize));
     let file_hash = Ed2kHash::from_bytes(md4(&payload));
-    let job = new_transfer_job(
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "out-of-order.bin".to_string(),
         payload.len() as u64,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
 
@@ -595,7 +605,7 @@ async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
     let second_end = ED2K_EMBLOCK_SIZE * 2;
     let (first_outcome, first_manifest) = runtime
         .append_or_salvage_block_with_manifest(
-            &job.file_hash,
+            job.token,
             0,
             second_start,
             second_end,
@@ -623,7 +633,7 @@ async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
 
     let (completed, final_manifest) = runtime
         .append_or_salvage_block_with_manifest(
-            &job.file_hash,
+            job.token,
             0,
             0,
             ED2K_EMBLOCK_SIZE,
@@ -643,7 +653,7 @@ async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
     );
     assert!(final_manifest.completed);
 
-    let on_disk = fs::read(runtime.payload_path(&job.file_hash)).unwrap();
+    let on_disk = fs::read(runtime.payload_path(job.token.job_id).unwrap()).unwrap();
     assert_eq!(on_disk, payload);
 }
 
@@ -664,14 +674,15 @@ async fn out_of_order_transition_preserves_cached_prefix_blocks() {
         ));
     }
     let file_hash = Ed2kHash::from_bytes(md4(&payload));
-    let job = new_transfer_job(
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "cached-prefix-out-of-order.bin".to_string(),
         payload.len() as u64,
     );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
 
@@ -680,7 +691,7 @@ async fn out_of_order_transition_preserves_cached_prefix_blocks() {
         let end = start + ED2K_EMBLOCK_SIZE;
         let outcome = runtime
             .append_or_salvage_block_with_manifest(
-                &job.file_hash,
+                job.token,
                 0,
                 start,
                 end,
@@ -701,7 +712,11 @@ async fn out_of_order_transition_preserves_cached_prefix_blocks() {
     // may have persisted more on a slow run. The bitmap transition below
     // works off the live runtime's cached manifest, which always holds all 29.
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let reloaded_manifest = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    reloaded_runtime
+        .prepare_download_job_storage(job.token)
+        .await
+        .unwrap();
+    let reloaded_manifest = reloaded_runtime.manifest(job.token).await.unwrap();
     assert!(
         reloaded_manifest.pieces[0].bytes_written >= 24 * ED2K_EMBLOCK_SIZE
             && reloaded_manifest.pieces[0].bytes_written <= 29 * ED2K_EMBLOCK_SIZE,
@@ -713,7 +728,7 @@ async fn out_of_order_transition_preserves_cached_prefix_blocks() {
     let later_end = later_start + ED2K_EMBLOCK_SIZE;
     let (_outcome, manifest) = runtime
         .append_or_salvage_block_with_manifest(
-            &job.file_hash,
+            job.token,
             0,
             later_start,
             later_end,
@@ -740,7 +755,7 @@ async fn out_of_order_transition_preserves_cached_prefix_blocks() {
     let missing_end = missing_start + ED2K_EMBLOCK_SIZE;
     let (completed, manifest) = runtime
         .append_or_salvage_block_with_manifest(
-            &job.file_hash,
+            job.token,
             0,
             missing_start,
             missing_end,

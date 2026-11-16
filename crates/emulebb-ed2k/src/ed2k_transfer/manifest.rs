@@ -12,6 +12,8 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub(super) struct Ed2kManifestCheckpointState {
+    /// Checked cache-publication revision; guards dirty acknowledgments across owned SQL.
+    pub(super) revision: u64,
     pub(super) persisted_bytes_written: u64,
     pub(super) last_persisted_at: Instant,
     /// Pieces whose progress advanced since the last durable persist (the
@@ -49,11 +51,13 @@ pub(crate) fn expected_piece_length(file_size: u64, piece_size: u64, piece_index
 /// Build a default slice-1 transfer job from a file identity.
 #[must_use]
 pub fn new_transfer_job(
+    token: emulebb_metadata::JobToken,
     file_hash: Ed2kHash,
     display_name: String,
     file_size: u64,
 ) -> Ed2kTransferJob {
     Ed2kTransferJob {
+        token,
         file_hash: file_hash.to_string(),
         display_name: normalize_ed2k_file_name(&display_name),
         file_size,

@@ -16,7 +16,7 @@ use crate::{
     text::{normalize_path_key, normalize_search_text},
 };
 
-/// Age cap for `transfer_sources` rows. A source last seen longer ago than this
+/// Age cap for `download_job_sources` rows. A source last seen longer ago than this
 /// almost certainly no longer carries the file, and a live transfer re-learns
 /// its current sources from the network, so older rows are pruned on startup.
 const TRANSFER_SOURCE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -156,7 +156,7 @@ impl MetadataStore {
                 "metadata schema version {stored_version} is not current {SCHEMA_VERSION}; create an entirely fresh profile for this build"
             );
             crate::schema_validation::validate(&*self.connection()?)?;
-            self.prune_transfer_sources()?;
+            self.prune_download_job_sources()?;
             return Ok(false);
         }
         ensure!(
@@ -178,7 +178,7 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
-    /// Bound the `transfer_sources` table on startup. Source rows accumulate per
+    /// Bound the `download_job_sources` table on startup. Source rows accumulate per
     /// transfer with no age cap of their own; this drops the rows that can no
     /// longer be useful: those belonging to a transfer that has been removed
     /// (`removed_at_ms` set), and those last seen beyond
@@ -186,15 +186,16 @@ impl MetadataStore {
     /// (a removed transfer's row is soft-kept) and stale rows describe peers that
     /// almost certainly no longer have the file. Correctness-neutral: a live
     /// transfer re-learns current sources from the network and rewrites them.
-    fn prune_transfer_sources(&self) -> Result<()> {
-        let cutoff = unix_ms().saturating_sub(TRANSFER_SOURCE_TTL_MS);
+    fn prune_download_job_sources(&self) -> Result<()> {
+        let cutoff =
+            crate::download_job_store::unix_s().saturating_sub(TRANSFER_SOURCE_TTL_MS / 1000);
         let conn = self.connection()?;
         conn.execute(
             r#"
-            DELETE FROM transfer_sources
-            WHERE last_seen_at_ms < ?1
-               OR transfer_id IN (
-                   SELECT id FROM transfers WHERE removed_at_ms IS NOT NULL
+            DELETE FROM download_job_sources
+            WHERE last_seen_at_s < ?1
+               OR job_id IN (
+                   SELECT id FROM download_jobs WHERE removed_at_s IS NOT NULL
                )
             "#,
             params![cutoff],
@@ -307,17 +308,15 @@ impl MetadataStore {
                 tx.execute(
                     r#"
                     UPDATE known_files
-                    SET size_bytes = ?2,
-                        display_name = ?3,
-                        content_type = ?4,
-                        availability_score = max(availability_score, ?5),
-                        last_seen_at_ms = ?6,
-                        updated_at_ms = ?6
+                    SET display_name = ?2,
+                        content_type = ?3,
+                        availability_score = max(availability_score, ?4),
+                        last_seen_at_ms = ?5,
+                        updated_at_ms = ?5
                     WHERE id = ?1
                     "#,
                     params![
                         known_file_id,
-                        i64::try_from(file.size_bytes)?,
                         file.name,
                         file.content_type,
                         file.availability_score,
@@ -344,11 +343,10 @@ impl MetadataStore {
                     ed2k_hash, size_bytes, display_name,
                     content_type, availability_score, first_seen_at_ms, last_seen_at_ms, updated_at_ms
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+                VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?5, ?5)
                 "#,
                 params![
                     hash,
-                    i64::try_from(file.size_bytes)?,
                     file.name,
                     file.content_type,
                     file.availability_score,
@@ -478,7 +476,7 @@ impl MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), file_names.name, known_files.size_bytes,
+            SELECT lower(hex(known_files.ed2k_hash)), file_names.name, coalesce(known_files.size_bytes,(SELECT o.size_bytes FROM known_file_origins o WHERE o.known_file_id=known_files.id ORDER BY CASE o.origin WHEN 'local_share' THEN 0 WHEN 'transfer' THEN 1 ELSE 2 END LIMIT 1)),
                    known_files.content_type, known_files.availability_score
             FROM file_name_fts
             JOIN file_names ON file_names.id = file_name_fts.rowid
@@ -509,10 +507,10 @@ impl MetadataStore {
         self.connection()?
             .query_row(
                 r#"
-                SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name, known_files.size_bytes,
+                SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name, coalesce(known_files.size_bytes,(SELECT o.size_bytes FROM known_file_origins o WHERE o.known_file_id=known_files.id ORDER BY CASE o.origin WHEN 'local_share' THEN 0 WHEN 'transfer' THEN 1 ELSE 2 END LIMIT 1)),
                        known_files.content_type, known_files.availability_score
                 FROM known_files
-                WHERE known_files.ed2k_hash = ?1
+                WHERE known_files.ed2k_hash = ?1 AND (known_files.size_bytes IS NOT NULL OR EXISTS(SELECT 1 FROM known_file_origins o WHERE o.known_file_id=known_files.id))
                 LIMIT 1
                 "#,
                 params![hash],
@@ -1119,12 +1117,12 @@ mod tests {
     }
 
     #[test]
-    fn prune_transfer_sources_drops_removed_transfer_and_stale_rows() {
+    fn prune_download_job_sources_drops_removed_transfer_and_stale_rows() {
         let store = MetadataStore::in_memory().unwrap();
-        let now = unix_ms();
+        let now = crate::download_job_store::unix_s();
         {
             let conn = store.connection().unwrap();
-            // Two known files + transfers: one live, one removed.
+            // Two known files + download_jobs: one live, one removed.
             conn.execute(
                 "INSERT INTO known_files(id, ed2k_hash, size_bytes, display_name, first_seen_at_ms, last_seen_at_ms, updated_at_ms)
                  VALUES (1, ?1, 1, 'a.bin', 0, 0, 0), (2, ?2, 1, 'b.bin', 0, 0, 0)",
@@ -1132,9 +1130,9 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO transfers(
+                "INSERT INTO download_jobs(
                      id, known_file_id, visible_state, delivery_state,
-                     created_at_ms, updated_at_ms, removed_at_ms, display_name, part_size_bytes, part_count
+                     created_at_s, updated_at_s, removed_at_s, display_name, part_size_bytes, part_count
                  )
                  VALUES (1, 1, 'downloading', 'pending', 0, 0, NULL, 'a.bin', 1, 1),
                         (2, 2, 'downloading', 'pending', 0, 0, ?1, 'b.bin', 1, 1)",
@@ -1144,20 +1142,20 @@ mod tests {
             // Live transfer: one fresh source (kept) + one stale source (pruned).
             // Removed transfer: one fresh source (pruned by transfer removal).
             conn.execute(
-                "INSERT INTO transfer_sources(transfer_id, ip, tcp_port, first_seen_at_ms, last_seen_at_ms)
+                "INSERT INTO download_job_sources(job_id, ip, tcp_port, first_seen_at_s, last_seen_at_s)
                  VALUES (1, '10.0.0.1', 4662, 0, ?1),
                         (1, '10.0.0.2', 4662, 0, ?2),
                         (2, '10.0.0.3', 4662, 0, ?1)",
-                params![now, now - TRANSFER_SOURCE_TTL_MS - 1],
+                params![now, now - TRANSFER_SOURCE_TTL_MS / 1000 - 1],
             )
             .unwrap();
         }
 
-        store.prune_transfer_sources().unwrap();
+        store.prune_download_job_sources().unwrap();
 
         let conn = store.connection().unwrap();
         let remaining: Vec<(i64, String)> = conn
-            .prepare("SELECT transfer_id, ip FROM transfer_sources ORDER BY id")
+            .prepare("SELECT job_id, ip FROM download_job_sources ORDER BY id")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()

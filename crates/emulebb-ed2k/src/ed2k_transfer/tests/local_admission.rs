@@ -10,9 +10,7 @@ use std::{
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{MetadataSharedDirectoryRoot, NativeFileFingerprint};
 
-use super::super::{
-    Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kTransferRuntime, new_transfer_job,
-};
+use super::super::{Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kTransferRuntime};
 
 struct VerifiedPath {
     path: PathBuf,
@@ -323,7 +321,13 @@ async fn root_change_after_admission_restores_live_uncheckpointed_partial_and_co
     let file = prepare_path(&runtime, &root, "shared.bin", b"verified admission content").await;
     configure_roots(&runtime, &[&root]);
     let hash: Ed2kHash = file.hash.parse().unwrap();
-    let job = new_transfer_job(hash, "partial.bin".into(), file.fingerprint.size_bytes);
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &runtime,
+        hash,
+        "partial.bin".into(),
+        file.fingerprint.size_bytes,
+    );
+    runtime.ensure_job(&job).await.unwrap();
     let mut manifest = Ed2kResumeManifest::new(&job);
     manifest.md4_hashset_acquired = true;
     manifest.verified_ranges = vec![Ed2kSharedRange { start: 0, end: 4 }];
@@ -331,7 +335,7 @@ async fn root_change_after_admission_restores_live_uncheckpointed_partial_and_co
         .manifest_cache
         .lock()
         .await
-        .insert(file.hash.clone(), manifest.clone());
+        .insert(job.token.job_id, manifest.clone());
     let mut entry = Ed2kSharedEntry::from_manifest(&manifest);
     entry.publish.session_request_count = 17;
     entry.all_time_uploaded_bytes = 31;
@@ -374,7 +378,7 @@ async fn root_change_after_admission_restores_live_uncheckpointed_partial_and_co
     assert_eq!(entry.publish.session_request_count, 17);
     assert_eq!(entry.all_time_uploaded_bytes, 31);
     assert_eq!(
-        runtime.manifest_cache.lock().await[&hash.to_string()].verified_ranges,
+        runtime.manifest_cache.lock().await[&job.token.job_id].verified_ranges,
         manifest.verified_ranges
     );
     assert!(

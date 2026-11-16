@@ -6,15 +6,13 @@ async fn small_file_download_starts_before_peer_secure_ident_key_arrives() {
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5A; 2_409_452];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "captured.epub".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "captured.epub".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -116,14 +114,17 @@ async fn small_file_download_starts_before_peer_secure_ident_key_arrives() {
         ),
         &transfer_runtime,
         "captured.epub".to_string(),
-        (180 * 1024) as u64,
+        payload.len() as u64,
         Duration::from_secs(3),
     )
     .await
     .unwrap();
     assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!manifest.completed);
     server.await.unwrap();
 }

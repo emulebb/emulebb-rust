@@ -159,18 +159,22 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
         .unwrap();
     }
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
 
     let root = unique_test_dir("ed2k-upload-listener-compressed");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(file_hash, "upload.txt".to_string(), payload.len() as u64);
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "upload.txt".to_string(),
+        payload.len() as u64,
+    );
     transfer_runtime.ensure_job(&job).await.unwrap();
     transfer_runtime
-        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 0, &payload)
+        .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
 
@@ -198,7 +202,7 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
     let peer_secure_ident = test_peer_secure_ident();
     complete_peer_secure_ident_with_listener(&mut stream, &peer_secure_ident).await;
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime.manifest(job.token).await.unwrap();
     stream
         .write_all(&super::encode_request_filename(&file_hash, &manifest))
         .await
@@ -319,19 +323,23 @@ async fn listener_rejects_oversized_range_and_serves_valid_range() {
     file_hasher.update(first_piece_hash);
     file_hasher.update(last_piece_hash);
     let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
-    let file_hash_hex = file_hash.to_string();
 
     let root = unique_test_dir("ed2k-upload-listener-oversized-range");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(file_hash, "oversized.bin".to_string(), file_size);
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "oversized.bin".to_string(),
+        file_size,
+    );
     transfer_runtime.ensure_job(&job).await.unwrap();
     transfer_runtime
-        .store_md4_hashset(&file_hash_hex, vec![first_piece_hash, last_piece_hash])
+        .store_md4_hashset(job.token, vec![first_piece_hash, last_piece_hash])
         .await
         .unwrap();
     // Only part 0 is verified; part 1 stays missing.
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 0, &first_piece)
+        .store_piece_data(job.token, 0, &first_piece)
         .await
         .unwrap();
 

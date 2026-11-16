@@ -41,7 +41,7 @@ fn download_read_timeout_immediately_wakes_for_elapsed_deadline() {
 
 #[test]
 fn download_window_starts_with_one_block_before_any_completed_payload() {
-    let job = new_transfer_job(
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
         Ed2kHash::from_bytes([0x21; 16]),
         "window.iso".to_string(),
         ED2K_PART_SIZE * 5,
@@ -59,7 +59,7 @@ fn download_window_starts_with_one_block_before_any_completed_payload() {
 
 #[test]
 fn download_window_grows_for_fast_large_transfer() {
-    let job = new_transfer_job(
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
         Ed2kHash::from_bytes([0x31; 16]),
         "window.iso".to_string(),
         ED2K_PART_SIZE * 5,
@@ -82,7 +82,7 @@ fn download_window_grows_for_fast_large_transfer() {
 
 #[test]
 fn download_window_scales_to_master_rate_tiers() {
-    let job = new_transfer_job(
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
         Ed2kHash::from_bytes([0x32; 16]),
         "window.iso".to_string(),
         ED2K_PART_SIZE * 32,
@@ -116,7 +116,7 @@ fn download_window_scales_to_master_rate_tiers() {
 
 #[test]
 fn download_window_stays_small_for_slow_endgame_transfer() {
-    let job = new_transfer_job(
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
         Ed2kHash::from_bytes([0x41; 16]),
         "window.iso".to_string(),
         ED2K_PART_SIZE * 2,

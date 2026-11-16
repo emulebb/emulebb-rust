@@ -99,6 +99,7 @@ pub struct MetadataLocalFileInstance {
     pub file_hash: String,
     pub file_size: u64,
     pub verified_fingerprint: NativeFileFingerprint,
+    pub secondary_identity: Option<crate::NativeFileIdentity>,
 }
 
 /// Local content hashes computed by Rust or accepted from a stock hash cache.
@@ -113,6 +114,7 @@ pub struct MetadataVerifiedLocalContent {
     pub aich_hashset: Vec<String>,
     pub path: PathBuf,
     pub fingerprint: NativeFileFingerprint,
+    pub secondary_identity: Option<crate::NativeFileIdentity>,
     pub upload_priority: String,
     pub auto_upload_priority: bool,
     pub comment: String,
@@ -120,6 +122,53 @@ pub struct MetadataVerifiedLocalContent {
 }
 
 impl MetadataStore {
+    /// Apply content presentation to the eligible complete copy, otherwise to
+    /// the sole unremoved unfinished job. The returned token fences only that
+    /// job's cache patch; historical jobs are never selected by hash order.
+    pub fn update_shared_content_metadata(
+        &self,
+        file_hash: &str,
+        priority: Option<(&str, bool)>,
+        comment_rating: Option<(&str, u8)>,
+    ) -> Result<Option<Option<crate::JobToken>>> {
+        ensure!(
+            priority.is_none_or(|(value, _)| value.len() <= 64),
+            "upload priority exceeds allowance"
+        );
+        ensure!(
+            comment_rating.is_none_or(|(value, _)| value.len() <= 65_536),
+            "share comment exceeds allowance"
+        );
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let complete: bool = tx.query_row(
+            crate::local_catalog::VERIFIED_SHARE_EXISTS_SQL,
+            [&hash],
+            |row| row.get(0),
+        )?;
+        let token = if complete {
+            None
+        } else {
+            let current=tx.query_row("SELECT j.id,j.execution_generation FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id
+                WHERE k.ed2k_hash=?1 AND j.removed_at_s IS NULL AND j.terminal_completed_at_s IS NULL
+                AND j.delete_requested_at_s IS NULL",[&hash],|row|Ok(crate::JobToken {job_id:row.get(0)?,generation:crate::sql_value::unsigned(row,1)?})).optional()?;
+            let Some(current) = current else {
+                return Ok(None);
+            };
+            Some(current)
+        };
+        if let Some(token) = token {
+            tx.execute("UPDATE download_jobs SET upload_priority=coalesce(?2,upload_priority),auto_upload_priority=coalesce(?3,auto_upload_priority),comment=coalesce(?4,comment),rating=coalesce(?5,rating) WHERE id=?1",
+                params![token.job_id,priority.map(|v|v.0),priority.map(|v|v.1),comment_rating.map(|v|v.0),comment_rating.map(|v|v.1)])?;
+        } else {
+            tx.execute("UPDATE verified_local_content SET upload_priority=coalesce(?2,upload_priority),auto_upload_priority=coalesce(?3,auto_upload_priority),comment=coalesce(?4,comment),rating=coalesce(?5,rating) WHERE known_file_id=(SELECT id FROM known_files WHERE ed2k_hash=?1)",
+                params![hash,priority.map(|v|v.0),priority.map(|v|v.1),comment_rating.map(|v|v.0),comment_rating.map(|v|v.1)])?;
+        }
+        tx.commit()?;
+        Ok(Some(token))
+    }
+
     /// Change presentation metadata only for a currently eligible complete
     /// local file. This does not create or mutate a download job.
     pub fn update_active_local_share_metadata(
@@ -271,7 +320,18 @@ impl MetadataStore {
     ) -> Result<bool> {
         let native = NativePath::from(path);
         let conn = self.connection()?;
-        if crate::delivery_exclusion_store::is_excluded(&conn, path)? {
+        if crate::delivery_exclusion_store::identity_is_excluded(&conn, fingerprint.identity)?
+            || crate::delivery_exclusion_store::is_excluded(&conn, path)?
+        {
+            return Ok(false);
+        }
+        let secondary = conn.query_row("SELECT i.secondary_identity FROM local_file_instances i JOIN local_paths p ON p.id=i.path_id WHERE p.platform=?1 AND p.native_path=?2 AND i.verified_fingerprint=?3",
+            params![NativePath::platform(),native.storage_bytes(),fingerprint.storage_bytes()],|row|crate::native_file::optional_identity_from_row(row,0)).optional()?;
+        let Some(secondary) = secondary else {
+            return Ok(false);
+        };
+        let evidence = crate::NativeFileIdentityEvidence::new(fingerprint.identity, secondary)?;
+        if crate::delivery_exclusion_store::evidence_is_excluded(&conn, evidence)? {
             return Ok(false);
         }
         let changed = conn.execute(
@@ -293,17 +353,17 @@ impl MetadataStore {
     /// Count distinct shares with at least one session-verified active path.
     pub fn verified_local_share_count(&self) -> Result<usize> {
         let count: i64 = self.connection()?.query_row(
-            "SELECT COUNT(DISTINCT local_file_instances.known_file_id)
+            concat!("SELECT COUNT(DISTINCT local_file_instances.known_file_id)
              FROM shared_file_memberships
              JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
              JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
              JOIN temp.session_verified_local_paths verified ON verified.path_id = local_file_instances.path_id
                   AND verified.verified_fingerprint = local_file_instances.verified_fingerprint
-             WHERE shared_file_memberships.removed_at_ms IS NULL
+             WHERE shared_file_memberships.removed_at_ms IS NULL AND ", crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), "
                AND shared_directory_roots.enabled = 1
                AND shared_directory_roots.deleted_at_ms IS NULL
                AND shared_directory_roots.accessible = 1
-               AND shared_directory_roots.shareable = 1",
+               AND shared_directory_roots.shareable = 1"),
             [],
             |row| row.get(0),
         )?;
@@ -363,6 +423,11 @@ impl MetadataStore {
         now: i64,
         origin: &'static str,
     ) -> Result<()> {
+        let evidence = crate::NativeFileIdentityEvidence::new(
+            content.fingerprint.identity,
+            content.secondary_identity,
+        )?;
+        crate::delivery_exclusion_store::ensure_evidence_not_excluded(tx, evidence)?;
         crate::delivery_exclusion_store::ensure_not_excluded(tx, &content.path)?;
         ensure!(
             matches!(origin, "local_computed" | "stock_import"),
@@ -523,21 +588,25 @@ impl MetadataStore {
         tx.execute(
             "INSERT INTO local_file_instances(
                 path_id, known_file_id, size_bytes, native_identity,
-                verified_fingerprint, verified_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                verified_fingerprint, verified_at_ms, secondary_identity
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(path_id) DO UPDATE SET
                 known_file_id = excluded.known_file_id,
                 size_bytes = excluded.size_bytes,
                 native_identity = excluded.native_identity,
                 verified_fingerprint = excluded.verified_fingerprint,
-                verified_at_ms = excluded.verified_at_ms",
+                verified_at_ms = excluded.verified_at_ms,
+                secondary_identity = excluded.secondary_identity",
             params![
                 path_id,
                 known_file_id,
                 size,
                 content.fingerprint.identity.storage_bytes(),
                 content.fingerprint.storage_bytes(),
-                now
+                now,
+                content
+                    .secondary_identity
+                    .map(|identity| identity.storage_bytes())
             ],
         )?;
         Ok(())
@@ -550,11 +619,14 @@ impl MetadataStore {
         path: &Path,
         file_hash: &str,
         fingerprint: &NativeFileFingerprint,
+        evidence: crate::NativeFileIdentityEvidence,
     ) -> Result<()> {
+        evidence.validate_fingerprint(fingerprint)?;
         ensure!(path.is_absolute(), "local file path must be absolute");
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        crate::delivery_exclusion_store::ensure_evidence_not_excluded(&tx, evidence)?;
         crate::delivery_exclusion_store::ensure_not_excluded(&tx, path)?;
         let (known_file_id, known_size): (i64, i64) = tx
             .query_row(
@@ -569,15 +641,15 @@ impl MetadataStore {
         );
         let path_id = upsert_local_path(&tx, path)?;
         tx.execute(
-            "INSERT INTO local_file_instances(path_id, known_file_id, size_bytes, native_identity, verified_fingerprint, verified_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO local_file_instances(path_id, known_file_id, size_bytes, native_identity, verified_fingerprint, verified_at_ms, secondary_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(path_id) DO UPDATE SET
                  known_file_id = excluded.known_file_id,
                  size_bytes = excluded.size_bytes,
                  native_identity = excluded.native_identity,
                  verified_fingerprint = excluded.verified_fingerprint,
-                 verified_at_ms = excluded.verified_at_ms",
-            params![path_id, known_file_id, known_size, fingerprint.identity.storage_bytes(), fingerprint.storage_bytes(), unix_ms()],
+                 verified_at_ms = excluded.verified_at_ms, secondary_identity = excluded.secondary_identity",
+            params![path_id, known_file_id, known_size, fingerprint.identity.storage_bytes(), fingerprint.storage_bytes(), unix_ms(),evidence.secondary().map(|identity|identity.storage_bytes())],
         )?;
         tx.commit()?;
         Ok(())
@@ -591,7 +663,7 @@ impl MetadataStore {
             .query_row(
                 "SELECT local_paths.platform, local_paths.native_path,
                         lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
-                        local_file_instances.verified_fingerprint
+                        local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
                  FROM local_file_instances
                  JOIN local_paths ON local_paths.id = local_file_instances.path_id
                  JOIN known_files ON known_files.id = local_file_instances.known_file_id
@@ -612,6 +684,7 @@ impl MetadataStore {
                         file_hash: row.get(2)?,
                         file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                         verified_fingerprint: fingerprint,
+                        secondary_identity:crate::native_file::optional_identity_from_row(row,5)?,
                     })
                 },
             )
@@ -627,7 +700,7 @@ impl MetadataStore {
         let mut statement = conn.prepare(
             "SELECT local_paths.platform, local_paths.native_path,
                     lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
-                    local_file_instances.verified_fingerprint
+                    local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
              FROM local_file_instances
              JOIN local_paths ON local_paths.id = local_file_instances.path_id
              JOIN known_files ON known_files.id = local_file_instances.known_file_id
@@ -648,6 +721,7 @@ impl MetadataStore {
                 file_hash: row.get(2)?,
                 file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                 verified_fingerprint: fingerprint,
+                secondary_identity: crate::native_file::optional_identity_from_row(row, 5)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -667,7 +741,7 @@ impl MetadataStore {
         let mut statement = conn.prepare(
             "SELECT local_paths.platform, local_paths.native_path,
                     lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
-                    local_file_instances.verified_fingerprint
+                    local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
              FROM local_file_instances
              JOIN local_paths ON local_paths.id = local_file_instances.path_id
              JOIN known_files ON known_files.id = local_file_instances.known_file_id
@@ -690,6 +764,7 @@ impl MetadataStore {
                 file_hash: row.get(2)?,
                 file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                 verified_fingerprint: fingerprint,
+                secondary_identity: crate::native_file::optional_identity_from_row(row, 5)?,
             })
         })?;
         let mut chosen: Option<MetadataLocalFileInstance> = None;
@@ -741,6 +816,7 @@ impl MetadataStore {
                 file_hash: row.get(2)?,
                 file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                 verified_fingerprint: fingerprint,
+                secondary_identity: crate::native_file::optional_identity_from_row(row, 5)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -756,21 +832,21 @@ impl MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         self.connection()?
             .query_row(
-                "SELECT local_paths.platform, local_paths.native_path,
+                concat!("SELECT local_paths.platform, local_paths.native_path,
                         lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
-                        local_file_instances.verified_fingerprint
+                        local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
                  FROM local_file_instances
                  JOIN local_paths ON local_paths.id = local_file_instances.path_id
                  JOIN known_files ON known_files.id = local_file_instances.known_file_id
                  JOIN shared_file_memberships ON shared_file_memberships.path_id = local_file_instances.path_id
                  JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
-                 WHERE known_files.ed2k_hash = ?1
+                 WHERE known_files.ed2k_hash = ?1 AND ", crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), "
                    AND shared_file_memberships.removed_at_ms IS NULL
                    AND shared_directory_roots.enabled = 1
                    AND shared_directory_roots.deleted_at_ms IS NULL
                    AND shared_directory_roots.accessible = 1
                    AND shared_directory_roots.shareable = 1
-                 ORDER BY local_paths.platform, local_paths.native_path LIMIT 1",
+                 ORDER BY local_paths.platform, local_paths.native_path LIMIT 1"),
                 params![hash],
                 |row| {
                     let bytes: Vec<u8> = row.get(4)?;
@@ -783,6 +859,7 @@ impl MetadataStore {
                         file_hash: row.get(2)?,
                         file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
                         verified_fingerprint: fingerprint,
+                        secondary_identity:crate::native_file::optional_identity_from_row(row,5)?,
                     })
                 },
             )
@@ -791,7 +868,7 @@ impl MetadataStore {
     }
 
     /// Read hashsets and the first eligible verified path without consulting
-    /// download transfers. Used to hydrate complete-file protocol responses.
+    /// download jobs. Used to hydrate complete-file protocol responses.
     pub fn active_local_content_by_hash(
         &self,
         file_hash: &str,
@@ -847,6 +924,7 @@ impl MetadataStore {
             .query_map(params![hash], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(MetadataVerifiedLocalContent {
+            secondary_identity: instance.secondary_identity,
             file_hash: instance.file_hash,
             display_name: name,
             file_size: instance.file_size,
@@ -921,13 +999,18 @@ mod tests {
         let path = std::env::temp_dir().join("emulebb-verified-library-sample.bin");
         let first = fingerprint(11);
         store
-            .upsert_local_file_instance(&path, hash, &first)
+            .upsert_local_file_instance(
+                &path,
+                hash,
+                &first,
+                crate::NativeFileIdentityEvidence::new((&first).identity, None).unwrap(),
+            )
             .unwrap();
         assert_eq!(
             store
                 .connection()
                 .unwrap()
-                .query_row("SELECT count(*) FROM transfers", [], |row| row
+                .query_row("SELECT count(*) FROM download_jobs", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
             0
@@ -935,6 +1018,7 @@ mod tests {
         assert_eq!(
             store.local_file_instance(&path).unwrap(),
             Some(MetadataLocalFileInstance {
+                secondary_identity: None,
                 path: path.clone(),
                 file_hash: hash.to_string(),
                 file_size: 32,
@@ -943,7 +1027,12 @@ mod tests {
         );
         let changed = fingerprint(12);
         store
-            .upsert_local_file_instance(&path, hash, &changed)
+            .upsert_local_file_instance(
+                &path,
+                hash,
+                &changed,
+                crate::NativeFileIdentityEvidence::new((&changed).identity, None).unwrap(),
+            )
             .unwrap();
         assert_eq!(
             store
@@ -961,7 +1050,16 @@ mod tests {
                     &NativeFileFingerprint {
                         size_bytes: 31,
                         ..changed
-                    }
+                    },
+                    crate::NativeFileIdentityEvidence::new(
+                        (&NativeFileFingerprint {
+                            size_bytes: 31,
+                            ..changed
+                        })
+                            .identity,
+                        None
+                    )
+                    .unwrap()
                 )
                 .is_err()
         );
@@ -987,6 +1085,7 @@ mod tests {
         let first_path = std::env::temp_dir().join("emulebb-local-content-first.bin");
         let second_path = std::env::temp_dir().join("emulebb-local-content-second.bin");
         let mut content = MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             display_name: "First.bin".to_string(),
             file_size: 32,
@@ -1007,10 +1106,10 @@ mod tests {
         content.fingerprint = fingerprint(42);
         store.upsert_verified_local_content(&content).unwrap();
         let conn = store.connection().unwrap();
-        let (name, transfers, md4, aich, paths): (String, i64, i64, i64, i64) = conn
+        let (name, download_jobs, md4, aich, paths): (String, i64, i64, i64, i64) = conn
             .query_row(
                 "SELECT known_files.display_name,
-                (SELECT count(*) FROM transfers),
+                (SELECT count(*) FROM download_jobs),
                 (SELECT count(*) FROM verified_local_md4_hashes),
                 (SELECT count(*) FROM verified_local_aich_hashes),
                 (SELECT count(*) FROM local_file_instances)
@@ -1028,7 +1127,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            (name.as_str(), transfers, md4, aich, paths),
+            (name.as_str(), download_jobs, md4, aich, paths),
             ("First.bin", 0, 1, 1, 2)
         );
         drop(conn);
@@ -1079,6 +1178,7 @@ mod tests {
         let mut native = fingerprint(41);
         native.size_bytes = 9_728_001;
         let mut content = MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: "11".repeat(16),
             display_name: "Sample.bin".to_string(),
             file_size: native.size_bytes,
@@ -1123,6 +1223,7 @@ mod tests {
     fn same_ed2k_hash_rejects_conflicting_verified_content_without_admitting_path() {
         let store = MetadataStore::in_memory().unwrap();
         let original = MetadataVerifiedLocalContent {
+            secondary_identity: None,
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             display_name: "Original.bin".to_string(),
             file_size: 32,
@@ -1243,6 +1344,7 @@ mod tests {
             let path = root.join(name);
             store
                 .upsert_verified_local_content(&MetadataVerifiedLocalContent {
+                    secondary_identity: None,
                     file_hash: hash.to_string(),
                     display_name: name.to_string(),
                     file_size: 32,

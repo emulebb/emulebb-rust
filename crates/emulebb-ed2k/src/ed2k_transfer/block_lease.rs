@@ -13,6 +13,7 @@ use std::{
 };
 
 use anyhow::Result;
+use emulebb_metadata::JobToken;
 
 use super::{Ed2kTransferRuntime, Ed2kTransferState};
 
@@ -36,8 +37,8 @@ const ENDGAME_STEAL_COOLDOWN: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
 struct LeaseRegistryState {
-    files: HashMap<String, HashMap<BlockKey, BlockLeaseOwner>>,
-    last_steal: HashMap<String, Instant>,
+    files: HashMap<JobToken, HashMap<BlockKey, BlockLeaseOwner>>,
+    last_steal: HashMap<JobToken, Instant>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,7 +107,7 @@ pub(crate) struct Ed2kDownloadBlockLease {
 #[derive(Debug)]
 struct BlockLeaseToken {
     registry: DownloadBlockLeaseRegistry,
-    file_hash: String,
+    job: JobToken,
     piece_index: u32,
     start: u64,
     end: u64,
@@ -116,7 +117,7 @@ struct BlockLeaseToken {
 impl Drop for BlockLeaseToken {
     fn drop(&mut self) {
         let mut registry = self.registry.0.lock().unwrap();
-        let remove_file = if let Some(file) = registry.files.get_mut(&self.file_hash) {
+        let remove_file = if let Some(file) = registry.files.get_mut(&self.job) {
             let key = (self.piece_index, self.start, self.end);
             if file
                 .get(&key)
@@ -129,7 +130,7 @@ impl Drop for BlockLeaseToken {
             false
         };
         if remove_file {
-            registry.files.remove(&self.file_hash);
+            registry.files.remove(&self.job);
         }
     }
 }
@@ -137,7 +138,7 @@ impl Drop for BlockLeaseToken {
 impl PartialEq for Ed2kDownloadBlockLease {
     fn eq(&self, other: &Self) -> bool {
         self.token.lease_id == other.token.lease_id
-            && self.token.file_hash == other.token.file_hash
+            && self.token.job == other.token.job
             && self.token.start == other.token.start
             && self.token.end == other.token.end
     }
@@ -146,6 +147,12 @@ impl PartialEq for Ed2kDownloadBlockLease {
 impl Eq for Ed2kDownloadBlockLease {}
 
 impl Ed2kDownloadBlockLease {
+    /// Captured execution owner; consumers must reject a lease from another
+    /// job or generation before admitting any returned payload bytes.
+    pub(crate) fn job_token(&self) -> JobToken {
+        self.token.job
+    }
+
     #[must_use]
     pub(crate) fn piece_index(&self) -> u32 {
         self.token.piece_index
@@ -168,7 +175,7 @@ impl Ed2kDownloadBlockLease {
         let key = (self.token.piece_index, self.token.start, self.token.end);
         let Some(owner) = registry
             .files
-            .get_mut(&self.token.file_hash)
+            .get_mut(&self.token.job)
             .and_then(|file| file.get_mut(&key))
         else {
             return;
@@ -185,22 +192,22 @@ impl Ed2kTransferRuntime {
     /// possible; the normal rarest/preview/completion picker chooses otherwise.
     pub(crate) async fn lease_next_download_block(
         &self,
-        file_hash: &str,
+        job: JobToken,
         peer_addr: SocketAddr,
         peer_bitmap: Option<&[bool]>,
         preferred_piece: Option<u32>,
         peer_rate_bytes_per_sec: u32,
     ) -> Result<Option<Ed2kDownloadBlockLease>> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let manifest = self.load_manifest_unlocked(file_hash).await?;
+        let _guard = self.lock_manifest(job).await;
+        let manifest = self.load_manifest_unlocked(job).await?;
         let policy = endgame_policy(
             manifest.file_size,
             manifest.durable_present_bytes(),
-            self.download_speed_bytes_per_sec(file_hash),
+            self.download_speed_bytes_per_sec(job),
         );
         let part_total = manifest.pieces.len();
-        let frequencies = self
-            .available_sources_per_part(file_hash, u32::try_from(part_total).unwrap_or(u32::MAX));
+        let frequencies =
+            self.available_sources_per_part(job, u32::try_from(part_total).unwrap_or(u32::MAX));
         let mut eligible = peer_bitmap.map_or_else(
             || vec![true; part_total],
             |bitmap| {
@@ -218,7 +225,7 @@ impl Ed2kTransferRuntime {
                 .unwrap_or(false)
             && let Some(lease) = self.try_lease_block_in_piece(
                 &manifest,
-                file_hash,
+                job,
                 piece_index,
                 LeaseRequest {
                     peer_addr,
@@ -240,7 +247,7 @@ impl Ed2kTransferRuntime {
         ) {
             if let Some(lease) = self.try_lease_block_in_piece(
                 &manifest,
-                file_hash,
+                job,
                 piece_index,
                 LeaseRequest {
                     peer_addr,
@@ -272,7 +279,7 @@ impl Ed2kTransferRuntime {
         ) {
             if let Some(lease) = self.try_lease_block_in_piece(
                 &manifest,
-                file_hash,
+                job,
                 piece_index,
                 LeaseRequest {
                     peer_addr,
@@ -296,7 +303,7 @@ impl Ed2kTransferRuntime {
     fn try_lease_block_in_piece(
         &self,
         manifest: &super::Ed2kResumeManifest,
-        file_hash: &str,
+        job: JobToken,
         piece_index: u32,
         request: LeaseRequest,
     ) -> Option<Ed2kDownloadBlockLease> {
@@ -316,9 +323,9 @@ impl Ed2kTransferRuntime {
         registry
             .last_steal
             .retain(|_, last| now.duration_since(*last) < ENDGAME_STEAL_COOLDOWN);
-        let normalized_hash = file_hash.to_ascii_lowercase();
-        let last_steal = registry.last_steal.get(&normalized_hash).copied();
-        let file = registry.files.entry(normalized_hash.clone()).or_default();
+        let token = job;
+        let last_steal = registry.last_steal.get(&token).copied();
+        let file = registry.files.entry(token).or_default();
         for block_index in 0..bitmap.block_count() {
             if bitmap.is_present(block_index) {
                 continue;
@@ -354,7 +361,7 @@ impl Ed2kTransferRuntime {
             return Some(Ed2kDownloadBlockLease {
                 token: Arc::new(BlockLeaseToken {
                     registry: self.download_block_leases.clone(),
-                    file_hash: file_hash.to_ascii_lowercase(),
+                    job,
                     piece_index,
                     start,
                     end,
@@ -396,9 +403,10 @@ impl Ed2kTransferRuntime {
                     peer_rate_bytes_per_sec: request.peer_rate_bytes_per_sec,
                 },
             );
-            registry.last_steal.insert(normalized_hash.clone(), now);
+            registry.last_steal.insert(token, now);
             tracing::debug!(
-                file_hash = %normalized_hash,
+                job_id = %token.job_id,
+                generation = token.generation,
                 piece_index,
                 start,
                 end,
@@ -411,7 +419,7 @@ impl Ed2kTransferRuntime {
             return Some(Ed2kDownloadBlockLease {
                 token: Arc::new(BlockLeaseToken {
                     registry: self.download_block_leases.clone(),
-                    file_hash: normalized_hash,
+                    job: token,
                     piece_index,
                     start,
                     end,
@@ -424,25 +432,25 @@ impl Ed2kTransferRuntime {
 
     /// Parts with at least one live block reservation, used by transfer details.
     #[must_use]
-    pub fn requested_download_parts(&self, file_hash: &str) -> HashSet<u32> {
+    pub fn requested_download_parts(&self, job: JobToken) -> HashSet<u32> {
         self.download_block_leases
             .0
             .lock()
             .unwrap()
             .files
-            .get(&file_hash.to_ascii_lowercase())
+            .get(&job)
             .map(|file| file.keys().map(|(piece, _, _)| *piece).collect())
             .unwrap_or_default()
     }
 
     #[cfg(test)]
-    pub(super) fn active_download_block_lease_count(&self, file_hash: &str) -> usize {
+    pub(super) fn active_download_block_lease_count(&self, job: JobToken) -> usize {
         self.download_block_leases
             .0
             .lock()
             .unwrap()
             .files
-            .get(&file_hash.to_ascii_lowercase())
+            .get(&job)
             .map_or(0, HashMap::len)
     }
 }
@@ -459,6 +467,60 @@ mod tests {
             transferred_bytes,
             peer_rate_bytes_per_sec: rate,
         }
+    }
+
+    #[test]
+    fn stale_job_lease_drop_and_payload_do_not_touch_new_generation_or_job() {
+        let registry = DownloadBlockLeaseRegistry::default();
+        let tokens = [
+            JobToken {
+                job_id: emulebb_metadata::JobId::new(1).unwrap(),
+                generation: 1,
+            },
+            JobToken {
+                job_id: emulebb_metadata::JobId::new(1).unwrap(),
+                generation: 2,
+            },
+            JobToken {
+                job_id: emulebb_metadata::JobId::new(2).unwrap(),
+                generation: 1,
+            },
+        ];
+        let key = (0, 0, 1);
+        let mut leases = Vec::new();
+        for job in tokens {
+            registry
+                .0
+                .lock()
+                .unwrap()
+                .files
+                .entry(job)
+                .or_default()
+                .insert(key, owner(Instant::now(), Duration::ZERO, 1, 0));
+            leases.push(Ed2kDownloadBlockLease {
+                token: Arc::new(BlockLeaseToken {
+                    registry: registry.clone(),
+                    job,
+                    piece_index: 0,
+                    start: 0,
+                    end: 1,
+                    lease_id: 1,
+                }),
+            });
+        }
+        // Equal range and lease sequence cannot alias a different execution.
+        assert_ne!(leases[0], leases[1]);
+        assert_ne!(leases[0], leases[2]);
+        leases[0].note_payload(99);
+        drop(leases.remove(0));
+        let state = registry.0.lock().unwrap();
+        assert!(!state.files.contains_key(&tokens[0]));
+        for token in &tokens[1..] {
+            assert_eq!(state.files[token][&key].transferred_bytes, 0);
+        }
+        drop(state);
+        drop(leases);
+        assert!(registry.0.lock().unwrap().files.is_empty());
     }
 
     #[test]

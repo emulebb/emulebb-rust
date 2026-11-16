@@ -143,7 +143,7 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
             let peer_rate = (session_payload_down as f64 / elapsed).min(f64::from(u32::MAX)) as u32;
             let Some(lease) = transfer_runtime
                 .lease_next_download_block(
-                    file_hash_hex,
+                    manifest.token,
                     peer_addr,
                     peer_part_bitmap,
                     active_piece_request.as_ref().map(|piece| piece.piece_index),

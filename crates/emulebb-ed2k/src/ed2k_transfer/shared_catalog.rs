@@ -66,8 +66,9 @@ impl Ed2kTransferRuntime {
     ) -> anyhow::Result<bool> {
         let hash = file_hash.parse::<Ed2kHash>()?;
         loop {
+            let capacity_revision = self.local_mutations.capacity_revision();
             let result = async {
-                let manifest_guard = self.lock_manifest(file_hash).await;
+                let manifest_guard = self.lock_content(file_hash).await;
                 let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
                 let receive = self.local_mutations.submit_admission(
                     self,
@@ -92,7 +93,9 @@ impl Ed2kTransferRuntime {
                         Some(super::LocalMutationError::Busy)
                     ) =>
                 {
-                    self.local_mutations.wait_for_completion().await?;
+                    self.local_mutations
+                        .wait_for_completion(capacity_revision)
+                        .await?;
                     if observed_root.is_some() {
                         return Err(error);
                     }
@@ -116,8 +119,9 @@ impl Ed2kTransferRuntime {
     ) -> anyhow::Result<usize> {
         let hash = file_hash.parse::<Ed2kHash>()?;
         loop {
+            let capacity_revision = self.local_mutations.capacity_revision();
             let result = async {
-                let manifest_guard = self.lock_manifest(file_hash).await;
+                let manifest_guard = self.lock_content(file_hash).await;
                 let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
                 let receive = self.local_mutations.submit_withdrawal(
                     self,
@@ -140,7 +144,9 @@ impl Ed2kTransferRuntime {
                         Some(super::LocalMutationError::Busy)
                     ) =>
                 {
-                    self.local_mutations.wait_for_completion().await?;
+                    self.local_mutations
+                        .wait_for_completion(capacity_revision)
+                        .await?;
                     self.stable_category_root_epoch().await;
                 }
                 other => return other,
@@ -223,31 +229,21 @@ impl Ed2kTransferRuntime {
         expected: (u64, u64),
         decision: CategoryCatalogDecision,
     ) -> anyhow::Result<bool> {
+        if !matches!(decision, CategoryCatalogDecision::Keep) {
+            // The root worker's local/partial projection cannot exclude an
+            // independent internal payload. Transfer fresh selection to the
+            // same retained owner, keeping its final watch/root CAS.
+            drop(decision);
+            return self
+                .persist_category_publication(Ed2kHash::from_bytes(hash), expected)
+                .await;
+        }
         let mut catalog = self.shared_catalog.write().await;
         if self.category_root_epoch.load(Ordering::Acquire) != expected.0
             || !catalog.finish_category_watch(hash, expected.1)
         {
             return Ok(false);
         }
-        let hash = Ed2kHash::from_bytes(hash);
-        let replacement = match decision {
-            CategoryCatalogDecision::Keep => {
-                drop(catalog);
-                self.notify_shared_publish_demand_changed();
-                return Ok(true);
-            }
-            CategoryCatalogDecision::Remove => None,
-            CategoryCatalogDecision::Partial(partial) => {
-                Some(Ed2kSharedEntry::from_partial_share(partial))
-            }
-        };
-        let mut replacement = replacement;
-        if let (Some(current), Some(next)) = (catalog.entry_by_hash(&hash), replacement.as_mut()) {
-            next.publish = current.publish.clone();
-            next.all_time_uploaded_bytes = current.all_time_uploaded_bytes;
-        }
-        catalog.upsert_verified(hash, replacement);
-        self.note_shared_catalog_entries_changed();
         drop(catalog);
         self.notify_shared_publish_demand_changed();
         Ok(true)
@@ -256,107 +252,8 @@ impl Ed2kTransferRuntime {
     /// Reconcile one hash after a watcher changes its root membership. A
     /// local share takes precedence over an independently servable download.
     pub async fn refresh_shared_catalog_entry(&self, file_hash: &str) -> anyhow::Result<()> {
-        let hash = Ed2kHash::from_str(file_hash)?;
-        let _guard = self.lock_manifest(file_hash).await;
-        loop {
-            let root_epoch = self.stable_category_root_epoch().await;
-            let metadata = self.metadata.clone();
-            let owned_hash = file_hash.to_owned();
-            let local = tokio::task::spawn_blocking(move || {
-                let Some(mut entry) = metadata.active_local_catalog_entry(&owned_hash)? else {
-                    return Ok(None);
-                };
-                let Some(source) = super::duplicate::first_present_source(
-                    metadata.current_shared_files_by_hash(&owned_hash)?,
-                ) else {
-                    return Ok(None);
-                };
-                if !metadata
-                    .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
-                {
-                    return Ok(None);
-                }
-                if let Some(name) =
-                    emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
-                {
-                    entry.display_name = name;
-                }
-                super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
-            })
-            .await??;
-            if let Some(local) = local {
-                let mut catalog = self.shared_catalog.write().await;
-                if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
-                    drop(catalog);
-                    continue;
-                }
-                catalog.upsert_verified(hash, Some(local));
-                self.note_shared_catalog_entries_changed();
-            } else if let Some(manifest) = self.load_manifest_optional_unlocked(file_hash).await? {
-                if !self
-                    .upsert_partial_catalog_entry(&manifest, hash, false, Some(root_epoch))
-                    .await
-                {
-                    continue;
-                }
-            } else {
-                let mut catalog = self.shared_catalog.write().await;
-                if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
-                    drop(catalog);
-                    continue;
-                }
-                catalog.upsert_verified(hash, None);
-                self.note_shared_catalog_entries_changed();
-            }
-            self.notify_shared_publish_demand_changed();
-            return Ok(());
-        }
-    }
-
-    /// Replace a retired download's offer with its independently admitted
-    /// local share, or withdraw it when no current local source exists.
-    pub(super) async fn refresh_retired_transfer_catalog_entry(
-        &self,
-        file_hash: &str,
-    ) -> anyhow::Result<()> {
-        loop {
-            let root_epoch = self.stable_category_root_epoch().await;
-            let metadata = self.metadata.clone();
-            let hash = file_hash.to_string();
-            let local = tokio::task::spawn_blocking(move || {
-                let Some(mut entry) = metadata.active_local_catalog_entry(&hash)? else {
-                    return Ok(None);
-                };
-                let Some(source) = super::duplicate::first_present_source(
-                    metadata.current_shared_files_by_hash(&hash)?,
-                ) else {
-                    return Ok(None);
-                };
-                if !metadata
-                    .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
-                {
-                    return Ok(None);
-                }
-                if let Some(name) =
-                    emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
-                {
-                    entry.display_name = name;
-                }
-                super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
-            })
-            .await??;
-            let hash = Ed2kHash::from_str(file_hash)?;
-            let mut catalog = self.shared_catalog.write().await;
-            if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
-                drop(catalog);
-                continue;
-            }
-            catalog.upsert_verified(hash, local);
-            self.note_shared_catalog_entries_changed();
-            drop(catalog);
-            self.notify_shared_publish_demand_changed();
-            return Ok(());
-        }
+        self.persist_content_metadata(file_hash.parse()?, None, None)
+            .await
     }
 
     /// Rebuild complete offers after a root scan changes membership. Verified
@@ -369,41 +266,64 @@ impl Ed2kTransferRuntime {
                 continue;
             };
             let metadata = self.metadata.clone();
-            let (complete, persisted_partial) = tokio::task::spawn_blocking(move || {
-                let complete =
+            let mut rebuilt = tokio::task::spawn_blocking(move || {
+                let mut rebuilt =
                     super::transfer_sql::completed_catalog_from_metadata_store(&metadata)?;
-                let partial = metadata
-                    .incomplete_transfer_manifests()?
-                    .into_iter()
-                    .filter(|manifest| !manifest.transfer_row_removed)
-                    .map(super::transfer_sql::manifest_from_metadata)
-                    .collect::<anyhow::Result<Vec<_>>>()?
-                    .into_iter()
-                    .filter(manifest_has_servable_payload_authority)
-                    .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest))
-                    .collect::<Vec<_>>();
-                Ok::<_, anyhow::Error>((complete, partial))
+                // The full catalog rebuild remains a separate scale target;
+                // it must never hydrate all historical execution manifests.
+                let mut after = None;
+                loop {
+                    let page = metadata.download_publish_entries_after(after.as_deref(), 200)?;
+                    if page.is_empty() {
+                        break;
+                    }
+                    for entry in &page {
+                        if let Some(source) =
+                            metadata.partial_share_for_category_reconciliation(&entry.file_hash)?
+                        {
+                            let hash = Ed2kHash::from_str(&entry.file_hash)?;
+                            if rebuilt.entry_by_hash(&hash).is_none() {
+                                rebuilt.push(Ed2kSharedEntry::from_partial_share(source));
+                            }
+                        }
+                    }
+                    after = page.last().map(|entry| entry.file_hash.clone());
+                }
+                Ok::<_, anyhow::Error>(rebuilt)
             })
             .await??;
-            let count = complete.len();
+            let mut after_job = None;
+            loop {
+                let page = self
+                    .payload_catalog_page(after_job, super::STARTUP_SHARED_CATALOG_BATCH)
+                    .await?;
+                for entry in page.entries {
+                    let hash = entry.file_hash.parse::<Ed2kHash>()?;
+                    if rebuilt
+                        .entry_by_hash(&hash)
+                        .is_none_or(|old| !old.verified_complete)
+                    {
+                        rebuilt.upsert_verified(hash, Some(entry));
+                    }
+                }
+                let Some(cursor) = page.cursor else { break };
+                anyhow::ensure!(
+                    Some(cursor) > after_job,
+                    "payload catalog cursor did not advance"
+                );
+                after_job = Some(cursor);
+                tokio::task::yield_now().await;
+            }
+            let count = rebuilt.completed_verified_len();
             let mut catalog = self.shared_catalog.write().await;
             if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
                 drop(catalog);
                 continue;
             }
-            let retained = catalog
-                .iter()
-                .filter(|entry| entry.compatibility_hint || !entry.verified_complete)
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut entries = persisted_partial;
-            entries.extend(retained);
-            entries.extend(complete);
-            if !self.share_eligibility.publish_full_rebuild(
-                &stripes,
-                &mut catalog,
-                dedupe_entries(entries),
-            ) {
+            if !self
+                .share_eligibility
+                .publish_full_rebuild(&stripes, &mut catalog, &mut rebuilt)
+            {
                 drop(catalog);
                 continue;
             }
@@ -527,7 +447,7 @@ impl Ed2kTransferRuntime {
                 )
             })
             .await??;
-            let has_more = page.has_more;
+            let mut has_more = page.has_more;
             let cursor = has_more.then_some(page.cursor).flatten();
             let mut hydrated = 0usize;
             for entry in page.entries {
@@ -542,6 +462,13 @@ impl Ed2kTransferRuntime {
                 .shared_catalog_hydration_cursor
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = cursor;
+            if !has_more {
+                self.shared_local_hydration_done
+                    .store(true, Ordering::Release);
+                let (count, more) = self.hydrate_payload_catalog_page(limit).await?;
+                hydrated += count;
+                has_more = more;
+            }
             self.shared_catalog_hydration_pending
                 .store(has_more, Ordering::Release);
             if hydrated > 0 {
@@ -563,7 +490,7 @@ impl Ed2kTransferRuntime {
     /// cohort. This work runs off the async executor and yields between bounded
     /// pages so normal network operation can proceed concurrently.
     pub async fn hydrate_shared_catalog(&self) -> anyhow::Result<usize> {
-        const HYDRATION_PAGE_SIZE: usize = 1_024;
+        const HYDRATION_PAGE_SIZE: usize = super::STARTUP_SHARED_CATALOG_BATCH;
 
         if !self
             .shared_catalog_hydration_pending
@@ -579,52 +506,66 @@ impl Ed2kTransferRuntime {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
             let mut hydrated = 0usize;
-            loop {
-                let metadata = self.metadata.clone();
-                let page_after = after_hash.clone();
-                let page = tokio::task::spawn_blocking(move || {
-                    super::transfer_sql::completed_catalog_page_from_metadata_store(
-                        &metadata,
-                        page_after.as_deref(),
-                        HYDRATION_PAGE_SIZE,
-                    )
-                })
-                .await??;
-                if page.cursor.is_none() {
-                    *self
-                        .shared_catalog_hydration_cursor
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                    break;
-                }
-
-                let has_more = page.has_more;
-                let next_after = page.cursor;
-                let mut inserted = 0usize;
-                for entry in page.entries {
-                    if self
-                        .insert_hydrated_completed_entry_if_current(entry)
-                        .await?
-                    {
-                        inserted = inserted.saturating_add(1);
+            if !self.shared_local_hydration_done.load(Ordering::Acquire) {
+                loop {
+                    let metadata = self.metadata.clone();
+                    let page_after = after_hash.clone();
+                    let page = tokio::task::spawn_blocking(move || {
+                        super::transfer_sql::completed_catalog_page_from_metadata_store(
+                            &metadata,
+                            page_after.as_deref(),
+                            HYDRATION_PAGE_SIZE,
+                        )
+                    })
+                    .await??;
+                    if page.cursor.is_none() {
+                        *self
+                            .shared_catalog_hydration_cursor
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                        break;
                     }
-                }
-                if inserted > 0 {
-                    self.note_shared_catalog_entries_changed();
-                    self.notify_shared_publish_demand_changed();
-                    hydrated = hydrated.saturating_add(inserted);
-                }
-                after_hash = next_after;
-                *self
-                    .shared_catalog_hydration_cursor
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = after_hash.clone();
 
-                if !has_more {
+                    let has_more = page.has_more;
+                    let next_after = page.cursor;
+                    let mut inserted = 0usize;
+                    for entry in page.entries {
+                        if self
+                            .insert_hydrated_completed_entry_if_current(entry)
+                            .await?
+                        {
+                            inserted = inserted.saturating_add(1);
+                        }
+                    }
+                    if inserted > 0 {
+                        self.note_shared_catalog_entries_changed();
+                        self.notify_shared_publish_demand_changed();
+                        hydrated = hydrated.saturating_add(inserted);
+                    }
+                    after_hash = next_after;
                     *self
                         .shared_catalog_hydration_cursor
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = after_hash.clone();
+
+                    if !has_more {
+                        *self
+                            .shared_catalog_hydration_cursor
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+            self.shared_local_hydration_done
+                .store(true, Ordering::Release);
+            loop {
+                let (count, more) = self
+                    .hydrate_payload_catalog_page(HYDRATION_PAGE_SIZE)
+                    .await?;
+                hydrated += count;
+                if !more {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -640,6 +581,44 @@ impl Ed2kTransferRuntime {
         result
     }
 
+    async fn hydrate_payload_catalog_page(&self, limit: usize) -> anyhow::Result<(usize, bool)> {
+        let after = *self
+            .shared_payload_hydration_cursor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let epoch = self.stable_category_root_epoch().await;
+        let snapshot = self
+            .share_eligibility
+            .full_rebuild_snapshot()?
+            .ok_or_else(|| anyhow::anyhow!("payload hydration overlaps a content mutation"))?;
+        let page = self.payload_catalog_page(after, limit).await?;
+        let mut catalog = self.shared_catalog.write().await;
+        anyhow::ensure!(
+            self.category_root_epoch.load(Ordering::Acquire) == epoch,
+            "payload hydration overlaps a root mutation"
+        );
+        let inserted = self
+            .share_eligibility
+            .publish_payload_page(&snapshot, &mut catalog, page.entries)?
+            .ok_or_else(|| anyhow::anyhow!("payload hydration overlaps a content mutation"))?;
+        drop(catalog);
+        if let Some(cursor) = page.cursor {
+            anyhow::ensure!(
+                Some(cursor) > after,
+                "payload hydration cursor did not advance"
+            );
+            *self
+                .shared_payload_hydration_cursor
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(cursor);
+        }
+        if inserted > 0 {
+            self.note_shared_catalog_entries_changed();
+            self.notify_shared_publish_demand_changed();
+        }
+        Ok((inserted, page.cursor.is_some()))
+    }
+
     pub(super) async fn insert_hydrated_completed_entry_if_current(
         &self,
         entry: Ed2kSharedEntry,
@@ -647,11 +626,11 @@ impl Ed2kTransferRuntime {
         let Ok(file_hash) = Ed2kHash::from_str(&entry.file_hash) else {
             return Ok(false);
         };
-        let _guard = self.lock_manifest(&entry.file_hash).await;
+        let _guard = self.lock_content(&entry.file_hash).await;
         loop {
             let root_epoch = self.stable_category_root_epoch().await;
             let Some(manifest) = self
-                .load_serving_view_optional_unlocked(&entry.file_hash)
+                .load_serving_view_optional_unlocked(&entry.file_hash, None)
                 .await?
             else {
                 return Ok(false);
@@ -679,11 +658,8 @@ impl Ed2kTransferRuntime {
         let Ok(file_hash) = Ed2kHash::from_str(&snapshot.file_hash) else {
             return Ok(false);
         };
-        let _guard = self.lock_manifest(&snapshot.file_hash).await;
-        let Some(manifest) = self
-            .load_manifest_optional_unlocked(&snapshot.file_hash)
-            .await?
-        else {
+        let _guard = self.lock_content(&snapshot.file_hash).await;
+        let Some(manifest) = self.load_manifest_optional_unlocked(snapshot.token).await? else {
             return Ok(false);
         };
         if manifest.completed || !manifest_has_servable_payload_authority(&manifest) {
@@ -831,11 +807,16 @@ impl Ed2kTransferRuntime {
             entry.media = if let Some(cached) = cached {
                 super::transfer_sql::media_from_metadata(cached)
             } else if manifest.completed && refresh_missing_media {
-                let path = manifest
-                    .delivered_path
-                    .as_deref()
-                    .map(std::path::Path::to_path_buf)
-                    .unwrap_or_else(|| self.payload_path(&manifest.file_hash));
+                let path = match manifest.delivered_path.as_deref() {
+                    Some(path) => path.to_path_buf(),
+                    None => match self.payload_path(manifest.token.job_id) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            tracing::warn!(%error,"verified payload storage is unavailable");
+                            return false;
+                        }
+                    },
+                };
                 let display_name = manifest.display_name.clone();
                 let media = tokio::task::spawn_blocking(move || {
                     super::media_metadata::extract_media_metadata(&path, &display_name)
@@ -872,12 +853,12 @@ impl Ed2kTransferRuntime {
             return false;
         }
         let metadata = self.metadata.clone();
-        let hash = manifest.file_hash.clone();
+        let token = manifest.token;
         let generation = Arc::clone(&self.shared_catalog_generation);
         let hashes = Arc::clone(&self.servable_shared_hash_cache);
         let published = tokio::task::spawn_blocking(move || {
             let mut hashes = hashes.lock().expect("servable hash cache mutex poisoned");
-            metadata.publish_transfer_aich_identity(&hash, |identity| {
+            metadata.publish_download_job_aich_identity(token, |identity| {
                 if let Some(entry) = new_entry.as_mut() {
                     entry.aich_root = identity.root;
                 }

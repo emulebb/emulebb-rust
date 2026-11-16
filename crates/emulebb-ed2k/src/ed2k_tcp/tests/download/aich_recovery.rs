@@ -13,19 +13,17 @@ async fn corrupt_part_triggers_aich_recovery_request() {
     // guard (file_size > PARTSIZE * part + EMBLOCKSIZE) admits part 0.
     let payload = vec![0x5A; 200 * 1024];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "corrupt.bin".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "corrupt.bin".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
     // Seed a trusted AICH master root so recovery can be solicited.
     let trusted_root = [0xABu8; 20];
     transfer_runtime
-        .reconcile_aich_root(&file_hash_hex, Some(trusted_root))
+        .reconcile_aich_root(file_hash_job.token, Some(trusted_root))
         .await
         .unwrap();
 
@@ -117,7 +115,10 @@ async fn corrupt_part_triggers_aich_recovery_request() {
     assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
 
     // The corrupt part was reset for re-download, not left verified.
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!manifest.completed);
     // An MD4 part failure alone must NOT ban the sender: the oracle only gaps
     // the part and requests AICH recovery (PartFile.cpp:5184-5199); a ban

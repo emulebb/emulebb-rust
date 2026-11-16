@@ -3,8 +3,8 @@ use std::{fs::File, path::Path, str::FromStr};
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
-    NativeFileFingerprint,
+    JobId, JobToken, MetadataStore, MetadataTransferDeletionTombstone,
+    MetadataTransferDeletionTombstonePhase, NativeFileFingerprint,
 };
 use uuid::Uuid;
 
@@ -17,11 +17,14 @@ use std::{
 use crate::long_path::long_path;
 
 use super::{
-    Ed2kTransferRuntime,
     deliver::{
-        OwnedDeliveryOutput, compute_ed2k_hash_from_handle, remove_file_if_fingerprint_matches,
+        OwnedDeliveryOutput, compute_ed2k_hash_from_handle,
+        remove_file_if_fingerprint_matches_retained as remove_file_if_fingerprint_matches,
     },
-    fs_durability::{NoReplaceMoveOutcome, move_path_no_replace, sync_parent_directory},
+    fs_durability::{
+        NoReplaceMoveOutcome, move_path_no_replace_retained as move_path_no_replace,
+        sync_parent_directory_retained as sync_parent_directory,
+    },
 };
 
 enum InspectedFile {
@@ -38,32 +41,33 @@ enum PreparedCleanupOutcome {
     RetryWithNewTombstone,
 }
 
-impl Ed2kTransferRuntime {
-    pub(super) async fn cleanup_delivery_output_for_deletion(
+pub(super) struct OutputCleanup<'a> {
+    pub metadata: &'a MetadataStore,
+    pub token: JobToken,
+}
+impl OutputCleanup<'_> {
+    pub(super) fn cleanup_delivery_output_for_deletion(
         &self,
+        job_id: JobId,
         file_hash: &str,
         authority: Option<OwnedDeliveryOutput>,
     ) -> Result<()> {
         for _ in 0..4 {
-            let tombstone = match self.deletion_tombstone(file_hash).await? {
+            let tombstone = match self.deletion_tombstone(job_id)? {
                 Some(tombstone) => tombstone,
                 None => {
                     let Some(authority) = authority.as_ref() else {
                         return Ok(());
                     };
-                    match inspect_file(&authority.path).await? {
+                    match inspect_file(&authority.path)? {
                         InspectedFile::Missing => {
-                            sync_parent_directory(&authority.path).await?;
+                            sync_parent_directory(&authority.path)?;
                             return Ok(());
                         }
                         InspectedFile::Regular { fingerprint, .. }
                             if fingerprint == authority.fingerprint => {}
                         InspectedFile::Regular { .. } | InspectedFile::Foreign => {
-                            tracing::warn!(
-                                file_hash,
-                                path = %authority.path.display(),
-                                "preserving delivered output without exact deletion ownership"
-                            );
+                            tracing::warn!(file_hash, path=%authority.path.display(), "preserving delivered output without exact deletion ownership");
                             return Ok(());
                         }
                     }
@@ -72,45 +76,43 @@ impl Ed2kTransferRuntime {
                         .path
                         .with_file_name(format!(".emulebb-delete-{tombstone_id}.tmp"));
                     self.begin_deletion_tombstone(
-                        file_hash,
+                        job_id,
                         tombstone_id,
                         &authority.path,
                         &tombstone_path,
                         &authority.fingerprint,
-                    )
-                    .await?
+                    )?
                 }
             };
             validate_tombstone(&tombstone)?;
             match tombstone.phase {
                 MetadataTransferDeletionTombstonePhase::Prepared => {
-                    match self
-                        .process_prepared_tombstone(file_hash, &tombstone)
-                        .await?
-                    {
+                    match self.process_prepared_tombstone(file_hash, &tombstone)? {
                         PreparedCleanupOutcome::Complete => return Ok(()),
                         PreparedCleanupOutcome::RetryWithNewTombstone => continue,
                     }
                 }
                 MetadataTransferDeletionTombstonePhase::Moved => {
-                    return reap_moved_tombstone(&tombstone).await;
+                    reap_moved_tombstone(&tombstone)?;
+                    return self.settle(&tombstone);
                 }
             }
         }
         anyhow::bail!("failed to allocate a collision-free deletion tombstone for {file_hash}")
     }
 
-    async fn process_prepared_tombstone(
+    fn process_prepared_tombstone(
         &self,
         file_hash: &str,
         tombstone: &MetadataTransferDeletionTombstone,
     ) -> Result<PreparedCleanupOutcome> {
-        match inspect_file(&tombstone.original_path).await? {
+        match inspect_file(&tombstone.original_path)? {
             InspectedFile::Missing => {
-                sync_parent_directory(&tombstone.original_path).await?;
-                match inspect_file(&tombstone.tombstone_path).await? {
+                sync_parent_directory(&tombstone.original_path)?;
+                match inspect_file(&tombstone.tombstone_path)? {
                     InspectedFile::Missing => {
-                        sync_parent_directory(&tombstone.tombstone_path).await?;
+                        sync_parent_directory(&tombstone.tombstone_path)?;
+                        self.settle(tombstone)?;
                         Ok(PreparedCleanupOutcome::Complete)
                     }
                     InspectedFile::Regular { file, fingerprint }
@@ -126,38 +128,22 @@ impl Ed2kTransferRuntime {
                             &tombstone.tombstone_path,
                             tombstone.source_fingerprint.size_bytes,
                             expected_hash,
-                        )
-                        .await?
+                        )?
                         .with_context(|| {
                             format!(
                                 "deletion tombstone {} does not contain the expected transferred bytes",
                                 tombstone.tombstone_id
                             )
                         })?;
-                        anyhow::ensure!(
-                            self.mark_deletion_tombstone_moved(
-                                file_hash,
-                                tombstone.tombstone_id,
-                                &verified_fingerprint,
-                            )
-                            .await?,
-                            "deletion tombstone {} disappeared before move committed",
-                            tombstone.tombstone_id
-                        );
-                        reap_moved_tombstone(&MetadataTransferDeletionTombstone {
-                            phase: MetadataTransferDeletionTombstonePhase::Moved,
-                            moved_fingerprint: Some(verified_fingerprint),
-                            ..tombstone.clone()
-                        })
-                        .await?;
+                        let moved =
+                            self.mark_deletion_tombstone_moved(tombstone, &verified_fingerprint)?;
+                        reap_moved_tombstone(&moved)?;
+                        self.settle(&moved)?;
                         Ok(PreparedCleanupOutcome::Complete)
                     }
                     InspectedFile::Regular { .. } | InspectedFile::Foreign => {
-                        anyhow::bail!(
-                            "deletion tombstone {} contains an unproven object at {}",
-                            tombstone.tombstone_id,
-                            tombstone.tombstone_path.display()
-                        );
+                        self.settle(tombstone)?;
+                        Ok(PreparedCleanupOutcome::Complete)
                     }
                 }
             }
@@ -166,42 +152,22 @@ impl Ed2kTransferRuntime {
             {
                 #[cfg(test)]
                 run_before_move_hook(&tombstone.original_path, &tombstone.tombstone_path);
-                match move_path_no_replace(&tombstone.original_path, &tombstone.tombstone_path)
-                    .await?
-                {
+                match move_path_no_replace(&tombstone.original_path, &tombstone.tombstone_path)? {
                     NoReplaceMoveOutcome::AlreadyExists => {
                         drop(file);
-                        anyhow::ensure!(
-                            self.clear_prepared_deletion_tombstone(
-                                file_hash,
-                                tombstone.tombstone_id,
-                            )
-                            .await?,
-                            "prepared deletion tombstone {} disappeared during collision recovery",
-                            tombstone.tombstone_id
-                        );
+                        self.settle(tombstone)?;
                         Ok(PreparedCleanupOutcome::RetryWithNewTombstone)
                     }
                     NoReplaceMoveOutcome::Moved => {
                         let moved_fingerprint =
-                            capture_moved_fingerprint(file, &tombstone.tombstone_path).await?;
+                            capture_moved_fingerprint(file, &tombstone.tombstone_path)?;
                         let Some(moved_fingerprint) = moved_fingerprint else {
                             match move_path_no_replace(
                                 &tombstone.tombstone_path,
                                 &tombstone.original_path,
-                            )
-                            .await?
-                            {
+                            )? {
                                 NoReplaceMoveOutcome::Moved => {
-                                    anyhow::ensure!(
-                                        self.clear_prepared_deletion_tombstone(
-                                            file_hash,
-                                            tombstone.tombstone_id,
-                                        )
-                                        .await?,
-                                        "prepared deletion tombstone {} disappeared after restoration",
-                                        tombstone.tombstone_id
-                                    );
+                                    self.settle(tombstone)?;
                                     tracing::warn!(
                                         file_hash,
                                         path = %tombstone.original_path.display(),
@@ -217,22 +183,10 @@ impl Ed2kTransferRuntime {
                                 }
                             }
                         };
-                        anyhow::ensure!(
-                            self.mark_deletion_tombstone_moved(
-                                file_hash,
-                                tombstone.tombstone_id,
-                                &moved_fingerprint,
-                            )
-                            .await?,
-                            "deletion tombstone {} disappeared before move committed",
-                            tombstone.tombstone_id
-                        );
-                        reap_moved_tombstone(&MetadataTransferDeletionTombstone {
-                            phase: MetadataTransferDeletionTombstonePhase::Moved,
-                            moved_fingerprint: Some(moved_fingerprint),
-                            ..tombstone.clone()
-                        })
-                        .await?;
+                        let moved =
+                            self.mark_deletion_tombstone_moved(tombstone, &moved_fingerprint)?;
+                        reap_moved_tombstone(&moved)?;
+                        self.settle(&moved)?;
                         Ok(PreparedCleanupOutcome::Complete)
                     }
                 }
@@ -243,88 +197,51 @@ impl Ed2kTransferRuntime {
                     path = %tombstone.original_path.display(),
                     "preserving replacement at delivered-output deletion path"
                 );
-                anyhow::ensure!(
-                    self.clear_prepared_deletion_tombstone(file_hash, tombstone.tombstone_id)
-                        .await?,
-                    "prepared deletion tombstone {} disappeared while preserving replacement",
-                    tombstone.tombstone_id
-                );
+                self.settle(tombstone)?;
                 Ok(PreparedCleanupOutcome::Complete)
             }
         }
     }
 
-    async fn begin_deletion_tombstone(
+    fn begin_deletion_tombstone(
         &self,
-        file_hash: &str,
+        id: JobId,
         tombstone_id: Uuid,
-        original_path: &Path,
-        tombstone_path: &Path,
-        source_fingerprint: &NativeFileFingerprint,
+        original: &Path,
+        target: &Path,
+        fingerprint: &NativeFileFingerprint,
     ) -> Result<MetadataTransferDeletionTombstone> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
-        let original_path = original_path.to_owned();
-        let tombstone_path = tombstone_path.to_owned();
-        let source_fingerprint = source_fingerprint.clone();
-        tokio::task::spawn_blocking(move || {
-            metadata.begin_transfer_deletion_tombstone(
-                &file_hash,
-                tombstone_id,
-                &original_path,
-                &tombstone_path,
-                &source_fingerprint,
-            )
-        })
-        .await
-        .context("ED2K deletion-tombstone prepare task panicked")?
+        self.metadata.begin_transfer_deletion_tombstone(
+            id,
+            tombstone_id,
+            original,
+            target,
+            fingerprint,
+        )
     }
-
-    async fn deletion_tombstone(
-        &self,
-        file_hash: &str,
-    ) -> Result<Option<MetadataTransferDeletionTombstone>> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
-        tokio::task::spawn_blocking(move || {
-            metadata.transfer_deletion_tombstone_by_hash(&file_hash)
-        })
-        .await
-        .context("ED2K deletion-tombstone load task panicked")?
+    fn deletion_tombstone(&self, id: JobId) -> Result<Option<MetadataTransferDeletionTombstone>> {
+        self.metadata.download_job_deletion_tombstone(id)
     }
-
-    async fn mark_deletion_tombstone_moved(
+    fn mark_deletion_tombstone_moved(
         &self,
-        file_hash: &str,
-        tombstone_id: Uuid,
-        moved_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
-        let moved_fingerprint = moved_fingerprint.clone();
-        tokio::task::spawn_blocking(move || {
-            metadata.mark_transfer_deletion_tombstone_moved(
-                &file_hash,
-                tombstone_id,
-                &moved_fingerprint,
-            )
-        })
-        .await
-        .context("ED2K deletion-tombstone move task panicked")?
+        expected: &MetadataTransferDeletionTombstone,
+        fingerprint: &NativeFileFingerprint,
+    ) -> Result<MetadataTransferDeletionTombstone> {
+        self.metadata
+            .mark_transfer_deletion_tombstone_moved(
+                expected.job_id,
+                expected.tombstone_id,
+                fingerprint,
+            )?
+            .context("deletion tombstone disappeared before move committed")
     }
-
-    async fn clear_prepared_deletion_tombstone(
-        &self,
-        file_hash: &str,
-        tombstone_id: Uuid,
-    ) -> Result<bool> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
-        tokio::task::spawn_blocking(move || {
-            metadata.clear_prepared_transfer_deletion_tombstone(&file_hash, tombstone_id)
-        })
-        .await
-        .context("ED2K deletion-tombstone clear task panicked")?
+    fn settle(&self, expected: &MetadataTransferDeletionTombstone) -> Result<()> {
+        anyhow::ensure!(
+            self.metadata
+                .settle_recovered_output_tombstone(self.token, expected)?,
+            "deletion tombstone changed before settlement"
+        );
+        Ok(())
     }
 }
 
@@ -380,19 +297,18 @@ fn validate_tombstone(tombstone: &MetadataTransferDeletionTombstone) -> Result<(
     Ok(())
 }
 
-async fn reap_moved_tombstone(tombstone: &MetadataTransferDeletionTombstone) -> Result<()> {
+fn reap_moved_tombstone(tombstone: &MetadataTransferDeletionTombstone) -> Result<()> {
     let moved_fingerprint = tombstone.moved_fingerprint.as_ref().with_context(|| {
         format!(
             "moved deletion tombstone {} has no moved identity",
             tombstone.tombstone_id
         )
     })?;
-    match inspect_file(&tombstone.tombstone_path).await? {
-        InspectedFile::Missing => sync_parent_directory(&tombstone.tombstone_path).await,
+    match inspect_file(&tombstone.tombstone_path)? {
+        InspectedFile::Missing => sync_parent_directory(&tombstone.tombstone_path),
         InspectedFile::Regular { fingerprint, .. } if fingerprint == *moved_fingerprint => {
             anyhow::ensure!(
-                remove_file_if_fingerprint_matches(&tombstone.tombstone_path, moved_fingerprint,)
-                    .await?,
+                remove_file_if_fingerprint_matches(&tombstone.tombstone_path, moved_fingerprint,)?,
                 "deletion tombstone {} changed before physical reclamation",
                 tombstone.tombstone_id
             );
@@ -406,91 +322,76 @@ async fn reap_moved_tombstone(tombstone: &MetadataTransferDeletionTombstone) -> 
     }
 }
 
-async fn inspect_file(path: &Path) -> Result<InspectedFile> {
+fn inspect_file(path: &Path) -> Result<InspectedFile> {
     let path = long_path(path);
-    tokio::task::spawn_blocking(move || -> Result<InspectedFile> {
-        let file = match open_renameable_file_without_follow(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(InspectedFile::Missing);
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to open deletion path {}", path.display()));
-            }
-        };
-        let metadata = file.metadata()?;
-        let Some(fingerprint) =
-            super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
-        else {
-            return Ok(InspectedFile::Foreign);
-        };
-        if super::ingest::native_file_fingerprint(&path).as_ref() != Some(&fingerprint) {
-            return Ok(InspectedFile::Foreign);
+    let file = match open_renameable_file_without_follow(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(InspectedFile::Missing);
         }
-        Ok(InspectedFile::Regular { file, fingerprint })
-    })
-    .await
-    .context("deletion path inspection task failed")?
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to open deletion path {}", path.display()));
+        }
+    };
+    let metadata = file.metadata()?;
+    let Some(fingerprint) = super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
+    else {
+        return Ok(InspectedFile::Foreign);
+    };
+    if super::ingest::native_file_fingerprint(&path).as_ref() != Some(&fingerprint) {
+        return Ok(InspectedFile::Foreign);
+    }
+    Ok(InspectedFile::Regular { file, fingerprint })
 }
 
-async fn verify_uncheckpointed_moved_tombstone(
+fn verify_uncheckpointed_moved_tombstone(
     mut file: File,
     tombstone_path: &Path,
     expected_size: u64,
     expected_hash: [u8; 16],
 ) -> Result<Option<NativeFileFingerprint>> {
     let tombstone_path = long_path(tombstone_path);
-    tokio::task::spawn_blocking(move || -> Result<Option<NativeFileFingerprint>> {
-        let metadata = file.metadata()?;
-        let Some(opened_fingerprint) =
-            super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
-        else {
-            return Ok(None);
-        };
-        if opened_fingerprint.size_bytes != expected_size
-            || compute_ed2k_hash_from_handle(&mut file, expected_size)? != expected_hash
-        {
-            return Ok(None);
-        }
-        let verified_metadata = file.metadata()?;
-        let Some(verified_fingerprint) =
-            super::ingest::native_file_fingerprint_from_handle(&file, &verified_metadata)
-        else {
-            return Ok(None);
-        };
-        if opened_fingerprint != verified_fingerprint
-            || super::ingest::native_file_fingerprint(&tombstone_path).as_ref()
-                != Some(&verified_fingerprint)
-        {
-            return Ok(None);
-        }
-        Ok(Some(verified_fingerprint))
-    })
-    .await
-    .context("uncheckpointed deletion tombstone verification task failed")?
+    let metadata = file.metadata()?;
+    let Some(opened_fingerprint) =
+        super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
+    else {
+        return Ok(None);
+    };
+    if opened_fingerprint.size_bytes != expected_size
+        || compute_ed2k_hash_from_handle(&mut file, expected_size)? != expected_hash
+    {
+        return Ok(None);
+    }
+    let verified_metadata = file.metadata()?;
+    let Some(verified_fingerprint) =
+        super::ingest::native_file_fingerprint_from_handle(&file, &verified_metadata)
+    else {
+        return Ok(None);
+    };
+    if opened_fingerprint != verified_fingerprint
+        || super::ingest::native_file_fingerprint(&tombstone_path).as_ref()
+            != Some(&verified_fingerprint)
+    {
+        return Ok(None);
+    }
+    Ok(Some(verified_fingerprint))
 }
 
-async fn capture_moved_fingerprint(
+fn capture_moved_fingerprint(
     file: File,
     tombstone_path: &Path,
 ) -> Result<Option<NativeFileFingerprint>> {
     let tombstone_path = long_path(tombstone_path);
-    tokio::task::spawn_blocking(move || -> Result<Option<NativeFileFingerprint>> {
-        let metadata = file.metadata()?;
-        let Some(fingerprint) =
-            super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
-        else {
-            return Ok(None);
-        };
-        Ok(
-            (super::ingest::native_file_fingerprint(&tombstone_path).as_ref()
-                == Some(&fingerprint))
+    let metadata = file.metadata()?;
+    let Some(fingerprint) = super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
+    else {
+        return Ok(None);
+    };
+    Ok(
+        (super::ingest::native_file_fingerprint(&tombstone_path).as_ref() == Some(&fingerprint))
             .then_some(fingerprint),
-        )
-    })
-    .await
-    .context("deletion tombstone fingerprint task failed")?
+    )
 }
 
 #[cfg(windows)]

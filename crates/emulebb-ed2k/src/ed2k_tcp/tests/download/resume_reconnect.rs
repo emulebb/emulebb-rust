@@ -7,16 +7,14 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
     let payload = vec![0x5A; 32_768];
     let split = 8_192usize;
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
     let source_name = "resume-download.epub";
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            source_name.to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        source_name.to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -182,7 +180,10 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
     .unwrap();
     assert_eq!(first_result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
 
-    let partial_manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let partial_manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!partial_manifest.completed);
     assert_eq!(
         partial_manifest.pieces[0].state,
@@ -204,7 +205,10 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
     .unwrap();
     assert_eq!(resumed_result, Ed2kPeerDownloadOutcome::Completed);
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(manifest.completed);
     server.await.unwrap();
 }
@@ -216,16 +220,14 @@ async fn small_file_download_resumes_partial_piece_after_obfuscated_reconnect() 
     let payload = vec![0x6B; 32_768];
     let split = 8_192usize;
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
     let source_name = "resume-obfuscated-download.epub";
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            source_name.to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        source_name.to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -357,7 +359,10 @@ async fn small_file_download_resumes_partial_piece_after_obfuscated_reconnect() 
     .unwrap();
     assert_eq!(first_result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
 
-    let partial_manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let partial_manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!partial_manifest.completed);
     assert_eq!(
         partial_manifest.pieces[0].bytes_written,
@@ -378,7 +383,10 @@ async fn small_file_download_resumes_partial_piece_after_obfuscated_reconnect() 
     .unwrap();
     assert_eq!(resumed_result, Ed2kPeerDownloadOutcome::Completed);
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(manifest.completed);
     server.await.unwrap();
 }

@@ -279,28 +279,32 @@ async fn stopped_kad_ignores_malformed_callback_without_closing_listener_session
 async fn listener_established_session_tolerates_unknown_opcodes_and_continues() {
     let payload = b"ubuntu linux upload startup handshake".repeat(512);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
     let no_sources_payload = b"ubuntu linux no source exchange peers".repeat(512);
     let no_sources_hash = Ed2kHash::from_bytes(Md4::digest(&no_sources_payload).into());
-    let no_sources_hash_hex = no_sources_hash.to_string();
     let root = unique_test_dir("ed2k-upload-listener-startup");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(file_hash, "startup.txt".to_string(), payload.len() as u64);
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "startup.txt".to_string(),
+        payload.len() as u64,
+    );
     transfer_runtime.ensure_job(&job).await.unwrap();
-    let no_sources_job = new_transfer_job(
+    let no_sources_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
         no_sources_hash,
         "no-sources.txt".to_string(),
         no_sources_payload.len() as u64,
     );
     transfer_runtime.ensure_job(&no_sources_job).await.unwrap();
     transfer_runtime
-        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     let aich_root = [0x7B; 20];
     let proposed = transfer_runtime
         .record_network_aich_root(
-            &file_hash_hex,
+            job.token,
             Some(aich_root),
             std::net::IpAddr::from([203, 0, 113, 7]),
         )
@@ -310,16 +314,16 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     assert!(proposed.aich_root_origin.is_none());
     assert!(!proposed.aich_hashset_acquired);
     transfer_runtime
-        .store_md4_hashset(&no_sources_hash_hex, Vec::new())
+        .store_md4_hashset(no_sources_job.token, Vec::new())
         .await
         .unwrap();
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 0, &payload)
+        .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
     transfer_runtime
         .remember_source(
-            &file_hash_hex,
+            job.token,
             Ed2kSourceHint {
                 ip: "10.20.30.40".to_string(),
                 tcp_port: 4662,
@@ -373,7 +377,7 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     };
     let mut stream = connect_peer_and_exchange_hello(peer_addr, peer_identity).await;
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime.manifest(job.token).await.unwrap();
     stream
         .write_all(&super::encode_request_filename(&file_hash, &manifest))
         .await
@@ -460,7 +464,7 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     stream.write_all(&invalid_source_request).await.unwrap();
 
     let no_sources_manifest = transfer_runtime
-        .manifest(&no_sources_hash_hex)
+        .manifest(no_sources_job.token)
         .await
         .unwrap();
     stream
@@ -835,28 +839,28 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
     // the requester), while a different-IP source is returned.
     let payload = b"ubuntu linux source exchange self-exclusion".repeat(512);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
     let root = unique_test_dir("ed2k-listener-sx-self-exclude");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
         file_hash,
         "sx-exclude.txt".to_string(),
         payload.len() as u64,
     );
     transfer_runtime.ensure_job(&job).await.unwrap();
     transfer_runtime
-        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 0, &payload)
+        .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
 
     // Source 1: the requester's own IP (must be excluded).
     transfer_runtime
         .remember_source(
-            &file_hash_hex,
+            job.token,
             Ed2kSourceHint {
                 ip: test_bind_ip().to_string(),
                 tcp_port: 5001,
@@ -871,7 +875,7 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
     // Source 2: a different IP (must be returned).
     transfer_runtime
         .remember_source(
-            &file_hash_hex,
+            job.token,
             Ed2kSourceHint {
                 ip: "10.20.30.41".to_string(),
                 tcp_port: 4662,
@@ -959,27 +963,27 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
 async fn listener_source_exchange_preserves_live_source_connect_options() {
     let payload = b"source exchange live crypt options".repeat(512);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
     let root = unique_test_dir("ed2k-listener-sx-live-connect-options");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
         file_hash,
         "sx-live-options.txt".to_string(),
         payload.len() as u64,
     );
     transfer_runtime.ensure_job(&job).await.unwrap();
     transfer_runtime
-        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 0, &payload)
+        .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
 
     let advertised_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 42)), 4662);
     transfer_runtime.note_download_source_bytes_at(
-        &file_hash_hex,
+        job.token,
         advertised_source,
         Some([0x63; 16]),
         Some(0x03),
@@ -1058,35 +1062,35 @@ async fn listener_source_exchange_preserves_live_source_connect_options() {
 async fn listener_source_exchange_returns_only_parts_useful_to_requester() {
     let payload = b"source exchange requester part filtering".repeat(512);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
     let root = unique_test_dir("ed2k-listener-sx-requester-parts");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
         file_hash,
         "sx-requester-parts.txt".to_string(),
         payload.len() as u64,
     );
     transfer_runtime.ensure_job(&job).await.unwrap();
     transfer_runtime
-        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     transfer_runtime
-        .store_piece_data(&file_hash_hex, 0, &payload)
+        .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
 
     let helpful = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 44)), 4662);
     let useless = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 45)), 4663);
     transfer_runtime.note_download_source_part_bitmap(
-        &file_hash_hex,
+        job.token,
         helpful,
         Some([0x64; 16]),
         Some(0x07),
         vec![true],
     );
     transfer_runtime.note_download_source_part_bitmap(
-        &file_hash_hex,
+        job.token,
         useless,
         Some([0x65; 16]),
         Some(0x03),
@@ -1096,7 +1100,7 @@ async fn listener_source_exchange_returns_only_parts_useful_to_requester() {
     // bypass the more authoritative live-state usefulness decision.
     transfer_runtime
         .remember_source(
-            &file_hash_hex,
+            job.token,
             Ed2kSourceHint {
                 ip: "10.20.30.45".to_string(),
                 tcp_port: 4663,
@@ -1181,11 +1185,17 @@ async fn listener_multipacket_ext2_source_only_returns_identifier_answer() {
             b"source-only multipacket ext2 request".repeat(512),
         )
         .await;
-    let file_hash_hex = file.file_hash.to_string();
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &runtime.transfer_runtime,
+        file.file_hash,
+        "source-only-ext2.txt".into(),
+        file.payload.len() as u64,
+    );
+    runtime.transfer_runtime.ensure_job(&job).await.unwrap();
     runtime
         .transfer_runtime
         .remember_source(
-            &file_hash_hex,
+            job.token,
             Ed2kSourceHint {
                 ip: "10.20.30.43".to_string(),
                 tcp_port: 4662,
@@ -1201,11 +1211,7 @@ async fn listener_multipacket_ext2_source_only_returns_identifier_answer() {
     let server = runtime.spawn_listener_connections(1);
     let mut stream =
         connect_peer_and_exchange_hello(runtime.peer_addr, peer_hello_identity()).await;
-    let manifest = runtime
-        .transfer_runtime
-        .manifest(&file_hash_hex)
-        .await
-        .unwrap();
+    let manifest = runtime.transfer_runtime.manifest(job.token).await.unwrap();
     let identifier = Ed2kFileIdentifier::from_manifest(&manifest).unwrap();
     let mut payload = Vec::new();
     identifier.encode_into(&mut payload);

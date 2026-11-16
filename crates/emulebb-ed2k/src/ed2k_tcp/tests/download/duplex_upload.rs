@@ -7,33 +7,32 @@ async fn outbound_download_connection_serves_and_cancels_upload_without_closing(
 
     let download_payload = vec![0x5A; 32_768];
     let download_hash = Ed2kHash::from_bytes(Md4::digest(&download_payload).into());
-    let download_hash_hex = download_hash.to_string();
+    let download_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        download_hash,
+        "download.epub".to_string(),
+        download_payload.len() as u64,
+    );
     transfer_runtime
-        .ensure_job(&new_transfer_job(
-            download_hash,
-            "download.epub".to_string(),
-            download_payload.len() as u64,
-        ))
+        .ensure_job(&download_hash_job)
         .await
         .unwrap();
 
     let upload_payload = vec![0x71; 4096];
     let upload_hash = Ed2kHash::from_bytes(Md4::digest(&upload_payload).into());
-    let upload_hash_hex = upload_hash.to_string();
+    let upload_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        upload_hash,
+        "upload.txt".to_string(),
+        upload_payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&upload_hash_job).await.unwrap();
     transfer_runtime
-        .ensure_job(&new_transfer_job(
-            upload_hash,
-            "upload.txt".to_string(),
-            upload_payload.len() as u64,
-        ))
+        .store_md4_hashset(upload_hash_job.token, Vec::new())
         .await
         .unwrap();
     transfer_runtime
-        .store_md4_hashset(&upload_hash_hex, Vec::new())
-        .await
-        .unwrap();
-    transfer_runtime
-        .store_piece_data(&upload_hash_hex, 0, &upload_payload)
+        .store_piece_data(upload_hash_job.token, 0, &upload_payload)
         .await
         .unwrap();
 
@@ -174,7 +173,7 @@ async fn outbound_download_connection_serves_and_cancels_upload_without_closing(
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
     assert!(
         transfer_runtime
-            .manifest(&download_hash_hex)
+            .manifest(download_hash_job.token)
             .await
             .unwrap()
             .completed

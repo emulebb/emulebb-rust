@@ -1,7 +1,22 @@
 use super::*;
 
+fn capture_jobs(
+    db: &MetadataStore,
+    content: &MetadataVerifiedLocalContent,
+    expected: Option<&MetadataLocalFileInstance>,
+) -> Vec<MetadataIngestJob> {
+    let mut hashes = vec![content.file_hash.clone()];
+    if let Some(expected) = expected {
+        hashes.push(expected.file_hash.clone());
+    }
+    hashes.sort_unstable();
+    hashes.dedup();
+    db.capture_local_ingest_jobs(&hashes).unwrap()
+}
+
 fn content(root: &std::path::Path, byte: &str) -> MetadataVerifiedLocalContent {
     MetadataVerifiedLocalContent {
+        secondary_identity: None,
         file_hash: byte.repeat(16),
         display_name: "Sample.bin".into(),
         file_size: 184_321,
@@ -68,6 +83,7 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
             &recovery,
             &media,
             None,
+            &capture_jobs(&db, &a, None),
             &roots,
             Some("unknown"),
             (&epoch, 0),
@@ -100,6 +116,7 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
             &recovery,
             &oversized,
             Some(&old),
+            &capture_jobs(&db, &b, Some(&old)),
             &roots,
             Some("unknown"),
             (&epoch, 0)
@@ -125,6 +142,7 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
             &recovery,
             &media,
             Some(&old),
+            &capture_jobs(&db, &b, Some(&old)),
             &roots,
             Some("unknown"),
             (&epoch, 0)
@@ -139,6 +157,7 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
             &recovery,
             &media,
             Some(&old),
+            &capture_jobs(&db, &b, Some(&old)),
             &roots,
             Some("unknown"),
             (&epoch, 2),
@@ -169,6 +188,7 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
             &recovery,
             &media,
             Some(&old),
+            &capture_jobs(&db, &c, Some(&old)),
             &roots,
             Some("unknown"),
             (&epoch, 2)
@@ -191,6 +211,7 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
             &recovery,
             &media,
             None,
+            &capture_jobs(&db, &c, None),
             &roots,
             Some("unknown"),
             (&epoch, 2)
@@ -218,6 +239,7 @@ fn savepoint_recovery_failure_preserves_owned_binding_without_recovery_rows() {
             &malformed,
             &MetadataTransferMediaMetadata::default(),
             None,
+            &capture_jobs(&db, &content, None),
             &[],
             None,
             (&epoch, 0),
@@ -286,6 +308,7 @@ fn fallback_rechecks_binding_changed_after_actual_recovery_transaction_abort() {
             },
             &MetadataTransferMediaMetadata::default(),
             Some(&worker_expected),
+            &capture_jobs(&worker_db, &worker_stale, Some(&worker_expected)),
             &[MetadataIngestRoot {
                 root: worker_root,
                 relative: "sample.bin".into(),
@@ -349,6 +372,244 @@ fn fallback_rechecks_binding_changed_after_actual_recovery_transaction_abort() {
             .is_none()
     );
     assert_eq!(db.table_count("aich_recovery_sets").unwrap(), 0);
+    drop(competing);
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ingest_projection_and_copy_readers_skip_paired_exclusion_before_selecting_sibling() {
+    let root = std::env::temp_dir().join(format!("ingest-exclusion-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let mut db = MetadataStore::in_memory().unwrap();
+    db.replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+        path: root.to_string_lossy().into_owned(),
+        monitor_owned: false,
+        shareable: true,
+        accessible: true,
+    }])
+    .unwrap();
+    let low = crate::NativeFileIdentity::WindowsLowResolution {
+        volume_serial_number: 7,
+        file_index: 11,
+    };
+    let mut blocked = content(&root, "11");
+    blocked.fingerprint.identity = crate::NativeFileIdentity::WindowsHighResolution {
+        volume_serial_number: 7,
+        file_id: 19,
+    };
+    blocked.secondary_identity = Some(low);
+    db.upsert_verified_local_content(&blocked).unwrap();
+    assert!(
+        db.admit_local_path_to_root(
+            &root,
+            &blocked.path,
+            std::path::Path::new("sample.bin"),
+            &blocked.fingerprint
+        )
+        .unwrap()
+    );
+    // Retained orphan reservation authority remains effective even after its
+    // originating job is gone. Leave membership/session rows in place.
+    let output = root.join("output.bin");
+    db.connection().unwrap().execute(
+        "INSERT INTO download_delivery_exclusions(platform,native_path,reservation_id,originating_job_id,output_identity)
+         VALUES(?1,?2,?3,1,?4)",
+        params![NativePath::platform(), NativePath::from(output.as_path()).storage_bytes(),
+            uuid::Uuid::new_v4().to_string(), low.storage_bytes()],
+    ).unwrap();
+    assert!(
+        db.local_ingest_projections(&[blocked.file_hash.clone()])
+            .unwrap()[0]
+            .complete
+            .is_none()
+    );
+    assert!(
+        db.current_shared_files_by_hash(&blocked.file_hash)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db.next_shared_copy(&blocked.file_hash, 0, 65_536)
+            .unwrap()
+            .is_none()
+    );
+
+    let mut sibling = content(&root, "11");
+    sibling.path = root.join("sibling.bin");
+    db.upsert_verified_local_content(&sibling).unwrap();
+    assert!(
+        db.admit_local_path_to_root(
+            &root,
+            &sibling.path,
+            std::path::Path::new("sibling.bin"),
+            &sibling.fingerprint
+        )
+        .unwrap()
+    );
+    let projections = db
+        .local_ingest_projections(&[blocked.file_hash.clone()])
+        .unwrap();
+    assert_eq!(
+        projections[0]
+            .complete
+            .as_ref()
+            .unwrap()
+            .media_path
+            .as_ref(),
+        Some(&sibling.path)
+    );
+    let copies = db.current_shared_files_by_hash(&blocked.file_hash).unwrap();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(copies[0].source_path, sibling.path);
+    assert_eq!(
+        db.next_shared_copy(&blocked.file_hash, 0, 65_536)
+            .unwrap()
+            .unwrap()
+            .source_path,
+        sibling.path
+    );
+
+    let recovery = MetadataAichRecoverySet {
+        root: [0x22; 20],
+        size: sibling.file_size,
+        parts: vec![vec![0x33; 40]],
+        part_roots: vec![[0x22; 20]],
+    };
+    let expected = db.local_file_instance(&sibling.path).unwrap().unwrap();
+    let epoch = AtomicU64::new(0);
+    let committed = db
+        .commit_local_ingest(
+            &sibling,
+            &recovery,
+            &MetadataTransferMediaMetadata::default(),
+            Some(&expected),
+            &capture_jobs(&db, &sibling, Some(&expected)),
+            &[],
+            None,
+            (&epoch, 0),
+        )
+        .unwrap();
+    assert_eq!(
+        committed.projections[0]
+            .complete
+            .as_ref()
+            .unwrap()
+            .media_path
+            .as_ref(),
+        Some(&sibling.path)
+    );
+    drop(db);
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn ingest_job_snapshot_fences_absence_and_generation_after_real_fallback_abort() {
+    let root = std::env::temp_dir().join(format!("ingest-job-fence-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let database = root.join("metadata.sqlite");
+    let db = MetadataStore::open(&database).unwrap();
+    let competing = MetadataStore::open(&database).unwrap();
+    let content = content(&root, "11");
+    let absent = capture_jobs(&db, &content, None);
+    let token = db
+        .admit_download_job(&crate::DownloadJobRequest {
+            file_hash: content.file_hash.clone(),
+            display_name: content.display_name.clone(),
+            expected_size_bytes: Some(content.file_size),
+            category_id: None,
+            intent: crate::DownloadIntent::Started,
+            piece_size: content.part_size,
+        })
+        .unwrap()
+        .job
+        .token;
+    let recovery = MetadataAichRecoverySet {
+        root: [0x22; 20],
+        size: content.file_size,
+        parts: vec![vec![0x33; 40]],
+        part_roots: vec![[0x22; 20]],
+    };
+    let epoch = AtomicU64::new(0);
+    assert!(
+        db.commit_local_ingest(
+            &content,
+            &recovery,
+            &MetadataTransferMediaMetadata::default(),
+            None,
+            &absent,
+            &[],
+            Some("unknown"),
+            (&epoch, 0)
+        )
+        .unwrap_err()
+        .is::<MetadataIngestJobChanged>()
+    );
+    assert!(db.local_file_instance(&content.path).unwrap().is_none());
+    let captured = capture_jobs(&db, &content, None);
+    db.connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TEMP TRIGGER abort_job_ingest BEFORE INSERT ON main.aich_recovery_parts
+        BEGIN SELECT RAISE(ROLLBACK, 'injected job fallback abort'); END;",
+        )
+        .unwrap();
+    let (reached, ready) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let worker_db = db.clone();
+    let input = content.clone();
+    let worker = std::thread::spawn(move || {
+        FALLBACK_GATE.with(|gate| *gate.borrow_mut() = Some((reached, resume)));
+        worker_db.commit_local_ingest(
+            &input,
+            &recovery,
+            &MetadataTransferMediaMetadata::default(),
+            None,
+            &captured,
+            &[],
+            Some("unknown"),
+            (&AtomicU64::new(0), 0),
+        )
+    });
+    ready
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert!(competing.stop_download_job(token).unwrap());
+    let stopped = competing.download_job(token.job_id).unwrap().unwrap().token;
+    let restarted = competing
+        .start_download_job(stopped, &root)
+        .unwrap()
+        .unwrap()
+        .token;
+    release.send(()).unwrap();
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .is::<MetadataIngestJobChanged>()
+    );
+    assert!(db.local_file_instance(&content.path).unwrap().is_none());
+    assert!(
+        db.find_indexed_file_by_hash(&content.file_hash)
+            .unwrap()
+            .is_none()
+    );
+    assert!(db.download_job_aich_identity(token).unwrap().is_none());
+    let mut called = false;
+    assert!(
+        db.publish_download_job_aich_identity(token, |_| {
+            called = true;
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(!called);
+    assert!(
+        db.publish_download_job_aich_identity(restarted, |_| Ok(()))
+            .is_ok()
+    );
+    assert_eq!(capture_jobs(&db, &content, None)[0].token, Some(restarted));
     drop(competing);
     drop(db);
     std::fs::remove_dir_all(root).unwrap();

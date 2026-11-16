@@ -8,15 +8,13 @@ async fn small_file_download_completes_after_out_of_order_multi_range_response()
     let first_end = super::ED2K_EMBLOCK_SIZE;
     let second_end = super::ED2K_EMBLOCK_SIZE * 2;
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
-    let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "window-complete.epub".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "window-complete.epub".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -169,7 +167,10 @@ async fn small_file_download_completes_after_out_of_order_multi_range_response()
     .unwrap();
 
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(manifest.completed);
     server.await.unwrap();
 }

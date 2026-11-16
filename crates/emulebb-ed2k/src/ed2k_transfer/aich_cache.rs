@@ -62,7 +62,7 @@ mod tests {
 
     #[tokio::test]
     async fn optional_cache_conflicts_do_not_undo_ingest_or_download_completion() {
-        use super::super::{Ed2kTransferRuntime, new_transfer_job};
+        use super::super::Ed2kTransferRuntime;
         let root = crate::paths::unique_test_dir("aich-optional-cache-conflict");
         std::fs::create_dir_all(&root).unwrap();
         let payload = vec![0x6d; 184_321];
@@ -118,29 +118,25 @@ mod tests {
                 &[master],
             )
             .unwrap();
-        let job = new_transfer_job(
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
             hashes.file_hash,
             "Sample.bin".to_string(),
             payload.len() as u64,
         );
         runtime.ensure_job(&job).await.unwrap();
         runtime
-            .store_md4_hashset(&job.file_hash, Vec::new())
+            .store_md4_hashset(job.token, Vec::new())
             .await
             .unwrap();
         runtime
-            .store_piece_data_unfinalized(&job.file_hash, 0, &payload)
+            .store_piece_data_unfinalized(job.token, 0, &payload)
             .await
             .unwrap();
-        assert!(
-            runtime
-                .finalize_pending_transfer(&job.file_hash)
-                .await
-                .unwrap()
-        );
+        assert!(runtime.finalize_pending_transfer(job.token).await.unwrap());
         drop(runtime);
         let restarted = Ed2kTransferRuntime::load_or_create(&download_root).unwrap();
-        let manifest = restarted.manifest(&job.file_hash).await.unwrap();
+        let manifest = restarted.manifest(job.token).await.unwrap();
         assert!(manifest.completed);
         assert!(!manifest.final_rehash_pending);
     }

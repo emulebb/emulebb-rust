@@ -134,14 +134,14 @@ fn check_queue_rank_flood(
 
 async fn remember_connected_peer_source(
     transfer_runtime: &Ed2kTransferRuntime,
-    file_hash_hex: &str,
+    job_token: emulebb_metadata::JobToken,
     peer_addr: SocketAddr,
     user_hash: [u8; 16],
     connect_options: u8,
 ) -> Result<()> {
     transfer_runtime
         .remember_source(
-            file_hash_hex,
+            job_token,
             Ed2kSourceHint {
                 ip: peer_addr.ip().to_string(),
                 tcp_port: peer_addr.port(),
@@ -170,14 +170,14 @@ fn connected_peer_source(
 
 async fn remember_peer_file_name(
     transfer_runtime: &Ed2kTransferRuntime,
-    file_hash_hex: &str,
+    job_token: emulebb_metadata::JobToken,
     peer_addr: SocketAddr,
     session_state: &DownloadSessionState,
     raw_name: &str,
-) -> Result<Ed2kResumeManifest> {
+) -> Result<()> {
     transfer_runtime
         .remember_source_file_name(
-            file_hash_hex,
+            job_token,
             Some(connected_peer_source(peer_addr, session_state)),
             raw_name,
             (!session_state.peer_client_software.is_empty())
@@ -217,6 +217,7 @@ pub enum Ed2kPeerDownloadOutcome {
 }
 
 pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
+    pub(in crate::ed2k_tcp) job_token: emulebb_metadata::JobToken,
     pub(in crate::ed2k_tcp) dispatcher: &'a mut Ed2kPeerDispatcher,
     pub(in crate::ed2k_tcp) peer_addr: SocketAddr,
     pub(in crate::ed2k_tcp) hello_identity: Ed2kHelloIdentity,
@@ -246,6 +247,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
     options: DownloadSessionOptions<'_>,
 ) -> Result<Ed2kPeerDownloadOutcome> {
     let DownloadSessionOptions {
+        job_token,
         dispatcher: transport,
         peer_addr,
         hello_identity,
@@ -273,7 +275,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
     // block list, and wire packets that carry up to three queued ranges.
     let mut pending_part_requests: Vec<PendingPartRequest> = Vec::new();
     let mut pending_compressed_parts: Vec<PendingCompressedPart> = Vec::new();
-    let mut manifest = transfer_runtime.manifest(file_hash_hex).await?;
+    let mut manifest = transfer_runtime.manifest(job_token).await?;
+    anyhow::ensure!(
+        manifest.file_hash == file_hash_hex,
+        "download session hash differs from its captured job"
+    );
     let mut request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
     let mut session_state = DownloadSessionState::new(
         initial_hello_complete,
@@ -401,6 +407,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
                             peer_addr,
+                            job_token,
                             file_hash,
                             &session_state,
                             transport.mode.is_obfuscated(),
@@ -419,6 +426,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
                             peer_addr,
+                            job_token,
                             file_hash,
                             &session_state,
                             transport.mode.is_obfuscated(),
@@ -479,6 +487,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
                             peer_addr,
+                            job_token,
                             file_hash,
                             &session_state,
                             transport.mode.is_obfuscated(),
@@ -510,6 +519,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
                             peer_addr,
+                            job_token,
                             file_hash,
                             &session_state,
                             transport.mode.is_obfuscated(),
@@ -535,7 +545,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     if let Some(software) = &hello_profile.client_software {
                         transfer_runtime.note_download_source_software(
-                            file_hash_hex,
+                            job_token,
                             peer_addr,
                             software.clone(),
                         );
@@ -564,7 +574,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     // reads expose a hashless peer.
                     remember_connected_peer_source(
                         transfer_runtime,
-                        file_hash_hex,
+                        job_token,
                         peer_addr,
                         hello_profile.identity.user_hash,
                         hello_profile.connect_options,
@@ -620,7 +630,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     if let Some(software) = &hello_profile.client_software {
                         transfer_runtime.note_download_source_software(
-                            file_hash_hex,
+                            job_token,
                             peer_addr,
                             software.clone(),
                         );
@@ -633,7 +643,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     // REST reads expose a hashless peer.
                     remember_connected_peer_source(
                         transfer_runtime,
-                        file_hash_hex,
+                        job_token,
                         peer_addr,
                         hello_profile.identity.user_hash,
                         hello_profile.connect_options,
@@ -874,7 +884,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         );
                     }
                     manifest = transfer_runtime
-                        .store_md4_hashset(file_hash_hex, hashset)
+                        .store_md4_hashset(job_token, hashset)
                         .await?;
                 }
                 (OP_EMULEPROT, OP_HASHSETANSWER2) => {
@@ -907,7 +917,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     .await?;
                     if let Some(hashset) = hashset_answer.md4_hashset {
                         manifest = transfer_runtime
-                            .store_md4_hashset(file_hash_hex, hashset)
+                            .store_md4_hashset(job_token, hashset)
                             .await?;
                     }
                     // Unrequested AICH sections cannot establish identity.
@@ -916,7 +926,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         && let Some(generation) = aich_generation
                     {
                         manifest = transfer_runtime
-                            .store_aich_hashset_for_generation(file_hash_hex, hashset, generation)
+                            .store_aich_hashset_for_generation(job_token, hashset, generation)
                             .await?;
                         request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                     }
@@ -935,9 +945,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             file_hash
                         );
                     }
-                    manifest = remember_peer_file_name(
+                    remember_peer_file_name(
                         transfer_runtime,
-                        file_hash_hex,
+                        job_token,
                         peer_addr,
                         &session_state,
                         &returned_file_name,
@@ -945,7 +955,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     .await?;
                     record_filename_answer_availability(
                         transfer_runtime,
-                        file_hash_hex,
+                        job_token,
                         peer_addr,
                         &mut session_state,
                         manifest.pieces.len(),
@@ -968,7 +978,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     )?;
                     let bitmap = record_source_part_availability(
                         transfer_runtime,
-                        file_hash_hex,
+                        job_token,
                         peer_addr,
                         session_state.peer_user_hash,
                         session_state.peer_connect_options,
@@ -1027,7 +1037,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                 session_state.peer_part_bitmap =
                                     Some(record_source_part_availability(
                                         transfer_runtime,
-                                        file_hash_hex,
+                                        job_token,
                                         peer_addr,
                                         session_state.peer_user_hash,
                                         session_state.peer_connect_options,
@@ -1063,7 +1073,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     manifest = transfer_runtime
                         .record_network_aich_root(
-                            file_hash_hex,
+                            job_token,
                             returned_aich_root,
                             peer_addr.ip(),
                         )
@@ -1081,9 +1091,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         return Ok(Ed2kPeerDownloadOutcome::FileNotFound);
                     }
                     if let Some(returned_file_name) = returned_file_name.as_deref() {
-                        manifest = remember_peer_file_name(
+                        remember_peer_file_name(
                             transfer_runtime,
-                            file_hash_hex,
+                            job_token,
                             peer_addr,
                             &session_state,
                             returned_file_name,
@@ -1091,7 +1101,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         .await?;
                         record_filename_answer_availability(
                             transfer_runtime,
-                            file_hash_hex,
+                            job_token,
                             peer_addr,
                             &mut session_state,
                             manifest.pieces.len(),
@@ -1144,7 +1154,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                 session_state.peer_part_bitmap =
                                     Some(record_source_part_availability(
                                         transfer_runtime,
-                                        file_hash_hex,
+                                        job_token,
                                         peer_addr,
                                         session_state.peer_user_hash,
                                         session_state.peer_connect_options,
@@ -1169,9 +1179,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         session_state.peer_advertised_aich_root = true;
                     }
                     if let Some(returned_file_name) = returned_file_name.as_deref() {
-                        manifest = remember_peer_file_name(
+                        remember_peer_file_name(
                             transfer_runtime,
-                            file_hash_hex,
+                            job_token,
                             peer_addr,
                             &session_state,
                             returned_file_name,
@@ -1179,7 +1189,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         .await?;
                         record_filename_answer_availability(
                             transfer_runtime,
-                            file_hash_hex,
+                            job_token,
                             peer_addr,
                             &mut session_state,
                             manifest.pieces.len(),
@@ -1218,7 +1228,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     session_state.peer_advertised_aich_root = true;
                     manifest = transfer_runtime
                         .record_network_aich_root(
-                            file_hash_hex,
+                            job_token,
                             Some(aich_root),
                             peer_addr.ip(),
                         )
@@ -1247,7 +1257,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     remember_source_exchange_sources(
                         transfer_runtime,
                         file_hash,
-                        file_hash_hex,
+                        job_token,
                         answer_hash,
                         sources,
                     )
@@ -1274,7 +1284,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 (OP_EDONKEYPROT, OP_QUEUERANK) => {
                     let rank = decode_edonkey_queue_rank_payload(&packet.payload)?;
                     session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
-                    transfer_runtime.note_download_source_queue_rank(file_hash_hex, peer_addr, rank);
+                    transfer_runtime.note_download_source_queue_rank(job_token, peer_addr, rank);
                     check_queue_rank_flood(
                         transfer_runtime,
                         peer_addr,
@@ -1292,7 +1302,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     let rank = decode_emule_queue_ranking_payload(&packet.payload)?;
                     session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
                     transfer_runtime.note_download_source_queue_rank(
-                        file_hash_hex,
+                        job_token,
                         peer_addr,
                         u32::from(rank),
                     );
@@ -1504,6 +1514,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         transfer_runtime,
                         file_hash_hex,
+                        job_token,
                         connected_peer_source(peer_addr, &session_state),
                         &packet.payload,
                         Ed2kStringEncoding::from_unicode_support(
@@ -1585,6 +1596,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     handle_aich_recovery_answer(
                         transfer_runtime,
+                        job_token,
                         file_hash_hex,
                         &answer,
                         &packet.payload,
@@ -1716,7 +1728,7 @@ fn initial_aich_recovery_parts(manifest: &Ed2kResumeManifest) -> Vec<u16> {
 async fn remember_source_exchange_sources(
     transfer_runtime: &Ed2kTransferRuntime,
     expected_hash: Ed2kHash,
-    file_hash_hex: &str,
+    job_token: emulebb_metadata::JobToken,
     answer_hash: Ed2kHash,
     sources: Vec<SourceExchangePeer>,
 ) -> Result<()> {
@@ -1725,7 +1737,7 @@ async fn remember_source_exchange_sources(
     }
 
     transfer_runtime
-        .note_source_exchange_answer(file_hash_hex, std::time::Instant::now())
+        .note_source_exchange_answer(job_token, std::time::Instant::now())
         .await;
 
     for source in sources {
@@ -1734,7 +1746,7 @@ async fn remember_source_exchange_sources(
         }
         transfer_runtime
             .remember_source(
-                file_hash_hex,
+                job_token,
                 Ed2kSourceHint {
                     ip: Ipv4Addr::from(source.ip).to_string(),
                     tcp_port: source.tcp_port,
@@ -1757,7 +1769,7 @@ async fn remember_source_exchange_sources(
 /// connected peer's availability for this session.
 fn record_source_part_availability(
     transfer_runtime: &Ed2kTransferRuntime,
-    file_hash_hex: &str,
+    job_token: emulebb_metadata::JobToken,
     peer_addr: SocketAddr,
     peer_user_hash: Option<[u8; 16]>,
     peer_connect_options: Option<u8>,
@@ -1770,7 +1782,7 @@ fn record_source_part_availability(
         availability
     };
     transfer_runtime.note_download_source_part_bitmap(
-        file_hash_hex,
+        job_token,
         peer_addr,
         peer_user_hash,
         peer_connect_options,
@@ -1785,7 +1797,7 @@ fn record_source_part_availability(
 /// part selection and the later client-UDP complete-source count.
 fn record_filename_answer_availability(
     transfer_runtime: &Ed2kTransferRuntime,
-    file_hash_hex: &str,
+    job_token: emulebb_metadata::JobToken,
     peer_addr: SocketAddr,
     session_state: &mut DownloadSessionState,
     manifest_part_count: usize,
@@ -1797,7 +1809,7 @@ fn record_filename_answer_availability(
         return;
     };
     transfer_runtime.note_download_source_part_bitmap(
-        file_hash_hex,
+        job_token,
         peer_addr,
         session_state.peer_user_hash,
         session_state.peer_connect_options,
@@ -1861,15 +1873,14 @@ mod tests {
         Ed2kResumeManifest, Ed2kTransferState, inferred_filename_answer_availability,
         initial_aich_recovery_parts, peer_holds_needed_part,
     };
-    use crate::ed2k_transfer::{Ed2kPieceState, Ed2kTransferJob};
+    use crate::ed2k_transfer::Ed2kPieceState;
 
     fn manifest_with_states(states: &[Ed2kTransferState]) -> Ed2kResumeManifest {
-        let job = Ed2kTransferJob {
-            file_hash: "0".repeat(32),
-            display_name: "sample.bin".to_string(),
-            file_size: u64::try_from(states.len()).unwrap_or(0) * 9_728_000,
-            piece_size: 9_728_000,
-        };
+        let (_profile, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
+            emulebb_kad_proto::Ed2kHash::from_bytes([0; 16]),
+            "sample.bin".into(),
+            u64::try_from(states.len()).unwrap() * 9_728_000,
+        );
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.pieces = states
             .iter()

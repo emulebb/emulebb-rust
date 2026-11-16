@@ -20,19 +20,18 @@ pub(crate) fn check_accepted_identity(
              SELECT f.size_bytes, coalesce(c.aich_root, f.aich_root)
              FROM known_files f
              LEFT JOIN verified_local_content c ON c.known_file_id = f.id
-             WHERE f.ed2k_hash = ?1
-               AND (f.aich_root_origin IS NOT NULL
-                    OR c.known_file_id IS NOT NULL
-                    OR EXISTS (SELECT 1 FROM transfers t WHERE t.known_file_id = f.id
-                               AND t.completed = 1 AND t.final_rehash_pending = 0))",
+             WHERE f.ed2k_hash = ?1",
     )?;
     let rows = stmt.query_map(params![hash], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+        Ok((
+            row.get::<_, Option<i64>>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+        ))
     })?;
     for row in rows {
         let (stored_size, stored_root) = row?;
         ensure!(
-            stored_size == size_bytes,
+            stored_size.is_none_or(|stored| stored == size_bytes),
             MetadataContentConflict("ED2K identity has conflicting file size")
         );
         ensure!(

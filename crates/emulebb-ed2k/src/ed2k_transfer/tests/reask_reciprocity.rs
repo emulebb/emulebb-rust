@@ -22,7 +22,7 @@ const PEER_UDP_VERSION: u8 = 4;
 fn shared_entry(file_hash: &Ed2kHash) -> Ed2kSharedEntry {
     Ed2kSharedEntry {
         file_hash: file_hash.to_string(),
-        display_name: "ubuntu-linux.iso".to_string(),
+        display_name: "Sample.Transfer.iso".to_string(),
         file_size: 9_728_000,
         verified_complete: true,
         verified_ranges: Vec::new(),
@@ -349,30 +349,30 @@ async fn reciprocity_replies_file_not_found_for_an_unshared_file() {
 
 #[tokio::test]
 async fn reask_transfer_info_advertises_partfile_bitmap_for_incomplete_download() {
-    use crate::ed2k_transfer::{ED2K_PART_SIZE, new_transfer_job};
+    use crate::ed2k_transfer::ED2K_PART_SIZE;
 
     let root = unique_test_dir("ed2k-reask-transfer-info");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     // A fresh two-part job is incomplete with no verified pieces yet.
     let file_hash = Ed2kHash::from_bytes([0x42; 16]);
-    let job = new_transfer_job(
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &runtime,
         file_hash,
-        "ubuntu-linux.iso".to_string(),
+        "Sample.Transfer.iso".to_string(),
         ED2K_PART_SIZE + 7,
     );
     runtime.ensure_job(&job).await.unwrap();
 
     // Two live sources: one advertises both parts (complete), one only one part.
-    let hex = file_hash.to_string();
     runtime.note_download_source_part_bitmap(
-        &hex,
+        job.token,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)), 4662),
         None,
         None,
         vec![true, true],
     );
     runtime.note_download_source_part_bitmap(
-        &hex,
+        job.token,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)), 4662),
         None,
         None,

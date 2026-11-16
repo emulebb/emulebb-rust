@@ -46,9 +46,45 @@ impl std::error::Error for MetadataIngestCommitUncertain {}
 #[derive(Debug)]
 pub struct MetadataIngestProjection {
     pub file_hash: String,
+    pub job_token: Option<crate::JobToken>,
     pub complete: Option<MetadataTransferCatalogEntry>,
     pub partial: Option<MetadataPartialShare>,
     pub aich: Option<MetadataTransferAichIdentity>,
+}
+
+/// Short post-preparation snapshot of the only unfinished job for content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataIngestJob {
+    pub file_hash: String,
+    pub token: Option<crate::JobToken>,
+}
+
+#[derive(Debug)]
+pub struct MetadataIngestJobChanged;
+impl std::fmt::Display for MetadataIngestJobChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ingest job generation changed before binding")
+    }
+}
+impl std::error::Error for MetadataIngestJobChanged {}
+
+fn current_job(conn: &Connection, hash: &str) -> Result<Option<crate::JobToken>> {
+    let raw = crate::store::decode_fixed_hex(hash, 16, "ED2K hash")?;
+    Ok(conn
+        .query_row(
+            "SELECT j.id,j.execution_generation FROM known_files k
+        JOIN download_jobs j ON j.known_file_id=k.id WHERE k.ed2k_hash=?1
+        AND j.removed_at_s IS NULL AND j.terminal_completed_at_s IS NULL
+        AND j.delete_requested_at_s IS NULL",
+            [raw],
+            |row| {
+                Ok(crate::JobToken {
+                    job_id: row.get(0)?,
+                    generation: crate::sql_value::unsigned::<u64>(row, 1)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 #[derive(Debug)]
@@ -89,17 +125,23 @@ fn project(conn: &Connection, hash: &str) -> Result<MetadataIngestProjection> {
     // One verified copy by path key, never an unverified representative and
     // never a materialized list of all copies. Bounds apply before decoding.
     let sql = format!(
-        "SELECT {} FROM known_files
+        concat!(
+            "SELECT {} FROM known_files
         JOIN verified_local_content ON verified_local_content.known_file_id=known_files.id
         JOIN local_file_instances ON local_file_instances.known_file_id=known_files.id
         JOIN local_paths ON local_paths.id=local_file_instances.path_id
         JOIN temp.session_verified_local_paths v ON v.path_id=local_paths.id
             AND v.verified_fingerprint=local_file_instances.verified_fingerprint
-        WHERE known_files.ed2k_hash=?1 AND EXISTS(SELECT 1 FROM shared_file_memberships m
+        WHERE known_files.ed2k_hash=?1
+        AND ",
+            crate::local_catalog::unexcluded_identity_sql!("local_file_instances"),
+            "
+        AND EXISTS(SELECT 1 FROM shared_file_memberships m
             JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=local_paths.id
             AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL
             AND r.accessible=1 AND r.shareable=1)
-        ORDER BY local_file_instances.path_id LIMIT 1",
+        ORDER BY local_file_instances.path_id LIMIT 1"
+        ),
         crate::local_catalog::COLUMNS
     );
     // Validate the selected row before catalog_entry allocates text/path buffers.
@@ -120,6 +162,7 @@ fn project(conn: &Connection, hash: &str) -> Result<MetadataIngestProjection> {
         .optional()?;
     Ok(MetadataIngestProjection {
         file_hash: hash.to_owned(),
+        job_token: current_job(conn, hash)?,
         complete,
         partial: MetadataStore::partial_share_on_connection(conn, hash)?,
         aich: crate::transfer_store::read_transfer_aich_identity(conn, &raw)?,
@@ -127,6 +170,26 @@ fn project(conn: &Connection, hash: &str) -> Result<MetadataIngestProjection> {
 }
 
 impl MetadataStore {
+    /// Capture at most two current executions after hashing, before waiting on
+    /// their job guards. Binding rechecks this exact snapshot in every transaction.
+    pub fn capture_local_ingest_jobs(&self, hashes: &[String]) -> Result<Vec<MetadataIngestJob>> {
+        ensure!(
+            !hashes.is_empty() && hashes.len() <= 2,
+            "invalid ingest identity count"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let mut jobs = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            jobs.push(MetadataIngestJob {
+                file_hash: hash.clone(),
+                token: current_job(&tx, hash)?,
+            });
+        }
+        tx.commit()?;
+        Ok(jobs)
+    }
+
     /// Re-read at most two affected identities without replaying committed SQL.
     pub fn local_ingest_projections(
         &self,
@@ -155,6 +218,7 @@ impl MetadataStore {
         recovery: &MetadataAichRecoverySet,
         media: &MetadataTransferMediaMetadata,
         expected: Option<&MetadataLocalFileInstance>,
+        expected_jobs: &[MetadataIngestJob],
         roots: &[MetadataIngestRoot],
         index_type: Option<&str>,
         root_epoch: (&AtomicU64, u64),
@@ -164,12 +228,31 @@ impl MetadataStore {
                 && content.aich_root.as_deref() == Some(hex::encode(recovery.root).as_str()),
             "recovery set differs from verified content"
         );
+        let mut affected = vec![content.file_hash.as_str()];
+        if let Some(old) = expected.filter(|old| old.file_hash != content.file_hash) {
+            affected.push(old.file_hash.as_str());
+        }
+        ensure!(
+            expected_jobs.len() == affected.len()
+                && affected.iter().all(|hash| expected_jobs
+                    .iter()
+                    .filter(|job| job.file_hash == *hash)
+                    .count()
+                    == 1),
+            "ingest job snapshot does not cover exactly the affected content"
+        );
         let mut recovery_error = None;
         // Only a transaction-wide optional-cache abort gets one fallback.
         for with_recovery in [true, false] {
             let mut conn = self.connection()?;
             let mut tx = conn.transaction()?;
             check_binding(&tx, content, expected)?;
+            for job in expected_jobs {
+                ensure!(
+                    current_job(&tx, &job.file_hash)? == job.token,
+                    MetadataIngestJobChanged
+                );
+            }
             ensure!(
                 root_epoch.1 % 2 == 0 && root_epoch.0.load(Ordering::Acquire) == root_epoch.1,
                 ObservedRootChanged

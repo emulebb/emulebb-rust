@@ -8,6 +8,13 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
     let file_hash_hex = file_hash.to_string();
     let placeholder_name = file_hash_hex.clone();
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        placeholder_name.clone(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -65,7 +72,7 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
         answer_startup_metadata_with_expected_size(
             &mut stream,
             &file_hash,
-            0,
+            payload_for_server.len() as u64,
             payload_for_server.len() as u64,
             "captured.epub",
             false,
@@ -132,8 +139,8 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
                 .unwrap(),
         ),
         &transfer_runtime,
-        placeholder_name,
-        0,
+        placeholder_name.clone(),
+        payload.len() as u64,
         Duration::from_secs(3),
         established_context: Some(established_context),
     )
@@ -153,26 +160,41 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
     );
     assert_eq!(callback_request.origin, Ed2kCallbackSessionOrigin::Kad);
 
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime.manifest(job.token).await.unwrap();
     assert!(manifest.completed);
-    assert_eq!(manifest.display_name, "captured.epub");
+    assert_eq!(manifest.display_name, placeholder_name);
+    let names = transfer_runtime
+        .download_names_after(job.token, 0, 10)
+        .await
+        .unwrap();
+    assert!(
+        names
+            .iter()
+            .any(|entry| entry.observation.raw_name == "captured.epub")
+    );
+    let sources = transfer_runtime
+        .download_sources_after(job.token, 0, 10)
+        .await
+        .unwrap();
     assert_eq!(manifest.file_size, payload.len() as u64);
-    assert!(manifest.sources.contains(&Ed2kSourceHint {
-        ip: test_bind_ip().to_string(),
-        tcp_port: peer_addr.port(),
-        user_hash: Some(hex::encode([0x42; 16])),
-        connect_options: Some(emule_connect_options(false)),
-        file_comment: String::new(),
-        file_rating: 0,
-    }));
-    assert!(manifest.sources.contains(&Ed2kSourceHint {
-        ip: "127.0.0.2".to_string(),
-        tcp_port: 4662,
-        user_hash: Some(hex::encode([0x77; 16])),
-        connect_options: Some(0),
-        file_comment: String::new(),
-        file_rating: 0,
-    }));
+    assert!(sources.iter().any(|entry| entry.source
+        == emulebb_metadata::MetadataTransferSource {
+            ip: test_bind_ip().to_string(),
+            tcp_port: peer_addr.port(),
+            user_hash: Some(hex::encode([0x42; 16])),
+            connect_options: Some(emule_connect_options(false)),
+            file_comment: String::new(),
+            file_rating: 0,
+        }));
+    assert!(sources.iter().any(|entry| entry.source
+        == emulebb_metadata::MetadataTransferSource {
+            ip: "127.0.0.2".to_string(),
+            tcp_port: 4662,
+            user_hash: Some(hex::encode([0x77; 16])),
+            connect_options: Some(0),
+            file_comment: String::new(),
+            file_rating: 0,
+        }));
     // FIX 3: the download path attributes credit only to a cryptographically
     // verified peer (eMule CClientCredits::AddDownloaded gates IS_IDFAILED/
     // IDNEEDED when crypto is available). This test peer never completes a secure
@@ -184,7 +206,7 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
             .map(|credit| credit.downloaded_bytes),
         None
     );
-    assert!(transfer_runtime.download_speed_bytes_per_sec(&file_hash_hex) > 0);
+    assert!(transfer_runtime.download_speed_bytes_per_sec(job.token) > 0);
     server.await.unwrap();
 }
 
@@ -273,6 +295,20 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
     let alternate_hash = Ed2kHash::from_bytes([0x6D; 16]);
     let primary_size = ED2K_PART_SIZE;
     let alternate_size = ED2K_PART_SIZE * 2;
+    let primary_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        primary_hash,
+        "primary-missing.bin".into(),
+        primary_size,
+    );
+    let alternate_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        alternate_hash,
+        "alternate-missing.bin".into(),
+        alternate_size,
+    );
+    transfer_runtime.ensure_job(&primary_job).await.unwrap();
+    transfer_runtime.ensure_job(&alternate_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -338,6 +374,7 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
     };
     let report = download_files_from_peer(
         Ed2kPeerDownloadOptions {
+            job_token: primary_job.token,
             egress_route: crate::networking::EgressRoute::StrictInterface,
             bind_ip: test_bind_ip(),
             peer: &peer,
@@ -365,6 +402,7 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
             reask_register: None,
         },
         vec![Ed2kPeerDownloadFile {
+            job_token: alternate_job.token,
             file_hash: alternate_hash,
             display_name: "alternate-missing.bin".to_string(),
             file_size: alternate_size,
@@ -378,10 +416,12 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
         report.file_outcomes,
         vec![
             Ed2kPeerFileDownloadOutcome {
+                job_token: primary_job.token,
                 file_hash: primary_hash,
                 outcome: Ed2kPeerDownloadOutcome::FileNotFound,
             },
             Ed2kPeerFileDownloadOutcome {
+                job_token: alternate_job.token,
                 file_hash: alternate_hash,
                 outcome: Ed2kPeerDownloadOutcome::FileNotFound,
             },

@@ -1,7 +1,7 @@
 //! Finished-file delivery.
 //!
 //! When a transfer completes, its verified payload still lives only in the
-//! internal hash-named piece store (`<root>/<hash>/pieces.bin`). This module
+//! persisted job-specific piece store (`<selected-temp>/<job-id>-<uuid>/pieces.bin`). This module
 //! materializes that payload into an operator-facing file named by the
 //! transfer's canonical name, under a destination directory chosen by the
 //! caller (a category path, or the global incoming directory). This is the
@@ -42,7 +42,8 @@ use emulebb_kad_proto::Ed2kHash;
 #[cfg(test)]
 use emulebb_metadata::NativePath;
 use emulebb_metadata::{
-    MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase, NativeFileFingerprint,
+    JobToken, MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
+    NativeFileFingerprint,
 };
 use md4::{Digest, Md4};
 use uuid::Uuid;
@@ -65,7 +66,7 @@ static DELIVERY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub enum Ed2kDeliveryOutcome {
     /// The transfer is not complete yet; nothing was delivered.
     NotCompleted,
-    /// Already delivered; the recorded file still exists (idempotent no-op).
+    /// Delivery was durably recorded. Later external loss never creates a new copy.
     AlreadyDelivered(PathBuf),
     /// The payload was materialized to this path.
     Delivered(PathBuf),
@@ -98,11 +99,22 @@ impl Ed2kTransferRuntime {
     /// copy cannot stall other transfers' manifest checkpoints.
     pub async fn materialize_completed_payload(
         &self,
-        file_hash: &str,
+        token: JobToken,
         dest_dir: &Path,
     ) -> Result<Ed2kDeliveryOutcome> {
-        let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
-        self.recover_delivery_attempt_unlocked(file_hash).await?;
+        let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
+        let metadata = self.metadata.clone();
+        let record = tokio::task::spawn_blocking(move || metadata.download_job(token.job_id))
+            .await
+            .context("delivery job lookup failed")??
+            .context("missing delivery job")?;
+        anyhow::ensure!(record.token == token, "stale delivery generation");
+        let file_hash = record.file_hash.as_str();
+        if record.delivery_state == emulebb_metadata::MetadataTransferDeliveryState::Pending
+            && record.completed_at_s.is_none()
+        {
+            self.recover_delivery_attempt_unlocked(token).await?;
+        }
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
         let (
@@ -113,8 +125,8 @@ impl Ed2kTransferRuntime {
             recorded_fingerprint,
             recorded_ownership,
         ) = {
-            let _guard = self.lock_manifest(file_hash).await;
-            let manifest = self.load_manifest_unlocked(file_hash).await?;
+            let _guard = self.lock_manifest(token).await;
+            let manifest = self.load_manifest_unlocked(token).await?;
             if !manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kDeliveryOutcome::NotCompleted);
             }
@@ -150,50 +162,51 @@ impl Ed2kTransferRuntime {
             )
             .await
             {
-                Ok(DeliveredOutputIdentity::Matching(current_fingerprint))
-                    if recorded_ownership == super::Ed2kDeliveryOwnership::Unowned
-                        || recorded_fingerprint
-                            .as_ref()
-                            .zip(current_fingerprint.as_ref())
-                            .is_some_and(|(recorded, current)| recorded == current) =>
-                {
+                Ok(DeliveredOutputIdentity::Matching(Some(current))) => {
+                    if recorded_fingerprint.as_ref() != Some(&current) {
+                        // Equal bytes prove delivery, never destructive ownership.
+                        // Fence the exact snapshot before retaining the fresh
+                        // verification evidence as explicitly unowned output.
+                        let guard = self.lock_manifest(token).await;
+                        // Busy is a safe pending retry. Do not wait for registry
+                        // capacity while retaining this lifecycle/job guard.
+                        let receipt = self.local_mutations.submit_delivery_verification(
+                            self,
+                            token,
+                            &recorded_path,
+                            recorded_fingerprint.as_ref(),
+                            recorded_ownership,
+                            &current,
+                            guard,
+                        )?;
+                        receipt
+                            .await
+                            .context("delivery verification owner stopped")??;
+                    }
                     return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded_path));
                 }
-                Ok(DeliveredOutputIdentity::Matching(_)) => {
-                    tracing::warn!(
-                        file_hash,
-                        path = %recorded_path.display(),
-                        "recorded output content matches but native identity changed; refusing to adopt unproven ownership"
+                Ok(DeliveredOutputIdentity::Matching(None)) => {
+                    anyhow::bail!(
+                        "matching delivered bytes lack stable native verification evidence"
                     );
                 }
-                Ok(DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign) => {}
+                Ok(DeliveredOutputIdentity::Missing | DeliveredOutputIdentity::Foreign) => {
+                    // Delivered is already a durable fact, even if a crash
+                    // precedes terminal retirement. Later loss/replacement never
+                    // authorizes another materialization for this job.
+                    return Ok(Ed2kDeliveryOutcome::AlreadyDelivered(recorded_path));
+                }
                 Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        file_hash,
-                        path = %recorded_path.display(),
-                        "recorded delivered output could not be verified; scheduling redelivery"
-                    );
+                    return Err(error)
+                        .context("recorded delivered output verification remains pending");
                 }
-            }
-
-            let _guard = self.lock_manifest(file_hash).await;
-            let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-            if manifest.delivery_state == super::Ed2kDeliveryState::Delivered
-                && manifest.delivered_path.as_ref() == Some(&recorded_path)
-            {
-                manifest.delivery_state = super::Ed2kDeliveryState::Pending;
-                manifest.delivery_ownership = super::Ed2kDeliveryOwnership::None;
-                manifest.delivered_path = None;
-                manifest.source_fingerprint = None;
-                self.store_manifest_unlocked(&manifest).await?;
             }
         }
 
-        let source = self.payload_path(file_hash);
+        let source = self.payload_path(token.job_id)?;
         let installed = self
             .deliver_payload_file(
-                file_hash,
+                token,
                 &source,
                 dest_dir,
                 &display_name,
@@ -202,36 +215,20 @@ impl Ed2kTransferRuntime {
             )
             .await
             .with_context(|| format!("failed to deliver completed transfer {file_hash}"))?;
-        let final_path = installed.path;
-
-        // Phase 2: persist the delivered path under the lock.
-        {
-            let _guard = self.lock_manifest(file_hash).await;
-            let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-            manifest.delivery_state = super::Ed2kDeliveryState::Delivered;
-            manifest.delivery_ownership = super::Ed2kDeliveryOwnership::Owned;
-            manifest.delivered_path = Some(final_path.clone());
-            // Record the delivered file's native fingerprint so a later
-            // shared-directory rescan that re-finds this file in a shared
-            // Incoming/category dir reuses the download's already-computed
-            // hashset instead of re-reading and re-hashing the whole payload
-            // (HASH-2; oracle FindKnownFile, SharedFileList.cpp:2138). Only for a
-            // download. It is
-            // read AFTER the file is in place, through the same `long_path` stat
-            // the reload uses, so an unchanged delivered file compares equal on
-            // reload (the copy+rename gets a fresh identity that is stable
-            // thereafter).
-            manifest.source_fingerprint = Some(installed.fingerprint);
-            self.store_manifest_unlocked(&manifest).await?;
-        }
+        let final_path = installed.target_path.clone();
+        let fingerprint = installed
+            .published_fingerprint
+            .as_ref()
+            .context("published delivery has no fingerprint")?;
+        self.commit_recovered_delivery(
+            token,
+            &installed,
+            fingerprint,
+            super::Ed2kDeliveryOwnership::Owned,
+        )
+        .await?;
         Ok(Ed2kDeliveryOutcome::Delivered(final_path))
     }
-}
-
-#[derive(Debug)]
-struct InstalledDelivery {
-    path: PathBuf,
-    fingerprint: NativeFileFingerprint,
 }
 
 fn delivery_candidate_name(
@@ -402,13 +399,13 @@ impl Ed2kTransferRuntime {
     /// attempt before it is created.
     async fn deliver_payload_file(
         &self,
-        file_hash: &str,
+        token: JobToken,
         source: &Path,
         dest_dir: &Path,
         display_name: &str,
         expected_size: u64,
         expected_hash: [u8; 16],
-    ) -> Result<InstalledDelivery> {
+    ) -> Result<MetadataTransferDeliveryAttempt> {
         validate_delivery_source(source, expected_size).await?;
         tokio::fs::create_dir_all(long_path(dest_dir))
             .await
@@ -437,28 +434,23 @@ impl Ed2kTransferRuntime {
 
             let attempt_id = Uuid::new_v4();
             let staging_path = dest_dir.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
-            self.begin_delivery_attempt(file_hash, attempt_id, &target_path, &staging_path)
+            self.begin_delivery_attempt(token, attempt_id, &target_path, &staging_path)
                 .await?;
             stage_delivery_payload(source, &staging_path).await?;
             let verified_staging =
                 open_verified_staging_file(&staging_path, expected_size, expected_hash).await?;
-            anyhow::ensure!(
-                self.mark_delivery_attempt_staged(
-                    file_hash,
-                    attempt_id,
-                    &verified_staging.fingerprint,
-                )
-                .await?,
-                "delivery attempt {attempt_id} disappeared before staging committed"
-            );
+            let attempt = self
+                .mark_delivery_attempt_staged(token, attempt_id, &verified_staging.fingerprint)
+                .await?
+                .context("delivery attempt disappeared before staging committed")?;
 
             let installation = match install_staged_payload(&staging_path, &target_path).await {
                 Ok(outcome) => outcome,
                 Err(error) if error.downcast_ref::<AtomicMoveUnsupported>().is_some() => {
                     let direct = self
                         .publish_direct_copy(
-                            file_hash,
-                            attempt_id,
+                            token,
+                            &attempt,
                             &staging_path,
                             &target_path,
                             verified_staging,
@@ -468,13 +460,10 @@ impl Ed2kTransferRuntime {
                             },
                         )
                         .await?;
-                    if let Some(fingerprint) = direct {
-                        return Ok(InstalledDelivery {
-                            path: target_path,
-                            fingerprint,
-                        });
+                    if let Some(published) = direct {
+                        return Ok(published);
                     }
-                    self.clear_delivery_attempt(file_hash, attempt_id).await?;
+                    self.clear_delivery_attempt(token, &attempt).await?;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -490,19 +479,10 @@ impl Ed2kTransferRuntime {
                         expected_hash,
                     )
                     .await?;
-                    anyhow::ensure!(
-                        self.mark_delivery_attempt_published(
-                            file_hash,
-                            attempt_id,
-                            &installed_fingerprint,
-                        )
-                        .await?,
-                        "delivery attempt {attempt_id} disappeared before publication committed"
-                    );
-                    return Ok(InstalledDelivery {
-                        path: target_path,
-                        fingerprint: installed_fingerprint,
-                    });
+                    return self
+                        .mark_delivery_attempt_published(token, attempt_id, &installed_fingerprint)
+                        .await?
+                        .context("delivery attempt disappeared before publication committed");
                 }
                 InstallOutcome::AlreadyExists => {
                     drop(verified_staging.file);
@@ -513,13 +493,13 @@ impl Ed2kTransferRuntime {
                     .await?
                     {
                         tracing::warn!(
-                            file_hash,
+                            job_id = %token.job_id,
                             path = %staging_path.display(),
                             "preserving delivery staging path whose native identity changed"
                         );
                     }
                     anyhow::ensure!(
-                        self.clear_delivery_attempt(file_hash, attempt_id).await?,
+                        self.clear_delivery_attempt(token, &attempt).await?,
                         "delivery attempt {attempt_id} disappeared during collision cleanup"
                     );
                 }
@@ -533,25 +513,30 @@ impl Ed2kTransferRuntime {
 
     async fn publish_direct_copy(
         &self,
-        file_hash: &str,
-        attempt_id: Uuid,
+        token: JobToken,
+        attempt: &MetadataTransferDeliveryAttempt,
         staging_path: &Path,
         target_path: &Path,
         verified: VerifiedStagingFile,
         expected: DeliveryPayloadIdentity,
-    ) -> Result<Option<NativeFileFingerprint>> {
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         use tokio::io::AsyncSeekExt;
+        let attempt_id = attempt.attempt_id;
 
         // WHY: The reservation must survive cancellation and crashes before a
         // partial final-looking file can ever be considered for sharing.
         if !self
             .metadata
-            .reserve_delivery_output(target_path, attempt_id)?
+            .reserve_delivery_output(token, target_path, attempt_id)?
         {
             drop(verified.file);
             remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
             return Ok(None);
         }
+        let reservation = self
+            .metadata
+            .delivery_output_reservation(token.job_id, attempt_id)?
+            .context("delivery output reservation disappeared before creation")?;
         self.refresh_complete_shared_catalog().await?;
         let mut output = match tokio::fs::OpenOptions::new()
             .read(true)
@@ -562,7 +547,11 @@ impl Ed2kTransferRuntime {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.metadata.release_delivery_output(attempt_id)?;
+                anyhow::ensure!(
+                    self.metadata
+                        .release_delivery_output(token, &reservation, attempt)?,
+                    "delivery reservation changed before collision release"
+                );
                 drop(verified.file);
                 remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
                 return Ok(None);
@@ -581,34 +570,27 @@ impl Ed2kTransferRuntime {
             capture_published_fingerprint(output, target_path, expected.size, expected.hash)
                 .await?;
         // Keep the barrier until the published journal record is committed.
-        anyhow::ensure!(
-            self.metadata
-                .publish_reserved_delivery_attempt(file_hash, attempt_id, &fingerprint)?,
-            "direct delivery reservation disappeared before publication committed"
-        );
+        let published = self
+            .metadata
+            .publish_reserved_delivery_attempt(token, attempt_id, &fingerprint)?
+            .context("direct delivery reservation disappeared before publication committed")?;
         drop(input);
         remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
-        Ok(Some(fingerprint))
+        Ok(Some(published))
     }
 
     async fn begin_delivery_attempt(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt_id: Uuid,
         target_path: &Path,
         staging_path: &Path,
     ) -> Result<MetadataTransferDeliveryAttempt> {
         let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
         let target_path = target_path.to_owned();
         let staging_path = staging_path.to_owned();
         tokio::task::spawn_blocking(move || {
-            metadata.begin_transfer_delivery_attempt(
-                &file_hash,
-                attempt_id,
-                &target_path,
-                &staging_path,
-            )
+            metadata.begin_transfer_delivery_attempt(token, attempt_id, &target_path, &staging_path)
         })
         .await
         .context("ED2K delivery-attempt prepare task panicked")?
@@ -616,19 +598,14 @@ impl Ed2kTransferRuntime {
 
     async fn mark_delivery_attempt_staged(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt_id: Uuid,
         staging_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
         let staging_fingerprint = staging_fingerprint.clone();
         tokio::task::spawn_blocking(move || {
-            metadata.mark_transfer_delivery_attempt_staged(
-                &file_hash,
-                attempt_id,
-                &staging_fingerprint,
-            )
+            metadata.mark_transfer_delivery_attempt_staged(token, attempt_id, &staging_fingerprint)
         })
         .await
         .context("ED2K delivery-attempt stage task panicked")?
@@ -636,16 +613,15 @@ impl Ed2kTransferRuntime {
 
     async fn mark_delivery_attempt_published(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt_id: Uuid,
         published_fingerprint: &NativeFileFingerprint,
-    ) -> Result<bool> {
+    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
         let published_fingerprint = published_fingerprint.clone();
         tokio::task::spawn_blocking(move || {
             metadata.mark_transfer_delivery_attempt_published(
-                &file_hash,
+                token,
                 attempt_id,
                 &published_fingerprint,
             )
@@ -654,11 +630,15 @@ impl Ed2kTransferRuntime {
         .context("ED2K delivery-attempt publish task panicked")?
     }
 
-    async fn clear_delivery_attempt(&self, file_hash: &str, attempt_id: Uuid) -> Result<bool> {
+    async fn clear_delivery_attempt(
+        &self,
+        token: JobToken,
+        expected: &MetadataTransferDeliveryAttempt,
+    ) -> Result<bool> {
         let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
+        let expected = expected.clone();
         tokio::task::spawn_blocking(move || {
-            metadata.clear_transfer_delivery_attempt(&file_hash, attempt_id)
+            metadata.settle_recovered_delivery_attempt(token, &expected)
         })
         .await
         .context("ED2K delivery-attempt cleanup task panicked")?
@@ -666,48 +646,48 @@ impl Ed2kTransferRuntime {
 
     pub(super) async fn delivery_attempt(
         &self,
-        file_hash: &str,
+        token: JobToken,
     ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_owned();
-        tokio::task::spawn_blocking(move || metadata.transfer_delivery_attempt_by_hash(&file_hash))
+        tokio::task::spawn_blocking(move || metadata.download_job_delivery_attempt(token.job_id))
             .await
             .context("ED2K delivery-attempt load task panicked")?
     }
 
-    pub(super) async fn recover_delivery_attempt_unlocked(&self, file_hash: &str) -> Result<()> {
-        let Some(attempt) = self.delivery_attempt(file_hash).await? else {
+    pub(super) async fn recover_delivery_attempt_unlocked(&self, token: JobToken) -> Result<()> {
+        let Some(attempt) = self.delivery_attempt(token).await? else {
             return Ok(());
         };
         validate_delivery_attempt_paths(&attempt)?;
-        if self.metadata.has_delivery_reservation(attempt.attempt_id)? {
+        if self
+            .metadata
+            .has_delivery_reservation(token.job_id, attempt.attempt_id)?
+        {
             // WHY: A crash may have interrupted direct creation or copying.
             // Preserve both artifacts; their identity cannot be proven here.
-            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                .await?;
-            return Ok(());
+            anyhow::bail!(
+                "direct delivery reservation remains pending for job {:?}",
+                token.job_id
+            );
         }
         let manifest = {
-            let _manifest_guard = self.lock_manifest(file_hash).await;
-            self.load_manifest_unlocked(file_hash).await?
+            let _manifest_guard = self.lock_manifest(token).await;
+            self.load_manifest_unlocked(token).await?
         };
         if manifest.delivery_state == super::Ed2kDeliveryState::Delivered {
-            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                .await?;
+            self.clear_delivery_attempt(token, &attempt).await?;
             return Ok(());
         }
         if manifest.delivery_state != super::Ed2kDeliveryState::Pending
             || !manifest.completed
             || manifest.final_rehash_pending
         {
-            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                .await?;
+            self.clear_delivery_attempt(token, &attempt).await?;
             return Ok(());
         }
         if attempt.phase == MetadataTransferDeliveryAttemptPhase::Prepared {
-            preserve_unproven_prepared_staging(file_hash, &attempt).await?;
-            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                .await?;
+            preserve_unproven_prepared_staging(&manifest.file_hash, &attempt).await?;
+            self.clear_delivery_attempt(token, &attempt).await?;
             return Ok(());
         }
 
@@ -739,7 +719,7 @@ impl Ed2kTransferRuntime {
                 AttemptArtifactIdentity::Owned => {
                     return self
                         .commit_recovered_delivery(
-                            file_hash,
+                            token,
                             &attempt,
                             published_fingerprint,
                             super::Ed2kDeliveryOwnership::Owned,
@@ -751,14 +731,13 @@ impl Ed2kTransferRuntime {
                 }
                 AttemptArtifactIdentity::Foreign => {
                     tracing::warn!(
-                        file_hash,
+                        job_id = %token.job_id,
                         path = %attempt.target_path.display(),
                         "preserving delivery target whose identity changed after publication"
                     );
                 }
             }
-            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                .await?;
+            self.clear_delivery_attempt(token, &attempt).await?;
             return Ok(());
         }
 
@@ -787,10 +766,10 @@ impl Ed2kTransferRuntime {
                     {
                         Ok(outcome) => outcome,
                         Err(error) if error.downcast_ref::<AtomicMoveUnsupported>().is_some() => {
-                            if let Some(fingerprint) = self
+                            if let Some(published) = self
                                 .publish_direct_copy(
-                                    file_hash,
-                                    attempt.attempt_id,
+                                    token,
+                                    &attempt,
                                     &attempt.staging_path,
                                     &attempt.target_path,
                                     verified_staging,
@@ -803,15 +782,17 @@ impl Ed2kTransferRuntime {
                             {
                                 return self
                                     .commit_recovered_delivery(
-                                        file_hash,
-                                        &attempt,
-                                        &fingerprint,
+                                        token,
+                                        &published,
+                                        published
+                                            .published_fingerprint
+                                            .as_ref()
+                                            .context("published attempt lacks fingerprint")?,
                                         super::Ed2kDeliveryOwnership::Owned,
                                     )
                                     .await;
                             }
-                            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                                .await?;
+                            self.clear_delivery_attempt(token, &attempt).await?;
                             return Ok(());
                         }
                         Err(error) => return Err(error),
@@ -827,20 +808,18 @@ impl Ed2kTransferRuntime {
                             expected_hash,
                         )
                         .await?;
-                        anyhow::ensure!(
-                            self.mark_delivery_attempt_published(
-                                file_hash,
+                        let published = self
+                            .mark_delivery_attempt_published(
+                                token,
                                 attempt.attempt_id,
                                 &published_fingerprint,
                             )
-                            .await?,
-                            "delivery attempt {} disappeared before publication committed",
-                            attempt.attempt_id
-                        );
+                            .await?
+                            .context("delivery attempt disappeared before publication committed")?;
                         return self
                             .commit_recovered_delivery(
-                                file_hash,
-                                &attempt,
+                                token,
+                                &published,
                                 &published_fingerprint,
                                 super::Ed2kDeliveryOwnership::Owned,
                             )
@@ -855,13 +834,12 @@ impl Ed2kTransferRuntime {
                         .await?
                         {
                             tracing::warn!(
-                                file_hash,
+                                job_id = %token.job_id,
                                 path = %attempt.staging_path.display(),
                                 "preserving delivery staging path whose native identity changed"
                             );
                         }
-                        self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                            .await?;
+                        self.clear_delivery_attempt(token, &attempt).await?;
                         Ok(())
                     }
                 }
@@ -879,7 +857,7 @@ impl Ed2kTransferRuntime {
                     DeliveredOutputIdentity::Matching(Some(current_fingerprint)) => {
                         return self
                             .commit_recovered_delivery(
-                                file_hash,
+                                token,
                                 &attempt,
                                 &current_fingerprint,
                                 super::Ed2kDeliveryOwnership::Unowned,
@@ -891,24 +869,22 @@ impl Ed2kTransferRuntime {
                     }
                     DeliveredOutputIdentity::Matching(None) | DeliveredOutputIdentity::Foreign => {
                         tracing::warn!(
-                            file_hash,
+                            job_id = %token.job_id,
                             path = %attempt.target_path.display(),
                             "preserving ambiguous delivery target after interrupted publication"
                         );
                     }
                 }
-                self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                    .await?;
+                self.clear_delivery_attempt(token, &attempt).await?;
                 Ok(())
             }
             AttemptArtifactIdentity::Foreign => {
                 tracing::warn!(
-                    file_hash,
+                    job_id = %token.job_id,
                     path = %attempt.staging_path.display(),
                     "preserving delivery staging path whose native identity changed"
                 );
-                self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                    .await?;
+                self.clear_delivery_attempt(token, &attempt).await?;
                 Ok(())
             }
         }
@@ -916,18 +892,18 @@ impl Ed2kTransferRuntime {
 
     async fn commit_recovered_delivery(
         &self,
-        file_hash: &str,
+        token: JobToken,
         attempt: &MetadataTransferDeliveryAttempt,
         fingerprint: &NativeFileFingerprint,
         ownership: super::Ed2kDeliveryOwnership,
     ) -> Result<()> {
-        let _manifest_guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let _manifest_guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_manifest_unlocked(token).await?;
         anyhow::ensure!(
             manifest.delivery_state == super::Ed2kDeliveryState::Pending
                 && manifest.completed
                 && !manifest.final_rehash_pending,
-            "transfer {file_hash} changed while recovering delivery attempt {}",
+            "job {token:?} changed while recovering delivery attempt {}",
             attempt.attempt_id
         );
         manifest.delivery_state = super::Ed2kDeliveryState::Delivered;
@@ -939,17 +915,16 @@ impl Ed2kTransferRuntime {
 
     pub(super) async fn discard_delivery_attempt_for_deletion_unlocked(
         &self,
-        file_hash: &str,
+        token: JobToken,
         manifest: &super::Ed2kResumeManifest,
     ) -> Result<Option<OwnedDeliveryOutput>> {
-        let Some(attempt) = self.delivery_attempt(file_hash).await? else {
+        let Some(attempt) = self.delivery_attempt(token).await? else {
             return Ok(None);
         };
         validate_delivery_attempt_paths(&attempt)?;
         if attempt.phase == MetadataTransferDeliveryAttemptPhase::Prepared {
-            preserve_unproven_prepared_staging(file_hash, &attempt).await?;
-            self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-                .await?;
+            preserve_unproven_prepared_staging(&manifest.file_hash, &attempt).await?;
+            self.clear_delivery_attempt(token, &attempt).await?;
             return Ok(None);
         }
 
@@ -975,7 +950,7 @@ impl Ed2kTransferRuntime {
                     .await?
                 {
                     tracing::warn!(
-                        file_hash,
+                        job_id = %token.job_id,
                         path = %attempt.staging_path.display(),
                         "preserving delivery staging artifact whose identity changed before deletion"
                     );
@@ -986,7 +961,7 @@ impl Ed2kTransferRuntime {
             }
             AttemptArtifactIdentity::Foreign => {
                 tracing::warn!(
-                    file_hash,
+                    job_id = %token.job_id,
                     path = %attempt.staging_path.display(),
                     "preserving delivery staging artifact without matching persisted native identity"
                 );
@@ -1005,8 +980,7 @@ impl Ed2kTransferRuntime {
                 fingerprint: published_fingerprint.clone(),
             }));
         }
-        self.clear_delivery_attempt(file_hash, attempt.attempt_id)
-            .await?;
+        self.clear_delivery_attempt(token, &attempt).await?;
         Ok(None)
     }
 }
@@ -1396,13 +1370,12 @@ async fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-pub(super) async fn remove_file_if_fingerprint_matches(
+pub(super) fn remove_file_if_fingerprint_matches_retained(
     path: &Path,
     expected_fingerprint: &NativeFileFingerprint,
 ) -> Result<bool> {
     let owned_path = long_path(path);
-    let expected_fingerprint = expected_fingerprint.clone();
-    let removed = tokio::task::spawn_blocking(move || -> Result<bool> {
+    let removed = (|| -> Result<bool> {
         let metadata = match owned_path.symlink_metadata() {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
@@ -1414,7 +1387,7 @@ pub(super) async fn remove_file_if_fingerprint_matches(
         let Some(current_fingerprint) = super::ingest::native_file_fingerprint(&owned_path) else {
             return Ok(false);
         };
-        if expected_fingerprint != current_fingerprint {
+        if *expected_fingerprint != current_fingerprint {
             return Ok(false);
         }
         #[cfg(test)]
@@ -1426,7 +1399,7 @@ pub(super) async fn remove_file_if_fingerprint_matches(
         };
         if !metadata.file_type().is_file()
             || super::ingest::native_file_fingerprint(&owned_path).as_ref()
-                != Some(&expected_fingerprint)
+                != Some(expected_fingerprint)
         {
             return Ok(false);
         }
@@ -1435,13 +1408,24 @@ pub(super) async fn remove_file_if_fingerprint_matches(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
             Err(error) => Err(error.into()),
         }
-    })
-    .await
-    .context("delivery target cleanup task panicked")??;
+    })()?;
     if removed {
-        sync_parent_directory(path).await?;
+        super::fs_durability::sync_parent_directory_retained(path)?;
     }
     Ok(removed)
+}
+
+pub(super) async fn remove_file_if_fingerprint_matches(
+    path: &Path,
+    expected: &NativeFileFingerprint,
+) -> Result<bool> {
+    let path = path.to_owned();
+    let expected = expected.clone();
+    tokio::task::spawn_blocking(move || {
+        remove_file_if_fingerprint_matches_retained(&path, &expected)
+    })
+    .await
+    .context("delivery target cleanup task panicked")?
 }
 
 #[cfg(test)]
@@ -1498,7 +1482,8 @@ pub(super) fn compute_ed2k_hash_from_handle(
 ) -> Result<[u8; 16]> {
     file.seek(SeekFrom::Start(0))?;
     let part_count = expected_size.div_ceil(ED2K_PART_SIZE);
-    let mut part_hashes = Vec::with_capacity(usize::try_from(part_count).unwrap_or(0));
+    let mut composite = Md4::new();
+    let mut first_part = None;
     let mut remaining = expected_size;
     for _ in 0..part_count {
         let mut hasher = Md4::new();
@@ -1510,21 +1495,16 @@ pub(super) fn compute_ed2k_hash_from_handle(
             hasher.update(&buffer[..length]);
             part_remaining -= length as u64;
         }
-        part_hashes.push(<[u8; 16]>::from(hasher.finalize()));
+        let digest = <[u8; 16]>::from(hasher.finalize());
+        first_part.get_or_insert(digest);
+        composite.update(digest);
         remaining = remaining.saturating_sub(ED2K_PART_SIZE);
     }
     if expected_size == 0 {
         return Ok(Md4::new().finalize().into());
     }
     if expected_size < ED2K_PART_SIZE {
-        return part_hashes
-            .first()
-            .copied()
-            .context("single-part ED2K hash was not produced");
-    }
-    let mut composite = Md4::new();
-    for hash in part_hashes {
-        composite.update(hash);
+        return first_part.context("single-part ED2K hash was not produced");
     }
     if expected_size.is_multiple_of(ED2K_PART_SIZE) {
         composite.update(<[u8; 16]>::from(Md4::new().finalize()));

@@ -8,14 +8,13 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
     let payload = vec![0x5A; 32_768];
     let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
     let file_hash_hex = file_hash.to_string();
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "callback.epub".to_string(),
-            payload.len() as u64,
-        ))
-        .await
-        .unwrap();
+    let file_hash_job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "callback.epub".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -79,6 +78,7 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
     );
 
     let result = drive_download_session(DownloadSessionOptions {
+        job_token: file_hash_job.token,
         dispatcher: &mut transport,
         peer_addr: remote_addr,
         hello_identity: Ed2kHelloIdentity {
@@ -112,7 +112,10 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
     .unwrap();
 
     assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
-    let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
+    let manifest = transfer_runtime
+        .manifest(file_hash_job.token)
+        .await
+        .unwrap();
     assert!(!manifest.completed);
     server.await.unwrap();
 }

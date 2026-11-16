@@ -494,7 +494,11 @@ fn file_identifier_roundtrip_matches_stock_md4_plus_size_shape() {
 #[test]
 fn file_identifier_from_manifest_includes_persisted_aich_root() {
     let file_hash = Ed2kHash([0x52; 16]);
-    let job = new_transfer_job(file_hash, "captured.iso".to_string(), ED2K_PART_SIZE + 1);
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
+        file_hash,
+        "captured.iso".to_string(),
+        ED2K_PART_SIZE + 1,
+    );
     let mut manifest = Ed2kResumeManifest::new(&job);
     manifest.aich_root = Some(hex::encode([0x7E; 20]));
 
@@ -587,7 +591,7 @@ fn multipacket_ext2_source_request_matches_peer_source_exchange_version() {
         file_size: Some(ED2K_PART_SIZE + 1),
         aich_root: None,
     };
-    let job = new_transfer_job(
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
         file_identifier.file_hash,
         "captured.iso".to_string(),
         ED2K_PART_SIZE + 1,
@@ -731,7 +735,7 @@ fn legacy_multipacket_answer_uses_hash_prefixed_subpackets() {
 #[test]
 fn legacy_multipacket_request_uses_ext_envelope_for_sized_peer() {
     let file_hash = Ed2kHash([0x47; 16]);
-    let job = new_transfer_job(
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
         file_hash,
         "legacy-download.avi".to_string(),
         ED2K_PART_SIZE + 1,

@@ -72,7 +72,6 @@ use crate::{
         ED2K_PART_SIZE, Ed2kCallbackDispatchOutcome, Ed2kCallbackDownload,
         Ed2kCallbackHelloIdentity, Ed2kCallbackReservation, Ed2kCallbackTicketRequest,
         Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kUploadQueueConfig,
-        new_transfer_job,
     },
     kad_firewall::KadFirewallState,
     paths::unique_test_dir,
@@ -121,21 +120,31 @@ macro_rules! download_file_from_peer_test {
             $timeout:expr,
             established_context: $established_context:expr $(,)?
         ) => {
-        download_file_from_peer(Ed2kPeerDownloadOptions {
+        async {
+        let peer = $peer;
+        let runtime = $transfer_runtime;
+            let display_name: String = $display_name;
+            let file_size: u64 = $file_size;
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            runtime, peer.file_hash, display_name.clone(), file_size,
+        );
+            download_file_from_peer(Ed2kPeerDownloadOptions {
+            job_token: job.token,
             egress_route: crate::networking::EgressRoute::StrictInterface,
             bind_ip: $bind_ip,
-            peer: $peer,
+            peer,
             hello_identity: $hello_identity,
             secure_ident: $secure_ident,
-            transfer_runtime: $transfer_runtime,
-            display_name: $display_name,
-            file_size: $file_size,
+            transfer_runtime: runtime,
+            display_name,
+            file_size,
             current_source_count: 0,
             timeout: $timeout,
             upload_context: None,
             established_context: $established_context,
             reask_register: None,
-        })
+            }).await
+        }
     };
     (
             $bind_ip:expr,

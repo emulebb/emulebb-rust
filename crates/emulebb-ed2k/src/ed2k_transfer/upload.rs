@@ -173,7 +173,7 @@ impl Ed2kTransferRuntime {
         let peer_ip = peer.ip;
         let mut handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
         let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(file_hash);
-        let file_size = self.shared_file_size(file_hash);
+        let file_size = self.shared_file_size(file_hash).await;
         // Resolve an auto-upload-priority file's dynamic tier from its live queue
         // depth (oracle GetQueuedCount, KnownFile.cpp:1382-1387). Read the count
         // in a short lock, released before the blocking manifest read.
@@ -182,7 +182,7 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .upload_client_count_for_file(&file_hash.to_string());
-        let file_priority_score = self.file_priority_score(file_hash, queued_count);
+        let file_priority_score = self.file_priority_score(file_hash, queued_count).await;
         let live_same_ip_connections = self.live_peer_connections_from(peer_ip);
         let status = {
             let mut queue = self.upload_queue.lock().await;
@@ -217,10 +217,10 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .upload_client_count_for_file(handle.file_hash_hex());
-        let file_priority_score = self.file_priority_score(&file_hash, queued_count);
+        let file_priority_score = self.file_priority_score(&file_hash, queued_count).await;
         let credit_score_permille = self.peer_credit_score_permille(&peer);
         let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(&file_hash);
-        let file_size = self.shared_file_size(&file_hash);
+        let file_size = self.shared_file_size(&file_hash).await;
         self.upload_queue.lock().await.refresh_session_peer(
             handle,
             peer,
@@ -686,28 +686,29 @@ impl Ed2kTransferRuntime {
     /// (oracle `ResolveSessionTransferLimitBytes` reads
     /// `CKnownFile::GetFileSize`, UploadQueue.cpp:137-149). 0 (unknown file)
     /// disables the byte cap, like the oracle's NULL-file early return.
-    fn shared_file_size(&self, file_hash: &Ed2kHash) -> u64 {
-        self.metadata
-            .transfer_manifest_by_hash(&file_hash.to_string())
-            .ok()
-            .flatten()
-            .map(|manifest| manifest.file_size)
-            .unwrap_or(0)
+    async fn shared_file_size(&self, file_hash: &Ed2kHash) -> u64 {
+        self.shared_catalog
+            .read()
+            .await
+            .entry_by_hash(file_hash)
+            .map_or(0, |entry| entry.file_size)
     }
 
-    fn file_priority_score(&self, file_hash: &Ed2kHash, queued_count: u64) -> i128 {
-        self.metadata
-            .transfer_manifest_by_hash(&file_hash.to_string())
-            .ok()
-            .flatten()
-            .map(|manifest| {
-                upload_priority_score(
-                    &manifest.upload_priority,
-                    manifest.auto_upload_priority,
-                    queued_count,
-                )
-            })
-            .unwrap_or_else(|| upload_priority_score("normal", false, queued_count))
+    async fn file_priority_score(&self, file_hash: &Ed2kHash, queued_count: u64) -> i128 {
+        self.shared_catalog
+            .read()
+            .await
+            .entry_by_hash(file_hash)
+            .map_or_else(
+                || upload_priority_score("normal", false, queued_count),
+                |entry| {
+                    upload_priority_score(
+                        &entry.upload_priority,
+                        entry.auto_upload_priority,
+                        queued_count,
+                    )
+                },
+            )
     }
 
     /// The requested file's all-time upload ratio in permille (eMule

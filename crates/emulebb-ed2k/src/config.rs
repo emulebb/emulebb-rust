@@ -110,13 +110,6 @@ pub struct Ed2kRuntimeConfig {
     /// budget). The download-side counterpart to
     /// `upload_queue.upload_limit_bytes_per_sec`.
     pub download_limit_bytes_per_sec: u64,
-    /// Enable follow-majority filename selection for newly created downloads.
-    /// Existing transfers retain their persisted per-transfer choice.
-    pub follow_majority_filename_for_new_downloads: bool,
-    /// Minimum votes required before a normalized source filename may win.
-    pub follow_majority_filename_minimum_votes: u32,
-    /// Required share of current source-name votes, clamped to 1..=100.
-    pub follow_majority_filename_required_percent: u32,
     /// Detect repeated TCP-layer session failures from one peer IP and apply an
     /// IP-only client ban when the configured interval threshold is reached.
     pub detect_tcp_error_flooder: bool,
@@ -298,9 +291,6 @@ impl Default for Ed2kRuntimeConfig {
             source_server_attempt_budget: 3,
             upload_queue: Ed2kUploadQueueRuntimeConfig::default(),
             download_limit_bytes_per_sec: 0,
-            follow_majority_filename_for_new_downloads: false,
-            follow_majority_filename_minimum_votes: 0,
-            follow_majority_filename_required_percent: 51,
             detect_tcp_error_flooder: true,
             tcp_error_flooder_interval_minutes: 60,
             tcp_error_flooder_threshold: 10,

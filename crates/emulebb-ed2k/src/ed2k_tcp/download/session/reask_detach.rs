@@ -43,6 +43,7 @@ fn parse_diagnostic_initial_reask_delay(raw: &str) -> Option<Duration> {
 pub(super) fn incomplete_or_detached_queued_source(
     reask_register: &Option<crate::ed2k_client_udp::ReaskSourceHandle>,
     peer_addr: SocketAddr,
+    job_token: emulebb_metadata::JobToken,
     file_hash: Ed2kHash,
     session_state: &DownloadSessionState,
     should_crypt: bool,
@@ -55,6 +56,7 @@ pub(super) fn incomplete_or_detached_queued_source(
         && try_detach_queued_source_for_reask(
             reask_register,
             peer_addr,
+            job_token,
             file_hash,
             session_state,
             should_crypt,
@@ -71,6 +73,7 @@ pub(super) fn incomplete_or_detached_queued_source(
 fn try_detach_queued_source_for_reask(
     reask_register: &Option<crate::ed2k_client_udp::ReaskSourceHandle>,
     peer_addr: SocketAddr,
+    job_token: emulebb_metadata::JobToken,
     file_hash: Ed2kHash,
     session_state: &DownloadSessionState,
     should_crypt: bool,
@@ -116,6 +119,7 @@ fn try_detach_queued_source_for_reask(
         return false;
     }
     handle.detach(crate::ed2k_client_udp::ReaskDetachArgs {
+        job_token,
         file_hash,
         endpoint: (*v4.ip(), session_state.peer_udp_port),
         // The connected session's remote TCP port — the key core leased this
@@ -162,6 +166,8 @@ mod tests {
     #[test]
     fn high_id_queued_source_detaches_for_udp_reask() {
         let file_hash = Ed2kHash::from_bytes([0x5a; 16]);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(file_hash);
         let peer_addr = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 10).into(), 4662);
         let state = session_state(false);
         let (handle, mut rx) = reask_command_channel();
@@ -169,6 +175,7 @@ mod tests {
         assert!(try_detach_queued_source_for_reask(
             &Some(handle),
             peer_addr,
+            job_token,
             file_hash,
             &state,
             true,
@@ -176,6 +183,7 @@ mod tests {
 
         match rx.try_recv().expect("register command") {
             ReaskCommand::Register(args) => {
+                assert_eq!(args.job_token, job_token);
                 assert_eq!(args.file_hash, file_hash);
                 assert_eq!(args.endpoint, (Ipv4Addr::new(192, 0, 2, 10), 4672));
                 // The TCP lease key port (core's source_endpoint_key), distinct
@@ -202,6 +210,8 @@ mod tests {
     #[test]
     fn low_id_tcp_queued_source_without_buddy_id_stays_on_tcp_path() {
         let file_hash = Ed2kHash::from_bytes([0x6b; 16]);
+        let (_job_store, job_token) =
+            crate::ed2k_transfer::test_support::admit_protocol_job(file_hash);
         let peer_addr = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 20).into(), 4662);
         let state = session_state(true);
         let (handle, mut rx) = reask_command_channel();
@@ -209,6 +219,7 @@ mod tests {
         assert!(!try_detach_queued_source_for_reask(
             &Some(handle),
             peer_addr,
+            job_token,
             file_hash,
             &state,
             false,

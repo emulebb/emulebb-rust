@@ -1,81 +1,23 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::{collections::BTreeMap, net::Ipv4Addr, path::PathBuf, sync::Arc};
+use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    MetadataLocalShareEntry, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
-    MetadataTransferCatalogEntry, MetadataTransferCounts,
-    MetadataTransferDirectoryDeletionAuthority, MetadataTransferPublishEntry,
-    MetadataVerifiedLocalContent, NativeFileFingerprint, NativeFileIdentity,
+    JobToken, MetadataLocalShareEntry, MetadataSharedFilePage, MetadataSharedFileQuery,
+    MetadataTransferCounts, MetadataVerifiedLocalContent, NativeFileFingerprint,
 };
 use uuid::Uuid;
 
 use crate::{long_path::long_path, normalize_ed2k_file_name};
 
-use super::deliver::OwnedDeliveryOutput;
-use super::fs_durability::{NoReplaceMoveOutcome, move_path_no_replace, sync_parent_directory};
-use super::hashset::{
-    decode_aich_hash_hex, expected_md4_hash_count, validate_aich_hashset, validate_md4_hashset,
-};
-use super::manifest::{manifest_has_structural_progress, piece_count};
-use super::transfer_sql::manifest_from_metadata;
-use super::upload_queue::upload_priority_score;
+use super::hashset::{decode_aich_hash_hex, validate_aich_hashset};
 use super::{
-    Ed2kAichHashset, Ed2kAichRootOrigin, Ed2kFileNameObservation, Ed2kPieceState,
-    Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport,
-    Ed2kTransferJob, Ed2kTransferRetirementRecoveryReport, Ed2kTransferRuntime, Ed2kTransferState,
+    Ed2kAichHashset, Ed2kAichRootOrigin, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
+    Ed2kTransferJob, Ed2kTransferRuntime,
 };
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DeletionCleanupPolicy {
-    RetryLater,
-    PropagateFailure,
-}
-
-fn merge_publish_entries(
-    metadata: &MetadataStore,
-    transfers: Vec<MetadataTransferPublishEntry>,
-    local: Vec<MetadataTransferCatalogEntry>,
-) -> Result<Vec<MetadataTransferPublishEntry>> {
-    let mut by_hash = transfers
-        .into_iter()
-        .map(|entry| (entry.file_hash.clone(), entry))
-        .collect::<BTreeMap<_, _>>();
-    for share in local {
-        let Some(source) = super::duplicate::first_present_source(
-            metadata.current_shared_files_by_hash(&share.file_hash)?,
-        ) else {
-            continue;
-        };
-        if !metadata.mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)? {
-            continue;
-        }
-        let entry = MetadataTransferPublishEntry {
-            file_hash: share.file_hash,
-            display_name: emulebb_metadata::NativePath::from(source.path.as_path())
-                .display_file_name()
-                .unwrap_or(share.display_name),
-            file_size: share.file_size,
-            aich_root: share.aich_root,
-            upload_priority: share.upload_priority,
-            auto_upload_priority: share.auto_upload_priority,
-            session_uploaded_bytes: 0,
-            session_request_count: 0,
-            session_accept_count: 0,
-            all_time_uploaded_bytes: share.all_time_uploaded_bytes,
-            all_time_upload_requests: share.all_time_upload_requests,
-            all_time_upload_accepts: share.all_time_upload_accepts,
-            last_upload_request_ms: share.last_upload_request_ms,
-            comment: share.comment,
-            rating: share.rating,
-        };
-        by_hash.insert(entry.file_hash.clone(), entry);
-    }
-    Ok(by_hash.into_values().collect())
-}
 
 impl Ed2kTransferRuntime {
     /// Return persisted transfer counts without hydrating every manifest.
@@ -86,37 +28,6 @@ impl Ed2kTransferRuntime {
     /// Return persisted transfer counts if the metadata connection is free.
     pub fn try_transfer_counts(&self) -> Result<Option<MetadataTransferCounts>> {
         self.metadata.try_transfer_counts()
-    }
-
-    /// Return Kad publish inputs from eligible complete local files and
-    /// shareable download parts without hydrating every persisted manifest.
-    pub async fn publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
-        let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            merge_publish_entries(
-                &metadata,
-                metadata.completed_transfer_publish_entries()?,
-                metadata.active_local_catalog_page(None, usize::MAX)?,
-            )
-        })
-        .await
-        .map_err(anyhow::Error::from)?
-    }
-
-    /// Return Kad publish inputs if the metadata connection is immediately free.
-    pub async fn try_publish_entries(&self) -> Result<Option<Vec<MetadataTransferPublishEntry>>> {
-        let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            let Some(transfers) = metadata.try_completed_transfer_publish_entries()? else {
-                return Ok(None);
-            };
-            let Some(local) = metadata.try_active_local_catalog_page()? else {
-                return Ok(None);
-            };
-            Ok(Some(merge_publish_entries(&metadata, transfers, local)?))
-        })
-        .await
-        .map_err(anyhow::Error::from)?
     }
 
     /// Return REST shared-file summaries without hydrating every manifest.
@@ -167,74 +78,6 @@ impl Ed2kTransferRuntime {
             .map_err(anyhow::Error::from)?
     }
 
-    /// Return completed download hashes that still need incoming delivery.
-    pub async fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {
-        let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.pending_completed_delivery_hashes())
-            .await
-            .map_err(anyhow::Error::from)?
-    }
-
-    /// Return active completed download hashes whose persisted delivery state
-    /// must be verified during startup (`pending` or `delivered`).
-    pub async fn completed_delivery_reconciliation_hashes(&self) -> Result<Vec<String>> {
-        let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.completed_delivery_reconciliation_hashes())
-            .await
-            .map_err(anyhow::Error::from)?
-    }
-
-    pub async fn transfer_deletion_requested(&self, file_hash: &str) -> Result<bool> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_string();
-        tokio::task::spawn_blocking(move || metadata.transfer_deletion_requested(&file_hash))
-            .await
-            .map_err(anyhow::Error::from)?
-    }
-
-    async fn pending_transfer_deletion_hashes(&self) -> Result<Vec<String>> {
-        let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || metadata.pending_transfer_deletion_hashes())
-            .await
-            .context("ED2K pending transfer deletion scan task panicked")?
-    }
-
-    async fn persist_transfer_deletion_intent(
-        &self,
-        file_hash: &str,
-        transfer_directory_authority: Option<MetadataTransferDirectoryDeletionAuthority>,
-    ) -> Result<bool> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_string();
-        tokio::task::spawn_blocking(move || {
-            metadata.request_transfer_deletion(&file_hash, transfer_directory_authority)
-        })
-        .await
-        .context("ED2K transfer deletion-intent task panicked")?
-    }
-
-    async fn pending_transfer_deletion_manifest(
-        &self,
-        file_hash: &str,
-    ) -> Result<Option<Ed2kResumeManifest>> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_string();
-        let manifest = tokio::task::spawn_blocking(move || {
-            metadata.pending_transfer_deletion_manifest_by_hash(&file_hash)
-        })
-        .await
-        .context("ED2K pending transfer deletion load task panicked")??;
-        manifest.map(manifest_from_metadata).transpose()
-    }
-
-    async fn finalize_transfer_deletion_intent(&self, file_hash: &str) -> Result<bool> {
-        let metadata = self.metadata.clone();
-        let file_hash = file_hash.to_string();
-        tokio::task::spawn_blocking(move || metadata.finalize_transfer_deletion(&file_hash))
-            .await
-            .context("ED2K transfer deletion-finalize task panicked")?
-    }
-
     /// Return a keyset page ordered by ED2K hash.
     pub async fn share_entries_after(
         &self,
@@ -257,224 +100,110 @@ impl Ed2kTransferRuntime {
 
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
-        let _lifecycle_guard = self.lock_lifecycle(&job.file_hash).await;
-        anyhow::ensure!(
-            !self.transfer_deletion_requested(&job.file_hash).await?,
-            "cannot create ED2K transfer {} while destructive deletion is pending",
-            job.file_hash
-        );
-        let metadata = self.metadata.clone();
-        let file_hash = job.file_hash.clone();
-        ensure!(
-            !tokio::task::spawn_blocking(move || metadata.transfer_retirement_pending(&file_hash))
-                .await??,
-            "cannot create ED2K transfer {} while download retirement is pending",
-            job.file_hash
-        );
-        let _guard = self.lock_manifest(&job.file_hash).await;
-        // A download manifest owns its internal piece directory.
+        self.prepare_download_job_storage(job.token).await?;
+        let _lifecycle_guard = self.lock_lifecycle(job.token.job_id).await;
+        let _guard = self.lock_manifest(job.token).await;
         self.load_manifest_or_rebuild_unlocked(job).await
     }
 
-    /// Reconcile canonical metadata for an existing transfer after a peer
-    /// reveals a better file name or previously unknown file size.
-    pub async fn reconcile_job_metadata(
+    /// A running execution already has an admitted size. Peer claims cannot
+    /// change its geometry or its chosen name.
+    pub async fn validate_execution_size(
         &self,
-        file_hash: &str,
-        display_name: Option<&str>,
+        token: JobToken,
         file_size: Option<u64>,
-    ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let mut changed = false;
-
-        if let Some(display_name) = display_name.map(normalize_ed2k_file_name)
-            && !display_name.is_empty()
-            && !manifest.display_name_pinned
-            && manifest.file_name_observations.is_empty()
-            && manifest.display_name != display_name
-        {
-            manifest.display_name = display_name;
-            changed = true;
+    ) -> Result<()> {
+        let job = self
+            .download_job(token.job_id)
+            .await?
+            .context("missing download job")?;
+        ensure!(
+            job.token == token && job.removed_at_s.is_none(),
+            "stale download size callback"
+        );
+        if let Some(size) = file_size {
+            ensure!(
+                size > 0 && job.expected_size_bytes == Some(size),
+                "peer size claim contradicts admitted execution"
+            );
         }
-
-        if let Some(file_size) = file_size.filter(|file_size| *file_size != 0) {
-            if manifest.file_size == 0 {
-                if manifest_has_structural_progress(&manifest) {
-                    anyhow::bail!(
-                        "cannot adopt ED2K file size {} for {} after transfer progress already exists",
-                        file_size,
-                        file_hash
-                    );
-                }
-                manifest.file_size = file_size;
-                manifest.pieces = (0..piece_count(file_size, manifest.piece_size))
-                    .map(|piece_index| Ed2kPieceState {
-                        piece_index,
-                        state: Ed2kTransferState::Missing,
-                        bytes_written: 0,
-                        block_bitmap: None,
-                        ich_corrupted: false,
-                    })
-                    .collect();
-                changed = true;
-            } else if manifest.file_size != file_size {
-                anyhow::bail!(
-                    "refusing to change ED2K file size for {} from {} to {}",
-                    file_hash,
-                    manifest.file_size,
-                    file_size
-                );
-            }
-        }
-
-        if changed {
-            self.store_manifest_unlocked(&manifest).await?;
-            self.upsert_verified_catalog_entry(&manifest).await;
-        }
-
-        Ok(manifest)
+        Ok(())
     }
 
-    /// Pin a manual operator-selected display name. Peer reports remain visible
-    /// as evidence but can no longer replace the selected name.
-    pub async fn pin_display_name(
-        &self,
-        file_hash: &str,
-        display_name: &str,
-    ) -> Result<Ed2kResumeManifest> {
-        let display_name = normalize_ed2k_file_name(display_name);
-        anyhow::ensure!(!display_name.is_empty(), "display name must not be empty");
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        if manifest.display_name != display_name || !manifest.display_name_pinned {
-            manifest.display_name = display_name;
-            manifest.display_name_pinned = true;
-            manifest.follow_majority_filename = false;
-            self.store_manifest_unlocked(&manifest).await?;
-        }
-        Ok(manifest)
+    /// Explicit operator mutation; peer filename observations never call this.
+    pub async fn rename_download_job(&self, token: JobToken, name: &str) -> Result<bool> {
+        ensure!(
+            name.len() <= 65_536,
+            "download name exceeds command allowance"
+        );
+        let name = normalize_ed2k_file_name(name);
+        self.apply_peer_delta(
+            token,
+            emulebb_metadata::MetadataDownloadPeerDelta::Rename(name),
+        )
+        .await
     }
 
-    /// Retain a peer's raw filename report and refresh the unpinned majority.
+    /// Retain a bounded diagnostic observation without changing the chosen name.
     pub async fn remember_source_file_name(
         &self,
-        file_hash: &str,
+        token: JobToken,
         source: Option<Ed2kSourceHint>,
         raw_name: &str,
         client_software: Option<&str>,
         origin: &str,
         server_endpoint: Option<&str>,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<()> {
+        ensure!(
+            raw_name.len() <= 65_536
+                && client_software.is_none_or(|value| value.len() <= 65_536)
+                && origin.len() <= 64
+                && server_endpoint.is_none_or(|value| value.len() <= 256),
+            "source filename observation exceeds command allowance"
+        );
+        ensure!(
+            source.as_ref().is_none_or(|value| value.ip.len() <= 45
+                && value.user_hash.as_ref().is_none_or(|hash| hash.len() == 32)
+                && value.file_comment.len() <= 65_536),
+            "source metadata exceeds command allowance"
+        );
         let raw_name = raw_name.trim();
         let normalized_name = normalize_ed2k_file_name(raw_name);
-        anyhow::ensure!(
+        ensure!(
             !normalized_name.is_empty(),
             "source filename must not be empty"
         );
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-
-        if let Some(source) = source.as_ref()
-            && !manifest
-                .sources
-                .iter()
-                .any(|existing| source_identity_matches(existing, source))
-        {
-            manifest.sources.push(source.clone());
-        }
-
-        let observed_at_ms = Utc::now().timestamp_millis();
-        let source_key = source_identity_key(
-            source.as_ref().map(|source| source.ip.as_str()),
-            source.as_ref().map(|source| source.tcp_port),
-            source
-                .as_ref()
-                .and_then(|source| source.user_hash.as_deref()),
-            origin,
-            server_endpoint,
-        );
-        if let Some(existing) = manifest.file_name_observations.iter_mut().find(|existing| {
-            source_identity_key(
-                existing.source_ip.as_deref(),
-                existing.source_tcp_port,
-                existing.user_hash.as_deref(),
-                &existing.origin,
-                existing.server_endpoint.as_deref(),
-            ) == source_key
-                && existing.raw_name == raw_name
-        }) {
-            existing.observed_at_ms = observed_at_ms;
-            if let Some(client_software) = client_software.filter(|value| !value.is_empty()) {
-                existing.client_software = client_software.to_string();
-            }
-        } else {
-            manifest
-                .file_name_observations
-                .push(Ed2kFileNameObservation {
-                    source_ip: source.as_ref().map(|source| source.ip.clone()),
-                    source_tcp_port: source.as_ref().map(|source| source.tcp_port),
-                    user_hash: source.and_then(|source| source.user_hash),
-                    client_software: client_software.unwrap_or_default().to_string(),
-                    origin: if origin.is_empty() { "peer" } else { origin }.to_string(),
-                    server_endpoint: server_endpoint.map(str::to_string),
-                    raw_name: raw_name.to_string(),
-                    normalized_name: normalized_name.clone(),
-                    observed_at_ms,
-                });
-        }
-        if manifest.file_name_observations.len() > 512 {
-            manifest
-                .file_name_observations
-                .sort_by_key(|observation| observation.observed_at_ms);
-            let remove_count = manifest.file_name_observations.len() - 512;
-            manifest.file_name_observations.drain(..remove_count);
-        }
-        if !manifest.display_name_pinned
-            && !manifest.completed
-            && !manifest.final_rehash_pending
-            && super::is_unresolved_ed2k_display_name(&manifest.file_hash, &manifest.display_name)
-        {
-            manifest.display_name = normalized_name;
-        } else if manifest.follow_majority_filename
-            && !manifest.display_name_pinned
-            && !manifest.completed
-            && !manifest.final_rehash_pending
-            && let Some(majority_name) = majority_file_name(
-                &manifest.file_name_observations,
-                self.file_name_policy.minimum_votes,
-                self.file_name_policy.required_percent,
-            )
-        {
-            manifest.display_name = majority_name;
-        }
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(manifest)
+        let observation = emulebb_metadata::MetadataTransferFileNameObservation {
+            source_ip: source.as_ref().map(|value| value.ip.clone()),
+            source_tcp_port: source.as_ref().map(|value| value.tcp_port),
+            user_hash: source.as_ref().and_then(|value| value.user_hash.clone()),
+            client_software: client_software.unwrap_or_default().to_owned(),
+            origin: if origin.is_empty() { "peer" } else { origin }.to_owned(),
+            server_endpoint: server_endpoint.map(str::to_owned),
+            raw_name: raw_name.to_owned(),
+            normalized_name,
+            observed_at_s: Utc::now().timestamp(),
+        };
+        self.apply_peer_delta(
+            token,
+            emulebb_metadata::MetadataDownloadPeerDelta::ObserveName {
+                observation,
+                source: source.map(source_to_metadata),
+            },
+        )
+        .await?;
+        Ok(())
     }
 
     /// Persist the canonical ED2K MD4 hashset after validating it against the
     /// expected file hash.
     pub async fn store_md4_hashset(
         &self,
-        file_hash: &str,
+        token: JobToken,
         md4_hashset: Vec<[u8; 16]>,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let expected_hash_count = expected_md4_hash_count(manifest.file_size);
-        if md4_hashset.len() != usize::from(expected_hash_count) {
-            anyhow::bail!(
-                "unexpected MD4 hashset length {} expected {} for {}",
-                md4_hashset.len(),
-                expected_hash_count,
-                file_hash
-            );
-        }
-        validate_md4_hashset(file_hash, &md4_hashset)?;
-        manifest.md4_hashset = md4_hashset.iter().map(hex::encode).collect();
-        manifest.md4_hashset_acquired = true;
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(manifest)
+        self.activate_md4_hashes(token, md4_hashset).await?;
+        self.manifest(token).await
     }
 
     /// Activate a peer's part hashset only against an independently trusted
@@ -482,11 +211,11 @@ impl Ed2kTransferRuntime {
     #[cfg(test)]
     pub(crate) async fn store_aich_hashset(
         &self,
-        file_hash: &str,
+        token: JobToken,
         aich_hashset: Ed2kAichHashset,
     ) -> Result<Ed2kResumeManifest> {
-        let generation = self.manifest(file_hash).await?.aich_trust_generation;
-        self.store_aich_hashset_for_generation(file_hash, aich_hashset, generation)
+        let generation = self.manifest(token).await?.aich_trust_generation;
+        self.store_aich_hashset_for_generation(token, aich_hashset, generation)
             .await
     }
 
@@ -494,12 +223,14 @@ impl Ed2kTransferRuntime {
     /// consensus selects the same master again.
     pub(crate) async fn store_aich_hashset_for_generation(
         &self,
-        file_hash: &str,
+        token: JobToken,
         aich_hashset: Ed2kAichHashset,
         expected_generation: u64,
     ) -> Result<Ed2kResumeManifest> {
-        let guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
+        let guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
+        let hash = manifest.file_hash.clone();
+        let file_hash = hash.as_str();
         if manifest.aich_trust_generation != expected_generation {
             return Ok(manifest);
         }
@@ -519,10 +250,10 @@ impl Ed2kTransferRuntime {
             .aich_root_corroboration
             .lock()
             .expect("aich corroboration mutex poisoned")
-            .get(file_hash)
+            .get(&token)
             .cloned();
         let (manifest, _guard) = self
-            .store_aich_transition_owned(guard, manifest, votes)
+            .persist_aich_decision(guard, manifest, expected_generation, votes)
             .await?;
         Ok(manifest)
     }
@@ -536,11 +267,14 @@ impl Ed2kTransferRuntime {
     /// [`record_network_aich_root`]: Self::record_network_aich_root
     pub async fn reconcile_aich_root(
         &self,
-        file_hash: &str,
+        token: JobToken,
         aich_root: Option<[u8; 20]>,
     ) -> Result<Ed2kResumeManifest> {
-        let guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
+        let guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
+        let hash = manifest.file_hash.clone();
+        let file_hash = hash.as_str();
+        let expected_generation = manifest.aich_trust_generation;
         if let Some(aich_root) = aich_root {
             let encoded = hex::encode(aich_root);
             if let Some(existing_root) = manifest.aich_root.as_deref()
@@ -560,14 +294,14 @@ impl Ed2kTransferRuntime {
             };
             if super::aich_trust::set_identity(&mut manifest, Some(encoded), Some(origin))? {
                 let (manifest, _guard) = self
-                    .store_aich_transition_owned(guard, manifest, None)
+                    .persist_aich_decision(guard, manifest, expected_generation, None)
                     .await?;
                 return Ok(manifest);
             }
             self.aich_root_corroboration
                 .lock()
                 .expect("aich corroboration mutex poisoned")
-                .remove(file_hash);
+                .remove(&token);
         }
         Ok(manifest)
     }
@@ -589,14 +323,14 @@ impl Ed2kTransferRuntime {
     /// (PartFile.cpp FT_AICH_HASH); retain its origin without recreating votes.
     pub async fn record_network_aich_root(
         &self,
-        file_hash: &str,
+        token: JobToken,
         aich_root: Option<[u8; 20]>,
         from_ip: std::net::IpAddr,
     ) -> Result<Ed2kResumeManifest> {
         let observations = aich_root
             .map(|root| vec![(root, from_ip)])
             .unwrap_or_default();
-        self.record_network_aich_observations(file_hash, &observations)
+        self.record_network_aich_observations(token, &observations)
             .await
     }
 
@@ -606,11 +340,11 @@ impl Ed2kTransferRuntime {
     /// every tuple represents one actual network responder.
     pub async fn record_network_aich_observations(
         &self,
-        file_hash: &str,
+        token: JobToken,
         observations: &[([u8; 20], std::net::IpAddr)],
     ) -> Result<Ed2kResumeManifest> {
-        let guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_aich_manifest_unlocked(file_hash).await?;
+        let guard = self.lock_manifest(token).await;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
         if observations.is_empty() {
             return Ok(manifest);
         }
@@ -628,10 +362,10 @@ impl Ed2kTransferRuntime {
                 .expect("aich corroboration mutex poisoned");
             // An accepted persisted consensus resumes VERIFIED exactly as
             // stock. Only this runtime's live accumulator is reconsiderable.
-            if manifest.aich_root.is_some() && !map.contains_key(file_hash) {
+            if manifest.aich_root.is_some() && !map.contains_key(&token) {
                 return Ok(manifest);
             }
-            map.get(file_hash).cloned().unwrap_or_default()
+            map.get(&token).cloned().unwrap_or_default()
         };
 
         for (aich_root, from_ip) in observations {
@@ -643,144 +377,84 @@ impl Ed2kTransferRuntime {
         let promoted = accumulator.trusted_root();
 
         let origin = promoted.map(|_| Ed2kAichRootOrigin::NetworkConsensus);
+        let expected_generation = manifest.aich_trust_generation;
         if super::aich_trust::set_identity(&mut manifest, promoted.map(hex::encode), origin)? {
             let (manifest, _guard) = self
-                .store_aich_transition_owned(guard, manifest, Some(accumulator))
+                .persist_aich_decision(guard, manifest, expected_generation, Some(accumulator))
                 .await?;
             return Ok(manifest);
         }
         self.aich_root_corroboration
             .lock()
             .expect("aich corroboration mutex poisoned")
-            .insert(file_hash.to_owned(), accumulator);
+            .insert(token, accumulator);
         Ok(manifest)
     }
 
-    /// Record one remembered source hint for a job.
-    pub async fn remember_source(&self, file_hash: &str, source: Ed2kSourceHint) -> Result<()> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let mut changed = false;
-        if let Some(existing) = manifest
-            .sources
-            .iter_mut()
-            .find(|existing| existing.ip == source.ip && existing.tcp_port == source.tcp_port)
-        {
-            // WHY: plaintext fallback retries carry the same endpoint without a
-            // user hash. Persisting both collides with the durable source
-            // identity index; keep one endpoint hint and retain the best hash.
-            if source.user_hash.is_some() && existing.user_hash != source.user_hash {
-                existing.user_hash = source.user_hash;
-                changed = true;
-            }
-            // Connect options are discovery metadata just like the user hash:
-            // a later known byte upgrades unknown state, while a plaintext
-            // retry that carries no byte must not erase what SX/server/Kad
-            // already taught us. `Some(0)` remains a meaningful known value.
-            if source.connect_options.is_some()
-                && existing.connect_options != source.connect_options
-            {
-                existing.connect_options = source.connect_options;
-                changed = true;
-            }
-            // A normal rediscovery carries empty description defaults and must
-            // not erase a previously received OP_FILEDESC. Like stock, only a
-            // non-empty comment or non-zero rating constitutes an update.
-            if (!source.file_comment.is_empty() || source.file_rating > 0)
-                && (existing.file_comment != source.file_comment
-                    || existing.file_rating != source.file_rating)
-            {
-                existing.file_comment = source.file_comment;
-                existing.file_rating = source.file_rating;
-                changed = true;
-            }
-        } else {
-            manifest.sources.push(source);
-            changed = true;
-        }
-        if changed {
-            self.store_manifest_unlocked(&manifest).await?;
-        }
+    /// Retain one endpoint hint without hydrating execution geometry.
+    pub async fn remember_source(&self, token: JobToken, source: Ed2kSourceHint) -> Result<()> {
+        self.apply_peer_delta(
+            token,
+            emulebb_metadata::MetadataDownloadPeerDelta::Source {
+                source: source_to_metadata(source),
+                description_only: false,
+            },
+        )
+        .await?;
         Ok(())
     }
 
-    /// Persist one peer's `OP_FILEDESC` comment/rating against its source row.
-    /// Stock retains descriptions only when at least one field is meaningful;
-    /// an all-empty packet does not clear an earlier description.
     pub async fn remember_source_file_description(
         &self,
-        file_hash: &str,
+        token: JobToken,
         source: Ed2kSourceHint,
     ) -> Result<()> {
         if source.file_comment.is_empty() && source.file_rating == 0 {
             return Ok(());
         }
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let matching_source = manifest.sources.iter_mut().find(|existing| {
-            (existing.ip == source.ip && existing.tcp_port == source.tcp_port)
-                || source.user_hash.is_some() && existing.user_hash == source.user_hash
-        });
-        if let Some(existing) = matching_source {
-            existing.file_comment = source.file_comment;
-            existing.file_rating = source.file_rating;
-            if existing.user_hash.is_none() {
-                existing.user_hash = source.user_hash;
-            }
-            if existing.connect_options.is_none() {
-                existing.connect_options = source.connect_options;
-            }
+        self.apply_peer_delta(
+            token,
+            emulebb_metadata::MetadataDownloadPeerDelta::Source {
+                source: source_to_metadata(source),
+                description_only: true,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_source(&self, token: JobToken, client_id: &str) -> Result<bool> {
+        let (endpoint, user_hash) = if let Ok(hash) = client_id.parse::<Ed2kHash>() {
+            (None, Some(hash.0))
         } else {
-            manifest.sources.push(source);
-        }
-        self.store_manifest_unlocked(&manifest).await
+            let address = client_id.parse::<std::net::SocketAddrV4>()?;
+            (Some((*address.ip(), address.port())), None)
+        };
+        self.apply_peer_delta(
+            token,
+            emulebb_metadata::MetadataDownloadPeerDelta::RemoveSource {
+                endpoint,
+                user_hash,
+            },
+        )
+        .await
     }
 
-    /// Remove one remembered source hint by public source selector.
-    pub async fn remove_source(&self, file_hash: &str, client_id: &str) -> Result<bool> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let before = manifest.sources.len();
-        manifest.sources.retain(|source| {
-            source.user_hash.as_deref() != Some(client_id)
-                && format!("{}:{}", source.ip, source.tcp_port) != client_id
-        });
-        if manifest.sources.len() == before {
-            return Ok(false);
-        }
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(true)
-    }
-
-    /// Remove the exact remembered source relation after a protocol-level drop.
-    /// Runtime source identity carries both the TCP endpoint and, once hello has
-    /// completed, the user hash; either may be absent from an older persisted
-    /// hint, so matching accepts either exact identity while remaining scoped to
-    /// one transfer manifest.
     pub async fn remove_source_identity(
         &self,
-        file_hash: &str,
+        token: JobToken,
         source_ip: Ipv4Addr,
         source_tcp_port: u16,
         source_user_hash: Option<[u8; 16]>,
     ) -> Result<bool> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let source_ip = source_ip.to_string();
-        let source_user_hash = source_user_hash.map(hex::encode);
-        let before = manifest.sources.len();
-        manifest.sources.retain(|source| {
-            let endpoint_matches = source.ip == source_ip && source.tcp_port == source_tcp_port;
-            let hash_matches = source_user_hash
-                .as_ref()
-                .is_some_and(|user_hash| source.user_hash.as_ref() == Some(user_hash));
-            !endpoint_matches && !hash_matches
-        });
-        if manifest.sources.len() == before {
-            return Ok(false);
-        }
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(true)
+        self.apply_peer_delta(
+            token,
+            emulebb_metadata::MetadataDownloadPeerDelta::RemoveSource {
+                endpoint: Some((source_ip, source_tcp_port)),
+                user_hash: source_user_hash,
+            },
+        )
+        .await
     }
 
     /// Persist shared-file metadata exposed through the eMuleBB REST contract.
@@ -790,119 +464,16 @@ impl Ed2kTransferRuntime {
         priority: Option<(&str, bool)>,
         comment_rating: Option<(&str, u8)>,
     ) -> Result<super::Ed2kFileServingView> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let metadata = self.metadata.clone();
-        let lookup_hash = file_hash.to_string();
-        let is_local = tokio::task::spawn_blocking(move || {
-            metadata
-                .active_local_file_by_hash(&lookup_hash)
-                .map(|entry| entry.is_some())
-        })
-        .await??;
-        if !is_local {
-            let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-            if let Some((value, auto)) = priority {
-                manifest.upload_priority = value.to_string();
-                manifest.auto_upload_priority = auto;
-            }
-            if let Some((comment, rating)) = comment_rating {
-                manifest.comment = comment.to_string();
-                manifest.rating = rating;
-            }
-            self.store_manifest_unlocked(&manifest).await?;
-            self.upsert_verified_catalog_entry(&manifest).await;
-            if priority.is_some() {
-                let mut queue = self.upload_queue.lock().await;
-                let queued_count = queue.upload_client_count_for_file(&manifest.file_hash);
-                queue.update_file_priority(
-                    &manifest.file_hash,
-                    upload_priority_score(
-                        &manifest.upload_priority,
-                        manifest.auto_upload_priority,
-                        queued_count,
-                    ),
-                );
-            }
-            return Ok(super::Ed2kFileServingView::from(&manifest));
-        }
-        let metadata = self.metadata.clone();
-        let owned_hash = file_hash.to_string();
-        let owned_priority = priority.map(|(value, auto)| (value.to_string(), auto));
-        let owned_comment = comment_rating.map(|(value, rating)| (value.to_string(), rating));
-        anyhow::ensure!(
-            tokio::task::spawn_blocking(move || metadata.update_active_local_share_metadata(
-                &owned_hash,
-                owned_priority
-                    .as_ref()
-                    .map(|(value, auto)| (value.as_str(), *auto)),
-                owned_comment
-                    .as_ref()
-                    .map(|(value, rating)| (value.as_str(), *rating)),
-            ))
-            .await??,
-            "shared file is not eligible under an active root"
-        );
-        let mut manifest = self
-            .load_serving_view_optional_unlocked(file_hash)
-            .await?
-            .with_context(|| format!("missing active local file {file_hash}"))?;
-        if let Some((value, auto)) = priority {
-            manifest.upload_priority = value.to_string();
-            manifest.auto_upload_priority = auto;
-        }
-        if let Some((comment, rating)) = comment_rating {
-            manifest.comment = comment.to_string();
-            manifest.rating = rating;
-        }
-        self.refresh_complete_shared_catalog().await?;
-        if priority.is_some() {
-            let mut queue = self.upload_queue.lock().await;
-            // Resolve an auto file's dynamic tier from its live queue depth
-            // (oracle GetQueuedCount, KnownFile.cpp:1382-1387) so a REST priority
-            // change re-scores the file against its current demand.
-            let queued_count = queue.upload_client_count_for_file(&manifest.file_hash);
-            queue.update_file_priority(
-                &manifest.file_hash,
-                upload_priority_score(
-                    &manifest.upload_priority,
-                    manifest.auto_upload_priority,
-                    queued_count,
-                ),
-            );
-        }
-        Ok(manifest)
+        self.persist_content_metadata(file_hash.parse()?, priority, comment_rating)
+            .await?;
+        self.serving_view(file_hash).await
     }
 
     /// Persist the user-facing transfer control state across process restarts.
-    pub async fn set_control_state(
-        &self,
-        file_hash: &str,
-        control_state: Option<&str>,
-    ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        manifest.control_state = control_state.map(str::to_string);
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(manifest)
-    }
-
-    /// Resume a paused download without clearing an authoritative stop.
-    pub async fn resume_transfer(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        ensure!(
-            manifest.control_state.as_deref() != Some("stopped"),
-            "stopped transfer cannot be resumed"
-        );
-        manifest.control_state = None;
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(manifest)
-    }
-
     /// Resolve the current assignment at the start of a delivery decision.
-    pub async fn current_category_id(&self, file_hash: &str) -> Result<Option<i64>> {
+    pub async fn current_category_id(&self, token: JobToken) -> Result<Option<i64>> {
         let _fence = self.category_assignment_gate.read().await;
-        self.current_category_id_fenced(file_hash).await
+        self.current_category_id_fenced(token).await
     }
 
     /// Hold through authoritative category read and subsequent cache publication.
@@ -913,22 +484,26 @@ impl Ed2kTransferRuntime {
     }
 
     /// Caller holds the category publication fence.
-    pub async fn current_category_id_fenced(&self, file_hash: &str) -> Result<Option<i64>> {
+    pub async fn current_category_id_fenced(&self, token: JobToken) -> Result<Option<i64>> {
         if let Some(category) = self
             .manifest_cache
             .lock()
             .await
-            .get(file_hash)
-            .map(|value| value.category_id)
+            .get(&token.job_id)
+            .filter(|m| m.token == token)
+            .map(|m| m.category_id)
         {
             return Ok(category);
         }
-        let metadata = self.metadata.clone();
-        let hash = file_hash.to_owned();
-        tokio::task::spawn_blocking(move || metadata.transfer_category_by_hash(&hash))
-            .await
-            .context("category read task panicked")??
-            .context("transfer not found")
+        let job = self
+            .download_job(token.job_id)
+            .await?
+            .context("download job not found")?;
+        ensure!(
+            job.token == token,
+            "category lookup belongs to a stale execution"
+        );
+        Ok(job.category_id)
     }
 
     /// Take the category publication fence without acquiring per-transfer locks.
@@ -948,34 +523,27 @@ impl Ed2kTransferRuntime {
     }
 
     /// Publish a committed assignment while the exclusive fence is held.
-    pub async fn publish_category_assignment(&self, file_hash: &str, category_id: Option<i64>) {
-        if let Some(manifest) = self.manifest_cache.lock().await.get_mut(file_hash) {
+    pub async fn publish_category_assignment(&self, token: JobToken, category_id: Option<i64>) {
+        if let Some(manifest) = self
+            .manifest_cache
+            .lock()
+            .await
+            .get_mut(&token.job_id)
+            .filter(|m| m.token == token)
+        {
             manifest.category_id = category_id;
         }
-    }
-
-    /// Restore a completed transfer row when the same link is explicitly added again.
-    pub async fn restore_transfer_row(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
-        let parsed_hash: Ed2kHash = file_hash.parse()?;
-        let file_hash = parsed_hash.to_string();
-        let _guard = self.lock_manifest(&file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
-        if manifest.transfer_row_removed {
-            manifest.transfer_row_removed = false;
-            self.store_manifest_unlocked(&manifest).await?;
-        }
-        Ok(manifest)
     }
 
     /// Cache a delivered download as verified local content without rereading
     /// its payload. Root membership must be admitted separately by the caller.
     pub async fn register_delivered_local_content(
         &self,
-        file_hash: &str,
+        token: JobToken,
     ) -> Result<(PathBuf, NativeFileFingerprint)> {
-        let _lifecycle_guard = self.lock_lifecycle(file_hash).await;
-        let _guard = self.lock_manifest(file_hash).await;
-        let manifest = self.load_manifest_unlocked(file_hash).await?;
+        let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
+        let _guard = self.lock_manifest(token).await;
+        let manifest = self.load_manifest_unlocked(token).await?;
         ensure!(
             manifest.completed
                 && !manifest.final_rehash_pending
@@ -991,8 +559,12 @@ impl Ed2kTransferRuntime {
             .source_fingerprint
             .clone()
             .context("delivered download has no output fingerprint")?;
-        let current = super::ingest::native_file_fingerprint(&path)
+        let file = super::ingest::open_regular_file_without_follow(&path)?;
+        let opened = file.metadata()?;
+        let current = super::ingest::native_file_fingerprint_from_handle(&file, &opened)
             .context("delivered output has no stable native fingerprint")?;
+        let evidence =
+            super::ingest::native_file_identity_evidence_from_handle(&file, &opened, &current)?;
         ensure!(
             fingerprint.safely_matches(&current),
             "delivered output changed since its verified fingerprint was recorded"
@@ -1002,6 +574,7 @@ impl Ed2kTransferRuntime {
             "delivered download has incomplete hashsets"
         );
         let content = MetadataVerifiedLocalContent {
+            secondary_identity: evidence.secondary(),
             file_hash: manifest.file_hash,
             display_name: manifest.display_name,
             file_size: manifest.file_size,
@@ -1026,281 +599,18 @@ impl Ed2kTransferRuntime {
         Ok((path, fingerprint))
     }
 
-    /// Retire a delivered download and reclaim its internal piece store while
-    /// preserving its delivered output, verified content, and history.
-    pub async fn remove_completed_transfer_row(
-        &self,
-        file_hash: &str,
-    ) -> Result<Option<Ed2kResumeManifest>> {
-        let parsed_hash: Ed2kHash = file_hash.parse()?;
-        let file_hash = parsed_hash.to_string();
-        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
-        if !self.transfer_deletion_requested(&file_hash).await? {
-            self.recover_delivery_attempt_unlocked(&file_hash).await?;
-        }
-        let _guard = self.lock_manifest(&file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
-        if !manifest.completed {
-            anyhow::bail!("only completed transfers can be removed without deleting files");
-        }
-        if manifest.delivery_state == super::Ed2kDeliveryState::Pending {
-            anyhow::bail!(
-                "completed download {} must be delivered before its transfer row can be removed",
-                manifest.file_hash
-            );
-        }
-        let newly_retired = !manifest.transfer_row_removed;
-        if newly_retired {
-            let transfer_dir = self.transfer_dir(&file_hash);
-            let authority = prepare_transfer_directory_deletion_authority(&transfer_dir).await?;
-            let metadata = self.metadata.clone();
-            let owned_hash = file_hash.clone();
-            ensure!(
-                tokio::task::spawn_blocking(move || {
-                    metadata.request_transfer_retirement(&owned_hash, authority)
-                })
-                .await??,
-                "delivered download could not enter retirement"
-            );
-        }
-        manifest.transfer_row_removed = true;
-        self.refresh_retired_transfer_catalog_entry(&file_hash)
-            .await?;
-        self.finish_transfer_retirement_unlocked(&file_hash).await?;
-        Ok(newly_retired.then_some(manifest))
-    }
-
-    async fn finish_transfer_retirement_unlocked(&self, file_hash: &str) -> Result<()> {
-        let metadata = self.metadata.clone();
-        let owned_hash = file_hash.to_owned();
-        let authority = tokio::task::spawn_blocking(move || {
-            metadata.transfer_retirement_authority(&owned_hash)
-        })
-        .await??;
-        self.invalidate_payload_handle(file_hash);
-        cleanup_transfer_directory_with_authority(
-            file_hash,
-            &self.transfer_dir(file_hash),
-            authority,
-        )
-        .await?;
-        let metadata = self.metadata.clone();
-        let owned_hash = file_hash.to_owned();
-        ensure!(
-            tokio::task::spawn_blocking(move || metadata.finalize_transfer_retirement(&owned_hash))
-                .await??,
-            "retired download disappeared before finalization"
-        );
-        self.manifest_cache.lock().await.remove(file_hash);
-        self.aich_root_corroboration
-            .lock()
-            .expect("aich corroboration mutex poisoned")
-            .remove(file_hash);
-        self.manifest_checkpoint_state
-            .lock()
-            .await
-            .remove(file_hash);
-        Ok(())
-    }
-
-    /// Resume hidden completed-download retirement after a crash or transient
-    /// filesystem failure. The delivered output is never part of this cleanup.
-    pub async fn recover_pending_transfer_retirements(
-        &self,
-    ) -> Result<Ed2kTransferRetirementRecoveryReport> {
-        let metadata = self.metadata.clone();
-        let hashes =
-            tokio::task::spawn_blocking(move || metadata.pending_transfer_retirement_hashes())
-                .await??;
-        let mut report = Ed2kTransferRetirementRecoveryReport::default();
-        for file_hash in hashes {
-            let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
-            let _manifest_guard = self.lock_manifest(&file_hash).await;
-            match self.finish_transfer_retirement_unlocked(&file_hash).await {
-                Ok(()) => report.recovered += 1,
-                Err(error) => report.failures.push(format!("{file_hash}: {error:#}")),
-            }
-        }
-        Ok(report)
-    }
-
-    /// Durably accept deletion, hide the transfer, and attempt filesystem cleanup.
-    /// Cleanup failures keep the intent for a later idempotent retry.
-    pub async fn delete_transfer_files(&self, file_hash: &str) -> Result<bool> {
-        self.delete_transfer_files_inner(file_hash, DeletionCleanupPolicy::RetryLater)
-            .await
-    }
-
-    /// Resume every durable destructive-deletion intent without making an
-    /// already-hidden transfer visible again. Intent enumeration failures are
-    /// fatal; per-transfer cleanup failures remain pending in the report.
-    pub async fn recover_pending_transfer_deletions(
-        &self,
-    ) -> Result<Ed2kTransferDeletionRecoveryReport> {
-        let hashes = self.pending_transfer_deletion_hashes().await?;
-        let mut recovered = 0usize;
-        let mut failures = Vec::new();
-        for file_hash in hashes {
-            let result = async {
-                anyhow::ensure!(
-                    self.delete_transfer_files_inner(
-                        &file_hash,
-                        DeletionCleanupPolicy::PropagateFailure,
-                    )
-                    .await
-                    .with_context(|| {
-                        format!("failed to recover pending ED2K transfer deletion {file_hash}")
-                    })?,
-                    "pending ED2K transfer deletion {file_hash} disappeared before recovery"
-                );
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            match result {
-                Ok(()) => recovered = recovered.saturating_add(1),
-                Err(error) => failures.push(format!("{error:#}")),
-            }
-        }
-        Ok(Ed2kTransferDeletionRecoveryReport {
-            recovered,
-            failures,
-        })
-    }
-
-    async fn delete_transfer_files_inner(
-        &self,
-        file_hash: &str,
-        cleanup_policy: DeletionCleanupPolicy,
-    ) -> Result<bool> {
-        let parsed_hash: Ed2kHash = file_hash.parse()?;
-        let file_hash = parsed_hash.to_string();
-        let _lifecycle_guard = self.lock_lifecycle(&file_hash).await;
-        let _guard = self.lock_manifest(&file_hash).await;
-        let transfer_dir = self.transfer_dir(&file_hash);
-        let manifest = match self.load_manifest_optional_unlocked(&file_hash).await? {
-            Some(manifest) => Some(manifest),
-            None => self.pending_transfer_deletion_manifest(&file_hash).await?,
-        };
-        if manifest.is_none() && !tokio::fs::try_exists(&transfer_dir).await? {
-            return Ok(false);
-        }
-        let Some(manifest) = manifest else {
-            self.invalidate_payload_handle(&file_hash);
-            tokio::fs::remove_dir_all(&transfer_dir)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to delete orphan ED2K transfer directory {}",
-                        transfer_dir.display()
-                    )
-                })?;
-            sync_parent_directory(&transfer_dir).await?;
-            return Ok(true);
-        };
-        // WHY: a retired download's delivered path is now independent local
-        // content. A stale transfer-delete request must never remove that file.
-        if manifest.transfer_row_removed && !self.transfer_deletion_requested(&file_hash).await? {
-            return Ok(false);
-        }
-        let transfer_directory_authority = if self.transfer_deletion_requested(&file_hash).await? {
-            None
-        } else {
-            prepare_transfer_directory_deletion_authority(&transfer_dir).await?
-        };
-        anyhow::ensure!(
-            self.persist_transfer_deletion_intent(&file_hash, transfer_directory_authority)
-                .await?,
-            "ED2K transfer {file_hash} disappeared before deletion intent was persisted"
-        );
-        self.manifest_cache.lock().await.remove(&file_hash);
-        self.aich_root_corroboration
-            .lock()
-            .expect("aich corroboration mutex poisoned")
-            .remove(&file_hash);
-        self.manifest_checkpoint_state
-            .lock()
-            .await
-            .remove(&file_hash);
-        self.shared_catalog
-            .write()
-            .await
-            .retain(|entry| entry.file_hash != file_hash);
-        self.note_shared_catalog_entries_changed();
-
-        let attempted_output = match self
-            .discard_delivery_attempt_for_deletion_unlocked(&file_hash, &manifest)
-            .await
-        {
-            Ok(attempted_output) => attempted_output,
-            Err(error) if cleanup_policy == DeletionCleanupPolicy::PropagateFailure => {
-                return Err(error);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    file_hash,
-                    "durable ED2K transfer deletion remains pending after delivery-attempt cleanup failure"
-                );
-                return Ok(true);
-            }
-        };
-
-        if let Err(error) = self
-            .complete_transfer_deletion(&file_hash, &manifest, attempted_output, &transfer_dir)
-            .await
-        {
-            if cleanup_policy == DeletionCleanupPolicy::PropagateFailure {
-                return Err(error);
-            }
-            tracing::warn!(
-                %error,
-                file_hash,
-                "durable ED2K transfer deletion remains pending after cleanup failure"
-            );
-        }
-        Ok(true)
-    }
-
-    async fn complete_transfer_deletion(
-        &self,
-        file_hash: &str,
-        manifest: &Ed2kResumeManifest,
-        attempted_output: Option<OwnedDeliveryOutput>,
-        transfer_dir: &std::path::Path,
-    ) -> Result<()> {
-        let delivered_output = if let Some(attempted_output) = attempted_output {
-            Some(attempted_output)
-        } else if manifest.delivery_ownership == super::Ed2kDeliveryOwnership::Owned {
-            Some(OwnedDeliveryOutput {
-                path: manifest.delivered_path.clone().with_context(|| {
-                    format!("owned delivered transfer {file_hash} has no output path")
-                })?,
-                fingerprint: manifest.source_fingerprint.clone().with_context(|| {
-                    format!("owned delivered transfer {file_hash} has no output identity")
-                })?,
-            })
-        } else {
-            None
-        };
-        self.cleanup_delivery_output_for_deletion(file_hash, delivered_output)
-            .await?;
-
-        self.invalidate_payload_handle(file_hash);
-        cleanup_transfer_directory(&self.metadata, file_hash, transfer_dir).await?;
-        anyhow::ensure!(
-            self.finalize_transfer_deletion_intent(file_hash).await?,
-            "ED2K transfer {file_hash} lost its deletion intent before finalization"
-        );
-        Ok(())
-    }
-
     /// Return local serving metadata even when only part of the
     /// payload has been verified already.
     pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {
         let hash_hex = file_hash.to_string();
-        let _guard = self.lock_manifest(&hash_hex).await;
+        let token = self.resolve_protocol_job(&hash_hex).await?;
+        let _guard = if let Some(token) = token {
+            Some(self.lock_manifest(token).await)
+        } else {
+            None
+        };
         Ok(self
-            .load_serving_view_optional_unlocked(&hash_hex)
+            .load_serving_view_optional_unlocked(&hash_hex, token)
             .await?
             .map(|view| Ed2kSharedEntry::from_serving_view(&view)))
     }
@@ -1336,8 +646,16 @@ impl Ed2kTransferRuntime {
     /// Return the canonical MD4 hashset for this file when known.
     pub async fn md4_hashset(&self, file_hash: &Ed2kHash) -> Result<Option<Vec<[u8; 16]>>> {
         let hash_hex = file_hash.to_string();
-        let _guard = self.lock_manifest(&hash_hex).await;
-        let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
+        let token = self.resolve_protocol_job(&hash_hex).await?;
+        let _guard = if let Some(token) = token {
+            Some(self.lock_manifest(token).await)
+        } else {
+            None
+        };
+        let Some(manifest) = self
+            .load_serving_view_optional_unlocked(&hash_hex, token)
+            .await?
+        else {
             return Ok(None);
         };
         if !manifest.md4_hashset_acquired {
@@ -1365,8 +683,16 @@ impl Ed2kTransferRuntime {
         file_hash: &Ed2kHash,
     ) -> Result<Option<Ed2kAichHashset>> {
         let hash_hex = file_hash.to_string();
-        let _guard = self.lock_manifest(&hash_hex).await;
-        let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
+        let token = self.resolve_protocol_job(&hash_hex).await?;
+        let _guard = if let Some(token) = token {
+            Some(self.lock_manifest(token).await)
+        } else {
+            None
+        };
+        let Some(manifest) = self
+            .load_serving_view_optional_unlocked(&hash_hex, token)
+            .await?
+        else {
             return Ok(None);
         };
         if !manifest.aich_hashset_acquired {
@@ -1405,8 +731,11 @@ impl Ed2kTransferRuntime {
 
         let hash_hex = file_hash.to_string();
         let (file_size, aich_root) = {
-            let _guard = self.lock_manifest(&hash_hex).await;
-            let Some(manifest) = self.load_serving_view_optional_unlocked(&hash_hex).await? else {
+            let _guard = self.lock_content(&hash_hex).await;
+            let Some(manifest) = self
+                .load_serving_view_optional_unlocked(&hash_hex, None)
+                .await?
+            else {
                 return Ok(None);
             };
             // Only serve from a fully verified (shared) file.
@@ -1451,207 +780,59 @@ impl Ed2kTransferRuntime {
         }
     }
 
-    /// Returns a persisted download job manifest. Complete local content is
-    /// never represented as an active download job.
-    pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
-        let _guard = self.lock_manifest(file_hash).await;
-        self.load_aich_manifest_unlocked(file_hash).await
+    /// Exact job detail; protocol hashes are resolved only at explicit wire admission.
+    pub async fn manifest(&self, token: JobToken) -> Result<Ed2kResumeManifest> {
+        let _guard = self.lock_manifest(token).await;
+        self.load_aich_manifest_unlocked(token).await
     }
 
-    /// Return absence separately from metadata failures for a transfer lookup.
-    pub async fn manifest_optional(&self, file_hash: &str) -> Result<Option<Ed2kResumeManifest>> {
-        let _guard = self.lock_manifest(file_hash).await;
-        if self
-            .load_manifest_optional_unlocked(file_hash)
-            .await?
-            .is_none()
-        {
+    pub async fn manifest_optional(&self, token: JobToken) -> Result<Option<Ed2kResumeManifest>> {
+        let _guard = self.lock_manifest(token).await;
+        if self.load_manifest_optional_unlocked(token).await?.is_none() {
             return Ok(None);
         }
-        self.load_aich_manifest_unlocked(file_hash).await.map(Some)
+        self.load_aich_manifest_unlocked(token).await.map(Some)
     }
 
-    /// Resolve a read-only protocol view for a download or eligible complete
-    /// local file without persisting a synthetic transfer row.
+    /// A content-only incoming protocol request resolves the sole current job
+    /// once; every subsequent callback retains the returned generation.
+    pub(crate) async fn resolve_protocol_job(&self, file_hash: &str) -> Result<Option<JobToken>> {
+        let super::local_mutation::job_read::JobReadResult::Exact(job) = self
+            .read_job_metadata(super::local_mutation::job_read::JobRead::Latest(
+                file_hash.parse::<Ed2kHash>()?.0,
+            ))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(job
+            .filter(|job| job.removed_at_s.is_none() && job.completed_at_s.is_none())
+            .map(|job| job.token))
+    }
+
     pub async fn serving_view(&self, file_hash: &str) -> Result<super::Ed2kFileServingView> {
-        let _guard = self.lock_manifest(file_hash).await;
-        self.load_serving_view_optional_unlocked(file_hash)
+        let token = self.resolve_protocol_job(file_hash).await?;
+        let _job_guard = if let Some(token) = token {
+            Some(self.lock_manifest(token).await)
+        } else {
+            None
+        };
+        let _content_guard = self.lock_content(file_hash).await;
+        self.load_serving_view_optional_unlocked(file_hash, token)
             .await?
             .with_context(|| format!("missing ED2K transfer or shared file {file_hash}"))
     }
-
-    /// Returns all readable persisted manifests under the transfer root.
-    ///
-    /// The bulk SQL read runs on the blocking pool without any manifest lock;
-    /// for hashes with a live in-memory copy the CACHED manifest is returned
-    /// instead of the SQL row — between batched progress checkpoints the
-    /// cache is AHEAD of SQL, and returning (or worse, re-caching) the stale
-    /// row would roll live download progress back. Rows without a cached copy
-    /// are returned as-is and deliberately NOT inserted into the cache, so a
-    /// library-wide listing does not pin every completed manifest in memory.
-    pub async fn manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
-        let metadata = self.metadata.clone();
-        let raw = tokio::task::spawn_blocking(move || metadata.transfer_manifests())
-            .await
-            .map_err(anyhow::Error::from)??;
-        let mut manifests = Vec::with_capacity(raw.len());
-        {
-            let cache = self.manifest_cache.lock().await;
-            for manifest in raw {
-                match cache.get(&manifest.file_hash) {
-                    Some(cached) => manifests.push(cached.clone()),
-                    None => manifests.push(manifest_from_metadata(manifest)?),
-                }
-            }
-        }
-        manifests.sort_by(|left, right| left.file_hash.cmp(&right.file_hash));
-        Ok(manifests)
-    }
-
-    /// Persisted manifests whose transfer-list row has not been removed.
-    ///
-    /// This intentionally excludes the potentially very large completed shared
-    /// catalog while retaining every row the transfer REST surface must expose.
-    /// Live cached manifests win over their SQL snapshot so hydration cannot
-    /// roll batched download progress backward.
-    pub async fn active_manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
-        let metadata = self.metadata.clone();
-        let raw = tokio::task::spawn_blocking(move || metadata.active_transfer_manifests())
-            .await
-            .map_err(anyhow::Error::from)??;
-        let mut manifests = Vec::with_capacity(raw.len());
-        {
-            let cache = self.manifest_cache.lock().await;
-            for manifest in raw {
-                match cache.get(&manifest.file_hash) {
-                    Some(cached) => manifests.push(cached.clone()),
-                    None => manifests.push(manifest_from_metadata(manifest)?),
-                }
-            }
-        }
-        manifests.sort_by(|left, right| left.file_hash.cmp(&right.file_hash));
-        Ok(manifests)
-    }
-
-    /// Persisted INCOMPLETE download manifests for startup resume. Unlike
-    /// [`manifests`], this filters to incomplete rows IN SQL (a handful vs the whole
-    /// library) and runs the blocking `rusqlite` load in `spawn_blocking`, so startup
-    /// hydration never blocks a tokio worker thread and starves REST.
-    pub async fn incomplete_manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
-        let manifests = self.incomplete_manifests_snapshot().await?;
-        // Re-advertise resumable partfiles that already carry >=1 verified part into
-        // the in-memory serving/offer catalog (empty at boot). This matches the
-        // `upsert_verified_catalog_entry` gate (completed || verified_ranges
-        // non-empty) and eMule partfile sharing: without it, a hydrated partfile is
-        // still served on a direct request (its manifest exists) but is never OFFERED
-        // to the ed2k server, so peers cannot discover rust as a source for it.
-        for manifest in &manifests {
-            if !manifest.verified_ranges.is_empty() {
-                self.insert_hydrated_incomplete_entry_if_current(manifest)
-                    .await?;
-            }
-        }
-        Ok(manifests)
-    }
-
-    pub(super) async fn incomplete_manifests_snapshot(&self) -> Result<Vec<Ed2kResumeManifest>> {
-        let metadata = self.metadata.clone();
-        let raw = tokio::task::spawn_blocking(move || metadata.incomplete_transfer_manifests())
-            .await
-            .map_err(anyhow::Error::from)??;
-        raw.into_iter()
-            .map(manifest_from_metadata)
-            .collect::<Result<_>>()
-    }
-
-    pub(super) async fn managed_download_manifests_snapshot(
-        &self,
-    ) -> Result<Vec<Ed2kResumeManifest>> {
-        let metadata = self.metadata.clone();
-        let raw =
-            tokio::task::spawn_blocking(move || metadata.managed_download_transfer_manifests())
-                .await
-                .map_err(anyhow::Error::from)??;
-        raw.into_iter()
-            .map(manifest_from_metadata)
-            .collect::<Result<_>>()
-    }
 }
 
-fn source_identity_matches(left: &Ed2kSourceHint, right: &Ed2kSourceHint) -> bool {
-    (left.ip == right.ip && left.tcp_port == right.tcp_port)
-        || right.user_hash.is_some() && left.user_hash == right.user_hash
-}
-
-fn source_identity_key(
-    ip: Option<&str>,
-    tcp_port: Option<u16>,
-    user_hash: Option<&str>,
-    origin: &str,
-    server_endpoint: Option<&str>,
-) -> String {
-    user_hash
-        .map(|hash| format!("hash:{hash}"))
-        .or_else(|| {
-            ip.zip(tcp_port)
-                .map(|(ip, port)| format!("endpoint:{ip}:{port}"))
-        })
-        .unwrap_or_else(|| format!("origin:{origin}:{}", server_endpoint.unwrap_or_default()))
-}
-
-fn majority_file_name(
-    observations: &[Ed2kFileNameObservation],
-    minimum_votes: usize,
-    required_percent: u32,
-) -> Option<String> {
-    let mut latest_by_source = BTreeMap::<String, &Ed2kFileNameObservation>::new();
-    for observation in observations {
-        let key = source_identity_key(
-            observation.source_ip.as_deref(),
-            observation.source_tcp_port,
-            observation.user_hash.as_deref(),
-            &observation.origin,
-            observation.server_endpoint.as_deref(),
-        );
-        if latest_by_source
-            .get(&key)
-            .is_none_or(|existing| existing.observed_at_ms <= observation.observed_at_ms)
-        {
-            latest_by_source.insert(key, observation);
-        }
+fn source_to_metadata(source: Ed2kSourceHint) -> emulebb_metadata::MetadataTransferSource {
+    emulebb_metadata::MetadataTransferSource {
+        ip: source.ip,
+        tcp_port: source.tcp_port,
+        user_hash: source.user_hash,
+        connect_options: source.connect_options,
+        file_comment: source.file_comment,
+        file_rating: source.file_rating,
     }
-    let total_votes = latest_by_source.len();
-    let mut votes = BTreeMap::<String, usize>::new();
-    for observation in latest_by_source.into_values() {
-        *votes
-            .entry(observation.normalized_name.clone())
-            .or_default() += 1;
-    }
-    let winning_votes = votes.values().copied().max()?;
-    if votes
-        .values()
-        .filter(|candidate_votes| **candidate_votes == winning_votes)
-        .count()
-        != 1
-    {
-        return None;
-    }
-    if winning_votes < minimum_votes
-        || winning_votes.saturating_mul(100)
-            < total_votes.saturating_mul(required_percent.clamp(1, 100) as usize)
-    {
-        return None;
-    }
-    votes
-        .into_iter()
-        .find_map(|(name, candidate_votes)| (candidate_votes == winning_votes).then_some(name))
-}
-
-pub(super) fn transfer_directory_tombstone_path(
-    file_hash: &str,
-    transfer_dir: &std::path::Path,
-) -> std::path::PathBuf {
-    transfer_dir.with_file_name(format!(".emulebb-delete-transfer-{file_hash}.tmp"))
 }
 
 pub(super) fn transfer_directory_authority_marker_path(
@@ -1662,195 +843,4 @@ pub(super) fn transfer_directory_authority_marker_path(
         ".emulebb-delete-authority-{}.tmp",
         marker_id.hyphenated()
     ))
-}
-
-async fn cleanup_transfer_directory(
-    metadata: &MetadataStore,
-    file_hash: &str,
-    transfer_dir: &std::path::Path,
-) -> Result<()> {
-    let metadata_store = metadata.clone();
-    let hash = file_hash.to_owned();
-    let authority = tokio::task::spawn_blocking(move || {
-        metadata_store.transfer_directory_deletion_authority(&hash)
-    })
-    .await
-    .context("transfer directory deletion authority load task failed")??;
-    cleanup_transfer_directory_with_authority(file_hash, transfer_dir, authority).await
-}
-
-async fn cleanup_transfer_directory_with_authority(
-    file_hash: &str,
-    transfer_dir: &std::path::Path,
-    persisted_authority: Option<MetadataTransferDirectoryDeletionAuthority>,
-) -> Result<()> {
-    let tombstone = transfer_directory_tombstone_path(file_hash, transfer_dir);
-    let transfer_exists = tokio::fs::try_exists(long_path(transfer_dir)).await?;
-    let tombstone_exists = tokio::fs::try_exists(long_path(&tombstone)).await?;
-    if transfer_exists {
-        anyhow::ensure!(
-            !tombstone_exists,
-            "transfer directory tombstone already exists at {}",
-            tombstone.display()
-        );
-        let authority = persisted_authority.with_context(|| {
-            format!(
-                "ED2K deletion intent does not own the current transfer path {}",
-                transfer_dir.display()
-            )
-        })?;
-        validate_transfer_directory_authority(transfer_dir, authority).await?;
-        match move_path_no_replace(transfer_dir, &tombstone).await? {
-            NoReplaceMoveOutcome::Moved => {}
-            NoReplaceMoveOutcome::AlreadyExists => {
-                anyhow::bail!(
-                    "transfer directory tombstone collision at {}",
-                    tombstone.display()
-                );
-            }
-        }
-    } else {
-        sync_parent_directory(transfer_dir).await?;
-    }
-    if tokio::fs::try_exists(long_path(&tombstone)).await? {
-        let authority = persisted_authority.with_context(|| {
-            format!(
-                "transfer directory tombstone has no durable authority at {}",
-                tombstone.display()
-            )
-        })?;
-        validate_transfer_directory_authority(&tombstone, authority).await?;
-        tokio::fs::remove_dir_all(long_path(&tombstone))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to delete ED2K transfer directory tombstone {}",
-                    tombstone.display()
-                )
-            })?;
-    }
-    sync_parent_directory(&tombstone).await?;
-    Ok(())
-}
-
-async fn capture_directory_identity(path: &std::path::Path) -> Result<Option<NativeFileIdentity>> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || super::ingest::native_directory_identity(&path))
-        .await
-        .context("native directory identity task failed")
-}
-
-async fn prepare_transfer_directory_deletion_authority(
-    transfer_dir: &std::path::Path,
-) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
-    let metadata = match tokio::fs::symlink_metadata(transfer_dir).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    if !metadata.file_type().is_dir() {
-        return Ok(None);
-    }
-
-    let marker_id = Uuid::new_v4();
-    let marker_path = transfer_directory_authority_marker_path(transfer_dir, marker_id);
-    let mut marker = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&marker_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create transfer directory deletion marker {}",
-                marker_path.display()
-            )
-        })?;
-    use tokio::io::AsyncWriteExt;
-    marker.write_all(marker_id.as_bytes()).await?;
-    marker.sync_all().await?;
-    drop(marker);
-    sync_parent_directory(&marker_path).await?;
-
-    let identity = capture_directory_identity(transfer_dir)
-        .await?
-        .with_context(|| {
-            format!(
-                "ED2K transfer path is not a native directory with stable identity {}",
-                transfer_dir.display()
-            )
-        })?;
-    Ok(Some(MetadataTransferDirectoryDeletionAuthority {
-        identity,
-        marker_id,
-    }))
-}
-
-async fn validate_transfer_directory_authority(
-    path: &std::path::Path,
-    authority: MetadataTransferDirectoryDeletionAuthority,
-) -> Result<()> {
-    let current_identity = capture_directory_identity(path).await?.with_context(|| {
-        format!(
-            "ED2K transfer deletion path is not a native directory with stable identity {}",
-            path.display()
-        )
-    })?;
-    anyhow::ensure!(
-        current_identity == authority.identity,
-        "ED2K transfer directory deletion authority identity changed at {}",
-        path.display()
-    );
-
-    let marker_path = transfer_directory_authority_marker_path(path, authority.marker_id);
-    let marker_id = authority.marker_id;
-    let matches = tokio::task::spawn_blocking(move || -> Result<bool> {
-        use std::io::Read;
-
-        let marker = match super::ingest::open_regular_file_without_follow(&marker_path) {
-            Ok(marker) => marker,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        // WHY: Bound corrupt-marker reads while requiring the exact UUID plus no overflow byte.
-        let mut contents = [0_u8; 17];
-        let length = std::io::copy(&mut marker.take(17), &mut contents.as_mut_slice())?;
-        Ok(length == 16 && contents[..16] == marker_id.as_bytes()[..])
-    })
-    .await
-    .context("transfer directory deletion marker validation task failed")??;
-    anyhow::ensure!(
-        matches,
-        "ED2K transfer directory deletion authority marker changed at {}",
-        path.display()
-    );
-    Ok(())
-}
-
-#[cfg(test)]
-mod file_name_majority_tests {
-    use super::*;
-
-    fn observation(source_ip: &str, normalized_name: &str) -> Ed2kFileNameObservation {
-        Ed2kFileNameObservation {
-            source_ip: Some(source_ip.to_string()),
-            source_tcp_port: Some(4662),
-            user_hash: None,
-            client_software: String::new(),
-            origin: "peer".to_string(),
-            server_endpoint: None,
-            raw_name: normalized_name.to_string(),
-            normalized_name: normalized_name.to_string(),
-            observed_at_ms: 1,
-        }
-    }
-
-    #[test]
-    fn tied_source_names_do_not_replace_the_existing_display_name() {
-        let observations = [
-            observation("198.51.100.1", "alpha.bin"),
-            observation("198.51.100.2", "beta.bin"),
-        ];
-
-        assert_eq!(majority_file_name(&observations, 0, 50), None);
-    }
 }

@@ -4,8 +4,34 @@ mod aich_recovery_store;
 mod content_identity;
 mod delivery_exclusion_store;
 mod discovery_store;
+mod download_cleanup_store;
+pub use download_cleanup_store::MetadataDownloadCleanupSnapshot;
+mod download_execution_store;
+mod download_hash_store;
 mod download_history_model;
 mod download_history_store;
+mod download_job_model;
+mod download_job_query;
+pub use download_job_query::{
+    DownloadJobCounts, DownloadJobPage, DownloadJobQuery, DownloadJobView,
+};
+mod download_job_store;
+mod download_payload_store;
+mod download_peer_store;
+pub use download_payload_store::{MetadataDownloadPayload, MetadataDownloadPayloadPage};
+mod download_progress_store;
+pub use download_execution_store::{
+    MetadataDownloadExecutionHeader, MetadataDownloadExecutionRow, MetadataDownloadGeometry,
+};
+pub use download_job_model::{
+    DownloadIntent, DownloadJobAdmission, DownloadJobRecord, DownloadJobRequest,
+    DownloadJobStorage, DownloadJobStorageFailure, DownloadJobStorageFailureOutcome, JobId,
+    JobToken,
+};
+pub use download_peer_store::{
+    MetadataDownloadNameEntry, MetadataDownloadPeerChange, MetadataDownloadPeerDelta,
+    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry,
+};
 mod identity_model;
 mod identity_store;
 mod kad_publish_model;
@@ -17,8 +43,9 @@ pub use local_catalog::MetadataPartialOffer;
 mod local_file_store;
 mod local_ingest_store;
 pub use local_ingest_store::{
-    MetadataIngestCommit, MetadataIngestCommitUncertain, MetadataIngestPathChanged,
-    MetadataIngestProjection, MetadataIngestRoot,
+    MetadataIngestCommit, MetadataIngestCommitUncertain, MetadataIngestJob,
+    MetadataIngestJobChanged, MetadataIngestPathChanged, MetadataIngestProjection,
+    MetadataIngestRoot,
 };
 mod model;
 mod native_file;
@@ -63,7 +90,9 @@ pub use local_file_store::{
     MetadataVerifiedLocalContent,
 };
 pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot};
-pub use native_file::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp};
+pub use native_file::{
+    NativeFileFingerprint, NativeFileIdentity, NativeFileIdentityEvidence, NativeFileTimestamp,
+};
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
@@ -78,12 +107,15 @@ pub use shared_membership_store::ObservedRootChanged;
 pub use store::{InitialProfileStorage, MetadataStore};
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataFileImportRecord, MetadataPartialShare, MetadataSharedSourceFailure,
-    MetadataTransferAichIdentity, MetadataTransferCatalogEntry, MetadataTransferCounts,
-    MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
-    MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
-    MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
-    MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
-    MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
-    MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferSource,
+    MetadataDeliveryOutputReservation, MetadataDownloadRetirement, MetadataFileImportRecord,
+    MetadataPartialShare, MetadataSharedSourceFailure, MetadataTransferAichIdentity,
+    MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferDeletionTombstone,
+    MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
+    MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
+    MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
+    MetadataTransferFileNameObservation, MetadataTransferManifest, MetadataTransferMediaMetadata,
+    MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
+    MetadataTransferSource,
 };
+
+pub use download_hash_store::MetadataDownloadAichState;

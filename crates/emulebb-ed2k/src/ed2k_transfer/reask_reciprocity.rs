@@ -335,7 +335,13 @@ impl Ed2kTransferRuntime {
     /// partstatus eMule sends with a reask when `GetUDPVersion() > 3`.
     pub(crate) async fn reask_transfer_info(&self, file_hash: &Ed2kHash) -> TransferReaskInfo {
         let hex = file_hash.to_string();
-        match self.manifest(&hex).await {
+        let Ok(Some(token)) = self.resolve_protocol_job(&hex).await else {
+            return TransferReaskInfo {
+                part_status: None,
+                complete_source_count: 0,
+            };
+        };
+        match self.manifest(token).await {
             // Incomplete partfile: advertise which pieces we already hold.
             Ok(manifest) if !manifest.completed && !manifest.pieces.is_empty() => {
                 let total_parts = manifest.pieces.len();
@@ -346,7 +352,7 @@ impl Ed2kTransferRuntime {
                     .collect();
                 // Complete-source hint: retained source status advertising every part
                 // (eMule `m_nCompleteSourcesCount`). Optional, gated on udp_version > 2.
-                let complete_source_count = self.known_complete_source_count(&hex, total_parts);
+                let complete_source_count = self.known_complete_source_count(token, total_parts);
                 TransferReaskInfo {
                     part_status: Some(part_status),
                     complete_source_count,

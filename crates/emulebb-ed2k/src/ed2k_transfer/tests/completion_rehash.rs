@@ -5,7 +5,6 @@ use md4::{Digest, Md4};
 
 use super::super::{
     ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kSharedEntry, Ed2kTransferRuntime, Ed2kTransferState,
-    new_transfer_job,
 };
 use crate::paths::unique_test_dir;
 
@@ -18,7 +17,7 @@ async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
     let root = unique_test_dir("ed2k-final-rehash-clean-restart");
     let payload = b"completion barrier payload";
     let file_hash = Ed2kHash::from_bytes(md4(payload));
-    let job = new_transfer_job(file_hash, "clean.bin".to_string(), payload.len() as u64);
+    let job;
     let source = root.join("aich-source.bin");
     std::fs::write(&source, payload).unwrap();
     let aich =
@@ -27,27 +26,33 @@ async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
 
     {
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        job = super::super::test_support::admit_download_job(
+            &runtime,
+            file_hash,
+            "clean.bin".to_string(),
+            payload.len() as u64,
+        );
         runtime.ensure_job(&job).await.unwrap();
         runtime
-            .reconcile_aich_root(&job.file_hash, Some(aich.master_hash))
+            .reconcile_aich_root(job.token, Some(aich.master_hash))
             .await
             .unwrap();
         runtime
-            .store_md4_hashset(&job.file_hash, Vec::new())
+            .store_md4_hashset(job.token, Vec::new())
             .await
             .unwrap();
         runtime
-            .store_piece_data_unfinalized(&job.file_hash, 0, payload)
+            .store_piece_data_unfinalized(job.token, 0, payload)
             .await
             .unwrap();
-        let pending = runtime.manifest(&job.file_hash).await.unwrap();
+        let pending = runtime.manifest(job.token).await.unwrap();
         assert!(!pending.completed);
         assert!(pending.final_rehash_pending);
         assert!(pending.payload_fingerprint.is_none());
         assert_eq!(runtime.shared_catalog_count().await, 0);
         assert_eq!(
             runtime
-                .materialize_completed_payload(&job.file_hash, &root.join("incoming"))
+                .materialize_completed_payload(job.token, &root.join("incoming"))
                 .await
                 .unwrap(),
             Ed2kDeliveryOutcome::NotCompleted
@@ -55,13 +60,12 @@ async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
     }
 
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    assert!(
-        runtime
-            .finalize_pending_transfer(&job.file_hash)
-            .await
-            .unwrap()
-    );
-    let completed = runtime.manifest(&job.file_hash).await.unwrap();
+    runtime
+        .prepare_download_job_storage(job.token)
+        .await
+        .unwrap();
+    assert!(runtime.finalize_pending_transfer(job.token).await.unwrap());
+    let completed = runtime.manifest(job.token).await.unwrap();
     assert!(completed.completed);
     assert!(!completed.final_rehash_pending);
     assert!(completed.payload_fingerprint.is_some());
@@ -80,41 +84,37 @@ async fn mutation_before_last_part_is_found_and_only_bad_part_is_demoted() {
     composite.update(first_hash);
     composite.update(second_hash);
     let file_hash = Ed2kHash::from_bytes(composite.finalize().into());
-    let job = new_transfer_job(
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "mutated.bin".to_string(),
         first.len() as u64 + second.len() as u64,
     );
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_hash, second_hash])
+        .store_md4_hashset(job.token, vec![first_hash, second_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first)
+        .store_piece_data(job.token, 0, &first)
         .await
         .unwrap();
 
     let mut payload = std::fs::OpenOptions::new()
         .write(true)
-        .open(runtime.payload_path(&job.file_hash))
+        .open(runtime.payload_path(job.token.job_id).unwrap())
         .unwrap();
     payload.seek(SeekFrom::Start(0)).unwrap();
     payload.write_all(&[0xff]).unwrap();
     payload.sync_all().unwrap();
 
     runtime
-        .store_piece_data_unfinalized(&job.file_hash, 1, &second)
+        .store_piece_data_unfinalized(job.token, 1, &second)
         .await
         .unwrap();
-    assert!(
-        !runtime
-            .finalize_pending_transfer(&job.file_hash)
-            .await
-            .unwrap()
-    );
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(!runtime.finalize_pending_transfer(job.token).await.unwrap());
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert!(!manifest.completed);
     assert!(!manifest.final_rehash_pending);
     assert!(manifest.payload_fingerprint.is_none());
@@ -128,18 +128,23 @@ async fn automatic_store_does_not_return_a_deliverable_file_before_final_rehash(
     let root = unique_test_dir("ed2k-final-rehash-auto");
     let payload = b"automatic final rehash";
     let file_hash = Ed2kHash::from_bytes(md4(payload));
-    let job = new_transfer_job(file_hash, "automatic.bin".to_string(), payload.len() as u64);
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "automatic.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, payload)
+        .store_piece_data(job.token, 0, payload)
         .await
         .unwrap();
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert!(manifest.completed);
     assert!(!manifest.final_rehash_pending);
 }
@@ -155,30 +160,31 @@ async fn stale_incomplete_hydration_cannot_republish_a_pending_completion() {
     composite.update(first_hash);
     composite.update(second_hash);
     let file_hash = Ed2kHash::from_bytes(composite.finalize().into());
-    let job = new_transfer_job(
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "stale-hydration.bin".to_string(),
         first.len() as u64 + second.len() as u64,
     );
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_hash, second_hash])
+        .store_md4_hashset(job.token, vec![first_hash, second_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &first)
+        .store_piece_data(job.token, 0, &first)
         .await
         .unwrap();
-    let stale_manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let stale_manifest = runtime.manifest(job.token).await.unwrap();
     assert!(!stale_manifest.verified_ranges.is_empty());
     assert_eq!(runtime.shared_catalog_count().await, 1);
 
     runtime
-        .store_piece_data_unfinalized(&job.file_hash, 1, &second)
+        .store_piece_data_unfinalized(job.token, 1, &second)
         .await
         .unwrap();
-    let pending = runtime.manifest(&job.file_hash).await.unwrap();
+    let pending = runtime.manifest(job.token).await.unwrap();
     assert!(pending.final_rehash_pending);
     assert_eq!(runtime.shared_catalog_count().await, 0);
 
@@ -202,27 +208,28 @@ async fn incomplete_hydration_requires_md4_authority() {
     composite.update(first_hash);
     composite.update(tail_hash);
     let file_hash = Ed2kHash::from_bytes(composite.finalize().into());
-    let job = new_transfer_job(
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "missing-md4-authority.bin".to_string(),
         payload.len() as u64 + tail.len() as u64,
     );
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, vec![first_hash, tail_hash])
+        .store_md4_hashset(job.token, vec![first_hash, tail_hash])
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &payload)
+        .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
-    let mut manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let mut manifest = runtime.manifest(job.token).await.unwrap();
     assert_eq!(runtime.shared_catalog_count().await, 1);
     manifest.md4_hashset_acquired = false;
     manifest.md4_hashset.clear();
     {
-        let _guard = runtime.lock_manifest(&job.file_hash).await;
+        let _guard = runtime.lock_manifest(job.token).await;
         runtime.store_manifest_unlocked(&manifest).await.unwrap();
         runtime.remove_verified_catalog_entry(&job.file_hash).await;
     }
@@ -241,20 +248,25 @@ async fn oversized_payload_is_quarantined_before_retry() {
     let root = unique_test_dir("ed2k-final-rehash-oversized");
     let payload = b"authoritative expected payload";
     let file_hash = Ed2kHash::from_bytes(md4(payload));
-    let job = new_transfer_job(file_hash, "oversized.bin".to_string(), payload.len() as u64);
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "oversized.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     runtime
-        .store_piece_data_unfinalized(&job.file_hash, 0, payload)
+        .store_piece_data_unfinalized(job.token, 0, payload)
         .await
         .unwrap();
     assert_eq!(runtime.shared_catalog_count().await, 0);
 
-    let payload_path = runtime.payload_path(&job.file_hash);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&payload_path)
@@ -262,12 +274,7 @@ async fn oversized_payload_is_quarantined_before_retry() {
     file.write_all(b"stale-tail").unwrap();
     file.sync_all().unwrap();
 
-    assert!(
-        !runtime
-            .finalize_pending_transfer(&job.file_hash)
-            .await
-            .unwrap()
-    );
+    assert!(!runtime.finalize_pending_transfer(job.token).await.unwrap());
     assert_eq!(std::fs::metadata(&payload_path).unwrap().len(), 0);
     let quarantined = std::fs::read_dir(payload_path.parent().unwrap())
         .unwrap()
@@ -285,16 +292,16 @@ async fn oversized_payload_is_quarantined_before_retry() {
         std::fs::read(quarantined).unwrap(),
         [payload.as_slice(), b"stale-tail"].concat()
     );
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert!(!manifest.completed);
     assert!(manifest.payload_fingerprint.is_none());
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert!(!manifest.pieces[0].ich_corrupted);
     runtime
-        .store_piece_data(&job.file_hash, 0, payload)
+        .store_piece_data(job.token, 0, payload)
         .await
         .unwrap();
-    assert!(runtime.manifest(&job.file_hash).await.unwrap().completed);
+    assert!(runtime.manifest(job.token).await.unwrap().completed);
 }
 
 #[cfg(unix)]
@@ -305,26 +312,31 @@ async fn final_rehash_rejects_symlink_payload_without_touching_target() {
     let root = unique_test_dir("ed2k-final-rehash-symlink");
     let payload = b"authoritative expected payload";
     let file_hash = Ed2kHash::from_bytes(md4(payload));
-    let job = new_transfer_job(file_hash, "symlink.bin".to_string(), payload.len() as u64);
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "symlink.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     runtime
-        .store_piece_data_unfinalized(&job.file_hash, 0, payload)
+        .store_piece_data_unfinalized(job.token, 0, payload)
         .await
         .unwrap();
 
-    let payload_path = runtime.payload_path(&job.file_hash);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     let foreign_path = root.join("foreign.bin");
     std::fs::write(&foreign_path, payload).unwrap();
     std::fs::remove_file(&payload_path).unwrap();
     symlink(&foreign_path, &payload_path).unwrap();
 
     runtime
-        .finalize_pending_transfer(&job.file_hash)
+        .finalize_pending_transfer(job.token)
         .await
         .unwrap_err();
     assert_eq!(std::fs::read(&foreign_path).unwrap(), payload);
@@ -335,7 +347,7 @@ async fn final_rehash_rejects_symlink_payload_without_touching_target() {
             .file_type()
             .is_symlink()
     );
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert!(manifest.final_rehash_pending);
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     assert_eq!(runtime.shared_catalog_count().await, 0);
@@ -346,22 +358,23 @@ async fn forced_rehash_with_authority_failure_withdraws_catalog_without_touching
     let root = unique_test_dir("ed2k-final-rehash-wrong-type");
     let payload = b"authoritative expected payload";
     let file_hash = Ed2kHash::from_bytes(md4(payload));
-    let job = new_transfer_job(
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "wrong-type.bin".to_string(),
         payload.len() as u64,
     );
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, payload)
+        .store_piece_data(job.token, 0, payload)
         .await
         .unwrap();
-    let completed = runtime.manifest(&job.file_hash).await.unwrap();
+    let completed = runtime.manifest(job.token).await.unwrap();
     assert!(completed.completed);
     let stale_catalog_entry = Ed2kSharedEntry::from_manifest(&completed);
     assert_eq!(runtime.shared_catalog_count().await, 1);
@@ -388,13 +401,13 @@ async fn forced_rehash_with_authority_failure_withdraws_catalog_without_touching
         17
     );
 
-    let payload_path = runtime.payload_path(&job.file_hash);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     std::fs::remove_file(&payload_path).unwrap();
     std::fs::create_dir(&payload_path).unwrap();
 
-    runtime.recheck_transfer(&job.file_hash).await.unwrap_err();
+    runtime.recheck_transfer(job.token).await.unwrap_err();
     assert!(payload_path.is_dir());
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
     assert!(manifest.final_rehash_pending);
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
     assert_eq!(runtime.shared_catalog_count().await, 0);
@@ -413,28 +426,29 @@ async fn replaced_completed_payload_is_withdrawn_before_upload() {
     let trusted_payload = vec![0x63; 4096];
     let foreign_payload = vec![0xa4; trusted_payload.len()];
     let file_hash = Ed2kHash::from_bytes(md4(&trusted_payload));
-    let job = new_transfer_job(
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
         file_hash,
         "replaced.bin".to_string(),
         trusted_payload.len() as u64,
     );
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     runtime
-        .store_piece_data(&job.file_hash, 0, &trusted_payload)
+        .store_piece_data(job.token, 0, &trusted_payload)
         .await
         .unwrap();
-    let completed = runtime.manifest(&job.file_hash).await.unwrap();
+    let completed = runtime.manifest(job.token).await.unwrap();
     assert!(completed.completed);
     assert!(completed.payload_fingerprint.is_some());
     assert_eq!(runtime.shared_catalog_count().await, 1);
 
-    runtime.invalidate_payload_handle(&job.file_hash);
-    let payload_path = runtime.payload_path(&job.file_hash);
+    runtime.invalidate_payload_handle(job.token);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     let original_path = payload_path.with_extension("trusted");
     std::fs::rename(&payload_path, &original_path).unwrap();
     std::fs::write(&payload_path, &foreign_payload).unwrap();
@@ -447,7 +461,7 @@ async fn replaced_completed_payload_is_withdrawn_before_upload() {
             .is_none(),
         "foreign replacement bytes must never be served under the completed hash"
     );
-    let withdrawn = runtime.manifest(&job.file_hash).await.unwrap();
+    let withdrawn = runtime.manifest(job.token).await.unwrap();
     assert!(!withdrawn.completed);
     assert!(withdrawn.final_rehash_pending);
     assert!(withdrawn.payload_fingerprint.is_none());
@@ -458,40 +472,76 @@ async fn replaced_completed_payload_is_withdrawn_before_upload() {
 }
 
 #[tokio::test]
-async fn missing_pending_payload_resets_idempotently_and_redownloads() {
+async fn missing_pending_payload_requires_explicit_restart_before_redownload() {
     let root = unique_test_dir("ed2k-final-rehash-missing");
     let payload = b"authoritative expected payload";
     let file_hash = Ed2kHash::from_bytes(md4(payload));
-    let job = new_transfer_job(file_hash, "missing.bin".to_string(), payload.len() as u64);
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        file_hash,
+        "missing.bin".to_string(),
+        payload.len() as u64,
+    );
     runtime.ensure_job(&job).await.unwrap();
     runtime
-        .store_md4_hashset(&job.file_hash, Vec::new())
+        .store_md4_hashset(job.token, Vec::new())
         .await
         .unwrap();
     runtime
-        .store_piece_data_unfinalized(&job.file_hash, 0, payload)
+        .store_piece_data_unfinalized(job.token, 0, payload)
         .await
         .unwrap();
 
-    let payload_path = runtime.payload_path(&job.file_hash);
+    let payload_path = runtime.payload_path(job.token.job_id).unwrap();
     std::fs::remove_file(&payload_path).unwrap();
 
-    assert!(
-        !runtime
-            .finalize_pending_transfer(&job.file_hash)
-            .await
-            .unwrap()
+    let before = runtime.manifest(job.token).await.unwrap();
+    for _ in 0..2 {
+        assert!(runtime.finalize_pending_transfer(job.token).await.is_err());
+        assert!(
+            !payload_path.exists(),
+            "storage failure must not recreate payload automatically"
+        );
+        assert_eq!(runtime.manifest(job.token).await.unwrap(), before);
+    }
+    assert!(runtime.stop_download_job(job.token).await.unwrap());
+    let stopped = runtime
+        .metadata
+        .download_job(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    let started = runtime
+        .metadata
+        .start_download_job(stopped.token, &root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(started.token, job.token);
+    let restarted = super::super::new_transfer_job(
+        started.token,
+        file_hash,
+        started.display_name,
+        payload.len() as u64,
     );
-    assert_eq!(std::fs::metadata(&payload_path).unwrap().len(), 0);
-    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    runtime.ensure_job(&restarted).await.unwrap();
+    let reconciled = runtime
+        .reconcile_download_storage(restarted.token)
+        .await
+        .unwrap();
+    assert_eq!(reconciled.reset_pieces, 1);
+    let manifest = runtime.manifest(restarted.token).await.unwrap();
     assert!(!manifest.final_rehash_pending);
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
     assert!(!manifest.pieces[0].ich_corrupted);
-
+    assert!(
+        runtime
+            .store_piece_data(job.token, 0, payload)
+            .await
+            .is_err()
+    );
     runtime
-        .store_piece_data(&job.file_hash, 0, payload)
+        .store_piece_data(restarted.token, 0, payload)
         .await
         .unwrap();
-    assert!(runtime.manifest(&job.file_hash).await.unwrap().completed);
+    assert!(runtime.manifest(restarted.token).await.unwrap().completed);
 }

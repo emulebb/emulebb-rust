@@ -9,6 +9,7 @@ fn current_marker_cannot_hide_missing_indexes_triggers_or_wrong_columns() {
         "ALTER TABLE known_files ADD COLUMN obsolete_value TEXT",
         "DELETE FROM profile",
         "DELETE FROM library_catalog_revision",
+        "DELETE FROM download_job_counts",
         "DELETE FROM discovery_initialization WHERE domain = 'kad'",
         "DELETE FROM kad_routing_revision",
     ] {
@@ -105,7 +106,7 @@ fn schema_rejects_wrong_storage_types_null_keys_and_out_of_range_values() {
         "INSERT INTO known_files(ed2k_hash,size_bytes,display_name,aich_root,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES (zeroblob(16),1,'sample',zeroblob(20),0,0,0)",
         "INSERT INTO known_files(ed2k_hash,size_bytes,display_name,aich_root,aich_root_origin,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES (zeroblob(16),1,'sample',zeroblob(20),'network_consensus',0,0,0)",
         "INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES (zeroblob(16),'invalid','sample',0,0,0)",
-        "INSERT INTO download_history(ed2k_hash,size_bytes,display_name,first_completed_at_ms,last_completed_at_ms) VALUES (NULL,1,'sample',0,0)",
+        "INSERT INTO download_history(ed2k_hash,size_bytes,display_name,first_completed_at_s,last_completed_at_s) VALUES (NULL,1,'sample',0,0)",
         "INSERT INTO known_files(ed2k_hash,size_bytes,display_name,media_length_seconds,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES (zeroblob(16),1,'sample',4294967296,0,0,0)",
         "INSERT INTO metadata_schema(schema_id,schema_version,created_at_ms) VALUES ('second-schema',1,0)",
         "UPDATE discovery_initialization SET status = 'invalid' WHERE domain = 'kad'",

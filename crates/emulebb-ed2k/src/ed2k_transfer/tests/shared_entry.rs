@@ -19,7 +19,11 @@ fn shared_entry_from_popular_hash_requires_valid_ed2k_hash() {
 #[test]
 fn manifest_new_initializes_missing_piece_state() {
     let file_hash = Ed2kHash::from_str("fedcba9876543210fedcba9876543210").unwrap();
-    let job = new_transfer_job(file_hash, "ubuntu.iso".to_string(), ED2K_PART_SIZE * 2);
+    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
+        file_hash,
+        "ubuntu.iso".to_string(),
+        ED2K_PART_SIZE * 2,
+    );
     let manifest = Ed2kResumeManifest::new(&job);
     assert_eq!(manifest.pieces.len(), 2);
     assert!(
@@ -28,5 +32,5 @@ fn manifest_new_initializes_missing_piece_state() {
             .iter()
             .all(|piece| piece.state == Ed2kTransferState::Missing)
     );
-    assert!(manifest.sources.is_empty());
+    assert_eq!(manifest.token, job.token);
 }
