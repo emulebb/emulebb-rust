@@ -145,7 +145,7 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         .unwrap();
         let shares = core.reload_shared_directories().await.unwrap();
         let first_share = require_share_by_name(&shares, "Persisted Unicode äöü.bin");
-        core.stop_shared_directory_monitor();
+        core.stop_shared_directory_monitor().await.unwrap();
         wait_for_hashing_idle(&core).await;
         // Share-in-place: the file is seeded directly from its original on-disk
         // path and must NOT be copied into the internal piece store.

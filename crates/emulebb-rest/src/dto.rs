@@ -110,7 +110,7 @@ pub(crate) struct SharedFilesQuery {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TransfersQuery {
     pub(crate) state: Option<String>,
-    pub(crate) category_id: Option<u32>,
+    pub(crate) category: Option<String>,
     pub(crate) offset: Option<usize>,
     pub(crate) limit: Option<usize>,
 }

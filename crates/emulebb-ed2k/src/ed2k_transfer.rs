@@ -57,6 +57,8 @@ mod hashset;
 mod ich_salvage;
 mod inbound_admission;
 mod ingest;
+mod local_mutation;
+pub use local_mutation::LocalMutationError;
 mod manifest;
 mod media_metadata;
 mod metadata;
@@ -70,6 +72,7 @@ mod reload_index;
 mod requested_block;
 mod salvage;
 mod shared_catalog;
+pub use shared_catalog::{CategoryCatalogDecision, CategoryRootMutation, category_copy_matches};
 mod source_exchange;
 mod store;
 mod transfer_sql;
@@ -81,6 +84,7 @@ pub(crate) use block_lease::Ed2kDownloadBlockLease;
 pub use callback::Ed2kCallbackDispatchGuard;
 pub use catalog::{
     Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange, IndexedSharedCatalog,
+    SharedFileMutation,
 };
 pub(crate) use completion_rehash::mark_final_rehash_pending;
 pub use deliver::Ed2kDeliveryOutcome;
@@ -103,7 +107,10 @@ use hashset::{
     build_md4_hashset_from_payload,
 };
 pub use inbound_admission::Ed2kInboundConnectionGuard;
-pub use ingest::{LocalIngestProgressEvent, LocalIngestProgressObserver, LocalIngestProgressStage};
+pub use ingest::{
+    LocalIngestOptions, LocalIngestProgressEvent, LocalIngestProgressObserver,
+    LocalIngestProgressStage,
+};
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
@@ -276,6 +283,8 @@ pub struct Ed2kTransferRuntime {
     metadata: MetadataStore,
     file_name_policy: Ed2kFileNamePolicy,
     shared_catalog: Ed2kSharedCatalog,
+    share_eligibility: Arc<catalog::SharedEligibility>,
+    local_mutations: Arc<local_mutation::LocalMutationRegistry>,
     shared_catalog_generation: Arc<AtomicU64>,
     /// Keyset cursor for a persisted catalog intentionally loaded only through
     /// the first publishable startup cohort. `pending` is claimed atomically so
@@ -294,7 +303,11 @@ pub struct Ed2kTransferRuntime {
     /// delete path takes this gate before locking every affected manifest, so
     /// no assignment can be resolved against one category snapshot and commit
     /// against another.
-    category_assignment_gate: Arc<Mutex<()>>,
+    category_assignment_gate: Arc<RwLock<()>>,
+    category_root_epoch: Arc<AtomicU64>,
+    category_root_dirty: Arc<AtomicBool>,
+    share_publication_failed: Arc<AtomicBool>,
+    category_root_epoch_ready: Arc<Notify>,
     /// Per-transfer lifecycle serialization for delivery, row removal, and
     /// destructive deletion. Unlike the manifest IO lock this may be held
     /// across slow filesystem work without delaying unrelated manifest reads.
@@ -511,25 +524,32 @@ impl Default for Ed2kSharedSourceInvalidationSignal {
 }
 
 impl Ed2kSharedSourceInvalidationSignal {
-    fn enqueue(&self, invalidation: Ed2kSharedSourceInvalidation) -> bool {
-        let mut state = self.state.lock().unwrap();
+    fn reserve(
+        &self,
+        invalidation: Ed2kSharedSourceInvalidation,
+    ) -> anyhow::Result<Ed2kSharedSourceInvalidationReservation> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("shared invalidation queue failed"))?;
         let key = (
             invalidation.source_path.clone(),
             invalidation.file_hash.clone(),
         );
-        if state.scheduled.contains(&key) {
-            return true;
-        }
-        if state.scheduled.len() >= SHARED_SOURCE_INVALIDATION_CAPACITY {
-            return false;
-        }
+        anyhow::ensure!(
+            !state.scheduled.contains(&key),
+            "shared invalidation is already pending"
+        );
+        anyhow::ensure!(
+            state.scheduled.len() < SHARED_SOURCE_INVALIDATION_CAPACITY,
+            "shared invalidation queue is busy"
+        );
         state.scheduled.insert(key);
-        state.pending.push_back(invalidation);
-        drop(state);
-        self.notify.notify_one();
-        true
+        Ok(Ed2kSharedSourceInvalidationReservation {
+            signal: self.clone(),
+            invalidation: Some(invalidation),
+        })
     }
-
     /// Wait for the next distinct invalidated path.
     ///
     /// The returned lease keeps the path coalesced while reconciliation is in
@@ -564,6 +584,42 @@ impl Ed2kSharedSourceInvalidationSignal {
     fn requeue(&self, invalidation: Ed2kSharedSourceInvalidation) {
         self.state.lock().unwrap().pending.push_front(invalidation);
         self.notify.notify_one();
+    }
+}
+
+struct Ed2kSharedSourceInvalidationReservation {
+    signal: Ed2kSharedSourceInvalidationSignal,
+    invalidation: Option<Ed2kSharedSourceInvalidation>,
+}
+impl Ed2kSharedSourceInvalidationReservation {
+    fn commit(mut self) -> anyhow::Result<()> {
+        let mut state = self
+            .signal
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("shared invalidation queue failed"))?;
+        if let Some(invalidation) = self.invalidation.take() {
+            state.pending.push_back(invalidation);
+            drop(state);
+            self.signal.notify.notify_one();
+        }
+        Ok(())
+    }
+}
+impl Drop for Ed2kSharedSourceInvalidationReservation {
+    fn drop(&mut self) {
+        if let Some(invalidation) = self.invalidation.take() {
+            match self.signal.state.lock() {
+                Ok(mut state) => {
+                    state
+                        .scheduled
+                        .remove(&(invalidation.source_path, invalidation.file_hash));
+                }
+                Err(_) => {
+                    tracing::error!("shared invalidation queue failed while releasing reservation")
+                }
+            }
+        }
     }
 }
 
@@ -728,9 +784,22 @@ impl Ed2kTransferRuntime {
                 false,
             )
         };
-        let shared_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
-            initial_catalog,
-        )));
+        let category_root_epoch = Arc::new(AtomicU64::new(0));
+        let category_root_dirty = Arc::new(AtomicBool::new(false));
+        let share_publication_failed = Arc::new(AtomicBool::new(false));
+        let manifest_cache = Arc::new(Mutex::new(HashMap::new()));
+        let stripes = Arc::new(std::sync::Mutex::new(catalog::ShareStripes::default()));
+        let share_eligibility = Arc::new(catalog::SharedEligibility::new(
+            metadata.clone(),
+            Arc::clone(&category_root_epoch),
+            Arc::clone(&category_root_dirty),
+            Arc::clone(&share_publication_failed),
+            stripes,
+            Arc::clone(&manifest_cache),
+        ));
+        let mut initial_catalog = IndexedSharedCatalog::from_entries(initial_catalog);
+        initial_catalog.set_eligibility(Arc::clone(&share_eligibility));
+        let shared_catalog = Arc::new(RwLock::new(initial_catalog));
         // The ban store is built before the upload queue so the queue state can
         // hand a no-request repeat-offender straight to the shared ban list
         // (RUST-PAR-020 U-GAP3, mirroring `client->Ban(...)`, UploadQueue.cpp:1640).
@@ -744,15 +813,21 @@ impl Ed2kTransferRuntime {
             metadata,
             file_name_policy,
             shared_catalog,
+            share_eligibility,
+            local_mutations: Arc::new(local_mutation::LocalMutationRegistry::default()),
             shared_catalog_generation: Arc::new(AtomicU64::new(0)),
             shared_catalog_hydration_cursor: StdMutex::new(None),
             shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_tickets: Arc::new(StdMutex::new(callback::CallbackTicketStore::default())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
-            category_assignment_gate: Arc::new(Mutex::new(())),
+            category_assignment_gate: Arc::new(RwLock::new(())),
+            category_root_epoch,
+            category_root_dirty,
+            share_publication_failed,
+            category_root_epoch_ready: Arc::new(Notify::new()),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
-            manifest_cache: Arc::new(Mutex::new(HashMap::new())),
+            manifest_cache,
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
             download_block_leases: block_lease::DownloadBlockLeaseRegistry::default(),
             next_download_block_lease_id: Arc::new(AtomicU64::new(1)),
@@ -852,23 +927,6 @@ impl Ed2kTransferRuntime {
     #[must_use]
     pub fn shared_source_invalidation_signal(&self) -> Ed2kSharedSourceInvalidationSignal {
         self.shared_source_invalidations.clone()
-    }
-
-    fn queue_shared_source_invalidation(&self, file_hash: &str, source_path: &Path) {
-        if !self
-            .shared_source_invalidations
-            .enqueue(Ed2kSharedSourceInvalidation {
-                file_hash: file_hash.to_string(),
-                source_path: source_path.to_path_buf(),
-            })
-        {
-            tracing::warn!(
-                file_hash,
-                path = %source_path.display(),
-                capacity = SHARED_SOURCE_INVALIDATION_CAPACITY,
-                "shared-source invalidation queue is full; explicit reload remains the recovery fallback",
-            );
-        }
     }
 
     pub(crate) fn notify_shared_publish_demand_changed(&self) {

@@ -569,7 +569,7 @@ pub struct Ed2kResumeManifest {
     pub rating: u8,
     /// Download category index, matching eMule's persisted FT_CATEGORY tag.
     #[serde(default)]
-    pub category_id: u32,
+    pub category_id: Option<i64>,
     /// User-facing transfer control state persisted across restarts.
     #[serde(default)]
     pub control_state: Option<String>,
@@ -840,7 +840,7 @@ impl Ed2kResumeManifest {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
-            category_id: 0,
+            category_id: None,
             control_state: None,
             transfer_row_removed: false,
             delivery_state: Ed2kDeliveryState::Pending,

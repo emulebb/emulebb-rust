@@ -8,7 +8,19 @@ use crate::{
 use anyhow::Result;
 use rusqlite::{Row, params};
 
-const COLUMNS: &str = r#"lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
+pub(crate) const VERIFIED_SHARE_EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM known_files k JOIN verified_local_content c ON c.known_file_id=k.id JOIN local_file_instances i INDEXED BY local_file_instances_content_idx ON i.known_file_id=k.id JOIN temp.session_verified_local_paths v ON v.path_id=i.path_id AND v.verified_fingerprint=i.verified_fingerprint WHERE k.ed2k_hash=?1 AND EXISTS(SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL AND r.accessible=1 AND r.shareable=1))";
+const PARTIAL_SHARE_OFFER_SQL: &str = "SELECT length(CAST(t.display_name AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.display_name,k.size_bytes,t.upload_priority,t.rating FROM known_files k JOIN transfers t ON t.known_file_id=k.id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_ms IS NULL AND t.delete_requested_at_ms IS NULL AND EXISTS(SELECT 1 FROM verified_ranges r WHERE r.transfer_id=t.id)";
+
+/// Compact, bounded fields needed to advertise an independent partial source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataPartialOffer {
+    pub name: String,
+    pub size: u64,
+    pub priority: String,
+    pub rating: u8,
+}
+
+pub(crate) const COLUMNS: &str = r#"lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
                     verified_local_content.part_count,
                     CASE WHEN verified_local_content.aich_root IS NULL THEN NULL
                          ELSE lower(hex(verified_local_content.aich_root)) END,
@@ -102,6 +114,61 @@ pub(crate) fn catalog_entry(row: &Row<'_>) -> rusqlite::Result<MetadataTransferC
 }
 
 impl MetadataStore {
+    /// Read one bounded batch from a single connection snapshot without waiting
+    /// for a category writer; `None` signals that the connection is busy.
+    pub fn try_verified_share_batch(
+        &self,
+        hashes: &[[u8; 16]],
+    ) -> Result<Option<Vec<(bool, Option<MetadataPartialOffer>)>>> {
+        anyhow::ensure!(
+            hashes.len() <= 200,
+            "shared eligibility batch exceeds 200 hashes"
+        );
+        let Some(mut conn) = self.try_connection()? else {
+            return Ok(None);
+        };
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare_cached(VERIFIED_SHARE_EXISTS_SQL)?;
+        let mut partial = tx.prepare_cached(PARTIAL_SHARE_OFFER_SQL)?;
+        let mut result = Vec::with_capacity(hashes.len());
+        let mut text_bytes = 0usize;
+        for hash in hashes {
+            let complete = stmt.query_row([hash.as_slice()], |row| row.get::<_, bool>(0))?;
+            let mut rows = partial.query([hash.as_slice()])?;
+            let incomplete = if let Some(row) = rows.next()? {
+                let name_len: i64 = row.get(0)?;
+                let priority_len: i64 = row.get(1)?;
+                let name_len = usize::try_from(name_len)?;
+                let priority_len = usize::try_from(priority_len)?;
+                anyhow::ensure!(
+                    name_len <= 65_536 && priority_len <= 65_536,
+                    "partial offer text exceeds per-entry bound"
+                );
+                let next = text_bytes
+                    .checked_add(name_len)
+                    .and_then(|n| n.checked_add(priority_len))
+                    .ok_or_else(|| anyhow::anyhow!("partial offer batch exceeds bound"))?;
+                if next > 192 * 1024 {
+                    break;
+                }
+                text_bytes = next;
+                Some(MetadataPartialOffer {
+                    name: row.get(2)?,
+                    size: crate::sql_value::unsigned::<u64>(row, 3)?,
+                    priority: row.get(4)?,
+                    rating: row.get(5)?,
+                })
+            } else {
+                None
+            };
+            result.push((complete, incomplete));
+        }
+        drop(partial);
+        drop(stmt);
+        tx.commit()?;
+        Ok(Some(result))
+    }
+
     pub fn query_active_local_share_entries(
         &self,
         query: &MetadataSharedFileQuery,

@@ -472,6 +472,20 @@ pub struct OfferFilesPublishStats {
     pub wrapped: bool,
     pub skipped_duplicate_batch: bool,
     pub session_pump_active: bool,
+    pub deferred: bool,
+}
+
+fn deferred_offer_files_stats(session: &ServerSession, cursor: usize) -> OfferFilesPublishStats {
+    let total = session.offer_files_ranked_catalog.len();
+    let published = session.offer_files_published_hashes.len().min(total);
+    OfferFilesPublishStats {
+        total_entries: total,
+        published_entries: published,
+        pending_entries: total.saturating_sub(published),
+        next_cursor: cursor,
+        deferred: true,
+        ..Default::default()
+    }
 }
 
 fn ranked_offer_files_at_cursor_skipping_published(
@@ -721,6 +735,7 @@ pub(super) async fn send_offer_files_advertisement(
         let fingerprint = hasher.finish();
         if session.offer_files_catalog_fingerprint != Some(fingerprint) {
             session.offer_files_catalog_cursor = 0;
+            session.offer_files_suppression_start = None;
             reconcile_offer_files_published_hashes(
                 &session.offer_files_ranked_catalog,
                 &ranked,
@@ -732,7 +747,7 @@ pub(super) async fn send_offer_files_advertisement(
         session.offer_files_refresh_catalog = false;
     }
     let current_cursor = session.offer_files_catalog_cursor;
-    let offered_files = ranked_offer_files_at_cursor_with_budget(
+    let mut offered_files = ranked_offer_files_at_cursor_with_budget(
         &session.offer_files_ranked_catalog,
         current_cursor,
         &session.offer_files_published_hashes,
@@ -740,12 +755,89 @@ pub(super) async fn send_offer_files_advertisement(
         session.offer_files_batch_limit(),
         session.offer_files_new_candidate_limit(),
     );
+    let provider = shared_catalog.read().await.eligibility();
+    let epoch = provider.as_ref().map(|provider| provider.epoch());
+    let hashes = offered_files
+        .entries
+        .iter()
+        .map(|entry| entry.0)
+        .collect::<Vec<_>>();
+    let stripes = match provider.as_ref() {
+        Some(provider) => match provider.stripe_snapshot(&hashes) {
+            Some(stripes) => stripes,
+            None => {
+                return Ok(deferred_offer_files_stats(session, current_cursor));
+            }
+        },
+        None => Vec::new(),
+    };
+    let mut checked = None;
+    if let Some(provider) = provider.as_ref()
+        && provider.requires_revalidation()
+    {
+        let Some(batch) = provider.try_batch(&hashes).await? else {
+            return Ok(deferred_offer_files_stats(session, current_cursor));
+        };
+        if batch.complete.len() < offered_files.entries.len() {
+            let Some(last) = batch
+                .complete
+                .len()
+                .checked_sub(1)
+                .map(|index| offered_files.entries[index].0)
+            else {
+                return Ok(deferred_offer_files_stats(session, current_cursor));
+            };
+            let total = session.offer_files_ranked_catalog.len();
+            let start = current_cursor % total;
+            let offset = (0..total)
+                .find(|offset| {
+                    session.offer_files_ranked_catalog[(start + offset) % total].0 == last
+                })
+                .expect("selected entry belongs to ranked catalog");
+            offered_files.next_cursor = (start + offset + 1) % total;
+            offered_files.entries.truncate(batch.complete.len());
+        }
+        let mut flags = batch.complete.iter().zip(batch.partial.iter());
+        offered_files.entries.retain_mut(|entry| {
+            let (complete, partial) = flags.next().expect("one eligibility result per candidate");
+            if !*complete {
+                let Some(partial) = partial.as_ref() else {
+                    return false;
+                };
+                if !shared_file_publish_enabled(&partial.priority) {
+                    return false;
+                }
+                entry.1.clone_from(&partial.name);
+                entry.2 = partial.size;
+                entry.3 = ed2k_offer_file_type(&partial.name);
+                entry.4 = false;
+                entry.5 = partial.rating;
+                entry.6 = Ed2kMediaMetadata::default();
+            }
+            true
+        });
+        checked = Some(batch);
+    }
     let encoded = encode_offered_files_catalog(
         offered_files,
         session.assigned_client_id,
         tcp_port,
         session.server_flags,
     );
+    // Admit this bounded owned packet under the same short lock as root
+    // mutation. Once admitted, it may finish socket IO after a later mutation.
+    if let Some(epoch) = epoch {
+        let catalog = shared_catalog.read().await;
+        let admitted = match checked.as_ref() {
+            Some(batch) => catalog.admit_eligibility_batch(batch),
+            None => catalog.admit_clean_epoch(epoch, &stripes),
+        };
+        if !admitted {
+            return Ok(deferred_offer_files_stats(session, current_cursor));
+        }
+    }
+    let was_checked = checked.is_some();
+    drop(checked);
     let published_before = session
         .offer_files_published_hashes
         .len()
@@ -761,6 +853,15 @@ pub(super) async fn send_offer_files_advertisement(
     let pending_after = encoded.total_entries.saturating_sub(published_after);
     let wrapped = pending_after == 0;
     if encoded.entries.is_empty() {
+        session.offer_files_catalog_cursor = encoded.next_cursor;
+        let deferred = if was_checked && encoded.total_entries > 0 {
+            let start = *session
+                .offer_files_suppression_start
+                .get_or_insert(current_cursor);
+            encoded.next_cursor != start
+        } else {
+            false
+        };
         #[cfg(feature = "packet-diagnostics")]
         log_shared_publish_offer_batch(session, current_cursor, &encoded, true, true);
         return Ok(OfferFilesPublishStats {
@@ -772,8 +873,10 @@ pub(super) async fn send_offer_files_advertisement(
             wrapped: true,
             skipped_duplicate_batch: true,
             session_pump_active: false,
+            deferred,
         });
     }
+    session.offer_files_suppression_start = None;
     let was_sent = session.offer_files_sent;
     let published_hashes = encoded
         .entries
@@ -822,6 +925,7 @@ pub(super) async fn send_offer_files_advertisement(
         wrapped,
         skipped_duplicate_batch: false,
         session_pump_active: false,
+        deferred: false,
     })
 }
 
@@ -845,11 +949,15 @@ pub(super) async fn send_due_offer_files_advertisement(
     }
     let mut stats =
         send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
-    session.finish_offer_files_batch(
-        stats.entries_sent,
-        stats.pending_entries,
-        stats.skipped_duplicate_batch,
-    );
+    if stats.deferred {
+        session.defer_offer_files_batch();
+    } else {
+        session.finish_offer_files_batch(
+            stats.entries_sent,
+            stats.pending_entries,
+            stats.skipped_duplicate_batch,
+        );
+    }
     stats.session_pump_active = session.offer_files_publish_requested;
     session
         .publish_offer_files_progress(stats.published_entries, stats.pending_entries)
@@ -864,7 +972,7 @@ async fn mark_offer_files_published(
 ) {
     let mut catalog = shared_catalog.write().await;
     for (file_hash, _, _, _, _, _, _) in entries {
-        catalog.update_by_hash(&Ed2kHash(*file_hash), |entry| {
+        catalog.update_stats_by_hash(&Ed2kHash(*file_hash), |entry| {
             entry.publish.last_ed2k_publish_unix_ms = published_at_ms;
         });
     }

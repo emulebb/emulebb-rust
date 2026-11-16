@@ -7,6 +7,15 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
+#[derive(Debug)]
+pub struct ObservedRootChanged;
+impl std::fmt::Display for ObservedRootChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("observed root changed")
+    }
+}
+impl std::error::Error for ObservedRootChanged {}
+
 impl MetadataStore {
     pub fn shared_root_last_scan_ms(&self, root: &Path) -> Result<Option<i64>> {
         let native = NativePath::from(root);
@@ -33,6 +42,22 @@ impl MetadataStore {
         relative: &Path,
         current: &NativeFileFingerprint,
     ) -> Result<bool> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let admitted =
+            Self::admit_local_path_on_connection(&tx, root, path, relative, current, false)?;
+        tx.commit()?;
+        Ok(admitted)
+    }
+
+    pub(crate) fn admit_local_path_on_connection(
+        tx: &rusqlite::Connection,
+        root: &Path,
+        path: &Path,
+        relative: &Path,
+        current: &NativeFileFingerprint,
+        observed_root: bool,
+    ) -> Result<bool> {
         ensure!(
             !relative.as_os_str().is_empty()
                 && !relative.is_absolute()
@@ -43,11 +68,10 @@ impl MetadataStore {
         );
         let native_root = NativePath::from(root);
         let native_path = NativePath::from(path);
-        let conn = self.connection()?;
-        if crate::delivery_exclusion_store::is_excluded(&conn, path)? {
+        if crate::delivery_exclusion_store::is_excluded(tx, path)? {
             return Ok(false);
         }
-        let found = conn.query_row(
+        let found = tx.query_row(
             "SELECT shared_directory_roots.id, local_file_instances.path_id,
                     local_file_instances.verified_fingerprint
              FROM shared_directory_roots
@@ -58,12 +82,13 @@ impl MetadataStore {
                AND file_paths.native_path = ?3
                AND shared_directory_roots.enabled = 1
                AND shared_directory_roots.deleted_at_ms IS NULL
-               AND shared_directory_roots.accessible = 1
+               AND (?4 = 1 OR shared_directory_roots.accessible = 1)
                AND shared_directory_roots.shareable = 1",
             params![
                 NativePath::platform(),
                 native_root.storage_bytes(),
-                native_path.storage_bytes()
+                native_path.storage_bytes(),
+                i64::from(observed_root)
             ],
             |row| {
                 Ok((
@@ -84,10 +109,17 @@ impl MetadataStore {
             return Ok(false);
         }
         let now = unix_ms();
-        conn.execute(
+        if observed_root {
+            tx.execute(
+                "UPDATE shared_directory_roots SET accessible=1 WHERE id=?1",
+                [root_id],
+            )?;
+            tx.execute("UPDATE shared_directory_root_origins SET accessible=1 WHERE root_id=?1 AND shareable=1", [root_id])?;
+        }
+        tx.execute(
             "INSERT INTO shared_file_memberships(
-                root_id, path_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)
+                root_id, path_id, known_file_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
+             ) VALUES (?1, ?2, (SELECT known_file_id FROM local_file_instances WHERE path_id=?2), ?3, ?4, ?4, NULL)
              ON CONFLICT(root_id, path_id) DO UPDATE SET
                 relative_path = excluded.relative_path,
                 last_seen_at_ms = excluded.last_seen_at_ms,
@@ -99,12 +131,71 @@ impl MetadataStore {
                 now
             ],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
              VALUES (?1, ?2)",
             params![path_id, stored],
         )?;
         Ok(true)
+    }
+
+    /// Atomically admit a particular verified copy and prepare its bounded
+    /// catalog projection before committing the membership change.
+    pub fn admit_shared_path_with_projection(
+        &self,
+        root: &Path,
+        path: &Path,
+        relative: &Path,
+        current: &NativeFileFingerprint,
+        file_hash: &str,
+        observed_root: Option<(&std::sync::atomic::AtomicU64, u64)>,
+    ) -> Result<
+        Option<(
+            crate::MetadataTransferCatalogEntry,
+            Option<crate::MetadataPartialShare>,
+        )>,
+    > {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        if !Self::admit_local_path_on_connection(
+            &tx,
+            root,
+            path,
+            relative,
+            current,
+            observed_root.is_some(),
+        )? {
+            return Ok(None);
+        }
+        let native = NativePath::from(path);
+        let hash = crate::store::decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let sql = format!(
+            "SELECT {} FROM local_paths
+             JOIN local_file_instances ON local_file_instances.path_id=local_paths.id
+             JOIN known_files ON known_files.id=local_file_instances.known_file_id
+             JOIN verified_local_content ON verified_local_content.known_file_id=known_files.id
+             WHERE local_paths.platform=?1 AND local_paths.native_path=?2 AND known_files.ed2k_hash=?3
+               AND length(CAST(verified_local_content.upload_priority AS BLOB))<=65536
+               AND length(CAST(verified_local_content.comment AS BLOB))<=65536
+               AND length(CAST(known_files.media_artist AS BLOB))<=65536
+               AND length(CAST(known_files.media_album AS BLOB))<=65536
+               AND length(CAST(known_files.media_title AS BLOB))<=65536
+               AND length(CAST(known_files.media_codec AS BLOB))<=65536",
+            crate::local_catalog::COLUMNS
+        );
+        let entry = tx.query_row(
+            &sql,
+            params![NativePath::platform(), native.storage_bytes(), hash],
+            crate::local_catalog::catalog_entry,
+        )?;
+        let partial = Self::partial_share_on_connection(&tx, file_hash)?;
+        if let Some((epoch, expected)) = observed_root {
+            if epoch.load(std::sync::atomic::Ordering::Acquire) != expected {
+                return Err(ObservedRootChanged.into());
+            }
+        }
+        tx.commit()?;
+        Ok(Some((entry, partial)))
     }
 
     /// Whether a verified path has ever been governed by a shared root.
@@ -166,6 +257,51 @@ impl MetadataStore {
             ],
         )?;
         Ok(changed)
+    }
+
+    /// Withdraw the observed path and validate its bounded catalog projection
+    /// in the same transaction, so projection failures roll the mutation back.
+    pub fn withdraw_shared_path_with_projection(
+        &self,
+        path: &Path,
+        file_hash: &str,
+        expected: Option<&NativeFileFingerprint>,
+    ) -> Result<(usize, bool, Option<crate::MetadataPartialShare>)> {
+        let native = NativePath::from(path);
+        let hash = crate::store::decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let fingerprint = expected.map(NativeFileFingerprint::storage_bytes);
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE shared_file_memberships SET removed_at_ms=?5 WHERE path_id IN (SELECT i.path_id FROM local_file_instances i JOIN local_paths p ON p.id=i.path_id JOIN known_files k ON k.id=i.known_file_id WHERE p.platform=?1 AND p.native_path=?2 AND k.ed2k_hash=?3 AND (?4 IS NULL OR i.verified_fingerprint=?4)) AND removed_at_ms IS NULL",
+            params![NativePath::platform(), native.storage_bytes(), hash, fingerprint, unix_ms()],
+        )?;
+        let complete = tx.query_row(
+            crate::local_catalog::VERIFIED_SHARE_EXISTS_SQL,
+            [&hash],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let partial = Self::partial_share_on_connection(&tx, file_hash)?;
+        tx.commit()?;
+        Ok((changed, complete, partial))
+    }
+
+    /// Re-read a bounded projection without replaying a previously committed mutation.
+    pub fn shared_path_projection(
+        &self,
+        file_hash: &str,
+    ) -> Result<(bool, Option<crate::MetadataPartialShare>)> {
+        let hash = crate::store::decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let complete = tx.query_row(
+            crate::local_catalog::VERIFIED_SHARE_EXISTS_SQL,
+            [&hash],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let partial = Self::partial_share_on_connection(&tx, file_hash)?;
+        tx.commit()?;
+        Ok((complete, partial))
     }
 
     /// Commit one successful full scan of a root. The caller supplies only
@@ -233,8 +369,8 @@ impl MetadataStore {
             )?;
             tx.execute(
                 "INSERT INTO shared_file_memberships(
-                    root_id, path_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)
+                    root_id, path_id, known_file_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
+                 ) VALUES (?1, ?2, (SELECT known_file_id FROM local_file_instances WHERE path_id=?2), ?3, ?4, ?4, NULL)
                  ON CONFLICT(root_id, path_id) DO UPDATE SET
                     relative_path = excluded.relative_path,
                     last_seen_at_ms = excluded.last_seen_at_ms,

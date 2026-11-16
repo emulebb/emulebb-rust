@@ -36,21 +36,29 @@ impl EmulebbCore {
             .await
     }
 
-    pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
-        let cached = self.state.lock().await.transfers.get(hash).cloned();
+    pub async fn transfer(&self, hash: &str) -> Result<Option<Transfer>> {
+        let cached = {
+            let state = self.state.lock().await;
+            self.persistence_owner.check_coherent_state()?;
+            state.transfers.get(hash).cloned()
+        };
         let mut transfer = match cached {
             Some(transfer) => transfer,
-            None => match self.refresh_transfer_from_manifest_default(hash).await {
-                Ok(Some(transfer)) => transfer,
-                Ok(None) => return None,
-                Err(error) => {
-                    tracing::warn!("failed to refresh ED2K transfer {hash} from manifest: {error}");
-                    return None;
-                }
+            None => match self.refresh_transfer_from_manifest_default(hash).await? {
+                Some(transfer) => transfer,
+                None => return Ok(None),
             },
         };
+        // Preserve the category ID/name pair from one coherent state snapshot.
+        let state = self.state.lock().await;
+        self.persistence_owner.check_coherent_state()?;
+        if let Some(current) = state.transfers.get(hash) {
+            transfer.category_id = current.category_id;
+            transfer.category_name = current.category_name.clone();
+        }
+        drop(state);
         self.apply_live_transfer_fields(&mut transfer);
-        Some(transfer)
+        Ok(Some(transfer))
     }
 
     pub async fn update_transfer(
@@ -59,7 +67,7 @@ impl EmulebbCore {
         request: TransferUpdate,
     ) -> Result<Option<Transfer>> {
         validate_transfer_update_family(&request)?;
-        if self.transfer(hash).await.is_none() {
+        if self.transfer(hash).await?.is_none() {
             return Ok(None);
         }
         if let Some(priority) = request.priority.as_deref() {
@@ -75,21 +83,21 @@ impl EmulebbCore {
             return Ok(Some(transfer));
         }
         if request.category_id.is_some() || request.category_name.is_some() {
-            let _category_guard = self.category_mutation_gate.lock().await;
-            let (category_id, category_name) = self
-                .resolve_transfer_category(request.category_id, request.category_name.as_deref())
+            let selected = self
+                .resolve_transfer_category(
+                    request.category_id.flatten(),
+                    request
+                        .category_name
+                        .as_ref()
+                        .and_then(|value| value.as_deref()),
+                )
                 .await?;
-            self.ed2k_transfers
-                .set_category_id(hash, category_id)
+            self.assign_transfer_category(hash, selected.as_ref().map(|value| value.0))
                 .await?;
-            let mut state = self.state.lock().await;
-            let Some(transfer) = state.transfers.get_mut(hash) else {
-                return Ok(None);
-            };
-            transfer.category_id = category_id;
-            transfer.category_name = category_name;
-            let transfer = transfer.clone();
-            drop(state);
+            let transfer = self
+                .transfer(hash)
+                .await?
+                .context("transfer disappeared after category assignment")?;
             self.publish_transfer_updated(transfer.clone());
             return Ok(Some(transfer));
         }
@@ -127,7 +135,7 @@ impl EmulebbCore {
     }
 
     pub async fn transfer_sources(&self, hash: &str) -> Result<Option<Vec<TransferSource>>> {
-        if self.transfer(hash).await.is_none() {
+        if self.transfer(hash).await?.is_none() {
             return Ok(None);
         }
         let manifest = self.ed2k_transfers.manifest(hash).await?;
@@ -142,7 +150,7 @@ impl EmulebbCore {
     }
 
     pub async fn transfer_comments(&self, hash: &str) -> Result<Option<Vec<TransferComment>>> {
-        let Some(transfer) = self.transfer(hash).await else {
+        let Some(transfer) = self.transfer(hash).await? else {
             return Ok(None);
         };
         let Some(sources) = self.transfer_sources(hash).await? else {
@@ -166,7 +174,7 @@ impl EmulebbCore {
     /// Transfer details: the transfer plus its per-part breakdown and source
     /// list, mirroring the master `BuildTransferDetailsJson` shape.
     pub async fn transfer_details(&self, hash: &str) -> Result<Option<TransferDetails>> {
-        let Some(cached) = self.transfer(hash).await else {
+        let Some(cached) = self.transfer(hash).await? else {
             return Ok(None);
         };
         let manifest = self.ed2k_transfers.manifest(hash).await?;
@@ -293,7 +301,7 @@ impl EmulebbCore {
 
     pub async fn remove_transfer_source(&self, hash: &str, client_id: &str) -> Result<Option<()>> {
         validate_source_client_id(client_id)?;
-        if self.transfer(hash).await.is_none() {
+        if self.transfer(hash).await?.is_none() {
             return Ok(None);
         }
         if !self.ed2k_transfers.remove_source(hash, client_id).await? {
@@ -316,7 +324,7 @@ impl EmulebbCore {
     }
 
     pub async fn recheck_transfer(&self, hash: &str) -> Result<Option<()>> {
-        let Some(current) = self.transfer(hash).await else {
+        let Some(current) = self.transfer(hash).await? else {
             return Ok(None);
         };
         ensure!(
@@ -363,7 +371,7 @@ impl EmulebbCore {
     }
 
     pub async fn delete_transfer_files(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(transfer) = self.transfer(hash).await else {
+        let Some(transfer) = self.transfer(hash).await? else {
             return Ok(None);
         };
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
@@ -382,7 +390,7 @@ impl EmulebbCore {
     }
 
     pub async fn delete_completed_transfer_row(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(current_transfer) = self.transfer(hash).await else {
+        let Some(current_transfer) = self.transfer(hash).await? else {
             return Ok(None);
         };
         let removed_manifest = self

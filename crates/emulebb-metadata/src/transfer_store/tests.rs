@@ -47,7 +47,7 @@ fn completed_download_manifest() -> MetadataTransferManifest {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
-        category_id: 0,
+        category_id: None,
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
@@ -65,6 +65,80 @@ fn completed_pending_download_manifest() -> MetadataTransferManifest {
     manifest.source_fingerprint = None;
     manifest.payload_fingerprint = Some(fingerprint(manifest.file_size, 91));
     manifest
+}
+
+#[test]
+fn failed_partial_projection_rolls_back_shared_path_withdrawal() {
+    let mut store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_download_manifest();
+    manifest.completed = false;
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute("UPDATE transfers SET comment=?1", ["x".repeat(65_537)])
+        .unwrap();
+    let root =
+        PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR is required"))
+            .join("tmp")
+            .join("projection-rollback");
+    let path = root.join("sample.bin");
+    store
+        .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
+            path: root.to_string_lossy().into_owned(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+    let fingerprint = fingerprint(manifest.file_size, 19);
+    store
+        .upsert_local_file_instance(&path, &manifest.file_hash, &fingerprint)
+        .unwrap();
+    store
+        .replace_root_memberships(
+            &root,
+            &[(
+                path.clone(),
+                PathBuf::from("sample.bin"),
+                fingerprint.clone(),
+            )],
+        )
+        .unwrap();
+    assert!(
+        store
+            .withdraw_shared_path_with_projection(&path, &manifest.file_hash, Some(&fingerprint))
+            .is_err()
+    );
+    assert!(
+        store
+            .next_shared_copy(&manifest.file_hash, 0, 65_536)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn partial_offer_batch_returns_a_bounded_prefix_and_can_resume() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut hashes = Vec::new();
+    for index in 1u8..=5 {
+        let mut manifest = completed_download_manifest();
+        manifest.file_hash = hex::encode([index; 16]);
+        manifest.display_name = format!("{}-{index}", "n".repeat(60_000));
+        manifest.completed = false;
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        hashes.push([index; 16]);
+    }
+    let first = store.try_verified_share_batch(&hashes).unwrap().unwrap();
+    assert_eq!(first.len(), 3);
+    assert!(first.iter().all(|(_, partial)| partial.is_some()));
+    let remainder = store
+        .try_verified_share_batch(&hashes[first.len()..])
+        .unwrap()
+        .unwrap();
+    assert_eq!(remainder.len(), 2);
+    assert!(remainder.iter().all(|(_, partial)| partial.is_some()));
 }
 
 #[test]
@@ -666,7 +740,7 @@ fn upload_demand_counters_persist_on_known_files() {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
-        category_id: 0,
+        category_id: None,
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
@@ -904,7 +978,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
-        category_id: 0,
+        category_id: None,
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
@@ -1183,7 +1257,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
-        category_id: 0,
+        category_id: None,
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Delivered,
@@ -1601,7 +1675,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
-        category_id: 0,
+        category_id: None,
         control_state: None,
         transfer_row_removed: false,
         delivery_state: MetadataTransferDeliveryState::Pending,
@@ -1718,7 +1792,7 @@ fn completed_catalog_supports_hash_keyset_pages() {
                 auto_upload_priority: false,
                 comment: String::new(),
                 rating: 0,
-                category_id: 0,
+                category_id: None,
                 control_state: None,
                 transfer_row_removed: false,
                 delivery_state: MetadataTransferDeliveryState::Pending,

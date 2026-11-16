@@ -1,103 +1,39 @@
-use crate::rest_test_support::*;
+use crate::rest_test_support::{assert_invalid_json_response, test_router};
 
 #[tokio::test]
-async fn category_id_body_uses_canonical_unsigned_validation() {
+async fn category_selector_uses_name_grammar() {
     let app = test_router();
-    let routes = [
-        ("POST", "/api/v1/transfers", r#"{"categoryId":%s}"#),
-        (
-            "PATCH",
-            "/api/v1/transfers/00112233445566778899aabbccddeeff",
-            r#"{"categoryId":%s}"#,
-        ),
-        (
-            "POST",
-            "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
-            r#"{"categoryId":%s}"#,
-        ),
-    ];
-    let cases = [
-        (r#""1""#, "categoryId must be an unsigned number"),
-        ("-1", "categoryId must be an unsigned number"),
-        ("null", "categoryId must be an unsigned number"),
-        ("4294967296", "categoryId is out of range"),
-    ];
-
-    for (method, uri, body_template) in routes {
-        for (value, expected_message) in cases {
-            let body = body_template.replace("%s", value);
-            assert_invalid_json_response(app.clone(), method, uri, body, expected_message).await;
-        }
-    }
-}
-
-#[tokio::test]
-async fn category_name_body_uses_canonical_selector_validation() {
-    let app = test_router();
-    let link = "ed2k://|file|CategoryName.bin|1|00112233445566778899aabbccddeeff|/";
     let routes = [
         (
             "POST",
             "/api/v1/transfers",
-            format!(r#"{{"link":"{link}","categoryName":%s}}"#),
+            r#"{"link":"ed2k://|file|A.bin|1|00112233445566778899aabbccddeeff|/","category":%s}"#,
         ),
         (
             "PATCH",
             "/api/v1/transfers/00112233445566778899aabbccddeeff",
-            r#"{"categoryName":%s}"#.to_string(),
+            r#"{"category":%s}"#,
         ),
         (
             "POST",
             "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
-            r#"{"categoryName":%s}"#.to_string(),
+            r#"{"category":%s}"#,
         ),
     ];
-    let cases = [
-        ("1", "categoryName must be a string"),
-        (
-            r#""   ""#,
-            "categoryName does not match a configured category",
-        ),
-    ];
-
-    for (method, uri, body_template) in routes {
-        for (value, expected_message) in cases {
-            let body = body_template.replace("%s", value);
-            assert_invalid_json_response(app.clone(), method, uri, body, expected_message).await;
+    for (value, message) in [
+        ("1", "category must be a string or null"),
+        (r#""bad name""#, "category must be a valid category name"),
+        (r#""-bad""#, "category must be a valid category name"),
+    ] {
+        for (method, uri, template) in routes {
+            assert_invalid_json_response(
+                app.clone(),
+                method,
+                uri,
+                template.replace("%s", value),
+                message,
+            )
+            .await;
         }
-    }
-}
-
-#[tokio::test]
-async fn category_selector_body_rejects_ambiguous_id_and_name() {
-    let app = test_router();
-    let link = "ed2k://|file|CategorySelector.bin|1|00112233445566778899aabbccddeeff|/";
-    let routes = [
-        (
-            "POST",
-            "/api/v1/transfers",
-            format!(r#"{{"link":"{link}","categoryId":1,"categoryName":"Media"}}"#),
-        ),
-        (
-            "PATCH",
-            "/api/v1/transfers/00112233445566778899aabbccddeeff",
-            r#"{"categoryId":1,"categoryName":"Media"}"#.to_string(),
-        ),
-        (
-            "POST",
-            "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
-            r#"{"categoryId":1,"categoryName":"Media"}"#.to_string(),
-        ),
-    ];
-
-    for (method, uri, body) in routes {
-        assert_invalid_json_response(
-            app.clone(),
-            method,
-            uri,
-            body,
-            "categoryId and categoryName are mutually exclusive",
-        )
-        .await;
     }
 }

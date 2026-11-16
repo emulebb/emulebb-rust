@@ -480,7 +480,11 @@ impl PersistenceOwner {
             tokio::pin!(notified);
             notified.as_mut().enable();
             match self.checkpoint_kad(dht, true).await {
-                Err(PersistenceError::Busy) => notified.await,
+                Err(PersistenceError::Busy) => {
+                    #[cfg(test)]
+                    self.final_quota_wait.notify_one();
+                    notified.await;
+                }
                 other => return other,
             }
         }

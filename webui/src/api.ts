@@ -164,8 +164,7 @@ export type Transfer = {
   downloadSpeedKiBps?: number;
   uploadSpeedKiBps?: number;
   priority?: string;
-  categoryId?: number | null;
-  categoryName?: string | null;
+  category?: string | null;
   sources?: number;
   sourcesTransferring?: number;
   stopped?: boolean;
@@ -432,13 +431,10 @@ export type LogRecord = {
 };
 
 export type Category = {
-  id: number;
   name: string;
-  path?: string | null;
-  comment?: string;
-  priority?: number | string;
-  color?: number | null;
-  [key: string]: unknown;
+  tempDir: string | null;
+  destinationDir: string | null;
+  comment: string;
 };
 
 export type Friend = {

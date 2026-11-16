@@ -9,6 +9,12 @@ struct SharedFilePublicationContext {
     kad_diagnostics: KadPublishDiagnostics,
 }
 
+enum ExplicitRootEdit {
+    Replace(Vec<SharedDirectoryRoot>),
+    Add(String),
+    Remove(String),
+}
+
 impl EmulebbCore {
     /// Reconcile cached hashes with target-native file metadata offline.
     /// Unresolved and changed files are counted but never read or hashed.
@@ -41,42 +47,25 @@ impl EmulebbCore {
     }
 
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
+        self.share_local_file_inner(request, None).await
+    }
+
+    pub(crate) async fn share_local_file_inner(
+        &self,
+        request: LocalShareCreate,
+        progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
+    ) -> Result<LocalShare> {
         let path = Path::new(&request.path);
         let normalized = long_path(path);
         shared_directories::sync_implicit_shared_directory_roots(self).await?;
-        let roots = shared_directories::effective_shared_directory_roots(self).await;
+        let roots = crate::shared_dir_monitor::prepare_ingest_roots(self, &normalized).await?;
         ensure!(
-            roots.iter().any(|root| {
-                root.shareable
-                    && root.accessible
-                    && normalized
-                        .strip_prefix(long_path(Path::new(&root.path)))
-                        .is_ok_and(|relative| !relative.as_os_str().is_empty())
-            }),
+            !roots.is_empty(),
             "local share path is outside accessible shared roots"
         );
         let share = self
-            .share_native_local_file_with_progress(path, request.name, None)
+            .share_native_local_file_with_intent(path, request.name, progress, &roots)
             .await?;
-        let instance = self
-            .metadata_store
-            .local_file_instance(&normalized)?
-            .with_context(|| {
-                format!(
-                    "verified local file missing after ingest: {}",
-                    path.display()
-                )
-            })?;
-        ensure!(
-            crate::shared_dir_monitor::admit_monitored_path(
-                self,
-                &normalized,
-                &instance.verified_fingerprint,
-                &share.hash,
-            )
-            .await?,
-            "verified local file was not admitted by its shared root"
-        );
         self.share(&share.hash)
             .await
             .context("admitted local share is absent from the active library")
@@ -87,6 +76,17 @@ impl EmulebbCore {
         source_path: &Path,
         requested_name: Option<String>,
         progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
+    ) -> Result<LocalShare> {
+        self.share_native_local_file_with_intent(source_path, requested_name, progress, &[])
+            .await
+    }
+
+    pub(crate) async fn share_native_local_file_with_intent(
+        &self,
+        source_path: &Path,
+        requested_name: Option<String>,
+        progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
+        roots: &[emulebb_metadata::MetadataIngestRoot],
     ) -> Result<LocalShare> {
         ensure!(
             !self
@@ -108,30 +108,20 @@ impl EmulebbCore {
                 .display_file_name()
                 .ok_or_else(|| anyhow::anyhow!("local share path has no valid file name"))?,
         };
-        let summary = match progress {
-            Some(progress) => {
-                self.ed2k_transfers
-                    .ingest_local_file_with_progress(source_path, &display_name, progress)
-                    .await?
-            }
-            None => {
-                self.ed2k_transfers
-                    .ingest_local_file(source_path, &display_name)
-                    .await?
-            }
-        };
-        self.index.lock().await.upsert_file(
-            &IndexedFile {
-                ed2k_hash: summary.file_hash.clone(),
-                name: summary.display_name.clone(),
-                size_bytes: summary.file_size,
-                content_type: ed2k_file_type_search_term(&summary.display_name)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                availability_score: 1,
-            },
-            emulebb_index::IndexedFileOrigin::LocalShare,
-        )?;
+        let summary = self
+            .ed2k_transfers
+            .ingest_local_file_owned(
+                source_path,
+                &display_name,
+                progress,
+                emulebb_ed2k::ed2k_transfer::LocalIngestOptions {
+                    roots,
+                    index_type: Some(
+                        ed2k_file_type_search_term(&display_name).unwrap_or("unknown"),
+                    ),
+                },
+            )
+            .await?;
         self.queue_ed2k_shared_catalog_publish();
         Ok(local_share_from_summary(summary))
     }
@@ -441,15 +431,9 @@ impl EmulebbCore {
         Ok(self.share(hash).await)
     }
 
+    /// Return the last health observations published by the monitor or scan.
     pub async fn shared_directories(&self) -> SharedDirectories {
-        let roots = self
-            .state
-            .lock()
-            .await
-            .shared_directories
-            .iter()
-            .map(refresh_shared_directory_row)
-            .collect::<Vec<_>>();
+        let roots = self.state.lock().await.shared_directories.clone();
         SharedDirectories {
             roots,
             // Files still pending the initial hash in the background reload worker.
@@ -524,10 +508,19 @@ impl EmulebbCore {
             request.confirm_replace_roots,
             "confirmReplaceRoots must be true"
         );
+        let paths = request.roots.into_iter().map(|root| root.path).collect();
+        let crate::shared_dir_monitor::RootIoResult::Canonical(paths) =
+            crate::shared_dir_monitor::run_root_io(
+                self,
+                crate::shared_dir_monitor::RootIoRequest::Canonical(paths),
+            )
+            .await?
+        else {
+            unreachable!()
+        };
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
-        for root in request.roots {
-            let canonical_path = canonical_shared_directory_root(&root.path)?;
+        for canonical_path in paths {
             if seen.insert(canonical_path.clone()) {
                 roots.push(SharedDirectoryRoot {
                     path: canonical_path,
@@ -537,89 +530,107 @@ impl EmulebbCore {
                 });
             }
         }
-        self.replace_shared_directory_roots(roots).await
+        self.replace_shared_directory_roots(ExplicitRootEdit::Replace(roots))
+            .await
     }
 
     pub async fn add_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
-        let canonical_path = canonical_shared_directory_root(path)?;
-        let mut roots = self.state.lock().await.shared_directories.clone();
-        roots.push(SharedDirectoryRoot {
-            path: canonical_path,
-            monitor_owned: false,
-            shareable: true,
-            accessible: true,
-        });
-        self.replace_shared_directory_roots(roots).await
+        let crate::shared_dir_monitor::RootIoResult::Canonical(mut paths) =
+            crate::shared_dir_monitor::run_root_io(
+                self,
+                crate::shared_dir_monitor::RootIoRequest::Canonical(vec![path.to_owned()]),
+            )
+            .await?
+        else {
+            unreachable!()
+        };
+        let canonical_path = paths.pop().expect("one canonical root");
+        self.replace_shared_directory_roots(ExplicitRootEdit::Add(canonical_path))
+            .await
     }
 
     pub async fn remove_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
-        let canonical_path = removable_shared_directory_root(path)?;
-        let key = shared_directories::shared_root_comparison_key(Path::new(&canonical_path));
-        let roots = self
-            .state
-            .lock()
+        self.replace_shared_directory_roots(ExplicitRootEdit::Remove(path.to_owned()))
             .await
-            .shared_directories
-            .iter()
-            .filter(|root| {
-                shared_directories::shared_root_comparison_key(Path::new(&root.path)) != key
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        self.replace_shared_directory_roots(roots).await
     }
 
     async fn replace_shared_directory_roots(
         &self,
-        roots: Vec<SharedDirectoryRoot>,
+        edit: ExplicitRootEdit,
     ) -> Result<SharedDirectories> {
-        let implicit = shared_directories::implicit_shared_directory_roots(self).await;
-        let implicit_paths: HashSet<_> = implicit.iter().map(|root| root.path.clone()).collect();
-        // Mandatory Incoming/category roots retain their own origins. They
-        // cover explicit children without becoming editable explicit roots.
-        let roots = consolidate_shared_directory_roots(
-            implicit
-                .into_iter()
-                .chain(
+        shared_directories::sync_implicit_shared_directory_roots(self).await?;
+        loop {
+            let expected = self.state.lock().await.shared_directories.clone();
+            let roots = match &edit {
+                ExplicitRootEdit::Replace(roots) => roots.clone(),
+                ExplicitRootEdit::Add(path) => {
+                    let mut roots = expected.clone();
+                    roots.push(SharedDirectoryRoot {
+                        path: path.clone(),
+                        monitor_owned: false,
+                        shareable: true,
+                        accessible: true,
+                    });
                     roots
-                        .into_iter()
-                        .map(|root| refresh_shared_directory_row(&root)),
-                )
-                .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
-                    path: root.path,
-                    monitor_owned: root.monitor_owned,
-                    shareable: root.shareable,
-                    accessible: root.accessible,
-                }),
-        )
-        .into_iter()
-        .filter(|root| !implicit_paths.contains(&root.path))
-        .map(|root| SharedDirectoryRoot {
-            path: root.path,
-            monitor_owned: root.monitor_owned,
-            shareable: root.shareable,
-            accessible: root.accessible,
-        })
-        .collect::<Vec<_>>();
-        let unchanged = self.state.lock().await.shared_directories == roots;
-        if unchanged {
-            return Ok(self.shared_directories().await);
-        }
-        self.index.lock().await.replace_shared_directory_roots(
-            &roots
+                }
+                ExplicitRootEdit::Remove(path) => {
+                    let crate::shared_dir_monitor::RootIoResult::Remaining(roots) =
+                        crate::shared_dir_monitor::run_root_io(
+                            self,
+                            crate::shared_dir_monitor::RootIoRequest::Remove(
+                                path.clone(),
+                                expected.clone(),
+                            ),
+                        )
+                        .await?
+                    else {
+                        unreachable!()
+                    };
+                    roots
+                }
+            };
+            let implicit = shared_directories::implicit_shared_directory_roots(self).await?;
+            let implicit_paths: HashSet<_> =
+                implicit.iter().map(|root| root.path.clone()).collect();
+            let first_explicit = implicit.len();
+            let candidates = implicit
                 .iter()
-                .map(shared_directory_to_index)
-                .collect::<Vec<_>>(),
-        )?;
-        self.state.lock().await.shared_directories = roots;
-        // Re-establish the live auto-pickup watch set for the new roots (it stops
-        // the previous monitor first), matching eMule re-monitoring on reconfigure.
-        // The monitor only auto-picks-up *newly arriving* files; files already
-        // present under the new roots still need the initial hash, so kick a
-        // detached background scan + hash (progress in `hashingCount`).
-        self.start_shared_directory_monitor().await;
-        self.reload_shared_directories_detached().await?;
-        Ok(self.shared_directories().await)
+                .cloned()
+                .chain(roots.iter().cloned())
+                .collect();
+            let crate::shared_dir_monitor::RootIoResult::Inspected(prepared) =
+                crate::shared_dir_monitor::run_root_io(
+                    self,
+                    crate::shared_dir_monitor::RootIoRequest::Replace(candidates, first_explicit),
+                )
+                .await?
+            else {
+                unreachable!()
+            };
+            let prepared = prepared
+                .into_iter()
+                .map(|(root, _)| root)
+                .filter(|root| !implicit_paths.contains(&root.path))
+                .collect::<Vec<_>>();
+            let owner = self
+                .persistence_owner
+                .owner(&self.metadata_store, &self.state)?;
+            if owner
+                .replace_explicit_roots(
+                    crate::persistence_owner::category::CategoryCommand::ReplaceRoots {
+                        expected,
+                        implicit,
+                        proposed: prepared,
+                        sharing: self.category_sharing_context(),
+                        reload: None,
+                    },
+                    Some(self),
+                )
+                .await?
+            {
+                return Ok(self.shared_directories().await);
+            }
+        }
     }
 
     /// Synchronous core primitive: scan + hash + share the whole library, blocking
@@ -642,8 +653,8 @@ impl EmulebbCore {
     }
 
     /// Stop the live shared-directory monitor (if running). Idempotent.
-    pub fn stop_shared_directory_monitor(&self) {
-        shared_dir_monitor::stop_shared_directory_monitor(self);
+    pub async fn stop_shared_directory_monitor(&self) -> Result<()> {
+        shared_dir_monitor::stop_shared_directory_monitor(self).await
     }
 }
 
@@ -747,7 +758,7 @@ fn kad_source_publication_status(
     }
 }
 
-fn canonical_shared_directory_root(path: &str) -> Result<String> {
+pub(crate) fn canonical_shared_directory_root(path: &str) -> Result<String> {
     let path = path.trim();
     ensure!(!path.is_empty(), "path must not be empty");
     let canonical = fs::canonicalize(long_path(Path::new(path)))
@@ -758,7 +769,7 @@ fn canonical_shared_directory_root(path: &str) -> Result<String> {
     Ok(normal_path_display(canonical.display().to_string()))
 }
 
-fn removable_shared_directory_root(path: &str) -> Result<String> {
+pub(crate) fn removable_shared_directory_root(path: &str) -> Result<String> {
     let path = path.trim();
     ensure!(!path.is_empty(), "path must not be empty");
     match fs::canonicalize(long_path(Path::new(path))) {

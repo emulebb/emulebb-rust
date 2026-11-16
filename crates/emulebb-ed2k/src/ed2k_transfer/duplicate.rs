@@ -239,12 +239,24 @@ impl Ed2kTransferRuntime {
         let metadata = self.metadata.clone();
         let file_hash = file_hash.to_string();
         tokio::task::spawn_blocking(move || {
-            let source = first_present_source(metadata.current_shared_files_by_hash(&file_hash)?);
-            if let Some(source) = source
-                && metadata
-                    .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
-            {
-                return Ok(Some(source));
+            let mut cursor = 0;
+            while let Some(candidate) = metadata.next_shared_copy(&file_hash, cursor, 65_536)? {
+                cursor = candidate.path_id;
+                if !super::shared_catalog::category_copy_matches(&candidate) {
+                    continue;
+                }
+                let Some(fingerprint) = candidate.source_fingerprint else {
+                    continue;
+                };
+                if metadata
+                    .mark_session_verified_local_path(&candidate.source_path, &fingerprint)?
+                {
+                    return Ok(Some(PresentSharedSource {
+                        path: crate::long_path::long_path(&candidate.source_path),
+                        metadata_path: candidate.source_path,
+                        fingerprint,
+                    }));
+                }
             }
             Ok(None)
         })
@@ -569,10 +581,41 @@ mod tests {
         drop(catalog);
         assert!(!runtime.manifest(&shared.file_hash).await.unwrap().completed);
 
+        let root_mutation = runtime.begin_category_root_mutation().await.unwrap();
         runtime
             .metadata
             .withdraw_local_file_path(&crate::long_path::long_path(&shared_path))
             .unwrap();
+        drop(root_mutation);
+        let manifest_guard = runtime.lock_manifest(&shared.file_hash).await;
+        let admitted = runtime
+            .authorize_serving_view_unlocked(&shared.file_hash, Some(local))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !admitted.completed,
+            "a stale complete view must fall back to the independent partial source"
+        );
+        drop(manifest_guard);
+        let partial = runtime.serving_view(&shared.file_hash).await.unwrap();
+        assert!(!partial.completed);
+        let hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
+        assert_eq!(
+            runtime
+                .read_verified_range(&hash, 0, 16)
+                .await
+                .unwrap()
+                .unwrap(),
+            payload[..16]
+        );
+        assert!(
+            runtime
+                .read_verified_range(&hash, ED2K_PART_SIZE, ED2K_PART_SIZE + 16)
+                .await
+                .unwrap()
+                .is_none()
+        );
         runtime
             .refresh_shared_catalog_entry(&shared.file_hash)
             .await

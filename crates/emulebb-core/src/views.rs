@@ -136,8 +136,8 @@ pub(crate) fn transfer_from_manifest(
         upload_speed_ki_bps: 0.0,
         stopped,
         priority: "normal".to_string(),
-        category_id: 0,
-        category_name: default_transfer_category_name().to_string(),
+        category_id: None,
+        category_name: None,
         eta,
         added_at: None,
         completed_at: None,
@@ -217,7 +217,7 @@ pub(crate) fn validate_transfer_update_family(request: &TransferUpdate) -> Resul
     }
     ensure!(
         mutation_family_count != 0,
-        "transfer PATCH requires priority, categoryId, categoryName, or name"
+        "transfer PATCH requires priority, category, or name"
     );
     ensure!(
         mutation_family_count == 1,
@@ -265,23 +265,19 @@ pub(crate) fn normalize_transfer_name(name: Option<String>) -> Result<String> {
     Ok(name.to_string())
 }
 
-pub(crate) fn default_transfer_category_name() -> &'static str {
-    "All"
-}
-
 pub(crate) fn ensure_category_selector_is_unambiguous(
-    category_id: Option<u32>,
+    category_id: Option<i64>,
     category_name: Option<&str>,
 ) -> Result<()> {
     ensure!(
         category_id.is_none() || category_name.is_none(),
-        "categoryId and categoryName are mutually exclusive"
+        "category selectors are mutually exclusive"
     );
     ensure!(
         category_name
-            .map(|value| !value.trim().is_empty())
+            .map(emulebb_metadata::valid_category_name)
             .unwrap_or(true),
-        "categoryName must not be empty"
+        "category must be a valid category name"
     );
     Ok(())
 }

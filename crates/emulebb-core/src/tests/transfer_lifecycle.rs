@@ -1,6 +1,266 @@
 use super::*;
 
 #[tokio::test]
+async fn retained_category_entry_wakes_the_real_server_publish_pump() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = unique_runtime_dir("category-keep-server-pump");
+    let shared_path = root.join("kept.bin");
+    fs::write(&shared_path, b"category retained share").unwrap();
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let mut network = test_network_config_with_store(
+        &root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.egress_route = emulebb_ed2k::networking::EgressRoute::DirectSystemRoute;
+    network.vpn_guard.mode = "off".into();
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.kad_bind_addr = "127.0.0.1:0".parse().unwrap();
+    network.listen_port = 0;
+    network.p2p_bind_ip = None;
+    network.nat_config.enabled = false;
+    network.ed2k.enable_udp_reask = false;
+    // WHY: metadata-poor endpoints are probed with crypt negotiation first
+    // when enabled; this owned mock implements a plaintext server login.
+    network.ed2k.obfuscation_enabled = false;
+    network.ed2k.server_endpoints = vec![endpoint.to_string()];
+    network.ed2k.offer_files_capability_enabled = false;
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+    // WHY: Kad or UDP reask would start public STUN probes even with NAT
+    // mapping disabled. This fixture owns only its loopback eD2K server.
+    core.update_core_settings(CoreSettingsUpdate {
+        network_kademlia: Some(false),
+        ..CoreSettingsUpdate::default()
+    })
+    .await
+    .unwrap();
+    configure_test_shared_root(&core, &shared_path).await;
+    let share = core
+        .share_local_file(LocalShareCreate {
+            path: shared_path.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let hash: Ed2kHash = share.hash.parse().unwrap();
+    assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+    assert!(
+        core.ed2k_transfers
+            .shared_catalog()
+            .read()
+            .await
+            .entry_by_hash(&hash)
+            .is_some_and(|entry| entry.verified_complete)
+    );
+    let shared_root = PathBuf::from(&core.state.lock().await.shared_directories[0].path);
+    let change = core
+        .ed2k_transfers
+        .begin_category_root_mutation()
+        .await
+        .unwrap();
+    assert!(
+        core.metadata_store
+            .set_shared_root_accessible(&shared_root, false)
+            .unwrap()
+    );
+    drop(change);
+    assert_eq!(
+        core.metadata_store.active_shared_content_count().unwrap(),
+        0
+    );
+    assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+
+    let (offer_sent, mut offer_received) = tokio::sync::oneshot::channel();
+    let (release_server, server_release) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("owned server did not receive a TCP connection")
+            .unwrap();
+        let mut header = [0u8; 6];
+        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header))
+            .await
+            .expect("owned server did not receive the login header")
+            .unwrap();
+        assert_eq!(header[0], 0xe3, "mock requires plaintext eD2K framing");
+        assert_eq!(header[5], 0x01, "mock requires OP_LOGINREQUEST first");
+        let length = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
+        assert!((1..=65_536).contains(&length), "invalid mock login length");
+        let mut login = vec![0; length - 1];
+        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut login))
+            .await
+            .expect("owned server did not receive the complete login body")
+            .unwrap();
+        // OP_IDCHANGE assigns a high ID on the existing loopback server session.
+        stream
+            .write_all(&[0xe3, 5, 0, 0, 0, 0x40, 0x10, 0x20, 0x30, 0x40])
+            .await
+            .unwrap();
+        loop {
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], 0xe3, "mock requires plaintext eD2K framing");
+            let length = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
+            assert!((1..=65_536).contains(&length), "invalid mock packet length");
+            let mut payload = vec![0; length - 1];
+            stream.read_exact(&mut payload).await.unwrap();
+            if header[5] == 0x15 {
+                assert!(payload.len() >= 4, "short offer-files packet");
+                if u32::from_le_bytes(payload[..4].try_into().unwrap()) == 0 {
+                    continue;
+                }
+                offer_sent.send(payload).unwrap();
+                // WHY: closing the mock here races the public session mirror
+                // and can erase the publish counters before the test sees them.
+                let _ = server_release.await;
+                return;
+            }
+        }
+    });
+    core.connect_ed2k_server(&endpoint.to_string())
+        .await
+        .unwrap()
+        .expect("owned loopback server is configured and enabled");
+    let suppressed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match offer_received.try_recv() {
+                Ok(payload) => panic!(
+                    "nonempty offer while root is ineligible: bytes={}, {}",
+                    payload.len(),
+                    category_keep_publish_snapshot(&core).await
+                ),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => panic!(
+                    "owned server stopped before suppressed rotation: {}",
+                    category_keep_publish_snapshot(&core).await
+                ),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+            let state = {
+                let runtime = core.ed2k_runtime.lock().await;
+                Arc::clone(&runtime.as_ref().unwrap().server_state)
+            };
+            let state = state.read().await;
+            if state.connected
+                && state.offer_files_pending_entries == 1
+                && state.offer_files_published_entries == 0
+            {
+                break;
+            }
+            drop(state);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        suppressed.is_ok(),
+        "the real session did not finish its suppressed rotation: {}",
+        category_keep_publish_snapshot(&core).await
+    );
+    assert!(matches!(
+        offer_received.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let change = core
+        .ed2k_transfers
+        .begin_category_root_mutation()
+        .await
+        .unwrap();
+    core.metadata_store
+        .set_shared_root_accessible(&shared_root, true)
+        .unwrap();
+    let native_path = emulebb_ed2k::long_path::long_path(&shared_path);
+    let native_root = emulebb_ed2k::long_path::long_path(&shared_root);
+    let fingerprint = core
+        .metadata_store
+        .local_file_instance(&native_path)
+        .unwrap()
+        .unwrap()
+        .verified_fingerprint;
+    assert!(
+        core.metadata_store
+            .admit_local_path_to_root(
+                &shared_root,
+                &native_path,
+                native_path.strip_prefix(&native_root).unwrap(),
+                &fingerprint,
+            )
+            .unwrap()
+    );
+    drop(change);
+    let watch = core
+        .ed2k_transfers
+        .watch_category_catalog_hash(hash.0)
+        .await
+        .unwrap();
+    assert!(
+        core.ed2k_transfers
+            .publish_category_catalog_decision(
+                hash.0,
+                watch,
+                emulebb_ed2k::ed2k_transfer::CategoryCatalogDecision::Keep,
+            )
+            .await
+            .unwrap()
+    );
+    let offer = tokio::time::timeout(Duration::from_secs(75), offer_received).await;
+    assert!(
+        offer.is_ok(),
+        "retained eligibility did not wake the real publish pump: {}",
+        category_keep_publish_snapshot(&core).await
+    );
+    let payload = offer.unwrap().expect("owned server stopped before offer");
+    assert_eq!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 1);
+    assert_eq!(&payload[4..20], &hash.0);
+    core.disconnect_ed2k().await.unwrap();
+    core.drain_persistence().await.unwrap();
+    release_server.send(()).unwrap();
+    server.await.unwrap();
+}
+
+async fn category_keep_publish_snapshot(core: &EmulebbCore) -> String {
+    let state = core
+        .ed2k_runtime
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| Arc::clone(&runtime.server_state));
+    let session = if let Some(state) = state {
+        let state = state.read().await;
+        Some((
+            state.connected,
+            state.connecting,
+            state.offer_files_pending_entries,
+            state.offer_files_published_entries,
+            state.offer_files_mode.clone(),
+        ))
+    } else {
+        None
+    };
+    let publish = ed2k_publish_diagnostics::snapshot(&core.ed2k_publish_diagnostics);
+    format!(
+        "session(connected,connecting,pending,published,mode)={session:?}, catalog={}, durable={:?}, publisher(phase,running,dirty,total,pending,published)=({},{},{},{},{},{})",
+        core.ed2k_transfers.shared_catalog_count().await,
+        core.metadata_store.active_shared_content_count(),
+        publish.phase,
+        publish.running,
+        publish.dirty,
+        publish.total_entries,
+        publish.pending_entries,
+        publish.published_entries,
+    )
+}
+
+#[tokio::test]
 async fn transfer_details_refresh_verified_parts_without_a_state_change() {
     let runtime_dir = unique_runtime_dir("emulebb-core-details-verified-parts");
     let core = EmulebbCore::new(
@@ -29,8 +289,8 @@ async fn transfer_details_refresh_verified_parts_without_a_state_change() {
         let cached = state.transfers.get_mut(&hash).unwrap();
         assert_eq!(cached.parts_obtained, 0);
         cached.priority = "high".to_string();
-        cached.category_id = 7;
-        cached.category_name = "Sample Category".to_string();
+        cached.category_id = Some(7);
+        cached.category_name = Some("Sample-Category".to_string());
     }
     core.ed2k_transfers
         .store_md4_hashset(&hash, hashset)
@@ -48,8 +308,11 @@ async fn transfer_details_refresh_verified_parts_without_a_state_change() {
     assert_eq!(details.transfer.completed_bytes, part.len() as u64);
     assert_eq!(details.transfer.state, "paused");
     assert_eq!(details.transfer.priority, "high");
-    assert_eq!(details.transfer.category_id, 7);
-    assert_eq!(details.transfer.category_name, "Sample Category");
+    assert_eq!(details.transfer.category_id, Some(7));
+    assert_eq!(
+        details.transfer.category_name.as_deref(),
+        Some("Sample-Category")
+    );
 }
 
 #[test]
@@ -308,7 +571,7 @@ async fn download_search_result_rejects_missing_file_size() {
         .unwrap_err();
 
     assert_eq!(error.to_string(), "search result has no usable file size");
-    assert!(core.transfer(file_hash).await.is_none());
+    assert!(core.transfer(file_hash).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -408,6 +671,7 @@ async fn create_transfer_uses_canonical_link_and_paused_state() {
         reloaded
             .transfer("00112233445566778899aabbccddeeff")
             .await
+            .unwrap()
             .unwrap()
             .state,
         "paused"
@@ -609,7 +873,7 @@ async fn active_duplicate_rejects_batch_before_any_new_transfer_is_created() {
     assert!(conflict.conflicts.iter().any(|item| {
         item.kind == DownloadConflictKind::ActiveTransfer && !item.redownload_allowed
     }));
-    assert!(core.transfer(new_hash).await.is_none());
+    assert!(core.transfer(new_hash).await.unwrap().is_none());
 
     let override_error = core
         .create_transfer(TransferCreate {
@@ -698,7 +962,7 @@ async fn removed_completed_download_requires_explicit_redownload_without_stale_p
     assert!(history.first_completed_at_ms.is_some());
     assert!(history.last_completed_at_ms.is_some());
     assert!(history.redownload_allowed);
-    assert!(core.transfer(&file_hash).await.is_none());
+    assert!(core.transfer(&file_hash).await.unwrap().is_none());
 
     let redownload = core
         .create_transfer(TransferCreate {
@@ -727,14 +991,11 @@ fn transfer_create_rejects_legacy_ed2k_link_field() {
 }
 
 #[test]
-fn category_id_selector_ignores_malformed_category_name_like_master() {
+fn category_selector_rejects_non_string_name() {
     let request = serde_json::from_str::<TransferCreate>(
-        r#"{"link":"ed2k://|file|Selector.bin|1|00112233445566778899aabbccddeeff|/","categoryId":0,"categoryName":1}"#,
-    )
-    .unwrap();
-
-    assert_eq!(request.category_id, Some(0));
-    assert_eq!(request.category_name, None);
+        r#"{"link":"ed2k://|file|Selector.bin|1|00112233445566778899aabbccddeeff|/","category":1}"#,
+    );
+    assert!(request.is_err());
 }
 
 #[tokio::test]
@@ -766,7 +1027,7 @@ async fn delete_transfer_files_removes_manifest_and_transfer_row() {
 
     assert_eq!(deleted.hash, transfer.hash);
     assert!(!transfer_dir.exists());
-    assert!(core.transfer(&transfer.hash).await.is_none());
+    assert!(core.transfer(&transfer.hash).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -809,7 +1070,7 @@ async fn completed_delivery_retires_transfer_without_deleting_local_file() {
         .unwrap();
     assert_eq!(awaiting_delivery.state, "completing");
     core.deliver_completed_transfer(&file_hash).await;
-    assert!(core.transfer(&file_hash).await.is_none());
+    assert!(core.transfer(&file_hash).await.unwrap().is_none());
     assert!(core.share(&file_hash).await.is_some());
     let delivered_path = incoming_dir.join("Delivered.Delete.bin");
     assert_eq!(std::fs::read(&delivered_path).unwrap(), payload);
@@ -837,7 +1098,7 @@ async fn completed_delivery_retires_transfer_without_deleting_local_file() {
         delivered_path.exists(),
         "retired download actions must not delete local shared content"
     );
-    assert!(core.transfer(&file_hash).await.is_none());
+    assert!(core.transfer(&file_hash).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -879,7 +1140,7 @@ async fn completed_download_is_history_only_after_restart() {
             .await
             .unwrap();
         core.deliver_completed_transfer(&file_hash).await;
-        assert!(core.transfer(&file_hash).await.is_none());
+        assert!(core.transfer(&file_hash).await.unwrap().is_none());
     }
 
     let reloaded = EmulebbCore::new(
@@ -889,7 +1150,7 @@ async fn completed_download_is_history_only_after_restart() {
     )
     .unwrap()
     .with_incoming_dir(incoming_dir.clone());
-    assert!(reloaded.transfers().await.is_empty());
+    assert!(reloaded.transfers().await.unwrap().is_empty());
     let evidence = reloaded
         .ed2k_transfers
         .download_evidence(&file_hash)
@@ -910,7 +1171,13 @@ async fn completed_download_is_history_only_after_restart() {
         .await
         .unwrap();
 
-    assert!(clear_without_prior_lookup.transfers().await.is_empty());
+    assert!(
+        clear_without_prior_lookup
+            .transfers()
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(incoming_dir.join("Persisted.Completed.bin").exists());
     let final_reload = EmulebbCore::new(
         "test",
@@ -919,7 +1186,7 @@ async fn completed_download_is_history_only_after_restart() {
     )
     .unwrap()
     .with_incoming_dir(incoming_dir);
-    assert!(final_reload.transfers().await.is_empty());
+    assert!(final_reload.transfers().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -992,7 +1259,7 @@ async fn retired_download_does_not_redeliver_replaced_local_output() {
         unrelated_replacement
     );
     assert!(!redelivered_path.exists());
-    assert!(reloaded.transfer(&file_hash).await.is_none());
+    assert!(reloaded.transfer(&file_hash).await.unwrap().is_none());
     assert!(reloaded.share(&file_hash).await.is_none());
 }
 
@@ -1065,7 +1332,7 @@ async fn retired_delivery_is_not_subject_to_transfer_deletion_recovery() {
             .unwrap(),
         0
     );
-    assert!(reloaded.transfers().await.is_empty());
+    assert!(reloaded.transfers().await.unwrap().is_empty());
     assert!(delivered_path.exists());
     assert!(
         reloaded
@@ -1112,13 +1379,13 @@ async fn delivery_failure_stays_completing_and_clears_after_retry() {
         .unwrap();
 
     core.deliver_completed_transfer(&file_hash).await;
-    let failed = core.transfer(&file_hash).await.unwrap();
+    let failed = core.transfer(&file_hash).await.unwrap().unwrap();
     assert_eq!(failed.state, "completing");
     assert!(failed.delivery_error.is_some());
 
     std::fs::remove_file(&blocked_incoming).unwrap();
     core.deliver_completed_transfer(&file_hash).await;
-    assert!(core.transfer(&file_hash).await.is_none());
+    assert!(core.transfer(&file_hash).await.unwrap().is_none());
     assert!(core.share(&file_hash).await.is_some());
     assert!(blocked_incoming.join("Retry.bin").exists());
 }
@@ -1307,8 +1574,8 @@ async fn verified_local_share_survives_restart_without_transfer_row() {
             .unwrap()
             .is_none()
     );
-    assert!(core.transfer(&share.hash).await.is_none());
-    assert!(core.transfers().await.is_empty());
+    assert!(core.transfer(&share.hash).await.unwrap().is_none());
+    assert!(core.transfers().await.unwrap().is_empty());
 
     let reloaded = EmulebbCore::new(
         "test",
@@ -1316,8 +1583,8 @@ async fn verified_local_share_survives_restart_without_transfer_row() {
         &transfer_root,
     )
     .unwrap();
-    assert!(reloaded.transfer(&share.hash).await.is_none());
-    assert!(reloaded.transfers().await.is_empty());
+    assert!(reloaded.transfer(&share.hash).await.unwrap().is_none());
+    assert!(reloaded.transfers().await.unwrap().is_empty());
     assert!(
         reloaded
             .shares()
@@ -1345,7 +1612,7 @@ async fn verified_local_share_survives_restart_without_transfer_row() {
         .await
         .unwrap();
     assert_eq!(restored.hash, share.hash);
-    assert!(reloaded.transfer(&share.hash).await.is_some());
+    assert!(reloaded.transfer(&share.hash).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1376,7 +1643,7 @@ async fn delete_completed_transfer_row_rejects_incomplete_transfer() {
             .to_string()
             .contains("only completed transfers can be removed without deleting files")
     );
-    assert!(core.transfer(&transfer.hash).await.is_some());
+    assert!(core.transfer(&transfer.hash).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1421,7 +1688,10 @@ async fn delete_completed_transfer_row_rejects_pending_delivery() {
         .unwrap_err();
 
     assert!(error.to_string().contains("must be delivered"));
-    assert_eq!(core.transfer(&file_hash).await.unwrap().state, "completing");
+    assert_eq!(
+        core.transfer(&file_hash).await.unwrap().unwrap().state,
+        "completing"
+    );
     assert!(
         !core
             .ed2k_transfers
@@ -1463,7 +1733,7 @@ async fn delayed_background_result_preserves_explicit_pause_and_stop() {
             .unwrap();
         assert_eq!(refreshed.state, "paused");
         assert_eq!(refreshed.stopped, stopped);
-        let current = core.transfer(&transfer.hash).await.unwrap();
+        let current = core.transfer(&transfer.hash).await.unwrap().unwrap();
         assert_eq!(current.state, "paused");
         assert_eq!(current.stopped, stopped);
         assert_eq!(
@@ -1595,7 +1865,7 @@ async fn stopped_transfer_state_survives_restart() {
         &transfer_root,
     )
     .unwrap();
-    let reloaded_transfer = reloaded.transfer(&transfer.hash).await.unwrap();
+    let reloaded_transfer = reloaded.transfer(&transfer.hash).await.unwrap().unwrap();
 
     // Master parity: a stopped transfer reports the `paused` state plus a
     // separate `stopped` flag (not a distinct `stopped` state token).
@@ -1638,7 +1908,7 @@ async fn shared_files_require_explicit_redownload_and_remain_shared() {
         &transfer_root,
     )
     .unwrap();
-    assert!(reloaded.transfers().await.is_empty());
+    assert!(reloaded.transfers().await.unwrap().is_empty());
     assert!(
         reloaded
             .shares()
@@ -1665,7 +1935,7 @@ async fn shared_files_require_explicit_redownload_and_remain_shared() {
     assert!(present.redownload_allowed);
     assert_eq!(present.current_paths.len(), 1);
     assert_eq!(std::fs::read(&present.current_paths[0]).unwrap(), payload);
-    assert!(reloaded.transfers().await.is_empty());
+    assert!(reloaded.transfers().await.unwrap().is_empty());
 
     let redownload = reloaded
         .create_transfer(TransferCreate {

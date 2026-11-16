@@ -1,6 +1,9 @@
 //! Bounded ordered persistence for durable mutations.
 
 use std::{
+    collections::VecDeque,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex as StdMutex, mpsc},
     time::Instant,
 };
@@ -12,6 +15,7 @@ use emulebb_metadata::{
     KAD_ROUTING_MAX_CONTACTS, KadNodeId, KadRoutingContact, KadRoutingSnapshot, MetadataStore,
 };
 
+pub(crate) mod category;
 mod kad;
 
 #[cfg(test)]
@@ -39,6 +43,7 @@ pub enum PersistenceError {
     Storage(String),
     Worker,
     CommittedAfterWorkerFailure,
+    CommittedPublicationFailed,
     CommitUnknown,
 }
 
@@ -53,6 +58,9 @@ impl std::fmt::Display for PersistenceError {
             Self::CommittedAfterWorkerFailure => {
                 f.write_str("persistence committed despite a worker failure")
             }
+            Self::CommittedPublicationFailed => {
+                f.write_str("persistence committed but derived publication did not complete")
+            }
             Self::CommitUnknown => {
                 f.write_str("persistence outcome is unknown after a worker failure")
             }
@@ -61,9 +69,19 @@ impl std::fmt::Display for PersistenceError {
 }
 impl std::error::Error for PersistenceError {}
 
+#[derive(Debug, Clone, Copy)]
+pub struct CategoryNameConflict;
+impl std::fmt::Display for CategoryNameConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("category name already exists")
+    }
+}
+impl std::error::Error for CategoryNameConflict {}
+
 enum Command {
     Add { hash: String, name: String },
     Delete { hash: String },
+    Category(category::CategoryCommand),
     KadLoad,
     KadIdentity,
     KadAttach(DhtNode),
@@ -73,6 +91,8 @@ enum Command {
 
 enum Response {
     Friend(Option<Friend>),
+    Category(Result<Option<crate::Category>, CategoryNameConflict>),
+    Roots(bool),
     KadLoaded(LeasedKadSnapshot),
     KadIdentity(KadNodeId),
     KadAttached(KadAttachGuard),
@@ -99,6 +119,12 @@ struct Request {
     enqueued: Instant,
     handoff: Option<oneshot::Receiver<()>>,
     released: oneshot::Sender<()>,
+}
+
+struct ActiveCategory {
+    request: Request,
+    result: Result<Response, PersistenceError>,
+    completion: Pin<Box<dyn Future<Output = Result<(), PersistenceError>> + Send>>,
 }
 
 /// Dropping an uncommitted startup handoff retires its unpublished DHT.
@@ -131,7 +157,7 @@ struct Permit {
     bytes: usize,
 }
 
-struct ByteLease {
+pub(crate) struct ByteLease {
     quota: Arc<StdMutex<Quota>>,
     bytes: usize,
 }
@@ -230,6 +256,7 @@ impl Drop for Permit {
 enum DbCommand {
     Add(Friend),
     Delete(Friend),
+    Category(category::CategoryDbCommand),
     KadLoad,
     KadIdentity,
     KadReplace {
@@ -258,6 +285,7 @@ enum KadMergeOutcome {
 
 enum DbResponse {
     Friend(Friend, bool),
+    Category(category::CategoryWrite),
     KadLoaded(KadRoutingSnapshot),
     KadIdentity(KadNodeId),
     KadReplaced(Option<i64>),
@@ -356,6 +384,10 @@ pub(crate) struct PersistenceOwner {
     publication_gate: Arc<StdMutex<Option<Arc<PublicationGate>>>>,
     #[cfg(test)]
     worker_started: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    category_page_gate: Arc<StdMutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>>,
+    #[cfg(test)]
+    final_quota_wait: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(test)]
@@ -388,10 +420,48 @@ impl PersistenceOwner {
         let publication_gate = Arc::new(StdMutex::new(None::<Arc<PublicationGate>>));
         #[cfg(test)]
         let coordinator_gate = Arc::clone(&publication_gate);
+        #[cfg(test)]
+        let category_page_gate = Arc::new(StdMutex::new(
+            None::<(oneshot::Sender<()>, mpsc::Receiver<()>)>,
+        ));
+        #[cfg(test)]
+        let worker_page_gate = Arc::clone(&category_page_gate);
+        #[cfg(test)]
+        let final_quota_wait = Arc::new(tokio::sync::Notify::new());
         let worker = std::thread::Builder::new()
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
+                    if matches!(&request.command, DbCommand::Category(_)) {
+                        let DbRequest { command, response } = request;
+                        let DbCommand::Category(command) = command else {
+                            unreachable!()
+                        };
+                        #[cfg(test)]
+                        if matches!(&command, category::CategoryDbCommand::RootPage { after, .. } if *after > 0) {
+                            let gate = worker_page_gate.lock().unwrap().take();
+                            if let Some((entered, release)) = gate {
+                                let _ = entered.send(());
+                                let _ = release.recv();
+                            }
+                        }
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                category::execute(&store, command)
+                            }));
+                        let result = match outcome {
+                            Ok(Ok(value)) => Ok(DbResponse::Category(value)),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "category SQL failed");
+                                Err(PersistenceError::Storage(
+                                    "database operation failed".into(),
+                                ))
+                            }
+                            Err(_) => Err(PersistenceError::CommitUnknown),
+                        };
+                        let _ = response.send(result);
+                        continue;
+                    }
                     if matches!(&request.command, DbCommand::KadMerge { .. }) {
                         let DbRequest { command, response } = request;
                         let DbCommand::KadMerge {
@@ -481,7 +551,8 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::KadLoad
+                            DbCommand::Category(_)
+                            | DbCommand::KadLoad
                             | DbCommand::KadIdentity
                             | DbCommand::KadReplace { .. }
                             | DbCommand::KadMerge { .. } => unreachable!(),
@@ -525,7 +596,8 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::KadLoad
+                                DbCommand::Category(_)
+                                | DbCommand::KadLoad
                                 | DbCommand::KadIdentity
                                 | DbCommand::KadReplace { .. }
                                 | DbCommand::KadMerge { .. } => {
@@ -550,7 +622,8 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::KadLoad
+                            DbCommand::Category(_)
+                            | DbCommand::KadLoad
                             | DbCommand::KadIdentity
                             | DbCommand::KadReplace { .. }
                             | DbCommand::KadMerge { .. } => unreachable!(),
@@ -575,15 +648,70 @@ impl PersistenceOwner {
             quota: Arc::clone(&quota),
         }));
         let coordinator_admission = Arc::downgrade(&admission);
+        let coordinator_shutdown = admission
+            .lock()
+            .map_err(|_| PersistenceError::Worker)?
+            .cancel_ingress
+            .clone();
         let join = tokio::spawn(async move {
             let mut failures = false;
+            let mut publication_failures = false;
             let mut kad_runtime = None;
-            while let Some(mut request) = receiver.recv().await {
+            let mut active_category: Option<ActiveCategory> = None;
+            let mut parked_categories = VecDeque::new();
+            let mut receiver_closed = false;
+            loop {
+                let mut request = if active_category.is_none() && !parked_categories.is_empty() {
+                    parked_categories
+                        .pop_front()
+                        .expect("nonempty category queue")
+                } else if let Some(active) = active_category.as_mut() {
+                    tokio::select! {
+                        outcome = &mut active.completion => {
+                            let active = active_category.take().expect("active category");
+                            let result = match outcome {
+                                Ok(()) => active.result,
+                                Err(error) => {
+                                    tracing::error!(%error, "category committed but derived publication failed");
+                                    publication_failures = true;
+                                    Err(PersistenceError::CommittedPublicationFailed)
+                                }
+                            };
+                            let Request { response, permit, released, .. } = active.request;
+                            let _ = response.send(result);
+                            drop(permit);
+                            let _ = released.send(());
+                            continue;
+                        }
+                        next = receiver.recv(), if !receiver_closed => {
+                            match next {
+                                Some(request) if matches!(&request.command, Command::Category(_)) => {
+                                    parked_categories.push_back(request);
+                                    continue;
+                                }
+                                Some(request) => request,
+                                None => { receiver_closed = true; continue; }
+                            }
+                        }
+                    }
+                } else if receiver_closed {
+                    break;
+                } else {
+                    match receiver.recv().await {
+                        Some(request) => request,
+                        None => {
+                            receiver_closed = true;
+                            continue;
+                        }
+                    }
+                };
+                let category_command = matches!(&request.command, Command::Category(_));
                 tracing::debug!(
                     queue_ms = request.enqueued.elapsed().as_millis() as u64,
                     "persistence request admitted to worker"
                 );
                 let faulted = quota.lock().map_err(|_| PersistenceError::Worker)?.faulted;
+                let mut category_continuation = None;
                 let result = if faulted {
                     Err(PersistenceError::CommitUnknown)
                 } else {
@@ -592,12 +720,17 @@ impl PersistenceOwner {
                         &db_tx,
                         &mut request,
                         &mut kad_runtime,
+                        &mut category_continuation,
                         #[cfg(test)]
                         &coordinator_gate,
                     )
                     .await
                 };
-                if matches!(&result, Err(PersistenceError::CommitUnknown)) && !faulted {
+                if (matches!(&result, Err(PersistenceError::CommitUnknown))
+                    || (category_command
+                        && matches!(&result, Err(PersistenceError::CommittedAfterWorkerFailure))))
+                    && !faulted
+                {
                     // Serialize the fault with readers of the cache. No reader can
                     // report this domain as coherent after the uncertain outcome.
                     if let Some(shared) = coordinator_admission.upgrade() {
@@ -613,12 +746,24 @@ impl PersistenceOwner {
                 // WHY: a completed request failure was already returned and
                 // does not mean the worker failed to drain. Preserve worker
                 // and uncertain-commit faults.
+                publication_failures |=
+                    matches!(&result, Err(PersistenceError::CommittedPublicationFailed));
                 failures |= matches!(
                     &result,
                     Err(PersistenceError::Worker
                         | PersistenceError::CommitUnknown
                         | PersistenceError::CommittedAfterWorkerFailure)
                 );
+                if let Some(continuation) = category_continuation {
+                    active_category = Some(ActiveCategory {
+                        request,
+                        result,
+                        completion: Box::pin(
+                            continuation.run(db_tx.clone(), coordinator_shutdown.clone()),
+                        ),
+                    });
+                    continue;
+                }
                 let Request {
                     response,
                     handoff,
@@ -652,6 +797,8 @@ impl PersistenceOwner {
                 .is_ok_and(|result| result.is_ok());
             if failures || !joined {
                 Err(PersistenceError::Worker)
+            } else if publication_failures {
+                Err(PersistenceError::CommittedPublicationFailed)
             } else {
                 Ok(())
             }
@@ -668,6 +815,10 @@ impl PersistenceOwner {
             publication_gate,
             #[cfg(test)]
             worker_started,
+            #[cfg(test)]
+            category_page_gate,
+            #[cfg(test)]
+            final_quota_wait,
         }))
     }
 
@@ -686,7 +837,8 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::KadLoad
+            Command::Category(_)
+            | Command::KadLoad
             | Command::KadIdentity
             | Command::KadAttach(_)
             | Command::KadCheckpoint { .. }
@@ -813,8 +965,20 @@ async fn process(
     db: &mpsc::SyncSender<DbRequest>,
     request: &mut Request,
     kad_runtime: &mut Option<KadRuntime>,
+    category_continuation: &mut Option<category::CategoryContinuation>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    if matches!(&request.command, Command::Category(_)) {
+        return category::process(
+            state,
+            db,
+            request,
+            category_continuation,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(
         &request.command,
         Command::KadAttach(_) | Command::KadCheckpoint { .. } | Command::KadImport { .. }
@@ -849,7 +1013,7 @@ async fn process(
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
-            DbResponse::Friend(..) => Err(PersistenceError::Worker),
+            DbResponse::Friend(..) | DbResponse::Category(..) => Err(PersistenceError::Worker),
         };
     }
     let prepared = {
@@ -875,7 +1039,8 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::KadLoad
+            Command::Category(_)
+            | Command::KadLoad
             | Command::KadIdentity
             | Command::KadAttach(_)
             | Command::KadCheckpoint { .. }

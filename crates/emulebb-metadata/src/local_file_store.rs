@@ -23,6 +23,37 @@ impl std::fmt::Display for MetadataContentConflict {
 
 impl std::error::Error for MetadataContentConflict {}
 
+fn decode_hashset<const N: usize>(hashes: &[String], label: &str) -> Result<Vec<[u8; N]>> {
+    let mut decoded = Vec::with_capacity(hashes.len());
+    for hash in hashes {
+        let bytes = decode_fixed_hex(hash, N, label)?;
+        let mut fixed = [0; N];
+        fixed.copy_from_slice(&bytes);
+        decoded.push(fixed);
+    }
+    Ok(decoded)
+}
+
+/// Compare ordered hash rows without retaining a second complete hashset.
+/// The count distinguishes absent optional AICH data from a conflicting set.
+pub(crate) fn compare_stored_hashes<const N: usize>(
+    rows: &mut rusqlite::Rows<'_>,
+    expected: &[[u8; N]],
+) -> Result<(usize, bool)> {
+    let mut count = 0usize;
+    let mut matches = true;
+    while let Some(row) = rows.next()? {
+        let hash = row.get_ref(0)?.as_blob()?;
+        matches &= expected
+            .get(count)
+            .is_some_and(|expected| expected.as_slice() == hash);
+        count = count
+            .checked_add(1)
+            .context("stored hash count exceeds usize")?;
+    }
+    Ok((count, matches && count == expected.len()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataLocalShareEntry {
     pub file_hash: String,
@@ -363,16 +394,8 @@ impl MetadataStore {
         let part_size = i64::try_from(content.part_size)?;
         let part_count = i64::try_from(content.md4_hashset.len())?;
         crate::content_identity::check_accepted_identity(tx, &hash, size, aich_root.as_deref())?;
-        let md4_hashset = content
-            .md4_hashset
-            .iter()
-            .map(|hash| decode_fixed_hex(hash, 16, "MD4 part hash"))
-            .collect::<Result<Vec<_>>>()?;
-        let aich_hashset = content
-            .aich_hashset
-            .iter()
-            .map(|hash| decode_fixed_hex(hash, 20, "AICH part hash"))
-            .collect::<Result<Vec<_>>>()?;
+        let md4_hashset = decode_hashset::<16>(&content.md4_hashset, "MD4 part hash")?;
+        let aich_hashset = decode_hashset::<20>(&content.aich_hashset, "AICH part hash")?;
         tx.execute(
             "INSERT INTO known_files(
                 ed2k_hash, size_bytes, display_name, aich_root, aich_root_origin,
@@ -440,30 +463,31 @@ impl MetadataStore {
                     "ED2K identity has conflicting verified local content geometry or AICH root"
                 )
             );
-            let stored_md4_hashset = tx
-                .prepare_cached(
-                    "SELECT md4_hash FROM verified_local_md4_hashes
+            let (_, md4_matches) = compare_stored_hashes(
+                &mut tx
+                    .prepare_cached(
+                        "SELECT md4_hash FROM verified_local_md4_hashes
                      WHERE known_file_id = ?1 ORDER BY part_index",
-                )?
-                .query_map(params![known_file_id], |row| row.get::<_, Vec<u8>>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let stored_aich_hashset = tx
-                .prepare_cached(
-                    "SELECT aich_hash FROM verified_local_aich_hashes
+                    )?
+                    .query(params![known_file_id])?,
+                &md4_hashset,
+            )?;
+            let (stored_aich_count, aich_matches) = compare_stored_hashes(
+                &mut tx
+                    .prepare_cached(
+                        "SELECT aich_hash FROM verified_local_aich_hashes
                      WHERE known_file_id = ?1 ORDER BY part_index",
-                )?
-                .query_map(params![known_file_id], |row| row.get::<_, Vec<u8>>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                    )?
+                    .query(params![known_file_id])?,
+                &aich_hashset,
+            )?;
             ensure!(
-                stored_md4_hashset == md4_hashset
-                    && (stored_aich_hashset.is_empty()
-                        || aich_hashset.is_empty()
-                        || stored_aich_hashset == aich_hashset),
+                md4_matches && (stored_aich_count == 0 || aich_hashset.is_empty() || aich_matches),
                 MetadataContentConflict("ED2K identity has conflicting verified local hashsets")
             );
             // WHY: optional AICH data can be absent from a stock record. Missing
             // data is not a conflict and must not erase a richer cached hashset.
-            write_aich = stored_aich_hashset.is_empty() && !aich_hashset.is_empty();
+            write_aich = stored_aich_count == 0 && !aich_hashset.is_empty();
             if stored_aich_root.is_none() && aich_root.is_some() {
                 tx.execute(
                     "UPDATE verified_local_content SET aich_root = ?2 WHERE known_file_id = ?1",
@@ -483,7 +507,7 @@ impl MetadataStore {
             for (part_index, part_hash) in md4_hashset.iter().enumerate() {
                 tx.execute(
                     "INSERT INTO verified_local_md4_hashes(known_file_id, part_index, md4_hash) VALUES (?1, ?2, ?3)",
-                    params![known_file_id, i64::try_from(part_index)?, part_hash],
+                    params![known_file_id, i64::try_from(part_index)?, part_hash.as_slice()],
                 )?;
             }
         }
@@ -491,7 +515,7 @@ impl MetadataStore {
             for (part_index, part_hash) in aich_hashset.iter().enumerate() {
                 tx.execute(
                     "INSERT INTO verified_local_aich_hashes(known_file_id, part_index, aich_hash) VALUES (?1, ?2, ?3)",
-                    params![known_file_id, i64::try_from(part_index)?, part_hash],
+                    params![known_file_id, i64::try_from(part_index)?, part_hash.as_slice()],
                 )?;
             }
         }
@@ -775,6 +799,15 @@ impl MetadataStore {
         let Some(instance) = self.active_local_file_by_hash(file_hash)? else {
             return Ok(None);
         };
+        self.verified_local_content_for_instance(instance).map(Some)
+    }
+
+    /// Hydrate known content for an already selected instance without sorting all copies.
+    pub fn verified_local_content_for_instance(
+        &self,
+        instance: MetadataLocalFileInstance,
+    ) -> Result<MetadataVerifiedLocalContent> {
+        let file_hash = &instance.file_hash;
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
         let (name, size, part_size, aich_root, priority, auto_priority, comment, rating):
@@ -813,7 +846,7 @@ impl MetadataStore {
         let aich_hashset = aich_stmt
             .query_map(params![hash], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Some(MetadataVerifiedLocalContent {
+        Ok(MetadataVerifiedLocalContent {
             file_hash: instance.file_hash,
             display_name: name,
             file_size: instance.file_size,
@@ -827,7 +860,7 @@ impl MetadataStore {
             auto_upload_priority: auto_priority,
             comment,
             rating,
-        }))
+        })
     }
 }
 
@@ -1113,6 +1146,15 @@ mod tests {
         collision.aich_root = original.aich_root.clone();
         collision.aich_hashset = vec!["55".repeat(20)];
         assert!(store.upsert_verified_local_content(&collision).is_err());
+        collision.aich_hashset = original.aich_hashset.clone();
+        // Streaming comparison must reject both prefix matches and extra rows.
+        collision.md4_hashset.clear();
+        assert!(store.upsert_verified_local_content(&collision).is_err());
+        collision.md4_hashset = vec!["11".repeat(16), "11".repeat(16)];
+        assert!(store.upsert_verified_local_content(&collision).is_err());
+        collision.md4_hashset = original.md4_hashset.clone();
+        collision.aich_hashset.push("33".repeat(20));
+        assert!(store.upsert_verified_local_content(&collision).is_err());
 
         let conn = store.connection().unwrap();
         let (root, part_hash, paths): (String, String, i64) = conn
@@ -1129,6 +1171,54 @@ mod tests {
         assert_eq!(Some(root), original.aich_root);
         assert_eq!(part_hash, original.aich_hashset[0]);
         assert_eq!(paths, 1);
+    }
+
+    #[test]
+    fn maximum_file_hash_decoding_has_fixed_width_capacity() {
+        const PARTS: usize = 28_257;
+        let md4 = vec!["12".repeat(16); PARTS];
+        let aich = vec!["34".repeat(20); PARTS];
+        let decoded_md4 = decode_hashset::<16>(&md4, "MD4 part hash").unwrap();
+        let decoded_aich = decode_hashset::<20>(&aich, "AICH part hash").unwrap();
+        assert_eq!(decoded_md4.capacity(), PARTS);
+        assert_eq!(decoded_aich.capacity(), PARTS);
+        assert!(decoded_md4.iter().all(|hash| *hash == [0x12; 16]));
+        assert!(decoded_aich.iter().all(|hash| *hash == [0x34; 20]));
+        assert_eq!(
+            decoded_md4.capacity() * 16 + decoded_aich.capacity() * 20,
+            1_017_252
+        );
+        assert_eq!(
+            decode_hashset::<16>(&[format!(" {} ", md4[0])], "MD4").unwrap(),
+            vec![[0x12; 16]]
+        );
+        assert!(decode_hashset::<16>(&["00".into()], "MD4").is_err());
+        assert!(decode_hashset::<20>(&["gg".repeat(20)], "AICH").is_err());
+    }
+
+    #[test]
+    fn streamed_hash_comparison_checks_values_and_both_lengths() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut statement = conn
+            .prepare("SELECT x'0102' UNION ALL SELECT x'0304'")
+            .unwrap();
+        for (expected, matches) in [
+            (vec![[1, 2], [3, 4]], true),
+            (vec![[1, 2]], false),
+            (vec![[1, 2], [3, 4], [5, 6]], false),
+            (vec![[1, 2], [3, 5]], false),
+            (vec![], false),
+        ] {
+            assert_eq!(
+                compare_stored_hashes(&mut statement.query([]).unwrap(), &expected).unwrap(),
+                (2, matches)
+            );
+        }
+        let mut empty = conn.prepare("SELECT x'0102' WHERE 0").unwrap();
+        assert_eq!(
+            compare_stored_hashes(&mut empty.query([]).unwrap(), &[[1, 2]]).unwrap(),
+            (0, false)
+        );
     }
 
     #[test]

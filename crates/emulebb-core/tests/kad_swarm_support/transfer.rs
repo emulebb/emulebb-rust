@@ -55,7 +55,7 @@ pub async fn wait_for_completed_download(
     let deadline = Instant::now() + TRANSFER_TIMEOUT;
     loop {
         if let Some(share) = core.share(hash).await
-            && core.transfer(hash).await.is_none()
+            && core.transfer(hash).await.unwrap().is_none()
         {
             return share;
         }

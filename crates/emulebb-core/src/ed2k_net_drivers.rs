@@ -350,7 +350,7 @@ async fn handle_reask_event(
         }
         ReaskEvent::SourceReady { file_hash } => {
             let hash = file_hash.to_string();
-            let Some(transfer) = core.transfer(&hash).await else {
+            let Ok(Some(transfer)) = core.transfer(&hash).await else {
                 return;
             };
             if transfer.state == "downloading" {
