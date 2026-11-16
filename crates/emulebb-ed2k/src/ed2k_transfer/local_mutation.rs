@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow, ensure};
 use tokio::{sync::oneshot, task::JoinSet};
 
+mod ingest;
+
 const MAX_UNITS: usize = 4;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 // Covers the live and persisted bounded partial projections, their conversion
@@ -94,6 +96,7 @@ fn withdrawal_path_charge(path: &std::path::Path) -> Result<usize> {
 pub(super) struct LocalMutationRegistry {
     state: Mutex<State>,
     join_gate: tokio::sync::Mutex<()>,
+    preparation: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Default)]

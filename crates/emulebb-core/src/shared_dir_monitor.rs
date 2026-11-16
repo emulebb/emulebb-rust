@@ -1156,6 +1156,44 @@ pub(crate) async fn admit_monitored_path(
     admit_verified_path(core, path, fingerprint, file_hash, false).await
 }
 
+/// Capture only matching ordinary roots using the existing tracked descriptor
+/// and filesystem providers. Ingest validates this observation again in its
+/// binding transaction; no membership handoff remains in the caller.
+pub(crate) async fn prepare_ingest_roots(
+    core: &EmulebbCore,
+    path: &Path,
+) -> anyhow::Result<Vec<emulebb_metadata::MetadataIngestRoot>> {
+    for _ in 0..16 {
+        let epoch = core.ed2k_transfers.root_observation_epoch().await;
+        let roots = crate::shared_directories::root_descriptors(core).await?;
+        let RootIoResult::Inspected(roots) =
+            run_root_io(core, RootIoRequest::Inspect(roots)).await?
+        else {
+            unreachable!()
+        };
+        let mut matching = Vec::new();
+        for (root, observed) in roots {
+            if !root.shareable || !root.accessible || !observed {
+                continue;
+            }
+            let root_path = PathBuf::from(root.path);
+            let normalized = long_path(&root_path);
+            if let Ok(relative) = path.strip_prefix(&normalized) {
+                if !relative.as_os_str().is_empty() {
+                    matching.push(emulebb_metadata::MetadataIngestRoot {
+                        root: root_path,
+                        relative: relative.to_path_buf(),
+                    });
+                }
+            }
+        }
+        if core.ed2k_transfers.root_observation_epoch().await == epoch {
+            return Ok(matching);
+        }
+    }
+    Err(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy.into())
+}
+
 pub(crate) async fn admit_delivered_path(
     core: &EmulebbCore,
     path: &Path,

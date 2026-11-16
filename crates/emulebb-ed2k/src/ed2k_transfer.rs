@@ -107,7 +107,10 @@ use hashset::{
     build_md4_hashset_from_payload,
 };
 pub use inbound_admission::Ed2kInboundConnectionGuard;
-pub use ingest::{LocalIngestProgressEvent, LocalIngestProgressObserver, LocalIngestProgressStage};
+pub use ingest::{
+    LocalIngestOptions, LocalIngestProgressEvent, LocalIngestProgressObserver,
+    LocalIngestProgressStage,
+};
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;

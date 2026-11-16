@@ -1122,7 +1122,7 @@ pub(crate) struct ScannedSharedFile {
 // ---------------------------------------------------------------------------
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
 use emulebb_metadata::MetadataSharedSourceFailure;
@@ -1707,16 +1707,22 @@ fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
 }
 
 fn record_hash_target_progress(
-    core: &EmulebbCore,
-    target: &ReloadHashTarget,
+    progress: &std::sync::Mutex<SharedDirectoryReloadProgress>,
+    running: &AtomicBool,
+    pending: &AtomicBool,
+    target_id: &str,
+    disk_key: &str,
     event: &LocalIngestProgressEvent,
 ) {
     let now_ms = current_time_ms();
-    record_reload_progress(core, |diagnostics| {
+    let mut diagnostics = progress
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    {
         if let Some(active) = diagnostics
             .active
             .iter_mut()
-            .find(|active| active.id == target.id)
+            .find(|active| active.id == target_id)
         {
             let next_read = event.file_bytes_read.min(active.read_bytes_total);
             let delta = next_read.saturating_sub(active.read_bytes);
@@ -1730,15 +1736,17 @@ fn record_hash_target_progress(
             if let Some(disk) = diagnostics
                 .disks
                 .iter_mut()
-                .find(|disk| disk.disk_key == target.disk_key)
+                .find(|disk| disk.disk_key == disk_key)
             {
                 disk.completed_read_bytes = disk.completed_read_bytes.saturating_add(delta);
                 disk.current_stage = Some(event.stage.as_str().to_string());
             }
         }
         diagnostics.updated_at_ms = Some(now_ms);
-        refresh_reload_rates(diagnostics, now_ms);
-    });
+        refresh_reload_rates(&mut diagnostics, now_ms);
+    }
+    diagnostics.running = running.load(Ordering::Acquire);
+    diagnostics.pending = pending.load(Ordering::Acquire);
 }
 
 fn record_hash_target_finished(
@@ -2481,10 +2489,20 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
 /// skipped so one bad file never aborts indexing of the rest of the library.
 async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
     record_hash_target_started(core, &target);
-    let progress_core = core.clone();
-    let progress_target = target.clone();
+    let progress_state = Arc::clone(&core.shared_directory_reload_progress);
+    let progress_running = Arc::clone(&core.shared_reload_running);
+    let progress_pending = Arc::clone(&core.shared_reload_pending);
+    let target_id = target.id.clone();
+    let disk_key = target.disk_key.clone();
     let progress = Arc::new(move |event: LocalIngestProgressEvent| {
-        record_hash_target_progress(&progress_core, &progress_target, &event);
+        record_hash_target_progress(
+            &progress_state,
+            &progress_running,
+            &progress_pending,
+            &target_id,
+            &disk_key,
+            &event,
+        );
     });
     let source_path = target.path.clone();
     match core

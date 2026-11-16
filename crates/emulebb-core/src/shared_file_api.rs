@@ -47,42 +47,25 @@ impl EmulebbCore {
     }
 
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
+        self.share_local_file_inner(request, None).await
+    }
+
+    pub(crate) async fn share_local_file_inner(
+        &self,
+        request: LocalShareCreate,
+        progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
+    ) -> Result<LocalShare> {
         let path = Path::new(&request.path);
         let normalized = long_path(path);
         shared_directories::sync_implicit_shared_directory_roots(self).await?;
-        let roots = shared_directories::effective_shared_directory_roots(self).await?;
+        let roots = crate::shared_dir_monitor::prepare_ingest_roots(self, &normalized).await?;
         ensure!(
-            roots.iter().any(|root| {
-                root.shareable
-                    && root.accessible
-                    && normalized
-                        .strip_prefix(long_path(Path::new(&root.path)))
-                        .is_ok_and(|relative| !relative.as_os_str().is_empty())
-            }),
+            !roots.is_empty(),
             "local share path is outside accessible shared roots"
         );
         let share = self
-            .share_native_local_file_with_progress(path, request.name, None)
+            .share_native_local_file_with_intent(path, request.name, progress, &roots)
             .await?;
-        let instance = self
-            .metadata_store
-            .local_file_instance(&normalized)?
-            .with_context(|| {
-                format!(
-                    "verified local file missing after ingest: {}",
-                    path.display()
-                )
-            })?;
-        ensure!(
-            crate::shared_dir_monitor::admit_monitored_path(
-                self,
-                &normalized,
-                &instance.verified_fingerprint,
-                &share.hash,
-            )
-            .await?,
-            "verified local file was not admitted by its shared root"
-        );
         self.share(&share.hash)
             .await
             .context("admitted local share is absent from the active library")
@@ -93,6 +76,17 @@ impl EmulebbCore {
         source_path: &Path,
         requested_name: Option<String>,
         progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
+    ) -> Result<LocalShare> {
+        self.share_native_local_file_with_intent(source_path, requested_name, progress, &[])
+            .await
+    }
+
+    pub(crate) async fn share_native_local_file_with_intent(
+        &self,
+        source_path: &Path,
+        requested_name: Option<String>,
+        progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
+        roots: &[emulebb_metadata::MetadataIngestRoot],
     ) -> Result<LocalShare> {
         ensure!(
             !self
@@ -114,30 +108,20 @@ impl EmulebbCore {
                 .display_file_name()
                 .ok_or_else(|| anyhow::anyhow!("local share path has no valid file name"))?,
         };
-        let summary = match progress {
-            Some(progress) => {
-                self.ed2k_transfers
-                    .ingest_local_file_with_progress(source_path, &display_name, progress)
-                    .await?
-            }
-            None => {
-                self.ed2k_transfers
-                    .ingest_local_file(source_path, &display_name)
-                    .await?
-            }
-        };
-        self.index.lock().await.upsert_file(
-            &IndexedFile {
-                ed2k_hash: summary.file_hash.clone(),
-                name: summary.display_name.clone(),
-                size_bytes: summary.file_size,
-                content_type: ed2k_file_type_search_term(&summary.display_name)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                availability_score: 1,
-            },
-            emulebb_index::IndexedFileOrigin::LocalShare,
-        )?;
+        let summary = self
+            .ed2k_transfers
+            .ingest_local_file_owned(
+                source_path,
+                &display_name,
+                progress,
+                emulebb_ed2k::ed2k_transfer::LocalIngestOptions {
+                    roots,
+                    index_type: Some(
+                        ed2k_file_type_search_term(&display_name).unwrap_or("unknown"),
+                    ),
+                },
+            )
+            .await?;
         self.queue_ed2k_shared_catalog_publish();
         Ok(local_share_from_summary(summary))
     }

@@ -36,6 +36,70 @@ async fn configure_test_root(core: &EmulebbCore, root: &Path) {
 }
 
 #[tokio::test]
+async fn cancelled_direct_share_finishes_owned_index_membership_and_publication() {
+    let root = scratch_dir("owned-direct-share-cancel");
+    let source = root.join("sample.bin");
+    fs::write(&source, b"owned Core share preparation").unwrap();
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = std::sync::Mutex::new(Some((started, gate)));
+    let progress = Arc::new(move |_: LocalIngestProgressEvent| {
+        if let Some((started, gate)) = gate.lock().unwrap().take() {
+            let _ = started.send(());
+            gate.recv().unwrap();
+        }
+    });
+    // The public frontdoor delegates to this exact path; the observer only
+    // holds an actual hash read so caller cancellation is deterministic.
+    let caller = {
+        let core = core.clone();
+        let path = source.display().to_string();
+        tokio::spawn(async move {
+            core.share_local_file_inner(
+                crate::LocalShareCreate { path, name: None },
+                Some(progress),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    release.send(()).unwrap();
+    core.drain_local_share_mutations().await.unwrap();
+    let instance = core
+        .metadata_store
+        .local_file_instance(&long_path(&source))
+        .unwrap()
+        .unwrap();
+    assert!(
+        core.index
+            .lock()
+            .await
+            .find_by_hash(&instance.file_hash)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        core.metadata_store
+            .next_shared_copy(&instance.file_hash, 0, 65_536)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        core.share(&instance.file_hash).await.unwrap().hash,
+        instance.file_hash
+    );
+    core.drain_persistence().await.unwrap();
+    fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
 async fn reserved_partial_is_excluded_from_scan_and_direct_share() {
     let root = scratch_dir("reserved-partial");
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();

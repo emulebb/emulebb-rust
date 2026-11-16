@@ -32,6 +32,7 @@ mod file_status_parts;
 mod ich_salvage;
 mod inbound_admission;
 mod local_admission;
+mod local_ingest;
 mod progressive_catalog;
 mod reask_reciprocity;
 mod salvage;

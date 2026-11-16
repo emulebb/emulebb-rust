@@ -79,3 +79,6 @@ rustix.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_IO", "Win32_System_Ioctl"] }
