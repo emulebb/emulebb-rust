@@ -630,6 +630,8 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
     assert!(store.request_transfer_retirement(manifest.token).unwrap());
     let completed = store.download_job(manifest.token.job_id).unwrap().unwrap();
     assert!(completed.completed_at_s.is_some());
+    assert_eq!(completed.checkpointed_bytes, 16);
+    assert_eq!(completed.progress(), Some(1.0));
     assert!(completed.removed_at_s.is_none());
     assert!(!completed.internal_storage_retired);
     assert!(
@@ -657,6 +659,8 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
     let retired = store.download_job(manifest.token.job_id).unwrap().unwrap();
     assert_eq!(retired.completed_at_s, completed.completed_at_s);
     assert!(retired.internal_storage_retired);
+    assert_eq!(retired.checkpointed_bytes, 0);
+    assert_eq!(retired.progress(), Some(1.0));
     assert!(store.local_file_instance(&path).unwrap().is_some());
     assert!(store.upsert_transfer_manifest(&manifest).is_err());
     assert!(store.connection().unwrap().execute("UPDATE download_jobs SET delivery_state='pending',delivery_ownership='none',delivered_path_id=NULL WHERE id=?1",[manifest.token.job_id]).is_err());

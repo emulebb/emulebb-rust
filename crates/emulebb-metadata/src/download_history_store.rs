@@ -294,6 +294,9 @@ mod tests {
         let store = MetadataStore::in_memory().unwrap();
         let mut manifest = completed_download_manifest(&store);
         manifest.completed = false;
+        manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+        manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
+        manifest.delivered_path = None;
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert!(
             store
@@ -483,6 +486,9 @@ mod tests {
         let rehash_store = MetadataStore::in_memory().unwrap();
         let mut rehash_manifest = completed_download_manifest(&rehash_store);
         rehash_manifest.final_rehash_pending = true;
+        rehash_manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+        rehash_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
+        rehash_manifest.delivered_path = None;
         rehash_store
             .upsert_transfer_manifest(&rehash_manifest)
             .unwrap();

@@ -2257,6 +2257,21 @@ fn replace_transfer_children(
         ])?;
     }
     drop(insert_range);
+    // WHY: a whole snapshot may repartition already-full geometry. Remove absent
+    // pieces and apply decreases before increases so the checked parent counter
+    // never transiently exceeds the payload size. Unchanged rows stay untouched.
+    tx.execute("DELETE FROM download_job_pieces WHERE job_id=?1 AND NOT EXISTS(
+        SELECT 1 FROM temp.incoming_download_job_pieces p
+        WHERE p.job_id=download_job_pieces.job_id AND p.piece_index=download_job_pieces.piece_index)", [job_id])?;
+    tx.execute(
+        "UPDATE download_job_pieces SET bytes_written=(SELECT p.bytes_written
+        FROM temp.incoming_download_job_pieces p WHERE p.job_id=download_job_pieces.job_id
+        AND p.piece_index=download_job_pieces.piece_index),updated_at_s=?2
+        WHERE job_id=?1 AND bytes_written>(SELECT p.bytes_written
+        FROM temp.incoming_download_job_pieces p WHERE p.job_id=download_job_pieces.job_id
+        AND p.piece_index=download_job_pieces.piece_index)",
+        params![job_id, now],
+    )?;
     for snapshot in snapshots {
         snapshot.finish(tx, Some(("job_id", job_id)))?;
     }

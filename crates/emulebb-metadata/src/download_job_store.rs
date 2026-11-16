@@ -102,7 +102,7 @@ const JOB_COLUMNS: &str = "j.id,j.execution_generation,lower(hex(k.ed2k_hash)),
     j.storage_directory_marker_id,CASE WHEN length(j.storage_directory_identity)<=64 THEN j.storage_directory_identity END,length(storage.native_path),length(j.storage_directory_identity),
     CASE WHEN length(CAST(j.storage_failure_code AS BLOB))<=64 THEN j.storage_failure_code END,
     CASE WHEN length(CAST(j.storage_failure_message AS BLOB))<=4096 THEN j.storage_failure_message END,
-    j.storage_failed_at_s,length(CAST(j.storage_failure_code AS BLOB)),length(CAST(j.storage_failure_message AS BLOB))";
+    j.storage_failed_at_s,length(CAST(j.storage_failure_code AS BLOB)),length(CAST(j.storage_failure_message AS BLOB)),j.checkpointed_bytes";
 
 fn job_row_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
     bounded_row_bytes(
@@ -131,6 +131,7 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJobRecord> {
         display_name: row.get(3)?,
         accepted_size_bytes: crate::sql_value::optional_unsigned(row, 4)?,
         expected_size_bytes: crate::sql_value::optional_unsigned(row, 5)?,
+        checkpointed_bytes: crate::sql_value::unsigned(row, 31)?,
         category_id: row.get(6)?,
         intent: match intent.as_str() {
             "started" => DownloadIntent::Started,

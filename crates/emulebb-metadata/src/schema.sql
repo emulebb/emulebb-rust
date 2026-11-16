@@ -333,6 +333,8 @@ CREATE TABLE download_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE RESTRICT,
     expected_size_bytes INTEGER CHECK(expected_size_bytes IS NULL OR expected_size_bytes >= 0),
+    -- Current durable piece bytes, including unverified data; retirement removes them.
+    checkpointed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checkpointed_bytes >= 0),
     execution_generation INTEGER NOT NULL DEFAULT 0 CHECK(execution_generation >= 0),
     selected_temp_path_id INTEGER REFERENCES local_paths(id),
     storage_path_id INTEGER UNIQUE REFERENCES local_paths(id),
@@ -393,6 +395,7 @@ CREATE TABLE download_jobs (
     -- an established identity plus the marker authorizes payload writes/cleanup.
     storage_directory_identity BLOB CHECK(storage_directory_identity IS NULL OR length(storage_directory_identity)<=64),
     storage_directory_marker_id TEXT UNIQUE CHECK(storage_directory_marker_id IS NULL OR length(storage_directory_marker_id)=36),
+    CHECK(expected_size_bytes IS NULL OR checkpointed_bytes <= expected_size_bytes),
     CHECK((storage_failure_code IS NULL) = (storage_failure_message IS NULL)),
     CHECK((storage_failure_code IS NULL) = (storage_failed_at_s IS NULL)),
     CHECK((selected_temp_path_id IS NULL) = (storage_path_id IS NULL)),
@@ -588,6 +591,30 @@ CREATE TABLE download_job_pieces (
     updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     PRIMARY KEY(job_id, piece_index)
 ) STRICT, WITHOUT ROWID;
+
+-- One persistence owner maintains the counter for deltas, snapshot reconciliation,
+-- verification/corruption, and child retirement. Never sum children on compact reads.
+-- Check capacity before addition so SQLite never promotes integer overflow to REAL.
+CREATE TRIGGER download_job_pieces_progress_insert AFTER INSERT ON download_job_pieces
+BEGIN
+    SELECT CASE WHEN new.bytes_written > 9223372036854775807 -
+        (SELECT checkpointed_bytes FROM download_jobs WHERE id=new.job_id)
+        THEN RAISE(ABORT, 'download checkpointed bytes overflow') END;
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes+new.bytes_written WHERE id=new.job_id;
+END;
+CREATE TRIGGER download_job_pieces_progress_update AFTER UPDATE OF job_id, bytes_written ON download_job_pieces
+WHEN new.job_id != old.job_id OR new.bytes_written != old.bytes_written
+BEGIN
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes-old.bytes_written WHERE id=old.job_id;
+    SELECT CASE WHEN new.bytes_written > 9223372036854775807 -
+        (SELECT checkpointed_bytes FROM download_jobs WHERE id=new.job_id)
+        THEN RAISE(ABORT, 'download checkpointed bytes overflow') END;
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes+new.bytes_written WHERE id=new.job_id;
+END;
+CREATE TRIGGER download_job_pieces_progress_delete AFTER DELETE ON download_job_pieces
+BEGIN
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes-old.bytes_written WHERE id=old.job_id;
+END;
 
 CREATE TABLE servers (
     id INTEGER PRIMARY KEY,

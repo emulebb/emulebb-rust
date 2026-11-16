@@ -148,6 +148,9 @@ pub struct DownloadJobRecord {
     pub display_name: String,
     pub accepted_size_bytes: Option<u64>,
     pub expected_size_bytes: Option<u64>,
+    /// Sum of current persisted piece byte counts, including unverified bytes.
+    /// Internal retirement removes those pieces and resets this count to zero.
+    pub checkpointed_bytes: u64,
     pub category_id: Option<i64>,
     pub intent: DownloadIntent,
     pub selected_temp: Option<PathBuf>,
@@ -166,4 +169,17 @@ pub struct DownloadJobRecord {
 pub struct DownloadJobAdmission {
     pub created: bool,
     pub job: DownloadJobRecord,
+}
+
+impl DownloadJobRecord {
+    /// Byte presence is independent of verification. Terminal completion remains
+    /// complete after internal pieces are retired; unknown totals have no fraction.
+    pub fn progress(&self) -> Option<f64> {
+        let size = self.expected_size_bytes.filter(|size| *size > 0)?;
+        Some(if self.completed_at_s.is_some() {
+            1.0
+        } else {
+            self.checkpointed_bytes as f64 / size as f64
+        })
+    }
 }

@@ -183,3 +183,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod aggregate_tests;
