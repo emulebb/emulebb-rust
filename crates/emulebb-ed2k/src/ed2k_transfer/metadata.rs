@@ -1,13 +1,13 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::{collections::BTreeMap, net::Ipv4Addr, path::PathBuf};
+use std::{collections::BTreeMap, net::Ipv4Addr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    MetadataCategory, MetadataLocalShareEntry, MetadataSharedFilePage, MetadataSharedFileQuery,
-    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferCounts,
+    MetadataLocalShareEntry, MetadataSharedFilePage, MetadataSharedFileQuery, MetadataStore,
+    MetadataTransferCatalogEntry, MetadataTransferCounts,
     MetadataTransferDirectoryDeletionAuthority, MetadataTransferPublishEntry,
     MetadataVerifiedLocalContent, NativeFileFingerprint, NativeFileIdentity,
 };
@@ -899,61 +899,59 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
-    /// Persist the user-facing download category across restarts.
-    pub async fn set_category_id(
-        &self,
-        file_hash: &str,
-        category_id: u32,
-    ) -> Result<Ed2kResumeManifest> {
-        let _category_guard = self.category_assignment_gate.lock().await;
-        let _guard = self.lock_manifest(file_hash).await;
-        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        manifest.category_id = category_id;
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(manifest)
+    /// Resolve the current assignment at the start of a delivery decision.
+    pub async fn current_category_id(&self, file_hash: &str) -> Result<Option<i64>> {
+        let _fence = self.category_assignment_gate.read().await;
+        self.current_category_id_fenced(file_hash).await
     }
 
-    /// Atomically delete one positional category and remap every persisted
-    /// transfer assignment which observes that positional namespace.
-    pub async fn delete_category_and_remap_transfers(
-        &self,
-        deleted_category_id: u32,
-        shifted_categories: Vec<MetadataCategory>,
-    ) -> Result<()> {
-        let _category_guard = self.category_assignment_gate.lock().await;
-        let metadata = self.metadata.clone();
-        let affected_hashes = tokio::task::spawn_blocking(move || {
-            metadata.transfer_hashes_requiring_category_remap(deleted_category_id)
-        })
-        .await
-        .context("category remap transfer inventory task panicked")??;
+    /// Hold through authoritative category read and subsequent cache publication.
+    pub async fn lock_category_publication(&self) -> tokio::sync::OwnedRwLockReadGuard<()> {
+        Arc::clone(&self.category_assignment_gate)
+            .read_owned()
+            .await
+    }
 
-        let mut manifest_guards = Vec::with_capacity(affected_hashes.len());
-        for file_hash in &affected_hashes {
-            manifest_guards.push(self.lock_manifest(file_hash).await);
+    /// Caller holds the category publication fence.
+    pub async fn current_category_id_fenced(&self, file_hash: &str) -> Result<Option<i64>> {
+        if let Some(category) = self
+            .manifest_cache
+            .lock()
+            .await
+            .get(file_hash)
+            .map(|value| value.category_id)
+        {
+            return Ok(category);
         }
-
         let metadata = self.metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            metadata.delete_category_and_remap_transfers(deleted_category_id, &shifted_categories)
-        })
-        .await
-        .context("category delete transaction task panicked")??;
+        let hash = file_hash.to_owned();
+        tokio::task::spawn_blocking(move || metadata.transfer_category_by_hash(&hash))
+            .await
+            .context("category read task panicked")??
+            .context("transfer not found")
+    }
 
-        let mut cache = self.manifest_cache.lock().await;
-        for file_hash in affected_hashes {
-            let Some(manifest) = cache.get_mut(&file_hash) else {
-                continue;
-            };
-            manifest.category_id = if manifest.category_id == deleted_category_id {
-                0
-            } else {
-                manifest.category_id.saturating_sub(1)
-            };
+    /// Take the category publication fence without acquiring per-transfer locks.
+    pub async fn lock_category_mutation(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.category_assignment_gate)
+            .write_owned()
+            .await
+    }
+
+    /// Publish a committed deletion while the exclusive fence is held.
+    pub async fn clear_deleted_category_from_cache(&self, category_id: i64) {
+        for manifest in self.manifest_cache.lock().await.values_mut() {
+            if manifest.category_id == Some(category_id) {
+                manifest.category_id = None;
+            }
         }
-        drop(cache);
-        drop(manifest_guards);
-        Ok(())
+    }
+
+    /// Publish a committed assignment while the exclusive fence is held.
+    pub async fn publish_category_assignment(&self, file_hash: &str, category_id: Option<i64>) {
+        if let Some(manifest) = self.manifest_cache.lock().await.get_mut(file_hash) {
+            manifest.category_id = category_id;
+        }
     }
 
     /// Restore a completed transfer row when the same link is explicitly added again.
@@ -1458,6 +1456,19 @@ impl Ed2kTransferRuntime {
     pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
         self.load_aich_manifest_unlocked(file_hash).await
+    }
+
+    /// Return absence separately from metadata failures for a transfer lookup.
+    pub async fn manifest_optional(&self, file_hash: &str) -> Result<Option<Ed2kResumeManifest>> {
+        let _guard = self.lock_manifest(file_hash).await;
+        if self
+            .load_manifest_optional_unlocked(file_hash)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        self.load_aich_manifest_unlocked(file_hash).await.map(Some)
     }
 
     /// Resolve a read-only protocol view for a download or eligible complete

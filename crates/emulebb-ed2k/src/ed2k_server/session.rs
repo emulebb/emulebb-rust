@@ -165,6 +165,7 @@ pub(super) struct ServerSession {
     pub(super) offer_files_sent_at: Option<Instant>,
     pub(super) offer_files_catalog_fingerprint: Option<u64>,
     pub(super) offer_files_catalog_cursor: usize,
+    pub(super) offer_files_suppression_start: Option<usize>,
     pub(super) offer_files_published_hashes: HashSet<[u8; 16]>,
     pub(super) offer_files_distinct_published_hashes: HashSet<[u8; 16]>,
     pub(super) offer_files_ranked_catalog: Vec<OfferedFileEntry>,
@@ -416,6 +417,7 @@ impl ServerSession {
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,
             offer_files_catalog_cursor: 0,
+            offer_files_suppression_start: None,
             offer_files_published_hashes: HashSet::new(),
             offer_files_distinct_published_hashes: HashSet::new(),
             offer_files_ranked_catalog: Vec::new(),
@@ -458,6 +460,7 @@ impl ServerSession {
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,
             offer_files_catalog_cursor: 0,
+            offer_files_suppression_start: None,
             offer_files_published_hashes: HashSet::new(),
             offer_files_distinct_published_hashes: HashSet::new(),
             offer_files_ranked_catalog: Vec::new(),
@@ -534,6 +537,7 @@ impl ServerSession {
     }
 
     fn reset_offer_files_publication_epoch(&mut self) {
+        self.offer_files_suppression_start = None;
         self.offer_files_sent = false;
         self.offer_files_sent_at = None;
         self.offer_files_catalog_fingerprint = None;
@@ -839,6 +843,12 @@ impl ServerSession {
             } else {
                 None
             };
+    }
+
+    pub(super) fn defer_offer_files_batch(&mut self) {
+        self.offer_files_publish_requested = true;
+        // No packet was sent, so this retry does not consume wire pacing.
+        self.offer_files_next_publish_at = Some(Instant::now() + Duration::from_millis(100));
     }
 
     async fn publish_offer_files_pacing_state(&self) {

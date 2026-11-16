@@ -1092,6 +1092,228 @@ fn background_offer_file() -> Ed2kSharedEntry {
 }
 
 #[tokio::test]
+async fn cached_offer_batch_does_not_publish_withdrawn_content() {
+    let root = crate::paths::unique_test_dir("cached-offer-withdrawal");
+    let runtime = crate::ed2k_transfer::Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let catalog = runtime.shared_catalog();
+    catalog.write().await.push(background_offer_file());
+    let (mut session, mut peer) = connected_background_test_session().await;
+    session.configure_offer_files_capability(false);
+    session.offer_files_ranked_catalog = {
+        let catalog = catalog.read().await;
+        crate::ed2k_server::startup::ranked_offer_files(&catalog, true)
+    };
+    session.offer_files_refresh_catalog = false;
+    assert_eq!(session.offer_files_ranked_catalog.len(), 1);
+    let mutation = runtime.begin_category_root_mutation().await.unwrap();
+    drop(mutation);
+    let result = crate::ed2k_server::startup::send_offer_files_advertisement(
+        &mut session,
+        &catalog,
+        Ipv4Addr::LOCALHOST,
+        4662,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.entries_sent, 0);
+    assert!(session.offer_files_published_hashes.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), read_client_frame(&mut peer))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cached_offer_batch_preserves_a_copy_in_another_root() {
+    let root = crate::paths::unique_test_dir("cached-offer-independent-root");
+    let old_root = root.join("old");
+    let other_root = root.join("other");
+    std::fs::create_dir_all(&old_root).unwrap();
+    std::fs::create_dir_all(&other_root).unwrap();
+    let only_old = old_root.join("only-old.bin");
+    let old_copy = old_root.join("both.bin");
+    let other_copy = other_root.join("both.bin");
+    std::fs::write(&only_old, b"only old root").unwrap();
+    std::fs::write(&old_copy, b"independent copy").unwrap();
+    std::fs::write(&other_copy, b"independent copy").unwrap();
+    let mut metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
+    metadata
+        .replace_shared_directory_roots(
+            &[&old_root, &other_root]
+                .into_iter()
+                .map(|path| emulebb_metadata::MetadataSharedDirectoryRoot {
+                    path: path.to_string_lossy().into_owned(),
+                    monitor_owned: false,
+                    shareable: true,
+                    accessible: true,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let runtime = crate::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
+        &root,
+        metadata.clone(),
+    )
+    .unwrap();
+    runtime
+        .ingest_local_file(&only_old, "only-old.bin")
+        .await
+        .unwrap();
+    let shared = runtime
+        .ingest_local_file(&old_copy, "both.bin")
+        .await
+        .unwrap();
+    runtime
+        .ingest_local_file(&other_copy, "both.bin")
+        .await
+        .unwrap();
+    for (base, path) in [
+        (&old_root, &only_old),
+        (&old_root, &old_copy),
+        (&other_root, &other_copy),
+    ] {
+        let native_path = crate::long_path::long_path(path);
+        let fingerprint = metadata
+            .local_file_instance(&native_path)
+            .unwrap()
+            .unwrap()
+            .verified_fingerprint;
+        let relative = native_path
+            .strip_prefix(crate::long_path::long_path(base))
+            .unwrap();
+        assert!(
+            metadata
+                .admit_local_path_to_root(base, &native_path, relative, &fingerprint)
+                .unwrap()
+        );
+    }
+    runtime.refresh_complete_shared_catalog().await.unwrap();
+    let catalog = runtime.shared_catalog();
+    let (mut session, mut peer) = connected_background_test_session().await;
+    session.configure_offer_files_capability(false);
+    session.offer_files_ranked_catalog = {
+        let catalog = catalog.read().await;
+        crate::ed2k_server::startup::ranked_offer_files(&catalog, true)
+    };
+    session.offer_files_refresh_catalog = false;
+    assert_eq!(session.offer_files_ranked_catalog.len(), 2);
+    let mutation = runtime.begin_category_root_mutation().await.unwrap();
+    metadata
+        .set_shared_root_accessible(&old_root, false)
+        .unwrap();
+    drop(mutation);
+    let sent = crate::ed2k_server::startup::send_offer_files_advertisement(
+        &mut session,
+        &catalog,
+        Ipv4Addr::LOCALHOST,
+        4662,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sent.entries_sent, 1);
+    let (opcode, payload) = read_client_frame(&mut peer).await;
+    assert_eq!(opcode, OP_OFFERFILES);
+    assert_eq!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 1);
+    assert_eq!(&payload[4..20], hex::decode(shared.file_hash).unwrap());
+}
+
+#[tokio::test]
+async fn cached_complete_offer_uses_live_partial_fields_after_withdrawal() {
+    use crate::ed2k_transfer::{ED2K_PART_SIZE, Ed2kTransferJob};
+    let root = crate::paths::unique_test_dir("cached-offer-partial-fallback");
+    let source_dir = root.join("library");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let path = source_dir.join("complete-name.bin");
+    let payload = vec![0x41; ED2K_PART_SIZE as usize + 32];
+    std::fs::write(&path, &payload).unwrap();
+    let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
+    let runtime = crate::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
+        &root,
+        metadata.clone(),
+    )
+    .unwrap();
+    let shared = runtime
+        .ingest_local_file(&path, "complete-name.bin")
+        .await
+        .unwrap();
+    crate::ed2k_transfer::test_support::admit_local_share(&runtime, &source_dir, &path).await;
+    let complete = runtime.serving_view(&shared.file_hash).await.unwrap();
+    let hashes = complete
+        .md4_hashset
+        .iter()
+        .map(|hash| hex::decode(hash).unwrap().try_into().unwrap())
+        .collect();
+    runtime
+        .replace_with_download_job(&Ed2kTransferJob {
+            file_hash: shared.file_hash.clone(),
+            display_name: "partial-name.bin".into(),
+            file_size: payload.len() as u64,
+            piece_size: ED2K_PART_SIZE,
+        })
+        .await
+        .unwrap();
+    runtime
+        .store_md4_hashset(&shared.file_hash, hashes)
+        .await
+        .unwrap();
+    runtime
+        .append_piece_block(
+            &shared.file_hash,
+            0,
+            0,
+            ED2K_PART_SIZE,
+            &payload[..ED2K_PART_SIZE as usize],
+        )
+        .await
+        .unwrap();
+    let catalog = runtime.shared_catalog();
+    let (mut session, mut peer) = connected_background_test_session().await;
+    session.configure_offer_files_capability(false);
+    session.server_flags = Some(SERVER_TCP_FLAG_COMPRESSION);
+    session.offer_files_ranked_catalog = {
+        let catalog = catalog.read().await;
+        crate::ed2k_server::startup::ranked_offer_files(&catalog, true)
+    };
+    session.offer_files_refresh_catalog = false;
+    assert_eq!(session.offer_files_ranked_catalog.len(), 1);
+    let mutation = runtime.begin_category_root_mutation().await.unwrap();
+    metadata
+        .withdraw_local_file_path(&crate::long_path::long_path(&path))
+        .unwrap();
+    drop(mutation);
+    let sent = crate::ed2k_server::startup::send_offer_files_advertisement(
+        &mut session,
+        &catalog,
+        Ipv4Addr::LOCALHOST,
+        4662,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sent.entries_sent, 1);
+    let mut header = [0u8; TCP_PACKET_HEADER_LEN];
+    peer.read_exact(&mut header).await.unwrap();
+    let mut body = vec![0; u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize - 1];
+    peer.read_exact(&mut body).await.unwrap();
+    let body = decode_server_payload(header[0], body).unwrap();
+    assert_eq!(header[5], OP_OFFERFILES);
+    assert_eq!(u32::from_le_bytes(body[..4].try_into().unwrap()), 1);
+    assert_eq!(
+        u32::from_le_bytes(body[20..24].try_into().unwrap()),
+        super::super::OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_ID
+    );
+    assert!(
+        body.windows(b"partial-name.bin".len())
+            .any(|window| window == b"partial-name.bin")
+    );
+    assert!(
+        !body
+            .windows(b"complete-name.bin".len())
+            .any(|window| window == b"complete-name.bin")
+    );
+}
+
+#[tokio::test]
 async fn background_offer_files_v1_waits_for_server_ident_before_first_batch() {
     let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
     let endpoint = listener.local_addr().unwrap();

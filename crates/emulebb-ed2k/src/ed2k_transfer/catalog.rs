@@ -1,4 +1,12 @@
-use std::{collections::HashMap, ops::Deref, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    ops::Deref,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,6 +24,340 @@ use super::{ED2K_PART_SIZE, Ed2kResumeManifest, ed2k_part_count};
 /// per-fragment/per-request crediting an O(1) lookup instead of a full scan held
 /// under the write lock.
 pub type Ed2kSharedCatalog = Arc<RwLock<IndexedSharedCatalog>>;
+type EligibilityRows = Vec<(bool, Option<emulebb_metadata::MetadataPartialOffer>)>;
+type EligibilityTask = tokio::task::JoinHandle<anyhow::Result<Option<EligibilityRows>>>;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ShareStripe {
+    active: u32,
+    generation: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct ShareStripes {
+    stripes: [ShareStripe; 256],
+    faulted: bool,
+}
+impl Default for ShareStripes {
+    fn default() -> Self {
+        Self {
+            stripes: [ShareStripe::default(); 256],
+            faulted: false,
+        }
+    }
+}
+
+/// Holds only fixed stripe identities across the actual SQL mutation lifetime.
+pub struct SharedFileMutation {
+    stripes: Arc<std::sync::Mutex<ShareStripes>>,
+    indexes: Vec<u8>,
+}
+impl Drop for SharedFileMutation {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.stripes.lock() {
+            for index in &self.indexes {
+                let stripe = &mut state.stripes[usize::from(*index)];
+                stripe.active -= 1;
+                if let Some(next) = stripe.generation.checked_add(1) {
+                    stripe.generation = next;
+                } else {
+                    state.faulted = true;
+                }
+            }
+        }
+    }
+}
+
+impl ShareStripes {
+    fn snapshot_all(&self) -> Option<Vec<(u8, u64)>> {
+        if self.faulted || self.stripes.iter().any(|stripe| stripe.active != 0) {
+            return None;
+        }
+        Some(
+            self.stripes
+                .iter()
+                .enumerate()
+                .map(|(index, stripe)| (index as u8, stripe.generation))
+                .collect(),
+        )
+    }
+    fn indexes(hashes: &[[u8; 16]]) -> Vec<u8> {
+        let mut indexes = hashes
+            .iter()
+            .map(|hash| hash[0] ^ hash[7] ^ hash[15])
+            .collect::<Vec<_>>();
+        indexes.sort_unstable();
+        indexes.dedup();
+        indexes
+    }
+    fn snapshot(&self, hashes: &[[u8; 16]]) -> Option<Vec<(u8, u64)>> {
+        if self.faulted {
+            return None;
+        }
+        Self::indexes(hashes)
+            .into_iter()
+            .map(|index| {
+                let stripe = self.stripes[usize::from(index)];
+                (stripe.active == 0).then_some((index, stripe.generation))
+            })
+            .collect()
+    }
+    fn matches(&self, snapshot: &[(u8, u64)]) -> bool {
+        !self.faulted
+            && snapshot.iter().all(|(index, generation)| {
+                let stripe = self.stripes[usize::from(*index)];
+                stripe.active == 0 && stripe.generation == *generation
+            })
+    }
+}
+
+/// One separately bounded, tracked eligibility read for outgoing batches.
+/// Product-owned read/projection buffers are capped at 1 MiB independently
+/// of persistence-owner payloads; SQLite/allocator and transport internals
+/// are outside this retained-payload bound.
+#[derive(Debug)]
+pub struct SharedEligibility {
+    metadata: emulebb_metadata::MetadataStore,
+    root_epoch: Arc<AtomicU64>,
+    root_dirty: Arc<AtomicBool>,
+    publication_failed: Arc<AtomicBool>,
+    sealed: AtomicBool,
+    stripes: Arc<std::sync::Mutex<ShareStripes>>,
+    manifests: Arc<tokio::sync::Mutex<HashMap<String, Ed2kResumeManifest>>>,
+    read_slot: Arc<tokio::sync::Mutex<Option<EligibilityTask>>>,
+}
+
+pub struct SharedEligibilityBatch {
+    epoch: u64,
+    stripes: Vec<(u8, u64)>,
+    pub complete: Vec<bool>,
+    pub partial: Vec<Option<emulebb_metadata::MetadataPartialOffer>>,
+    _slot: tokio::sync::OwnedMutexGuard<Option<EligibilityTask>>,
+}
+
+impl SharedEligibility {
+    pub(crate) fn new(
+        metadata: emulebb_metadata::MetadataStore,
+        root_epoch: Arc<AtomicU64>,
+        root_dirty: Arc<AtomicBool>,
+        publication_failed: Arc<AtomicBool>,
+        stripes: Arc<std::sync::Mutex<ShareStripes>>,
+        manifests: Arc<tokio::sync::Mutex<HashMap<String, Ed2kResumeManifest>>>,
+    ) -> Self {
+        Self {
+            metadata,
+            root_epoch,
+            root_dirty,
+            publication_failed,
+            sealed: AtomicBool::new(false),
+            stripes,
+            manifests,
+            read_slot: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Returns None when the bounded slot or SQLite connection is busy, or a
+    /// root transaction overlaps the read. No waiting caller copies a batch.
+    pub async fn try_batch(&self, hashes: &[[u8; 16]]) -> Result<Option<SharedEligibilityBatch>> {
+        anyhow::ensure!(hashes.len() <= 200, "eligibility batch exceeds 200 hashes");
+        if self.sealed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let Ok(mut slot) = Arc::clone(&self.read_slot).try_lock_owned() else {
+            return Ok(None);
+        };
+        if self.sealed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if slot.as_ref().is_some_and(|task| !task.is_finished()) {
+            return Ok(None);
+        }
+        if let Some(task) = slot.take() {
+            let _ = task.await;
+        }
+        let epoch = self.root_epoch.load(Ordering::Acquire);
+        if epoch % 2 != 0 {
+            return Ok(None);
+        }
+        let Some(mut stripes) = self
+            .stripes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("share stripe lock poisoned"))?
+            .snapshot(hashes)
+        else {
+            return Ok(None);
+        };
+        let owned = hashes.to_vec();
+        let metadata = self.metadata.clone();
+        *slot = Some(tokio::task::spawn_blocking(move || {
+            metadata.try_verified_share_batch(&owned)
+        }));
+        let result = slot.as_mut().expect("eligibility read slot").await;
+        slot.take();
+        let result = result.context("eligibility read task panicked")??;
+        let Some(rows) = result else {
+            return Ok(None);
+        };
+        if self.root_epoch.load(Ordering::Acquire) != epoch {
+            return Ok(None);
+        }
+        let Ok(cache) = self.manifests.try_lock() else {
+            return Ok(None);
+        };
+        let mut complete = Vec::with_capacity(hashes.len());
+        let mut partial = Vec::with_capacity(hashes.len());
+        let mut output_text_bytes = 0usize;
+        for (hash, (is_complete, persisted_partial)) in hashes.iter().zip(rows) {
+            let offer = if let Some(manifest) = cache.get(&hex::encode(hash)) {
+                if !manifest.completed
+                    && !manifest.final_rehash_pending
+                    && manifest.md4_hashset_acquired
+                    && !manifest.transfer_row_removed
+                    && !manifest.verified_ranges.is_empty()
+                {
+                    let name_len = manifest.display_name.len();
+                    let priority_len = manifest.upload_priority.len();
+                    anyhow::ensure!(
+                        name_len <= 65_536 && priority_len <= 65_536,
+                        "live partial offer exceeds per-entry bound"
+                    );
+                    let next = output_text_bytes
+                        .checked_add(name_len)
+                        .and_then(|n| n.checked_add(priority_len))
+                        .ok_or_else(|| anyhow::anyhow!("live partial offer batch exceeds bound"))?;
+                    if next > 192 * 1024 {
+                        break;
+                    }
+                    output_text_bytes = next;
+                    Some(emulebb_metadata::MetadataPartialOffer {
+                        name: manifest.display_name.clone(),
+                        size: manifest.file_size,
+                        priority: manifest.upload_priority.clone(),
+                        rating: manifest.rating,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                if let Some(offer) = &persisted_partial {
+                    let next = output_text_bytes
+                        .checked_add(offer.name.len())
+                        .and_then(|n| n.checked_add(offer.priority.len()))
+                        .ok_or_else(|| anyhow::anyhow!("partial offer batch exceeds bound"))?;
+                    if next > 192 * 1024 {
+                        break;
+                    }
+                    output_text_bytes = next;
+                }
+                persisted_partial
+            };
+            complete.push(is_complete);
+            partial.push(offer);
+        }
+        drop(cache);
+        let retained = ShareStripes::indexes(&hashes[..complete.len()]);
+        stripes.retain(|(index, _)| retained.binary_search(index).is_ok());
+        Ok(Some(SharedEligibilityBatch {
+            epoch,
+            stripes,
+            complete,
+            partial,
+            _slot: slot,
+        }))
+    }
+
+    pub fn requires_revalidation(&self) -> bool {
+        self.root_dirty.load(Ordering::Acquire) || self.publication_failed.load(Ordering::Acquire)
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.root_epoch.load(Ordering::Acquire)
+    }
+
+    pub fn stripe_snapshot(&self, hashes: &[[u8; 16]]) -> Option<Vec<(u8, u64)>> {
+        if hashes.len() > 200 {
+            return None;
+        }
+        self.stripes.lock().ok()?.snapshot(hashes)
+    }
+
+    pub(crate) fn full_rebuild_snapshot(&self) -> Result<Option<Vec<(u8, u64)>>> {
+        let state = self
+            .stripes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("share stripe lock poisoned"))?;
+        anyhow::ensure!(!state.faulted, "share stripe generation exhausted");
+        Ok(state.snapshot_all())
+    }
+
+    pub(crate) fn publish_full_rebuild(
+        &self,
+        snapshot: &[(u8, u64)],
+        catalog: &mut IndexedSharedCatalog,
+        entries: Vec<Ed2kSharedEntry>,
+    ) -> bool {
+        let Ok(state) = self.stripes.lock() else {
+            return false;
+        };
+        if !state.matches(snapshot) {
+            return false;
+        }
+        catalog.replace_with(entries);
+        self.publication_failed.store(false, Ordering::Release);
+        true
+    }
+
+    pub(crate) fn begin_mutation(&self, hashes: &[[u8; 16]]) -> Result<SharedFileMutation> {
+        anyhow::ensure!(
+            !hashes.is_empty() && hashes.len() <= 2,
+            "invalid share mutation identity count"
+        );
+        let indexes = ShareStripes::indexes(hashes);
+        let mut state = self
+            .stripes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("share stripe lock poisoned"))?;
+        anyhow::ensure!(
+            !state.faulted
+                && indexes.iter().all(|index| {
+                    let stripe = state.stripes[usize::from(*index)];
+                    stripe.active < u32::MAX
+                        && stripe
+                            .generation
+                            .checked_add(u64::from(stripe.active) + 2)
+                            .is_some()
+                }),
+            "share stripe generation exhausted"
+        );
+        for index in &indexes {
+            let stripe = &mut state.stripes[usize::from(*index)];
+            stripe.active += 1;
+            stripe.generation += 1;
+        }
+        drop(state);
+        Ok(SharedFileMutation {
+            stripes: Arc::clone(&self.stripes),
+            indexes,
+        })
+    }
+
+    pub async fn drain(&self) -> Result<()> {
+        {
+            let _cut = self
+                .stripes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("share stripe lock poisoned"))?;
+            self.sealed.store(true, Ordering::Release);
+        }
+        let mut slot = self.read_slot.lock().await;
+        if let Some(task) = slot.as_mut() {
+            let outcome = task.await;
+            slot.take();
+            outcome.context("eligibility read task panicked")??;
+        }
+        Ok(())
+    }
+}
 
 /// Ordered shared-file catalog paired with an O(1) raw-hash index.
 ///
@@ -37,14 +379,104 @@ pub type Ed2kSharedCatalog = Arc<RwLock<IndexedSharedCatalog>>;
 /// The index is kept in lock-step with `entries` by EVERY mutator on this type
 /// (`push`, `retain`, `replace_with`, `mutate_all`); the inner `Vec` is never
 /// exposed mutably, so a caller cannot let the index drift out of sync.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IndexedSharedCatalog {
     entries: Vec<Ed2kSharedEntry>,
     by_hash: HashMap<[u8; 16], usize>,
     completed_verified_count: usize,
+    category_watch: Option<([u8; 16], u64)>,
+    category_watch_sequence: Option<u64>,
+    eligibility: Option<Arc<SharedEligibility>>,
+}
+
+impl Default for IndexedSharedCatalog {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            by_hash: HashMap::new(),
+            completed_verified_count: 0,
+            category_watch: None,
+            category_watch_sequence: Some(0),
+            eligibility: None,
+        }
+    }
 }
 
 impl IndexedSharedCatalog {
+    pub(crate) fn set_eligibility(&mut self, eligibility: Arc<SharedEligibility>) {
+        self.eligibility = Some(eligibility);
+    }
+
+    pub fn eligibility(&self) -> Option<Arc<SharedEligibility>> {
+        self.eligibility.clone()
+    }
+
+    /// Called under the catalog read lock to admit one already-owned packet.
+    pub fn admit_eligibility_batch(&self, batch: &SharedEligibilityBatch) -> bool {
+        self.eligibility.as_ref().is_some_and(|provider| {
+            let Ok(state) = provider.stripes.lock() else {
+                return false;
+            };
+            !provider.sealed.load(Ordering::Acquire)
+                && provider.root_epoch.load(Ordering::Acquire) == batch.epoch
+                && state.matches(&batch.stripes)
+        })
+    }
+
+    pub fn admit_clean_epoch(&self, epoch: u64, stripes: &[(u8, u64)]) -> bool {
+        self.eligibility.as_ref().is_some_and(|provider| {
+            let Ok(state) = provider.stripes.lock() else {
+                return false;
+            };
+            provider.epoch() == epoch
+                && epoch % 2 == 0
+                && !provider.requires_revalidation()
+                && !provider.sealed.load(Ordering::Acquire)
+                && state.matches(stripes)
+        })
+    }
+
+    pub fn admit_revalidated_epoch(&self, epoch: u64, stripes: &[(u8, u64)]) -> bool {
+        self.eligibility.as_ref().is_some_and(|provider| {
+            let Ok(state) = provider.stripes.lock() else {
+                return false;
+            };
+            provider.epoch() == epoch
+                && epoch % 2 == 0
+                && !provider.sealed.load(Ordering::Acquire)
+                && state.matches(stripes)
+        })
+    }
+    /// Install the single bounded root-reconciliation watch under the catalog lock.
+    pub fn watch_category_hash(&mut self, hash: [u8; 16]) -> Option<u64> {
+        self.category_watch = None;
+        self.category_watch_sequence = self
+            .category_watch_sequence
+            .and_then(|value| value.checked_add(1));
+        let next = self.category_watch_sequence?;
+        self.category_watch = Some((hash, next));
+        Some(next)
+    }
+
+    /// Check and retire a watch while holding the same lock as publication.
+    pub fn finish_category_watch(&mut self, hash: [u8; 16], token: u64) -> bool {
+        if self.category_watch == Some((hash, token)) {
+            self.category_watch = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn invalidate_category_watch(&mut self, hash: Option<[u8; 16]>) {
+        if self
+            .category_watch
+            .is_some_and(|(watched, _)| hash.is_none_or(|key| key == watched))
+        {
+            self.category_watch = None;
+        }
+    }
+
     /// Build an indexed catalog from an ordered entry list.
     #[must_use]
     pub fn from_entries(entries: Vec<Ed2kSharedEntry>) -> Self {
@@ -52,6 +484,9 @@ impl IndexedSharedCatalog {
             entries,
             by_hash: HashMap::new(),
             completed_verified_count: 0,
+            category_watch: None,
+            category_watch_sequence: Some(0),
+            eligibility: None,
         };
         catalog.rebuild_index();
         catalog
@@ -107,6 +542,7 @@ impl IndexedSharedCatalog {
     /// indexed at its new tail position, first-occurrence-wins so an earlier
     /// duplicate keeps ownership (matching the old first-match scan).
     pub fn push(&mut self, entry: Ed2kSharedEntry) {
+        self.invalidate_category_watch(Self::entry_hash_key(&entry));
         let idx = self.entries.len();
         if !entry.compatibility_hint && entry.verified_complete {
             self.completed_verified_count += 1;
@@ -122,12 +558,14 @@ impl IndexedSharedCatalog {
     /// Retain entries matching `keep`, then rebuild the index. Removal shifts every
     /// later `Vec` position, so the map is rebuilt wholesale rather than patched.
     pub fn retain(&mut self, keep: impl FnMut(&Ed2kSharedEntry) -> bool) {
+        self.invalidate_category_watch(None);
         self.entries.retain(keep);
         self.rebuild_index();
     }
 
     /// Replace the whole ordered entry list and rebuild the index.
     pub fn replace_with(&mut self, entries: Vec<Ed2kSharedEntry>) {
+        self.invalidate_category_watch(None);
         self.entries = entries;
         self.rebuild_index();
     }
@@ -152,6 +590,7 @@ impl IndexedSharedCatalog {
         new_entry: Option<Ed2kSharedEntry>,
         dedup: impl FnOnce(Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry>,
     ) {
+        self.invalidate_category_watch(None);
         self.entries.retain(keep);
         if let Some(entry) = new_entry {
             self.entries.push(entry);
@@ -170,6 +609,24 @@ impl IndexedSharedCatalog {
     /// whether an entry was found. `update` MUST NOT change `file_hash` (that would
     /// desync the index); it is only ever used to bump stat counters.
     pub fn update_by_hash(
+        &mut self,
+        hash: &Ed2kHash,
+        update: impl FnOnce(&mut Ed2kSharedEntry),
+    ) -> bool {
+        self.invalidate_category_watch(Some(hash.0));
+        self.update_by_hash_inner(hash, update)
+    }
+
+    /// Update only publication/upload counters without invalidating eligibility work.
+    pub fn update_stats_by_hash(
+        &mut self,
+        hash: &Ed2kHash,
+        update: impl FnOnce(&mut Ed2kSharedEntry),
+    ) -> bool {
+        self.update_by_hash_inner(hash, update)
+    }
+
+    fn update_by_hash_inner(
         &mut self,
         hash: &Ed2kHash,
         update: impl FnOnce(&mut Ed2kSharedEntry),
@@ -205,6 +662,7 @@ impl IndexedSharedCatalog {
     /// can append. Removal uses `swap_remove` and repairs only the moved entry's
     /// index. Compatibility hints are deliberately untouched.
     pub fn upsert_verified(&mut self, hash: Ed2kHash, new_entry: Option<Ed2kSharedEntry>) {
+        self.invalidate_category_watch(Some(hash.0));
         if let Some(entry) = new_entry.as_ref() {
             debug_assert!(!entry.compatibility_hint);
             debug_assert_eq!(Self::entry_hash_key(entry), Some(hash.0));
@@ -251,6 +709,7 @@ impl IndexedSharedCatalog {
     /// wholesale rebuild guarantees the index cannot drift regardless of what
     /// `mutate` does.
     pub fn mutate_all(&mut self, mutate: impl FnMut(&mut Ed2kSharedEntry)) {
+        self.invalidate_category_watch(None);
         self.entries.iter_mut().for_each(mutate);
         self.rebuild_index();
     }
@@ -468,6 +927,53 @@ impl Ed2kSharedEntry {
         }
     }
 
+    /// Build a partial entry from the bounded transfer-only projection.
+    #[must_use]
+    pub(crate) fn from_partial_share(partial: emulebb_metadata::MetadataPartialShare) -> Self {
+        let ranges: Vec<Ed2kSharedRange> = partial
+            .ranges
+            .into_iter()
+            .map(|range| Ed2kSharedRange {
+                start: range.start,
+                end: range.end,
+            })
+            .collect();
+        let count = usize::from(ed2k_part_count(partial.file_size));
+        let mut complete_parts = Vec::with_capacity(count);
+        let mut range_index = 0;
+        for part in 0..count {
+            let start = part as u64 * ED2K_PART_SIZE;
+            let end = (start + ED2K_PART_SIZE).min(partial.file_size);
+            while range_index < ranges.len() && ranges[range_index].end < end {
+                range_index += 1;
+            }
+            complete_parts.push(
+                start >= partial.file_size
+                    || ranges
+                        .get(range_index)
+                        .is_some_and(|range| range.start <= start && end <= range.end),
+            );
+        }
+        Self {
+            file_hash: partial.file_hash,
+            display_name: partial.display_name,
+            file_size: partial.file_size,
+            verified_complete: false,
+            verified_ranges: ranges,
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: partial.aich_root,
+            upload_priority: partial.upload_priority,
+            auto_upload_priority: partial.auto_upload_priority,
+            comment: partial.comment,
+            rating: partial.rating,
+            media: Ed2kMediaMetadata::default(),
+            all_time_uploaded_bytes: 0,
+            complete_parts,
+            publish: Ed2kSharedPublishStats::default(),
+        }
+    }
+
     #[must_use]
     pub fn from_serving_view(manifest: &super::Ed2kFileServingView) -> Self {
         let complete_parts = if manifest.completed {
@@ -589,6 +1095,156 @@ pub struct Ed2kSharedRange {
 #[cfg(test)]
 mod indexed_catalog_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn eligibility_reads_are_bounded_and_single_slot() {
+        let maximum_workspace = 2 * 200 * std::mem::size_of::<[u8; 16]>()
+            + 2 * 200 * std::mem::size_of::<(u8, u64)>()
+            + 2 * 200
+                * std::mem::size_of::<(bool, Option<emulebb_metadata::MetadataPartialOffer>)>()
+            + 200 * 32
+            + 4096
+            + 4 * 192 * 1024;
+        assert!(maximum_workspace <= 1024 * 1024);
+        let epoch = Arc::new(AtomicU64::new(0));
+        let provider = SharedEligibility::new(
+            emulebb_metadata::MetadataStore::in_memory().unwrap(),
+            Arc::clone(&epoch),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::Mutex::new(ShareStripes::default())),
+            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        );
+        assert!(provider.try_batch(&[[0; 16]; 201]).await.is_err());
+        let first = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
+        assert_eq!(first.complete, vec![false]);
+        assert_eq!(first.partial, vec![None]);
+        assert!(provider.try_batch(&[[2; 16]]).await.unwrap().is_none());
+        drop(first);
+        epoch.store(1, Ordering::Release);
+        assert!(provider.try_batch(&[[2; 16]]).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn eligibility_drain_seals_before_waiting_for_the_inflight_batch() {
+        let provider = Arc::new(SharedEligibility::new(
+            emulebb_metadata::MetadataStore::in_memory().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::Mutex::new(ShareStripes::default())),
+            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        ));
+        let batch = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
+        let draining = {
+            let provider = Arc::clone(&provider);
+            tokio::spawn(async move { provider.drain().await })
+        };
+        while !provider.sealed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        assert!(!draining.is_finished());
+        assert!(provider.try_batch(&[[2; 16]]).await.unwrap().is_none());
+        drop(batch);
+        draining.await.unwrap().unwrap();
+        assert!(provider.try_batch(&[[3; 16]]).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn packet_admission_rejects_an_epoch_changed_before_admission() {
+        let epoch = Arc::new(AtomicU64::new(0));
+        let provider = Arc::new(SharedEligibility::new(
+            emulebb_metadata::MetadataStore::in_memory().unwrap(),
+            Arc::clone(&epoch),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::Mutex::new(ShareStripes::default())),
+            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        ));
+        let mut catalog = IndexedSharedCatalog::default();
+        catalog.set_eligibility(Arc::clone(&provider));
+        let batch = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
+        epoch.store(2, Ordering::Release);
+        assert!(!catalog.admit_eligibility_batch(&batch));
+        drop(batch);
+        let next = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
+        assert!(catalog.admit_eligibility_batch(&next));
+        epoch.store(4, Ordering::Release);
+        // The prior owned packet was already admitted; the next one retries.
+        assert!(!catalog.admit_eligibility_batch(&next));
+    }
+
+    #[test]
+    fn share_stripes_detect_inflight_and_completed_mutations_without_wrap() {
+        let provider = SharedEligibility::new(
+            emulebb_metadata::MetadataStore::in_memory().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::Mutex::new(ShareStripes::default())),
+            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        );
+        let hash = [1; 16];
+        let snapshot = provider.stripe_snapshot(&[hash]).unwrap();
+        let guard = provider.begin_mutation(&[hash, hash]).unwrap();
+        assert!(provider.stripe_snapshot(&[hash]).is_none());
+        drop(guard);
+        assert!(!provider.stripes.lock().unwrap().matches(&snapshot));
+        let stripe = ShareStripes::indexes(&[hash])[0];
+        provider.stripes.lock().unwrap().stripes[usize::from(stripe)].generation = u64::MAX - 1;
+        assert!(provider.begin_mutation(&[hash]).is_err());
+    }
+
+    #[test]
+    fn category_watch_ignores_unrelated_hashes_but_detects_replacement() {
+        let mut catalog = IndexedSharedCatalog::default();
+        let watched = [1; 16];
+        let token = catalog.watch_category_hash(watched).unwrap();
+        catalog.upsert_verified(Ed2kHash::from_bytes([2; 16]), None);
+        catalog.update_stats_by_hash(&Ed2kHash::from_bytes(watched), |_| {});
+        assert!(catalog.finish_category_watch(watched, token));
+
+        let token = catalog.watch_category_hash(watched).unwrap();
+        catalog.upsert_verified(Ed2kHash::from_bytes(watched), None);
+        assert!(!catalog.finish_category_watch(watched, token));
+
+        let token = catalog.watch_category_hash(watched).unwrap();
+        catalog.replace_with(Vec::new());
+        assert!(!catalog.finish_category_watch(watched, token));
+
+        catalog.category_watch_sequence = Some(u64::MAX);
+        assert!(catalog.watch_category_hash(watched).is_none());
+    }
+
+    #[test]
+    fn maximum_partial_projection_fits_category_workspace() {
+        let ranges = vec![emulebb_metadata::MetadataTransferRange { start: 0, end: 1 }; 28_258];
+        let input_range_bytes =
+            ranges.capacity() * std::mem::size_of::<emulebb_metadata::MetadataTransferRange>();
+        let partial = emulebb_metadata::MetadataPartialShare {
+            file_hash: "11".repeat(16),
+            display_name: "n".repeat(65_536),
+            file_size: 0x4000000000,
+            aich_root: Some("22".repeat(20)),
+            upload_priority: "normal".into(),
+            auto_upload_priority: false,
+            comment: "c".repeat(65_536),
+            rating: 0,
+            ranges,
+        };
+        let output = Ed2kSharedEntry::from_partial_share(partial);
+        let output_bytes = output.verified_ranges.capacity()
+            * std::mem::size_of::<Ed2kSharedRange>()
+            + output.complete_parts.capacity()
+            + output.display_name.capacity()
+            + output.comment.capacity()
+            + output.file_hash.capacity()
+            + output.upload_priority.capacity()
+            + output.aich_root.as_ref().map_or(0, String::capacity);
+        // Conservatively include the input allocation during conversion, one
+        // maximum native-path candidate and fixed page/allocator headroom.
+        assert!(input_range_bytes + output_bytes + 2 * 65_536 + 64 * 1024 < 4 * 1024 * 1024);
+    }
 
     fn hex_hash(nibble: u8) -> String {
         std::iter::repeat_n(format!("{nibble:x}{nibble:x}"), 16).collect()

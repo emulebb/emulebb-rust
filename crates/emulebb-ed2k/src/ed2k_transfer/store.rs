@@ -257,7 +257,7 @@ impl Ed2kTransferRuntime {
             return Ok(None);
         };
         let manifest = manifest_from_metadata(manifest)?;
-        self.mark_manifest_persisted_unlocked(&manifest).await;
+        let manifest = self.mark_manifest_persisted_unlocked(&manifest).await?;
         Ok(Some(manifest))
     }
 
@@ -267,23 +267,28 @@ impl Ed2kTransferRuntime {
         &self,
         file_hash: &str,
     ) -> Result<Option<super::Ed2kFileServingView>> {
-        let metadata = self.metadata.clone();
-        let owned_hash = file_hash.to_string();
-        let local =
-            tokio::task::spawn_blocking(move || metadata.active_local_content_by_hash(&owned_hash))
-                .await
-                .context("ED2K local content load task panicked")??;
         // WHY: SQLite remembers verified bytes, but an offline replacement
         // can leave the selected path stale. Resolve a live sibling path or
         // fall through to an independently verified download payload.
-        let local = if let Some(mut content) = local {
-            self.first_present_shared_source(file_hash)
-                .await?
-                .map(|source| {
-                    content.path = source.path;
-                    content.fingerprint = source.fingerprint;
-                    content
-                })
+        let local = if let Some(source) = self.first_present_shared_source(file_hash).await? {
+            let metadata = self.metadata.clone();
+            let expected_hash = file_hash.to_string();
+            tokio::task::spawn_blocking(move || {
+                let Some(instance) = metadata.local_file_instance(&source.metadata_path)? else {
+                    return Ok(None);
+                };
+                if !instance.file_hash.eq_ignore_ascii_case(&expected_hash)
+                    || instance.verified_fingerprint != source.fingerprint
+                {
+                    return Ok(None);
+                }
+                let mut content = metadata.verified_local_content_for_instance(instance)?;
+                content.path = source.path;
+                content.fingerprint = source.fingerprint;
+                Ok::<_, anyhow::Error>(Some(content))
+            })
+            .await
+            .context("ED2K local content load task panicked")??
         } else {
             None
         };
@@ -318,16 +323,55 @@ impl Ed2kTransferRuntime {
                 has_payload_authority: true,
             }
         });
-        if local_view.is_some() {
-            Ok(local_view)
+        let view = if local_view.is_some() {
+            local_view
         } else {
             match self.load_manifest_optional_unlocked(file_hash).await? {
-                Some(_) => Ok(Some(super::Ed2kFileServingView::from(
+                Some(_) => Some(super::Ed2kFileServingView::from(
                     &self.load_aich_manifest_unlocked(file_hash).await?,
-                ))),
-                None => Ok(None),
+                )),
+                None => None,
+            }
+        };
+        self.authorize_serving_view_unlocked(file_hash, view).await
+    }
+
+    /// Revalidate the selected view at admission while the manifest lock is held.
+    pub(super) async fn authorize_serving_view_unlocked(
+        &self,
+        file_hash: &str,
+        view: Option<super::Ed2kFileServingView>,
+    ) -> Result<Option<super::Ed2kFileServingView>> {
+        if view.is_none() {
+            return Ok(None);
+        }
+        let hash = file_hash.parse::<Ed2kHash>()?;
+        let complete_only = view.as_ref().is_some_and(|value| value.completed);
+        let Some(allowed) = self.admit_shared_hashes(&[hash.0], complete_only).await? else {
+            return Ok(None);
+        };
+        if allowed[0] {
+            return Ok(view);
+        }
+        if complete_only
+            && self
+                .load_manifest_optional_unlocked(file_hash)
+                .await?
+                .is_some()
+        {
+            let partial = super::Ed2kFileServingView::from(
+                &self.load_aich_manifest_unlocked(file_hash).await?,
+            );
+            if !partial.completed && partial.has_payload_authority {
+                let Some(allowed) = self.admit_shared_hashes(&[hash.0], false).await? else {
+                    return Ok(None);
+                };
+                if allowed[0] {
+                    return Ok(Some(partial));
+                }
             }
         }
+        Ok(None)
     }
 
     pub(super) async fn load_manifest_unlocked(
@@ -366,6 +410,23 @@ impl Ed2kTransferRuntime {
             let metadata = self.metadata.clone();
             let hash = file_hash.to_owned();
             let parsed_hash = file_hash.parse::<Ed2kHash>()?;
+            let _category_fence = self.category_assignment_gate.read().await;
+            let existing_category = self
+                .manifest_cache
+                .lock()
+                .await
+                .get(file_hash)
+                .map(|value| value.category_id);
+            manifest.category_id = if let Some(category) = existing_category {
+                category
+            } else {
+                let metadata = metadata.clone();
+                let hash = hash.clone();
+                tokio::task::spawn_blocking(move || metadata.transfer_category_by_hash(&hash))
+                    .await
+                    .context("category read task panicked")??
+                    .context("missing transfer while publishing AICH identity")?
+            };
             let mut cached = manifest.clone();
             let mut cache = Arc::clone(&self.manifest_cache).lock_owned().await;
             let mut catalog = Arc::clone(&self.shared_catalog).write_owned().await;
@@ -446,7 +507,7 @@ impl Ed2kTransferRuntime {
                 .await
                 .context("ED2K manifest upsert task panicked")??;
         let manifest = manifest_from_metadata(stored)?;
-        self.mark_manifest_persisted_unlocked(&manifest).await;
+        self.mark_manifest_persisted_unlocked(&manifest).await?;
         Ok(())
     }
 
@@ -464,6 +525,7 @@ impl Ed2kTransferRuntime {
         let transfer_dir = self.transfer_dir(&manifest.file_hash);
         let metadata = self.metadata.clone();
         let cache = Arc::clone(&self.manifest_cache);
+        let category_gate = Arc::clone(&self.category_assignment_gate);
         let checkpoints = Arc::clone(&self.manifest_checkpoint_state);
         let corroboration = Arc::clone(&self.aich_root_corroboration);
         let catalog = Arc::clone(&self.shared_catalog);
@@ -487,6 +549,22 @@ impl Ed2kTransferRuntime {
                     barrier.committed.notify_one();
                     barrier.release.notified().await;
                 }
+                let _category_fence = category_gate.read_owned().await;
+                let existing_category = cache
+                    .lock()
+                    .await
+                    .get(&manifest.file_hash)
+                    .map(|value| value.category_id);
+                manifest.category_id = if let Some(category) = existing_category {
+                    category
+                } else {
+                    let metadata = metadata.clone();
+                    let hash = manifest.file_hash.clone();
+                    tokio::task::spawn_blocking(move || metadata.transfer_category_by_hash(&hash))
+                        .await
+                        .context("category read task panicked")??
+                        .context("missing transfer while publishing AICH state")?
+                };
                 let mut cached = manifest.clone();
                 let progress = manifest_progress_bytes(&manifest);
                 // Lock order: manifest -> cache -> checkpoints -> catalog ->
@@ -603,7 +681,7 @@ impl Ed2kTransferRuntime {
         if !all_rows_updated {
             return self.store_manifest_unlocked(manifest).await;
         }
-        self.mark_manifest_persisted_unlocked(manifest).await;
+        self.mark_manifest_persisted_unlocked(manifest).await?;
         Ok(())
     }
 
@@ -628,23 +706,52 @@ impl Ed2kTransferRuntime {
             .insert(piece_index);
     }
 
-    pub(super) async fn cache_manifest_unlocked(&self, manifest: &Ed2kResumeManifest) {
+    /// Publish only while category writers are fenced; an older progress clone
+    /// must not replace the current cached assignment.
+    pub(super) async fn cache_manifest_unlocked(
+        &self,
+        manifest: &Ed2kResumeManifest,
+    ) -> Result<Ed2kResumeManifest> {
+        let _fence = self.category_assignment_gate.read().await;
+        let existing = self
+            .manifest_cache
+            .lock()
+            .await
+            .get(&manifest.file_hash)
+            .map(|value| value.category_id);
+        let category = if let Some(category) = existing {
+            category
+        } else {
+            let metadata = self.metadata.clone();
+            let hash = manifest.file_hash.clone();
+            tokio::task::spawn_blocking(move || metadata.transfer_category_by_hash(&hash))
+                .await
+                .context("category read task panicked")??
+                .context("missing transfer while publishing manifest")?
+        };
+        let mut current = manifest.clone();
+        current.category_id = category;
         self.manifest_cache
             .lock()
             .await
-            .insert(manifest.file_hash.clone(), manifest.clone());
+            .insert(current.file_hash.clone(), current.clone());
+        Ok(current)
     }
 
-    pub(super) async fn mark_manifest_persisted_unlocked(&self, manifest: &Ed2kResumeManifest) {
-        self.cache_manifest_unlocked(manifest).await;
+    pub(super) async fn mark_manifest_persisted_unlocked(
+        &self,
+        manifest: &Ed2kResumeManifest,
+    ) -> Result<Ed2kResumeManifest> {
+        let current = self.cache_manifest_unlocked(manifest).await?;
         self.manifest_checkpoint_state.lock().await.insert(
-            manifest.file_hash.clone(),
+            current.file_hash.clone(),
             Ed2kManifestCheckpointState {
-                persisted_bytes_written: manifest_progress_bytes(manifest),
+                persisted_bytes_written: manifest_progress_bytes(&current),
                 last_persisted_at: Instant::now(),
                 dirty_piece_indexes: std::collections::BTreeSet::new(),
             },
         );
+        Ok(current)
     }
 
     pub(super) async fn should_checkpoint_manifest_unlocked(

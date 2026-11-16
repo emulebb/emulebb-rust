@@ -12,50 +12,305 @@ use super::{
     Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kTransferRuntime,
 };
 
+/// Marks a root transaction in progress until its durable/cache publication ends.
+pub struct CategoryRootMutation {
+    epoch: Arc<std::sync::atomic::AtomicU64>,
+    ready: Arc<tokio::sync::Notify>,
+    clean_epoch: Option<u64>,
+}
+impl CategoryRootMutation {
+    /// A scoped reconciliation may clear safety only if no earlier root work
+    /// was pending and no later root transaction changes this epoch.
+    pub fn finish(self) -> Option<u64> {
+        self.clean_epoch
+    }
+}
+impl Drop for CategoryRootMutation {
+    fn drop(&mut self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.ready.notify_waiters();
+    }
+}
+
+/// Fixed-workspace outcome of reconciling a root-affected hash.
+pub enum CategoryCatalogDecision {
+    Keep,
+    Remove,
+    Partial(emulebb_metadata::MetadataPartialShare),
+}
+
+/// Probe one already-reserved candidate without holding a metadata connection.
+/// The caller owns the candidate and its allocation lease for the whole probe.
+pub fn category_copy_matches(candidate: &emulebb_metadata::MetadataSharedCopyCandidate) -> bool {
+    let Some(expected) = &candidate.source_fingerprint else {
+        return false;
+    };
+    let path = crate::long_path::long_path(&candidate.source_path);
+    expected.size_bytes == candidate.file_size
+        && super::ingest::native_file_fingerprint(&path)
+            .as_ref()
+            .is_some_and(|value| expected.safely_matches(value))
+}
+
 impl Ed2kTransferRuntime {
+    /// Admit a verified monitored path and publish its catalog entry under the
+    /// tracked owner. Capacity waits retain only the current caller's event.
+    pub async fn admit_monitored_shared_path(
+        &self,
+        file_hash: &str,
+        root: &std::path::Path,
+        path: &std::path::Path,
+        relative: &std::path::Path,
+        fingerprint: &emulebb_metadata::NativeFileFingerprint,
+        observed_root: Option<u64>,
+    ) -> anyhow::Result<bool> {
+        let hash = file_hash.parse::<Ed2kHash>()?;
+        loop {
+            let result = async {
+                let manifest_guard = self.lock_manifest(file_hash).await;
+                let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
+                let receive = self.local_mutations.submit_admission(
+                    self,
+                    file_hash,
+                    root,
+                    path,
+                    relative,
+                    fingerprint,
+                    observed_root,
+                    manifest_guard,
+                    stripe_guard,
+                )?;
+                receive
+                    .await
+                    .map_err(|_| anyhow::anyhow!("local admission worker stopped"))?
+            }
+            .await;
+            match result {
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<super::LocalMutationError>(),
+                        Some(super::LocalMutationError::Busy)
+                    ) =>
+                {
+                    self.local_mutations.wait_for_completion().await?;
+                    if observed_root.is_some() {
+                        return Err(error);
+                    }
+                    self.stable_category_root_epoch().await;
+                }
+                other => return other.map(|admitted| admitted != 0),
+            }
+        }
+    }
+
+    /// Capture the stable root epoch before a filesystem observation.
+    pub async fn root_observation_epoch(&self) -> u64 {
+        self.stable_category_root_epoch().await
+    }
+
+    /// Withdraw one monitored path through the tracked SQL/publication unit.
+    pub async fn withdraw_monitored_shared_path(
+        &self,
+        file_hash: &str,
+        path: &std::path::Path,
+    ) -> anyhow::Result<usize> {
+        let hash = file_hash.parse::<Ed2kHash>()?;
+        loop {
+            let result = async {
+                let manifest_guard = self.lock_manifest(file_hash).await;
+                let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
+                let receive = self.local_mutations.submit_withdrawal(
+                    self,
+                    file_hash,
+                    path,
+                    None,
+                    false,
+                    manifest_guard,
+                    stripe_guard,
+                )?;
+                receive
+                    .await
+                    .map_err(|_| anyhow::anyhow!("local withdrawal worker stopped"))?
+            }
+            .await;
+            match result {
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<super::LocalMutationError>(),
+                        Some(super::LocalMutationError::Busy)
+                    ) =>
+                {
+                    self.local_mutations.wait_for_completion().await?;
+                    self.stable_category_root_epoch().await;
+                }
+                other => return other,
+            }
+        }
+    }
+    /// Fence one or two content identities through durable and cache publication.
+    pub fn begin_shared_file_mutation(
+        &self,
+        hashes: &[[u8; 16]],
+    ) -> anyhow::Result<super::SharedFileMutation> {
+        self.share_eligibility.begin_mutation(hashes)
+    }
+    /// Fence stale catalog candidates across an in-flight root transaction.
+    pub async fn begin_category_root_mutation(&self) -> anyhow::Result<CategoryRootMutation> {
+        loop {
+            let epoch = self.stable_category_root_epoch().await;
+            // Serialize the transition with the final epoch check and catalog write.
+            let _catalog = self.shared_catalog.write().await;
+            if self.category_root_epoch.load(Ordering::Acquire) != epoch {
+                continue;
+            }
+            let next = epoch
+                .checked_add(2)
+                .ok_or_else(|| anyhow::anyhow!("category root generation is exhausted"))?
+                - 1;
+            self.category_root_epoch.store(next, Ordering::Release);
+            let previously_dirty = self.category_root_dirty.swap(true, Ordering::AcqRel);
+            return Ok(CategoryRootMutation {
+                epoch: Arc::clone(&self.category_root_epoch),
+                ready: Arc::clone(&self.category_root_epoch_ready),
+                clean_epoch: (!previously_dirty).then_some(next + 1),
+            });
+        }
+    }
+
+    /// Clear a scoped root fence only after its publication and only at its epoch.
+    pub async fn finish_scoped_root_publication(&self, epoch: u64) {
+        let catalog = self.shared_catalog.write().await;
+        let cleared = self.category_root_epoch.load(Ordering::Acquire) == epoch
+            && self.category_root_dirty.swap(false, Ordering::AcqRel);
+        drop(catalog);
+        if cleared {
+            self.notify_shared_publish_demand_changed();
+        }
+    }
+
+    async fn stable_category_root_epoch(&self) -> u64 {
+        loop {
+            let notified = self.category_root_epoch_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let epoch = self.category_root_epoch.load(Ordering::Acquire);
+            if epoch % 2 == 0 {
+                return epoch;
+            }
+            notified.await;
+        }
+    }
+
+    /// Watch one root-affected hash while its replacement is resolved.
+    pub async fn watch_category_catalog_hash(&self, hash: [u8; 16]) -> anyhow::Result<(u64, u64)> {
+        loop {
+            let epoch = self.stable_category_root_epoch().await;
+            let mut catalog = self.shared_catalog.write().await;
+            if self.category_root_epoch.load(Ordering::Acquire) != epoch {
+                continue;
+            }
+            let watch = catalog
+                .watch_category_hash(hash)
+                .ok_or_else(|| anyhow::anyhow!("catalog watch sequence exhausted"))?;
+            return Ok((epoch, watch));
+        }
+    }
+
+    /// Apply a worker decision only if no newer catalog publisher won the race.
+    pub async fn publish_category_catalog_decision(
+        &self,
+        hash: [u8; 16],
+        expected: (u64, u64),
+        decision: CategoryCatalogDecision,
+    ) -> anyhow::Result<bool> {
+        let mut catalog = self.shared_catalog.write().await;
+        if self.category_root_epoch.load(Ordering::Acquire) != expected.0
+            || !catalog.finish_category_watch(hash, expected.1)
+        {
+            return Ok(false);
+        }
+        let hash = Ed2kHash::from_bytes(hash);
+        let replacement = match decision {
+            CategoryCatalogDecision::Keep => {
+                drop(catalog);
+                self.notify_shared_publish_demand_changed();
+                return Ok(true);
+            }
+            CategoryCatalogDecision::Remove => None,
+            CategoryCatalogDecision::Partial(partial) => {
+                Some(Ed2kSharedEntry::from_partial_share(partial))
+            }
+        };
+        let mut replacement = replacement;
+        if let (Some(current), Some(next)) = (catalog.entry_by_hash(&hash), replacement.as_mut()) {
+            next.publish = current.publish.clone();
+            next.all_time_uploaded_bytes = current.all_time_uploaded_bytes;
+        }
+        catalog.upsert_verified(hash, replacement);
+        self.note_shared_catalog_entries_changed();
+        drop(catalog);
+        self.notify_shared_publish_demand_changed();
+        Ok(true)
+    }
+
     /// Reconcile one hash after a watcher changes its root membership. A
     /// local share takes precedence over an independently servable download.
     pub async fn refresh_shared_catalog_entry(&self, file_hash: &str) -> anyhow::Result<()> {
         let hash = Ed2kHash::from_str(file_hash)?;
         let _guard = self.lock_manifest(file_hash).await;
-        let metadata = self.metadata.clone();
-        let owned_hash = file_hash.to_owned();
-        let local = tokio::task::spawn_blocking(move || {
-            let Some(mut entry) = metadata.active_local_catalog_entry(&owned_hash)? else {
-                return Ok(None);
-            };
-            let Some(source) = super::duplicate::first_present_source(
-                metadata.current_shared_files_by_hash(&owned_hash)?,
-            ) else {
-                return Ok(None);
-            };
-            if !metadata
-                .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
-            {
-                return Ok(None);
+        loop {
+            let root_epoch = self.stable_category_root_epoch().await;
+            let metadata = self.metadata.clone();
+            let owned_hash = file_hash.to_owned();
+            let local = tokio::task::spawn_blocking(move || {
+                let Some(mut entry) = metadata.active_local_catalog_entry(&owned_hash)? else {
+                    return Ok(None);
+                };
+                let Some(source) = super::duplicate::first_present_source(
+                    metadata.current_shared_files_by_hash(&owned_hash)?,
+                ) else {
+                    return Ok(None);
+                };
+                if !metadata
+                    .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
+                {
+                    return Ok(None);
+                }
+                if let Some(name) =
+                    emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
+                {
+                    entry.display_name = name;
+                }
+                super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
+            })
+            .await??;
+            if let Some(local) = local {
+                let mut catalog = self.shared_catalog.write().await;
+                if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
+                    drop(catalog);
+                    continue;
+                }
+                catalog.upsert_verified(hash, Some(local));
+                self.note_shared_catalog_entries_changed();
+            } else if let Some(manifest) = self.load_manifest_optional_unlocked(file_hash).await? {
+                if !self
+                    .upsert_partial_catalog_entry(&manifest, hash, false, Some(root_epoch))
+                    .await
+                {
+                    continue;
+                }
+            } else {
+                let mut catalog = self.shared_catalog.write().await;
+                if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
+                    drop(catalog);
+                    continue;
+                }
+                catalog.upsert_verified(hash, None);
+                self.note_shared_catalog_entries_changed();
             }
-            if let Some(name) =
-                emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
-            {
-                entry.display_name = name;
-            }
-            super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
-        })
-        .await??;
-        if let Some(local) = local {
-            self.shared_catalog
-                .write()
-                .await
-                .upsert_verified(hash, Some(local));
-            self.note_shared_catalog_entries_changed();
-        } else if let Some(manifest) = self.load_manifest_optional_unlocked(file_hash).await? {
-            self.upsert_partial_catalog_entry(&manifest, hash, false)
-                .await;
-        } else {
-            self.remove_verified_catalog_entry(file_hash).await;
+            self.notify_shared_publish_demand_changed();
+            return Ok(());
         }
-        self.notify_shared_publish_demand_changed();
-        Ok(())
     }
 
     /// Replace a retired download's offer with its independently admitted
@@ -64,74 +319,100 @@ impl Ed2kTransferRuntime {
         &self,
         file_hash: &str,
     ) -> anyhow::Result<()> {
-        let metadata = self.metadata.clone();
-        let hash = file_hash.to_string();
-        let local = tokio::task::spawn_blocking(move || {
-            let Some(mut entry) = metadata.active_local_catalog_entry(&hash)? else {
-                return Ok(None);
-            };
-            let Some(source) = super::duplicate::first_present_source(
-                metadata.current_shared_files_by_hash(&hash)?,
-            ) else {
-                return Ok(None);
-            };
-            if !metadata
-                .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
-            {
-                return Ok(None);
+        loop {
+            let root_epoch = self.stable_category_root_epoch().await;
+            let metadata = self.metadata.clone();
+            let hash = file_hash.to_string();
+            let local = tokio::task::spawn_blocking(move || {
+                let Some(mut entry) = metadata.active_local_catalog_entry(&hash)? else {
+                    return Ok(None);
+                };
+                let Some(source) = super::duplicate::first_present_source(
+                    metadata.current_shared_files_by_hash(&hash)?,
+                ) else {
+                    return Ok(None);
+                };
+                if !metadata
+                    .mark_session_verified_local_path(&source.metadata_path, &source.fingerprint)?
+                {
+                    return Ok(None);
+                }
+                if let Some(name) =
+                    emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
+                {
+                    entry.display_name = name;
+                }
+                super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
+            })
+            .await??;
+            let hash = Ed2kHash::from_str(file_hash)?;
+            let mut catalog = self.shared_catalog.write().await;
+            if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
+                drop(catalog);
+                continue;
             }
-            if let Some(name) =
-                emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
-            {
-                entry.display_name = name;
-            }
-            super::transfer_sql::shared_entry_from_catalog_entry(entry).map(Some)
-        })
-        .await??;
-        let hash = Ed2kHash::from_str(file_hash)?;
-        self.shared_catalog
-            .write()
-            .await
-            .upsert_verified(hash, local);
-        self.note_shared_catalog_entries_changed();
-        self.notify_shared_publish_demand_changed();
-        Ok(())
+            catalog.upsert_verified(hash, local);
+            self.note_shared_catalog_entries_changed();
+            drop(catalog);
+            self.notify_shared_publish_demand_changed();
+            return Ok(());
+        }
     }
 
     /// Rebuild complete offers after a root scan changes membership. Verified
     /// in-progress download entries and compatibility hints stay in the catalog.
     pub async fn refresh_complete_shared_catalog(&self) -> anyhow::Result<usize> {
-        let metadata = self.metadata.clone();
-        let (complete, persisted_partial) = tokio::task::spawn_blocking(move || {
-            let complete = super::transfer_sql::completed_catalog_from_metadata_store(&metadata)?;
-            let partial = metadata
-                .incomplete_transfer_manifests()?
-                .into_iter()
-                .filter(|manifest| !manifest.transfer_row_removed)
-                .map(super::transfer_sql::manifest_from_metadata)
-                .collect::<anyhow::Result<Vec<_>>>()?
-                .into_iter()
-                .filter(manifest_has_servable_payload_authority)
-                .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest))
+        loop {
+            let root_epoch = self.stable_category_root_epoch().await;
+            let Some(stripes) = self.share_eligibility.full_rebuild_snapshot()? else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            };
+            let metadata = self.metadata.clone();
+            let (complete, persisted_partial) = tokio::task::spawn_blocking(move || {
+                let complete =
+                    super::transfer_sql::completed_catalog_from_metadata_store(&metadata)?;
+                let partial = metadata
+                    .incomplete_transfer_manifests()?
+                    .into_iter()
+                    .filter(|manifest| !manifest.transfer_row_removed)
+                    .map(super::transfer_sql::manifest_from_metadata)
+                    .collect::<anyhow::Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(manifest_has_servable_payload_authority)
+                    .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest))
+                    .collect::<Vec<_>>();
+                Ok::<_, anyhow::Error>((complete, partial))
+            })
+            .await??;
+            let count = complete.len();
+            let mut catalog = self.shared_catalog.write().await;
+            if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
+                drop(catalog);
+                continue;
+            }
+            let retained = catalog
+                .iter()
+                .filter(|entry| entry.compatibility_hint || !entry.verified_complete)
+                .cloned()
                 .collect::<Vec<_>>();
-            Ok::<_, anyhow::Error>((complete, partial))
-        })
-        .await??;
-        let count = complete.len();
-        let mut catalog = self.shared_catalog.write().await;
-        let retained = catalog
-            .iter()
-            .filter(|entry| entry.compatibility_hint || !entry.verified_complete)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut entries = persisted_partial;
-        entries.extend(retained);
-        entries.extend(complete);
-        catalog.replace_with(dedupe_entries(entries));
-        drop(catalog);
-        self.note_shared_catalog_entries_changed();
-        self.notify_shared_publish_demand_changed();
-        Ok(count)
+            let mut entries = persisted_partial;
+            entries.extend(retained);
+            entries.extend(complete);
+            if !self.share_eligibility.publish_full_rebuild(
+                &stripes,
+                &mut catalog,
+                dedupe_entries(entries),
+            ) {
+                drop(catalog);
+                continue;
+            }
+            self.category_root_dirty.store(false, Ordering::Release);
+            drop(catalog);
+            self.note_shared_catalog_entries_changed();
+            self.notify_shared_publish_demand_changed();
+            return Ok(count);
+        }
     }
 
     /// Borrow the shared catalog used by server-session advertisement and
@@ -139,6 +420,77 @@ impl Ed2kTransferRuntime {
     #[must_use]
     pub fn shared_catalog(&self) -> Ed2kSharedCatalog {
         Arc::clone(&self.shared_catalog)
+    }
+
+    /// Join a cancelled batch read before releasing the profile lease.
+    pub async fn drain_shared_eligibility(&self) -> anyhow::Result<()> {
+        let provider = self.shared_catalog.read().await.eligibility();
+        if let Some(provider) = provider {
+            provider.drain().await?;
+        }
+        Ok(())
+    }
+
+    /// Seal and join accepted local SQL/publication units before profile release.
+    pub async fn drain_local_mutations(&self) -> anyhow::Result<()> {
+        self.local_mutations.seal_and_drain().await
+    }
+
+    /// Admit a bounded outbound candidate batch before spawning network work.
+    /// A later root change does not revoke already-admitted work.
+    pub async fn admit_shared_hashes(
+        &self,
+        hashes: &[[u8; 16]],
+        complete_only: bool,
+    ) -> anyhow::Result<Option<Vec<bool>>> {
+        anyhow::ensure!(
+            hashes.len() <= 200,
+            "shared admission batch exceeds 200 hashes"
+        );
+        let provider = self.shared_catalog.read().await.eligibility();
+        let Some(provider) = provider else {
+            return Ok(Some(vec![true; hashes.len()]));
+        };
+        let epoch = provider.epoch();
+        let Some(stripes) = provider.stripe_snapshot(hashes) else {
+            return Ok(None);
+        };
+        if provider.requires_revalidation() {
+            let mut allowed = Vec::with_capacity(hashes.len());
+            let mut offset = 0;
+            while offset < hashes.len() {
+                let end = (offset + 2).min(hashes.len());
+                let chunk = &hashes[offset..end];
+                let Some(batch) = provider.try_batch(chunk).await? else {
+                    return Ok(None);
+                };
+                let count = batch.complete.len();
+                if count == 0 {
+                    return Ok(None);
+                }
+                allowed.extend(
+                    batch
+                        .complete
+                        .iter()
+                        .zip(batch.partial.iter())
+                        .map(|(complete, partial)| {
+                            *complete || (!complete_only && partial.is_some())
+                        }),
+                );
+                offset += count;
+            }
+            let catalog = self.shared_catalog.read().await;
+            if !catalog.admit_revalidated_epoch(epoch, &stripes) {
+                return Ok(None);
+            }
+            Ok(Some(allowed))
+        } else {
+            let catalog = self.shared_catalog.read().await;
+            if !catalog.admit_clean_epoch(epoch, &stripes) {
+                return Ok(None);
+            }
+            Ok(Some(vec![true; hashes.len()]))
+        }
     }
 
     /// Return the current verified shared-catalog entry count without walking
@@ -296,21 +648,28 @@ impl Ed2kTransferRuntime {
             return Ok(false);
         };
         let _guard = self.lock_manifest(&entry.file_hash).await;
-        let Some(manifest) = self
-            .load_serving_view_optional_unlocked(&entry.file_hash)
-            .await?
-        else {
-            return Ok(false);
-        };
-        if !hydrated_entry_matches_serving_view(&entry, &manifest) {
-            return Ok(false);
+        loop {
+            let root_epoch = self.stable_category_root_epoch().await;
+            let Some(manifest) = self
+                .load_serving_view_optional_unlocked(&entry.file_hash)
+                .await?
+            else {
+                return Ok(false);
+            };
+            if !hydrated_entry_matches_serving_view(&entry, &manifest) {
+                return Ok(false);
+            }
+            let mut catalog = self.shared_catalog.write().await;
+            if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
+                drop(catalog);
+                continue;
+            }
+            if catalog.entry_by_hash(&file_hash).is_some() {
+                return Ok(false);
+            }
+            catalog.upsert_verified(file_hash, Some(entry));
+            return Ok(true);
         }
-        let mut catalog = self.shared_catalog.write().await;
-        if catalog.entry_by_hash(&file_hash).is_some() {
-            return Ok(false);
-        }
-        catalog.upsert_verified(file_hash, Some(entry));
-        Ok(true)
     }
 
     pub(super) async fn insert_hydrated_incomplete_entry_if_current(
@@ -376,52 +735,77 @@ impl Ed2kTransferRuntime {
         let Ok(file_hash) = Ed2kHash::from_str(&manifest.file_hash) else {
             return;
         };
-        // A download may acquire verified parts while the same hash is already
-        // shared as a complete local file. The local file owns the effective
-        // protocol entry until its root membership is withdrawn.
-        match self
-            .metadata
-            .active_local_catalog_entry(&manifest.file_hash)
-        {
-            Ok(Some(mut local)) => {
-                let source = match self.first_present_shared_source(&manifest.file_hash).await {
-                    Ok(source) => source,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to validate local share precedence");
-                        return;
-                    }
-                };
-                let Some(source) = source else {
-                    // A stale local path cannot displace verified download parts.
-                    return self
-                        .upsert_partial_catalog_entry(manifest, file_hash, refresh_missing_media)
-                        .await;
-                };
-                if let Some(name) =
-                    emulebb_metadata::NativePath::from(source.path.as_path()).display_file_name()
-                {
-                    local.display_name = name;
-                }
-                match super::transfer_sql::shared_entry_from_catalog_entry(local) {
-                    Ok(entry) => {
-                        self.shared_catalog
-                            .write()
+        loop {
+            let root_epoch = self.stable_category_root_epoch().await;
+            // A download may acquire verified parts while the same hash is already
+            // shared as a complete local file. The local file owns the effective
+            // protocol entry until its root membership is withdrawn.
+            match self
+                .metadata
+                .active_local_catalog_entry(&manifest.file_hash)
+            {
+                Ok(Some(mut local)) => {
+                    let source = match self.first_present_shared_source(&manifest.file_hash).await {
+                        Ok(source) => source,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to validate local share precedence");
+                            return;
+                        }
+                    };
+                    let Some(source) = source else {
+                        // A stale local path cannot displace verified download parts.
+                        if self
+                            .upsert_partial_catalog_entry(
+                                manifest,
+                                file_hash,
+                                refresh_missing_media,
+                                Some(root_epoch),
+                            )
                             .await
-                            .upsert_verified(file_hash, Some(entry));
-                        self.note_shared_catalog_entries_changed();
+                        {
+                            return;
+                        }
+                        continue;
+                    };
+                    if let Some(name) = emulebb_metadata::NativePath::from(source.path.as_path())
+                        .display_file_name()
+                    {
+                        local.display_name = name;
                     }
-                    Err(error) => tracing::warn!(%error, "failed to project local shared entry"),
+                    match super::transfer_sql::shared_entry_from_catalog_entry(local) {
+                        Ok(entry) => {
+                            let mut catalog = self.shared_catalog.write().await;
+                            if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
+                                drop(catalog);
+                                continue;
+                            }
+                            catalog.upsert_verified(file_hash, Some(entry));
+                            self.note_shared_catalog_entries_changed();
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to project local shared entry")
+                        }
+                    }
+                    return;
                 }
-                return;
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "failed to resolve local share precedence");
+                    return;
+                }
             }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(%error, "failed to resolve local share precedence");
+            if self
+                .upsert_partial_catalog_entry(
+                    manifest,
+                    file_hash,
+                    refresh_missing_media,
+                    Some(root_epoch),
+                )
+                .await
+            {
                 return;
             }
         }
-        self.upsert_partial_catalog_entry(manifest, file_hash, refresh_missing_media)
-            .await;
     }
 
     async fn upsert_partial_catalog_entry(
@@ -429,7 +813,8 @@ impl Ed2kTransferRuntime {
         manifest: &Ed2kResumeManifest,
         file_hash: Ed2kHash,
         refresh_missing_media: bool,
-    ) {
+        expected_root_epoch: Option<u64>,
+    ) -> bool {
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
         let mut new_entry = manifest_has_servable_payload_authority(manifest)
@@ -481,6 +866,11 @@ impl Ed2kTransferRuntime {
         // Lock order: catalog -> servable-hash cache -> metadata connection.
         // The identity-only callback acquires no further locks and does no I/O.
         let mut entries = Arc::clone(&self.shared_catalog).write_owned().await;
+        if expected_root_epoch
+            .is_some_and(|epoch| self.category_root_epoch.load(Ordering::Acquire) != epoch)
+        {
+            return false;
+        }
         let metadata = self.metadata.clone();
         let hash = manifest.file_hash.clone();
         let generation = Arc::clone(&self.shared_catalog_generation);
@@ -503,6 +893,7 @@ impl Ed2kTransferRuntime {
             Ok(Err(error)) => tracing::warn!(%error, "failed to fence shared AICH identity"),
             Err(error) => tracing::warn!(%error, "shared AICH publication task panicked"),
         }
+        true
     }
 
     /// Remove a locally verified file from the live serving/advertisement

@@ -156,7 +156,7 @@ async fn accepted_authority_retires_old_parts_without_another_vote_and_after_res
         // Simulate a newer cache-only append: identity refresh must not reload
         // old SQL piece rows over independently received payload progress.
         stale.pieces[0].bytes_written = 123;
-        runtime.cache_manifest_unlocked(&stale).await;
+        runtime.cache_manifest_unlocked(&stale).await.unwrap();
         let mut replacement = consistent_candidate();
         replacement.part_hashes[0] = [0x91; 20];
         replacement.master_hash = super::super::hashset::reconstruct_aich_root_from_part_hashes(

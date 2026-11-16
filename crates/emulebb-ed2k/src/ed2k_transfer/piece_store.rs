@@ -685,7 +685,7 @@ impl Ed2kTransferRuntime {
 
             self.store_payload_handle(file_hash, file);
             self.note_dirty_piece_unlocked(&manifest, piece_index).await;
-            self.cache_manifest_unlocked(&manifest).await;
+            manifest = self.cache_manifest_unlocked(&manifest).await?;
             log_append_piece_block(AppendPieceBlockLog {
                 manifest: &manifest,
                 piece_index,
@@ -945,30 +945,19 @@ impl Ed2kTransferRuntime {
                 Ok(())
             }
             VerifiedPayloadAuthority::LocalInstance { path, expected } => {
-                let metadata = self.metadata.clone();
-                let path_for_db = path.clone();
-                let hash_for_db = file_hash.to_string();
-                let expected_for_db = expected.clone();
-                let remaining = tokio::task::spawn_blocking(move || {
-                    metadata.withdraw_local_file_path_if_verified(
-                        &path_for_db,
-                        &hash_for_db,
-                        &expected_for_db,
-                    )
-                })
-                .await??;
-                if remaining > 0 {
-                    let metadata = self.metadata.clone();
-                    let hash = file_hash.to_string();
-                    let another = tokio::task::spawn_blocking(move || {
-                        metadata.active_local_file_by_hash(&hash)
-                    })
-                    .await??;
-                    if another.is_none() {
-                        self.remove_verified_catalog_entry(file_hash).await;
-                    }
-                    self.queue_shared_source_invalidation(file_hash, path);
-                }
+                let hash: Ed2kHash = file_hash.parse()?;
+                let manifest_guard = self.lock_manifest(file_hash).await;
+                let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
+                let receive = self.local_mutations.submit_withdrawal(
+                    self,
+                    file_hash,
+                    path,
+                    Some(expected),
+                    true,
+                    manifest_guard,
+                    stripe_guard,
+                )?;
+                receive.await.context("local withdrawal worker stopped")??;
                 Ok(())
             }
         }
