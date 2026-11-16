@@ -15,7 +15,6 @@ use emulebb_settings::{
 
 use crate::{
     Category, CoreState, Friend, ServerInfo, SharedDirectoryRoot, apply_core_settings_update,
-    default_categories,
 };
 
 pub(crate) fn load_core_state(
@@ -28,17 +27,11 @@ pub(crate) fn load_core_state(
             .iter()
             .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
     )?;
-    let mut categories = default_categories();
-    for category in metadata.load_categories()? {
-        categories.insert(category.id, category_from_metadata(category));
-    }
-    let next_category_id = categories
-        .keys()
-        .copied()
-        .max()
-        .unwrap_or_default()
-        .saturating_add(1)
-        .max(1);
+    let categories = metadata
+        .load_categories()?
+        .into_iter()
+        .map(|category| (category.id, category_from_metadata(category)))
+        .collect();
 
     let friends = metadata
         .load_friends()?
@@ -74,7 +67,6 @@ pub(crate) fn load_core_state(
         transfers: HashMap::new(),
         core_settings,
         categories,
-        next_category_id,
         friends,
         servers,
         server_overrides: HashMap::new(),
@@ -262,17 +254,6 @@ where
     )?)
 }
 
-pub(crate) fn persist_category(metadata: &MetadataStore, category: &Category) -> Result<()> {
-    metadata.upsert_category(&MetadataCategory {
-        id: category.id,
-        name: category.name.clone(),
-        path: category.path.clone(),
-        comment: category.comment.clone(),
-        sort_order: category.priority,
-        color: category.color,
-    })
-}
-
 pub(crate) fn persist_friend(
     metadata: &MetadataStore,
     friend: &Friend,
@@ -324,14 +305,13 @@ pub(crate) fn persist_server(
     })
 }
 
-fn category_from_metadata(category: MetadataCategory) -> Category {
+pub(crate) fn category_from_metadata(category: MetadataCategory) -> Category {
     Category {
         id: category.id,
         name: category.name,
-        path: category.path.as_deref().map(normal_path_display),
+        temp_dir: category.temp_dir,
+        destination_dir: category.destination_dir,
         comment: category.comment,
-        priority: category.sort_order,
-        color: category.color,
     }
 }
 

@@ -25,7 +25,8 @@ pub struct SharedDirectoryRoot {
 }
 
 /// Consolidate recursive roots without inventing parents or altering native paths.
-/// Configured ancestors cover descendants, including temporarily unavailable trees.
+/// Configured ancestors cover descendants unless an unavailable ancestor would
+/// hide an independently eligible child root.
 /// Imports and every user-facing root mutation use this same policy.
 pub fn consolidate_shared_directory_roots(
     roots: impl IntoIterator<Item = MetadataSharedDirectoryRoot>,
@@ -33,10 +34,16 @@ pub fn consolidate_shared_directory_roots(
     let mut combined: Vec<(MetadataSharedDirectoryRoot, PathBuf)> = Vec::new();
     for root in roots {
         let key = shared_root_comparison_key(Path::new(&root.path));
-        if combined.iter().any(|(_, parent)| key.starts_with(parent)) {
+        let eligible = root.shareable && root.accessible;
+        if combined.iter().any(|(parent_root, parent)| {
+            key.starts_with(parent)
+                && (!eligible || (parent_root.shareable && parent_root.accessible))
+        }) {
             continue;
         }
-        combined.retain(|(_, child)| !child.starts_with(&key));
+        combined.retain(|(child_root, child)| {
+            !child.starts_with(&key) || (!eligible && child_root.shareable && child_root.accessible)
+        });
         combined.push((root, key));
     }
     combined.into_iter().map(|(root, _)| root).collect()
@@ -262,15 +269,6 @@ pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> S
     }
 }
 
-pub(crate) fn shared_directory_to_index(root: &SharedDirectoryRoot) -> IndexedSharedDirectoryRoot {
-    IndexedSharedDirectoryRoot {
-        path: normal_path_display(&root.path),
-        monitor_owned: root.monitor_owned,
-        shareable: root.shareable,
-        accessible: root.accessible,
-    }
-}
-
 pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> SharedDirectoryRoot {
     let path = long_path(Path::new(&root.path));
     let accessible = path.is_dir();
@@ -284,73 +282,163 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
 
 /// Incoming and category destinations are mandatory recursive share roots.
 /// They are derived from current settings rather than exposed as editable roots.
+fn root_sql_failure(error: anyhow::Error) -> anyhow::Error {
+    tracing::warn!(%error, "shared root database operation failed");
+    crate::persistence_owner::PersistenceError::Storage("database operation failed".into()).into()
+}
+
 pub(crate) async fn implicit_shared_directory_roots(
     core: &EmulebbCore,
-) -> Vec<SharedDirectoryRoot> {
-    let mut paths = vec![core.incoming_dir.clone()];
-    let state = core.state.lock().await;
-    paths.extend(
-        state
-            .categories
-            .values()
-            .filter_map(|category| category.path.as_ref())
-            .filter(|path| !path.trim().is_empty())
-            .map(PathBuf::from),
-    );
-    drop(state);
-    let mut seen = HashSet::new();
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let display = normal_path_display(&path);
-            if !seen.insert(shared_root_comparison_key(&path)) {
-                return None;
+) -> Result<Vec<SharedDirectoryRoot>> {
+    use crate::shared_dir_monitor::RootSqlResult;
+    let mut slot = core.shared_root_sql.lock().await;
+    if core.lifecycle_state_name() != "running" {
+        return Err(crate::persistence_owner::PersistenceError::Closing.into());
+    }
+    if let Some(previous) = slot.as_mut() {
+        let result = previous.await;
+        slot.take();
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                core.shared_root_fault
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return Err(root_sql_failure(error));
             }
-            Some(refresh_shared_directory_row(&SharedDirectoryRoot {
-                path: display,
-                monitor_owned: false,
-                shareable: true,
-                accessible: true,
-            }))
+            Err(error) => {
+                core.shared_root_fault
+                    .store(true, std::sync::atomic::Ordering::Release);
+                tracing::warn!(%error, "shared root database worker failed");
+                return Err(crate::persistence_owner::PersistenceError::Worker.into());
+            }
+        }
+    }
+    if core.lifecycle_state_name() != "running" {
+        return Err(crate::persistence_owner::PersistenceError::Closing.into());
+    }
+    let metadata = core.metadata_store.clone();
+    *slot = Some(tokio::task::spawn_blocking(move || {
+        Ok(RootSqlResult::Descriptors(
+            metadata.implicit_shared_directory_roots()?,
+        ))
+    }));
+    let result = slot
+        .as_mut()
+        .expect("implicit root read is installed")
+        .await;
+    slot.take();
+    let roots = match result {
+        Ok(Ok(RootSqlResult::Descriptors(roots))) => roots,
+        Ok(Ok(RootSqlResult::Mutation(_))) => unreachable!(),
+        Ok(Err(error)) => return Err(root_sql_failure(error)),
+        Err(error) => {
+            core.shared_root_fault
+                .store(true, std::sync::atomic::Ordering::Release);
+            tracing::warn!(%error, "shared root database worker failed");
+            return Err(crate::persistence_owner::PersistenceError::Worker.into());
+        }
+    };
+    Ok(roots
+        .into_iter()
+        .map(|root| SharedDirectoryRoot {
+            path: root.path,
+            monitor_owned: root.monitor_owned,
+            shareable: root.shareable,
+            accessible: root.accessible,
         })
-        .collect()
+        .collect())
+}
+
+pub(crate) async fn root_descriptors(core: &EmulebbCore) -> Result<Vec<SharedDirectoryRoot>> {
+    let mut roots = implicit_shared_directory_roots(core).await?;
+    roots.extend(core.state.lock().await.shared_directories.clone());
+    Ok(roots)
 }
 
 pub(crate) async fn effective_shared_directory_roots(
     core: &EmulebbCore,
-) -> Vec<SharedDirectoryRoot> {
-    let mut roots = implicit_shared_directory_roots(core).await;
-    roots.extend(core.state.lock().await.shared_directories.clone());
-    consolidate_shared_directory_roots(roots.into_iter().map(|root| MetadataSharedDirectoryRoot {
-        path: root.path,
-        monitor_owned: root.monitor_owned,
-        shareable: root.shareable,
-        accessible: root.accessible,
-    }))
-    .into_iter()
-    .map(|root| SharedDirectoryRoot {
-        path: root.path,
-        monitor_owned: root.monitor_owned,
-        shareable: root.shareable,
-        accessible: root.accessible,
-    })
-    .collect()
+) -> Result<Vec<SharedDirectoryRoot>> {
+    let roots = root_descriptors(core).await?;
+    let crate::shared_dir_monitor::RootIoResult::Inspected(roots) =
+        crate::shared_dir_monitor::run_root_io(
+            core,
+            crate::shared_dir_monitor::RootIoRequest::Inspect(roots),
+        )
+        .await?
+    else {
+        unreachable!()
+    };
+    Ok(roots.into_iter().map(|(root, _)| root).collect())
 }
 
 pub(crate) async fn sync_implicit_shared_directory_roots(core: &EmulebbCore) -> Result<()> {
-    let roots = implicit_shared_directory_roots(core)
-        .await
-        .into_iter()
-        .map(|root| MetadataSharedDirectoryRoot {
-            path: root.path,
-            monitor_owned: false,
-            shareable: root.shareable,
-            accessible: root.accessible,
-        })
-        .collect::<Vec<_>>();
-    let mut metadata = core.metadata_store.clone();
-    tokio::task::spawn_blocking(move || metadata.replace_implicit_shared_directory_roots(&roots))
-        .await??;
+    if core.lifecycle_state_name() != "running" {
+        return Err(crate::persistence_owner::PersistenceError::Closing.into());
+    }
+    let incoming = core.incoming_dir.clone();
+    let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
+    let mut slot = core.shared_root_sql.lock().await;
+    if core.lifecycle_state_name() != "running" {
+        return Err(crate::persistence_owner::PersistenceError::Closing.into());
+    }
+    if let Some(previous) = slot.as_mut() {
+        let result = previous.await;
+        slot.take();
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                core.shared_root_fault
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return Err(root_sql_failure(error));
+            }
+            Err(error) => {
+                core.shared_root_fault
+                    .store(true, std::sync::atomic::Ordering::Release);
+                tracing::warn!(%error, "shared root database worker failed");
+                return Err(crate::persistence_owner::PersistenceError::Worker.into());
+            }
+        }
+    }
+    let was_unpublished = core
+        .shared_root_unpublished
+        .load(std::sync::atomic::Ordering::Acquire);
+    if core.lifecycle_state_name() != "running" {
+        return Err(crate::persistence_owner::PersistenceError::Closing.into());
+    }
+    let metadata = core.metadata_store.clone();
+    let unpublished = std::sync::Arc::clone(&core.shared_root_unpublished);
+    #[cfg(test)]
+    let gate = core.shared_implicit_sql_gate.lock().unwrap().take();
+    *slot = Some(tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
+        let _root_mutation = root_mutation;
+        metadata.sync_profile_category_roots(&incoming)?;
+        unpublished.store(true, std::sync::atomic::Ordering::Release);
+        Ok(crate::shared_dir_monitor::RootSqlResult::Mutation(true))
+    }));
+    let result = slot
+        .as_mut()
+        .expect("implicit root update is installed")
+        .await;
+    slot.take();
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return Err(root_sql_failure(error)),
+        Err(error) => {
+            core.shared_root_fault
+                .store(true, std::sync::atomic::Ordering::Release);
+            tracing::warn!(%error, "shared root database worker failed");
+            return Err(crate::persistence_owner::PersistenceError::Worker.into());
+        }
+    }
+    if !was_unpublished {
+        core.shared_root_unpublished
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
     Ok(())
 }
 
@@ -909,11 +997,20 @@ fn select_initial_publish_cohort(mut candidates: Vec<ScannedSharedFile>) -> Vec<
 
 async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSharedFile>> {
     sync_implicit_shared_directory_roots(core).await?;
-    let roots = effective_shared_directory_roots(core).await;
+    let roots = root_descriptors(core).await?;
+    let crate::shared_dir_monitor::RootIoResult::Inspected(roots) =
+        crate::shared_dir_monitor::run_root_io(
+            core,
+            crate::shared_dir_monitor::RootIoRequest::Inspect(roots),
+        )
+        .await?
+    else {
+        unreachable!()
+    };
     let policy = load_shared_file_ignore_policy(core)?;
     tokio::task::spawn_blocking(move || -> Result<Vec<ScannedSharedFile>> {
         let mut candidates = Vec::new();
-        for root in roots.into_iter().filter(|root| root.accessible) {
+        for (root, _) in roots.into_iter().filter(|(_, observed)| *observed) {
             collect_initial_publish_candidates(Path::new(&root.path), &mut candidates, &policy)
                 .with_context(|| {
                     format!("failed to scan initial publish candidates in {}", root.path)
@@ -989,8 +1086,12 @@ async fn admit_scanned_roots(
             })
             .collect::<Vec<_>>();
         let metadata = core.metadata_store.clone();
-        tokio::task::spawn_blocking(move || metadata.replace_root_memberships(&root, &members))
-            .await??;
+        let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
+        tokio::task::spawn_blocking(move || {
+            let _root_mutation = root_mutation;
+            metadata.replace_root_memberships(&root, &members)
+        })
+        .await??;
     }
     // WHY: A full scan is the authority for removed paths. Rebuild offers once
     // after its memberships commit; per-hash refresh before this point reads
@@ -1052,7 +1153,7 @@ pub(crate) fn hashing_count_snapshot(core: &EmulebbCore) -> i64 {
 /// Scan the configured shared roots and return the deduped, sorted file list.
 async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     sync_implicit_shared_directory_roots(core).await?;
-    let roots = effective_shared_directory_roots(core).await;
+    let roots = effective_shared_directory_roots(core).await?;
     let policy = load_shared_file_ignore_policy(core)?;
     // The recursive directory walk is synchronous and may be large, so the helper
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
@@ -1761,8 +1862,12 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
     for root in &scan.inaccessible_roots {
         let metadata = core.metadata_store.clone();
         let root = root.clone();
-        tokio::task::spawn_blocking(move || metadata.set_shared_root_accessible(&root, false))
-            .await??;
+        let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
+        tokio::task::spawn_blocking(move || {
+            let _root_mutation = root_mutation;
+            metadata.set_shared_root_accessible(&root, false)
+        })
+        .await??;
     }
     let root_files = scan.root_files;
     let mut plan = plan_incremental_reload(core, scan.files).await?;
@@ -1889,32 +1994,183 @@ pub(crate) async fn forget_stale_shares(
 /// synchronous primitive, the background worker logs and skips a file that fails
 /// to hash and continues, so one bad file never aborts indexing of the rest of
 /// the library.
-pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Result<usize> {
-    core.shared_reload_pending.store(true, Ordering::Release);
-    record_reload_progress(core, |diagnostics| {
-        diagnostics.phase = "queued".to_string();
-    });
-    if core.shared_reload_running.swap(true, Ordering::AcqRel) {
-        return Ok(0);
+#[derive(Default)]
+pub(crate) struct ReloadControl {
+    state: std::sync::Mutex<ReloadState>,
+    wake: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ReloadState {
+    reservations: usize,
+    pending: bool,
+    running: bool,
+    sealed: bool,
+    join_failed: bool,
+}
+
+/// The Core owns task joins separately: a command's reservation must not reach
+/// the worker's Core clone and, through it, the persistence owner.
+#[derive(Default)]
+pub(crate) struct ReloadTaskSlot {
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    join_gate: tokio::sync::Mutex<()>,
+}
+
+pub(crate) struct ReloadReservation {
+    control: Arc<ReloadControl>,
+    pending: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ReloadReservation {
+    pub(crate) fn arm(
+        &self,
+    ) -> std::result::Result<(), crate::persistence_owner::PersistenceError> {
+        let mut state = self.control.state.lock().unwrap();
+        if state.sealed {
+            return Err(crate::persistence_owner::PersistenceError::Closing);
+        }
+        state.pending = true;
+        self.pending.store(true, Ordering::Release);
+        self.control.wake.notify_one();
+        Ok(())
     }
+}
+
+impl Drop for ReloadReservation {
+    fn drop(&mut self) {
+        let mut state = self.control.state.lock().unwrap();
+        state.reservations -= 1;
+        self.control.wake.notify_one();
+    }
+}
+
+fn start_reload_worker(core: &EmulebbCore, state: &mut ReloadState) {
+    // Lock order is control state, then task slot. No join holds either lock
+    // across an await; the async join gate only serializes drain callers.
+    let mut slot = core.shared_reload_task.task.lock().unwrap();
+    if state.running && slot.as_ref().is_some_and(|task| task.is_finished()) {
+        state.running = false;
+    }
+    if state.running {
+        return;
+    }
+    let previous = slot.take();
+    state.running = true;
+    core.shared_reload_running.store(true, Ordering::Release);
     let core = core.clone();
-    tokio::spawn(async move {
-        loop {
-            core.shared_reload_pending.store(false, Ordering::Release);
-            if let Err(error) = run_shared_directories_reload_job(core.clone()).await {
-                tracing::warn!(%error, "background shared-directory reload failed");
+    // An exiting predecessor is retained by its successor, which joins it
+    // before doing work. There can be only one worker and one exiting task.
+    *slot = Some(tokio::spawn(async move {
+        if let Some(previous) = previous {
+            if let Err(error) = previous.await {
+                tracing::warn!(%error, "previous shared reload worker failed");
+                core.shared_reload_control.state.lock().unwrap().join_failed = true;
             }
-            if !core.shared_reload_pending.load(Ordering::Acquire) {
-                core.shared_reload_running.store(false, Ordering::Release);
-                if !core.shared_reload_pending.load(Ordering::Acquire) {
-                    break;
+        }
+        loop {
+            let notified = core.shared_reload_control.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let run = {
+                let mut state = core.shared_reload_control.state.lock().unwrap();
+                if state.sealed {
+                    state.pending = false;
+                    core.shared_reload_pending.store(false, Ordering::Release);
                 }
-                if core.shared_reload_running.swap(true, Ordering::AcqRel) {
-                    break;
+                if state.pending {
+                    state.pending = false;
+                    core.shared_reload_pending.store(false, Ordering::Release);
+                    Some(true)
+                } else if state.reservations == 0 {
+                    state.running = false;
+                    core.shared_reload_running.store(false, Ordering::Release);
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            match run {
+                Some(true) => {
+                    if let Err(error) = run_shared_directories_reload_job(core.clone()).await {
+                        tracing::warn!(%error, "background shared-directory reload failed");
+                    }
+                }
+                Some(false) => break,
+                None => notified.await,
+            }
+        }
+    }));
+}
+
+pub(crate) fn reserve_root_reload(
+    core: &EmulebbCore,
+) -> std::result::Result<ReloadReservation, crate::persistence_owner::PersistenceError> {
+    let control = Arc::clone(&core.shared_reload_control);
+    let mut state = control.state.lock().unwrap();
+    if state.sealed {
+        return Err(crate::persistence_owner::PersistenceError::Closing);
+    }
+    state.reservations = state
+        .reservations
+        .checked_add(1)
+        .ok_or(crate::persistence_owner::PersistenceError::Busy)?;
+    start_reload_worker(core, &mut state);
+    drop(state);
+    Ok(ReloadReservation {
+        control,
+        pending: Arc::clone(&core.shared_reload_pending),
+    })
+}
+
+pub(crate) fn seal_reload(core: &EmulebbCore) {
+    let mut state = core.shared_reload_control.state.lock().unwrap();
+    state.sealed = true;
+    state.pending = false;
+    core.shared_reload_pending.store(false, Ordering::Release);
+    core.shared_reload_control.wake.notify_one();
+}
+
+pub(crate) async fn drain_reload(core: &EmulebbCore) -> Result<()> {
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::task::Poll;
+    // WHY: JoinHandle has one registered waker. Concurrent drain callers must
+    // not replace each other's wakeup, even when the latest caller is canceled.
+    let _gate = core.shared_reload_task.join_gate.lock().await;
+    poll_fn(|cx| {
+        let mut state = core.shared_reload_control.state.lock().unwrap();
+        let mut slot = core.shared_reload_task.task.lock().unwrap();
+        if let Some(task) = slot.as_mut() {
+            match Pin::new(task).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => {
+                    slot.take();
+                    if result.is_err() {
+                        state.join_failed = true;
+                    }
                 }
             }
         }
-    });
+        if state.join_failed {
+            Poll::Ready(Err(anyhow::anyhow!("shared reload worker failed")))
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    })
+    .await
+}
+
+pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Result<usize> {
+    let mut state = core.shared_reload_control.state.lock().unwrap();
+    if state.sealed {
+        return Err(crate::persistence_owner::PersistenceError::Closing.into());
+    }
+    state.pending = true;
+    core.shared_reload_pending.store(true, Ordering::Release);
+    record_reload_progress(core, |diagnostics| diagnostics.phase = "queued".to_string());
+    start_reload_worker(core, &mut state);
+    core.shared_reload_control.wake.notify_one();
     Ok(0)
 }
 
@@ -1967,6 +2223,9 @@ async fn bootstrap_initial_publish_catalog(
     }
     hash_reload_targets(core, plan.to_hash).await;
     for file in cohort {
+        if core.lifecycle_state_name() != "running" {
+            break;
+        }
         if let Some(fingerprint) = file.source_fingerprint.as_ref() {
             let Some(instance) = core.metadata_store.local_file_instance(&file.path)? else {
                 continue;
@@ -2103,6 +2362,9 @@ async fn hash_reload_targets(core: &EmulebbCore, mut to_hash: Vec<ReloadHashTarg
         workers.spawn(async move {
             let files = targets.len();
             for target in targets {
+                if core.lifecycle_state_name() != "running" {
+                    break;
+                }
                 hash_one_reload_target(&core, target).await;
                 tokio::task::yield_now().await;
             }
@@ -2122,18 +2384,31 @@ async fn hash_reload_targets(core: &EmulebbCore, mut to_hash: Vec<ReloadHashTarg
 
 async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     let _reload_guard = core.shared_reload_gate.lock().await;
+    if core.lifecycle_state_name() != "running" {
+        return Ok(());
+    }
     let bootstrap = bootstrap_initial_publish_catalog(&core).await?;
+    if core.lifecycle_state_name() != "running" {
+        return Ok(());
+    }
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
     });
     let scan = scan_shared_files(&core).await?;
+    if core.lifecycle_state_name() != "running" {
+        return Ok(());
+    }
     let scanned = scan.files.len();
     let skipped_intake_count = scan.skipped_intake_count;
     for root in &scan.inaccessible_roots {
         let metadata = core.metadata_store.clone();
         let root = root.clone();
-        tokio::task::spawn_blocking(move || metadata.set_shared_root_accessible(&root, false))
-            .await??;
+        let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
+        tokio::task::spawn_blocking(move || {
+            let _root_mutation = root_mutation;
+            metadata.set_shared_root_accessible(&root, false)
+        })
+        .await??;
     }
     let root_files = scan.root_files;
     record_reload_progress(&core, |diagnostics| {
@@ -2145,6 +2420,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     // re-hashed, so a restart over an unchanged
     // library finishes near-instantly and `hashingCount` stays ~0.
     let mut plan = plan_incremental_reload(&core, scan.files).await?;
+    if core.lifecycle_state_name() != "running" {
+        return Ok(());
+    }
     plan.stats.skipped_intake_count = skipped_intake_count;
     record_reload_progress(&core, |diagnostics| {
         *diagnostics = plan.stats.clone().into_diagnostics(
@@ -2173,6 +2451,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     }
 
     hash_reload_targets(&core, plan.to_hash).await;
+    if core.lifecycle_state_name() != "running" {
+        return Ok(());
+    }
     admit_scanned_roots(&core, root_files).await?;
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();

@@ -5,6 +5,10 @@ impl EmulebbCore {
     pub fn stop_persistence_admission(&self) -> Result<()> {
         Ok(self.persistence_owner.stop_regular_admission()?)
     }
+    /// Stop and join accepted local-share mutations.
+    pub async fn drain_local_share_mutations(&self) -> Result<()> {
+        self.ed2k_transfers.drain_local_mutations().await
+    }
     pub async fn friends(&self) -> Result<Vec<Friend>> {
         let state = self.state.lock().await;
         self.persistence_owner.check_coherent_state()?;
@@ -32,6 +36,21 @@ impl EmulebbCore {
 
     /// Close persistence admission and finish all accepted mutations.
     pub async fn drain_persistence(&self) -> Result<()> {
-        Ok(self.persistence_owner.close_and_drain().await?)
+        self.begin_shutdown();
+        let admission = self.stop_persistence_admission();
+        let monitor = self.stop_shared_directory_monitor().await;
+        let owner = self.persistence_owner.close_and_drain().await;
+        let reload = crate::shared_directories::drain_reload(self).await;
+        let local = self.ed2k_transfers.drain_local_mutations().await;
+        let root = crate::shared_dir_monitor::drain_root_sql(self).await;
+        let reads = self.ed2k_transfers.drain_shared_eligibility().await;
+        admission?;
+        monitor?;
+        owner?;
+        reload?;
+        local?;
+        root?;
+        reads?;
+        Ok(())
     }
 }

@@ -860,15 +860,9 @@ pub struct TransferCreate {
     pub link: Option<String>,
     #[serde(default)]
     pub links: Option<Vec<String>>,
-    #[serde(
-        default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
-    )]
-    pub category_id: Option<u32>,
-    #[serde(
-        default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_name"
-    )]
+    #[serde(skip)]
+    pub category_id: Option<i64>,
+    #[serde(default, rename = "category")]
     pub category_name: Option<String>,
     #[serde(
         default,
@@ -887,30 +881,22 @@ pub struct TransferUpdate {
     pub name: Option<String>,
     #[serde(default)]
     pub priority: Option<String>,
+    #[serde(skip)]
+    pub category_id: Option<Option<i64>>,
     #[serde(
         default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
+        rename = "category",
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_category"
     )]
-    pub category_id: Option<u32>,
-    #[serde(
-        default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_name"
-    )]
-    pub category_name: Option<String>,
+    pub category_name: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchResultDownloadCreate {
-    #[serde(
-        default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
-    )]
-    pub category_id: Option<u32>,
-    #[serde(
-        default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_name"
-    )]
+    #[serde(skip)]
+    pub category_id: Option<i64>,
+    #[serde(default, rename = "category")]
     pub category_name: Option<String>,
     #[serde(
         default,
@@ -924,12 +910,12 @@ pub struct SearchResultDownloadCreate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Category {
-    pub id: u32,
+    #[serde(skip)]
+    pub id: i64,
     pub name: String,
-    pub path: Option<String>,
+    pub temp_dir: Option<String>,
+    pub destination_dir: Option<String>,
     pub comment: String,
-    pub priority: u32,
-    pub color: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -940,37 +926,31 @@ pub struct CategoryCreate {
         default,
         deserialize_with = "crate::rest_model_serde::deserialize_nullable_string_field"
     )]
-    pub path: NullableStringField,
-    #[serde(default)]
-    pub comment: Option<String>,
+    pub temp_dir: NullableStringField,
     #[serde(
         default,
-        deserialize_with = "crate::rest_model_serde::deserialize_nullable_u32_field"
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_string_field"
     )]
-    pub color: NullableU32Field,
+    pub destination_dir: NullableStringField,
     #[serde(default)]
-    pub priority: Option<CategoryPriorityValue>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CategoryUpdate {
-    #[serde(default)]
-    pub name: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::rest_model_serde::deserialize_nullable_string_field"
     )]
-    pub path: NullableStringField,
-    #[serde(default)]
-    pub comment: Option<String>,
+    pub temp_dir: NullableStringField,
     #[serde(
         default,
-        deserialize_with = "crate::rest_model_serde::deserialize_nullable_u32_field"
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_string_field"
     )]
-    pub color: NullableU32Field,
+    pub destination_dir: NullableStringField,
     #[serde(default)]
-    pub priority: Option<CategoryPriorityValue>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -980,22 +960,6 @@ pub enum NullableStringField {
     Missing,
     Null(()),
     Value(String),
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum NullableU32Field {
-    #[default]
-    Missing,
-    Null(()),
-    Value(u32),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum CategoryPriorityValue {
-    Number(u32),
-    Name(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1151,8 +1115,10 @@ pub struct Transfer {
     pub stopped: bool,
     pub ed2k_link: String,
     pub priority: String,
-    pub category_id: u32,
-    pub category_name: String,
+    #[serde(skip)]
+    pub category_id: Option<i64>,
+    #[serde(rename = "category")]
+    pub category_name: Option<String>,
     /// Estimated seconds to completion, or None when idle/complete.
     pub eta: Option<u64>,
     /// Unix ms when the transfer was created, when persisted.

@@ -25,6 +25,129 @@ async fn test_dht(owner: &PersistenceOwner) -> DhtNode {
 }
 
 #[tokio::test]
+async fn final_kad_waits_for_cancelled_category_sql_and_reserved_probe_bytes() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR is required"),
+    )
+    .join("tmp")
+    .join("category-kad-drain")
+    .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&root).unwrap();
+    let category_path = root.join("category");
+    let incoming = root.join("incoming");
+    let uri = format!(
+        "file:category-kad-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let store =
+        MetadataStore::from_connection(rusqlite::Connection::open_with_flags(&uri, flags).unwrap())
+            .unwrap();
+    let category = store
+        .create_category(
+            "Queued",
+            None,
+            Some(category_path.to_str().unwrap()),
+            "",
+            &incoming,
+        )
+        .unwrap();
+    {
+        let mut conn = rusqlite::Connection::open_with_flags(&uri, flags).unwrap();
+        let tx = conn.transaction().unwrap();
+        let root_native = emulebb_metadata::NativePath::from(category_path.as_path());
+        let root_id: i64 = tx.query_row("SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2", rusqlite::params![emulebb_metadata::NativePath::platform(), root_native.storage_bytes()], |row| row.get(0)).unwrap();
+        for index in 1..=129u8 {
+            let hash = [index; 16];
+            tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES(?1,1,'sample',0,0,0)", [&hash[..]]).unwrap();
+            let known_id = tx.last_insert_rowid();
+            let path =
+                emulebb_metadata::NativePath::from(category_path.join(format!("sample-{index}")));
+            let display = path.display_path();
+            tx.execute("INSERT INTO local_paths(display_path,native_path,search_key,sort_key,file_name_search_key,platform) VALUES(?1,?2,?1,?1,?1,?3)", rusqlite::params![display, path.storage_bytes(), emulebb_metadata::NativePath::platform()]).unwrap();
+            let path_id = tx.last_insert_rowid();
+            tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) VALUES(?1,?2,1,x'01',x'01',0)", rusqlite::params![path_id, known_id]).unwrap();
+            tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_ms,last_seen_at_ms) VALUES(?1,?2,?3,'sample',0,0)", rusqlite::params![root_id,path_id,known_id]).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let state = Arc::new(Mutex::new(
+        profile_state::load_core_state(&store, vec![]).unwrap(),
+    ));
+    let owner = PersistenceOwner::start(store.clone(), state).unwrap();
+    let runtime = Arc::new(
+        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
+            &root.join("transfers"),
+            store.clone(),
+        )
+        .unwrap(),
+    );
+    let dht = test_dht(&owner).await;
+    owner.attach_kad(&dht).await.unwrap().commit();
+    wait_for_slots(&owner, 0).await;
+    let (entered, entered_rx) = oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *owner.category_page_gate.lock().unwrap() = Some((entered, release_rx));
+    let deleting = {
+        let owner = Arc::clone(&owner);
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            owner
+                .category(category::CategoryCommand::Delete {
+                    id: category.id,
+                    sharing: category::CategorySharingContext {
+                        runtime,
+                        incoming: Arc::new(incoming),
+                        root_change: Arc::new(tokio::sync::Notify::new()),
+                        probe_sender: std::sync::Weak::new(),
+                    },
+                })
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(usage(&owner).1 + kad_runtime_charge().unwrap() > MAX_BYTES);
+    let final_quota_wait = Arc::clone(&owner.final_quota_wait);
+    let wait = final_quota_wait.notified();
+    tokio::pin!(wait);
+    wait.as_mut().enable();
+    {
+        let mut admission = owner.admission.lock().unwrap();
+        admission.stopping = true;
+        admission.cancel_ingress.cancel();
+    }
+    let final_kad = {
+        let owner = Arc::clone(&owner);
+        let dht = dht.clone();
+        tokio::spawn(async move { owner.finish_kad(&dht).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+        .await
+        .unwrap();
+    assert!(!final_kad.is_finished());
+    release.send(()).unwrap();
+    assert!(matches!(
+        deleting.await.unwrap(),
+        Err(PersistenceError::CommittedPublicationFailed)
+    ));
+    final_kad.await.unwrap().unwrap();
+    assert!(matches!(
+        owner.close_and_drain().await,
+        Err(PersistenceError::CommittedPublicationFailed)
+    ));
+    drop(runtime);
+    drop(dht);
+    drop(owner);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn kad_runtime_checkpoints_only_changed_state_and_seals_on_finish() {
     let (store, _, owner) = setup();
     let dht = test_dht(&owner).await;
@@ -482,6 +605,10 @@ fn kad_full_runtime_and_import_reservations_fit_the_shared_budget() {
     let baseline =
         KAD_RESERVED_CAPACITY * std::mem::size_of::<emulebb_kad_dht::RoutingKeyProjection>();
     assert!(kad_runtime_charge().unwrap() + baseline <= MAX_BYTES);
+    assert!(
+        kad_runtime_charge().unwrap() + baseline + super::category::CATEGORY_PROBE_BYTES
+            <= MAX_BYTES
+    );
     assert!(kad_import_charge().unwrap() + baseline <= MAX_BYTES);
     let live_delta = KAD_RESERVED_CAPACITY * std::mem::size_of::<RoutingSnapshotContact>()
         + 2 * KAD_RESERVED_CAPACITY * (std::mem::size_of::<emulebb_kad_proto::NodeId>() + 1);

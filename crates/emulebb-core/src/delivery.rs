@@ -10,6 +10,7 @@
 
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -54,6 +55,7 @@ impl EmulebbCore {
     /// config path before wrapping the core in an `Arc`.
     #[must_use]
     pub fn with_incoming_dir(mut self, incoming_dir: PathBuf) -> Self {
+        self.category_incoming_dir = Arc::new(incoming_dir.clone());
         self.incoming_dir = incoming_dir;
         self
     }
@@ -66,19 +68,17 @@ impl EmulebbCore {
 
     /// Resolve the delivery destination directory for one completed transfer:
     /// its category's path when set, otherwise the global incoming directory.
-    async fn delivery_destination_dir(&self, manifest: &Ed2kResumeManifest) -> PathBuf {
-        if manifest.category_id != 0 {
-            let state = self.state.lock().await;
-            if let Some(path) = state
-                .categories
-                .get(&manifest.category_id)
-                .and_then(|category| category.path.clone())
-                .filter(|path| !path.trim().is_empty())
-            {
-                return PathBuf::from(path);
-            }
-        }
-        self.incoming_dir.clone()
+    async fn delivery_destination_dir(&self, manifest: &Ed2kResumeManifest) -> Result<PathBuf> {
+        let id = self
+            .ed2k_transfers
+            .current_category_id(&manifest.file_hash)
+            .await?;
+        let state = self.state.lock().await;
+        Ok(id
+            .and_then(|id| state.categories.get(&id))
+            .and_then(|category| category.destination_dir.as_ref())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.incoming_dir.clone()))
     }
 
     /// Materialize one completed transfer's payload into its destination by name
@@ -96,7 +96,13 @@ impl EmulebbCore {
         if !manifest.completed || manifest.final_rehash_pending {
             return;
         }
-        let dest_dir = self.delivery_destination_dir(&manifest).await;
+        let dest_dir = match self.delivery_destination_dir(&manifest).await {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(%error, "delivery skipped: category unavailable");
+                return;
+            }
+        };
         match self
             .ed2k_transfers
             .materialize_completed_payload(hash, &dest_dir)
@@ -133,7 +139,7 @@ impl EmulebbCore {
             .should_ignore(&normalized_path, &file_metadata)
         {
             ensure!(
-                crate::shared_dir_monitor::admit_monitored_path(
+                crate::shared_dir_monitor::admit_delivered_path(
                     self,
                     &normalized_path,
                     &fingerprint,

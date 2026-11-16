@@ -27,6 +27,7 @@ impl EmulebbCore {
     pub fn begin_shutdown(&self) {
         self.lifecycle
             .store(LIFECYCLE_SHUTTING_DOWN, Ordering::SeqCst);
+        crate::shared_directories::seal_reload(self);
     }
 
     /// The REST `app.lifecycle.state` token for the current phase. Must stay

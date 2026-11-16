@@ -17,20 +17,25 @@ impl EmulebbCore {
         }
 
         let manifests = self.ed2k_transfers.active_manifests().await?;
-        let categories = self.state.lock().await.categories.clone();
-        let mut hydrated = Vec::with_capacity(manifests.len());
+        let mut inserted = 0usize;
         for manifest in manifests {
             let mut transfer = self.transfer_from_manifest(
                 &manifest,
                 crate::views::manifest_default_state_name(&manifest),
             );
-            apply_persisted_transfer_category(&mut transfer, &manifest, &categories);
-            hydrated.push(transfer);
-        }
-
-        let mut inserted = 0usize;
-        let mut state = self.state.lock().await;
-        for transfer in hydrated {
+            let _fence = self.ed2k_transfers.lock_category_publication().await;
+            let category_id = self
+                .ed2k_transfers
+                .current_category_id_fenced(&transfer.hash)
+                .await?;
+            let mut state = self.state.lock().await;
+            transfer.category_id = category_id;
+            transfer.category_name = category_id.and_then(|id| {
+                state
+                    .categories
+                    .get(&id)
+                    .map(|category| category.name.clone())
+            });
             if let std::collections::hash_map::Entry::Vacant(entry) =
                 state.transfers.entry(transfer.hash.clone())
             {
@@ -38,7 +43,6 @@ impl EmulebbCore {
                 inserted = inserted.saturating_add(1);
             }
         }
-        drop(state);
         self.persisted_transfers_hydrated
             .store(true, Ordering::Release);
         Ok(inserted)
@@ -115,7 +119,7 @@ impl EmulebbCore {
         hash: &str,
         state_name: &str,
     ) -> Result<Option<Transfer>> {
-        if self.transfer(hash).await.is_none() {
+        if self.transfer(hash).await?.is_none() {
             return Ok(None);
         }
         let manifest = self
@@ -130,8 +134,16 @@ impl EmulebbCore {
         // re-queues a fresh attempt (its cancel token is recreated then).
         self.cancel_download_attempt(hash).await;
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
+        let _fence = self.ed2k_transfers.lock_category_publication().await;
+        let category_id = self.ed2k_transfers.current_category_id_fenced(hash).await?;
         let mut state = self.state.lock().await;
-        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+        transfer.category_id = category_id;
+        transfer.category_name = category_id.and_then(|id| {
+            state
+                .categories
+                .get(&id)
+                .map(|category| category.name.clone())
+        });
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
@@ -144,7 +156,7 @@ impl EmulebbCore {
     }
 
     pub async fn resume_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(current) = self.transfer(hash).await else {
+        let Some(current) = self.transfer(hash).await? else {
             return Ok(None);
         };
         if current.state == "completed" {
@@ -205,11 +217,29 @@ impl EmulebbCore {
                 crate::views::manifest_default_state_name(&manifest),
             );
             let transfer = {
+                let _fence = self.ed2k_transfers.lock_category_publication().await;
+                let category_id = match self
+                    .ed2k_transfers
+                    .current_category_id_fenced(&transfer.hash)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to read category during resume");
+                        continue;
+                    }
+                };
                 let mut state = self.state.lock().await;
                 if let Some(existing) = state.transfers.get(&transfer.hash) {
                     existing.clone()
                 } else {
-                    apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+                    transfer.category_id = category_id;
+                    transfer.category_name = category_id.and_then(|id| {
+                        state
+                            .categories
+                            .get(&id)
+                            .map(|category| category.name.clone())
+                    });
                     state
                         .transfers
                         .insert(transfer.hash.clone(), transfer.clone());

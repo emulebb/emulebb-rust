@@ -21,6 +21,7 @@ pub use discovery_fetch::{
 use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
+pub use emulebb_ed2k::ed2k_transfer::LocalMutationError;
 pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_ed2k::{
     DirectCallbackArgs, DirectCallbackDispatchOutcome, DirectCallbackSender, NatManager,
@@ -113,7 +114,6 @@ mod build_identity;
 mod callback_tracker;
 mod categories;
 mod category_api;
-mod category_runtime;
 mod core_settings;
 mod core_state;
 mod delivery;
@@ -158,6 +158,8 @@ mod local_search_response;
 mod network_api;
 mod network_binding;
 mod persistence_owner;
+pub use emulebb_metadata::valid_category_name;
+pub use persistence_owner::CategoryNameConflict;
 mod physical_disk;
 mod profile_state;
 mod search_api;
@@ -179,7 +181,6 @@ mod upload_api;
 mod upload_view;
 mod views;
 pub mod vpn_guard;
-use categories::default_categories;
 #[cfg(test)]
 use core_settings::default_core_settings;
 use core_settings::{
@@ -287,9 +288,8 @@ pub use shared_directories::{
     SharedFileIgnoreRuleUpdate, SharedFileIgnores, consolidate_shared_directory_roots,
 };
 use shared_directories::{
-    is_shared_file_ignore_rule, load_shared_file_ignore_policy, refresh_shared_directory_row,
-    reload_progress_snapshot, shared_directory_from_index, shared_directory_to_index,
-    shared_file_ignore_rules,
+    is_shared_file_ignore_rule, load_shared_file_ignore_policy, reload_progress_snapshot,
+    shared_directory_from_index, shared_file_ignore_rules,
 };
 
 mod network_status_defaults;
@@ -311,29 +311,27 @@ pub use emulebb_settings::{
     core_settings_schema, settings_section_resource_inventory,
 };
 pub use rest_model::{
-    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
-    DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution,
-    IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus,
-    NullableStringField, NullableU32Field, Search, SearchCreate, SearchProgress, SearchResult,
-    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec,
-    ServerCreate, ServerInfo, ServerUpdate, SharedFileKadKeywordPublish, SharedFileListCursor,
-    SharedFileListItem, SharedFileListPage, SharedFileListQuery, SharedFilePublicationStatus,
-    SharedFilePublishLane, SharedFilePublishState, SharedFileUpdate, Status, Transfer,
-    TransferComment, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
-    TransferEventResetReason, TransferEventType, TransferFileNameObservation,
-    TransferNameCandidate, TransferNameConsensus, TransferPart, TransferSource, TransferStats,
-    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
-    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadSourceMetrics,
+    Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus, IpFilterStatus,
+    KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField, Search,
+    SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate, SearchResultMedia,
+    SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
+    SharedFileKadKeywordPublish, SharedFileListCursor, SharedFileListItem, SharedFileListPage,
+    SharedFileListQuery, SharedFilePublicationStatus, SharedFilePublishLane,
+    SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferCreate,
+    TransferDetails, TransferEvent, TransferEventDiagnostics, TransferEventResetReason,
+    TransferEventType, TransferFileNameObservation, TransferNameCandidate, TransferNameConsensus,
+    TransferPart, TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
+    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
-    ServerLiveDetails, apply_server_update, default_transfer_category_name,
-    download_priority_score, enrich_sources_with_live, ensure_category_selector_is_unambiguous,
-    format_ed2k_file_link, kad_status_from_running, manifest_default_state_name,
-    normalize_transfer_name, preserve_transfer_public_metadata, server_endpoint_from_create,
-    server_info_from_parts, source_by_client_id, source_friend_name, transfer_create_links,
-    transfer_create_state_name, transfer_from_manifest, transfer_parts_from_manifest,
-    transfer_sources_from_manifest, validate_server_priority, validate_server_update,
-    validate_shared_file_comment_rating, validate_shared_upload_priority,
+    ServerLiveDetails, apply_server_update, download_priority_score, enrich_sources_with_live,
+    ensure_category_selector_is_unambiguous, format_ed2k_file_link, kad_status_from_running,
+    manifest_default_state_name, normalize_transfer_name, preserve_transfer_public_metadata,
+    server_endpoint_from_create, server_info_from_parts, source_by_client_id, source_friend_name,
+    transfer_create_links, transfer_create_state_name, transfer_from_manifest,
+    transfer_parts_from_manifest, transfer_sources_from_manifest, validate_server_priority,
+    validate_server_update, validate_shared_file_comment_rating, validate_shared_upload_priority,
     validate_source_client_id, validate_transfer_priority, validate_transfer_update_family,
     validate_url_import,
 };
@@ -460,6 +458,7 @@ pub struct EmulebbCore {
     /// (eMule global Incoming folder). Defaults next to the transfer root; the
     /// daemon overrides it from `incomingDir` config via [`with_incoming_dir`].
     incoming_dir: PathBuf,
+    category_incoming_dir: Arc<PathBuf>,
     /// Retry/backoff and operator-facing error state for verified downloads
     /// whose finished-file materialization has not succeeded yet.
     delivery_failures: Arc<std::sync::Mutex<HashMap<String, delivery::DeliveryFailure>>>,
@@ -496,13 +495,78 @@ pub struct EmulebbCore {
     ed2k_download_tasks: Arc<DownloadTaskSupervisor>,
     /// Live shared-directory auto-pickup monitor (eMule directory auto-monitor
     /// parity); rebuilt on reconfigure, torn down on `disconnect_ed2k`. See the
-    /// `shared_dir_monitor` module. `std::sync::Mutex` so start/stop is await-free.
-    shared_dir_monitor: Arc<std::sync::Mutex<Option<SharedDirMonitor>>>,
+    /// `shared_dir_monitor` module.
+    shared_dir_monitor: Arc<Mutex<Option<SharedDirMonitor>>>,
     /// Serial bounded re-hash worker for upload-time share-in-place authority
     /// invalidations. It is lifecycle-coupled to the directory monitor because
     /// both reconcile local source paths through the same ingest authority.
-    shared_source_reconcile_worker: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
-    shared_root_health_worker: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    shared_source_reconcile_worker: Arc<Mutex<Option<JoinHandle<()>>>>,
+    shared_root_health_worker: Arc<Mutex<Option<JoinHandle<()>>>>,
+    shared_monitor_lifecycle: Arc<Mutex<()>>,
+    shared_watcher_gate: Arc<Mutex<()>>,
+    shared_monitor_stopped: Arc<AtomicBool>,
+    shared_monitor_fault: Arc<AtomicBool>,
+    shared_root_snapshot:
+        Arc<Mutex<Option<JoinHandle<anyhow::Result<shared_dir_monitor::RootIoResult>>>>>,
+    shared_root_sql:
+        Arc<Mutex<Option<JoinHandle<anyhow::Result<shared_dir_monitor::RootSqlResult>>>>>,
+    shared_root_unpublished: Arc<AtomicBool>,
+    shared_root_fault: Arc<AtomicBool>,
+    #[cfg(test)]
+    shared_root_sql_gate: Arc<
+        std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                std::sync::mpsc::Receiver<()>,
+            )>,
+        >,
+    >,
+    #[cfg(test)]
+    shared_root_io_gate: Arc<
+        std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                std::sync::mpsc::Receiver<()>,
+            )>,
+        >,
+    >,
+    #[cfg(test)]
+    shared_implicit_sql_gate: Arc<
+        std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                std::sync::mpsc::Receiver<()>,
+            )>,
+        >,
+    >,
+    #[cfg(test)]
+    category_probe_gate: Arc<
+        std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                std::sync::mpsc::Receiver<()>,
+            )>,
+        >,
+    >,
+    #[cfg(test)]
+    category_probe_waiting: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    shared_root_change: Arc<tokio::sync::Notify>,
+    category_probe_sender: Arc<
+        std::sync::Mutex<
+            Option<tokio::sync::mpsc::Sender<persistence_owner::category::CategoryProbeJob>>,
+        >,
+    >,
+    category_probe_slot: Arc<
+        tokio::sync::Mutex<
+            Option<
+                JoinHandle<(
+                    emulebb_metadata::MetadataSharedCopyCandidate,
+                    bool,
+                    persistence_owner::ByteLease,
+                )>,
+            >,
+        >,
+    >,
     /// Files still pending the initial hash in the detached background reload
     /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
     /// atomic shared by the sync primitive and the worker (see `shared_directories`).
@@ -517,6 +581,8 @@ pub struct EmulebbCore {
     shared_reload_gate: Arc<Mutex<()>>,
     shared_reload_running: Arc<AtomicBool>,
     shared_reload_pending: Arc<AtomicBool>,
+    shared_reload_control: Arc<shared_directories::ReloadControl>,
+    shared_reload_task: Arc<shared_directories::ReloadTaskSlot>,
     /// Coalesces ED2K server shared-catalog refreshes caused by share/hash
     /// completion. Large startup reloads can complete many files quickly; waiting
     /// for a server publish per file would serialize hashing behind network I/O.
@@ -608,7 +674,12 @@ impl EmulebbCore {
         let shared_directories = index
             .shared_directory_roots()?
             .into_iter()
-            .map(shared_directory_from_index)
+            .map(|root| {
+                let mut root = shared_directory_from_index(root);
+                // Persisted intent is not a fresh filesystem health observation.
+                root.accessible = false;
+                root
+            })
             .collect::<Vec<_>>();
         let mut core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
         let passive_replay_enabled = ed2k_network
@@ -701,6 +772,7 @@ impl EmulebbCore {
             persisted_transfer_hydration_gate: Arc::new(Mutex::new(())),
             transfer_root,
             profile_dir,
+            category_incoming_dir: Arc::new(incoming_dir.clone()),
             incoming_dir,
             delivery_failures: Arc::new(std::sync::Mutex::new(HashMap::new())),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)),
@@ -715,9 +787,30 @@ impl EmulebbCore {
                 vpn_guard::EgressProbeReport::default(),
             )),
             ed2k_download_tasks: Arc::new(DownloadTaskSupervisor::new()),
-            shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
-            shared_source_reconcile_worker: Arc::new(std::sync::Mutex::new(None)),
-            shared_root_health_worker: Arc::new(std::sync::Mutex::new(None)),
+            shared_dir_monitor: Arc::new(Mutex::new(None)),
+            shared_source_reconcile_worker: Arc::new(Mutex::new(None)),
+            shared_root_health_worker: Arc::new(Mutex::new(None)),
+            shared_monitor_lifecycle: Arc::new(Mutex::new(())),
+            shared_watcher_gate: Arc::new(Mutex::new(())),
+            shared_monitor_stopped: Arc::new(AtomicBool::new(true)),
+            shared_monitor_fault: Arc::new(AtomicBool::new(false)),
+            shared_root_snapshot: Arc::new(Mutex::new(None)),
+            shared_root_sql: Arc::new(Mutex::new(None)),
+            shared_root_unpublished: Arc::new(AtomicBool::new(false)),
+            shared_root_fault: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            shared_root_sql_gate: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            shared_root_io_gate: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            shared_implicit_sql_gate: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            category_probe_gate: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            category_probe_waiting: Arc::new(std::sync::Mutex::new(None)),
+            shared_root_change: Arc::new(tokio::sync::Notify::new()),
+            category_probe_sender: Arc::new(std::sync::Mutex::new(None)),
+            category_probe_slot: Arc::new(tokio::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             shared_directory_reload_progress: Arc::new(std::sync::Mutex::new(
                 SharedDirectoryReloadProgress::default(),
@@ -725,6 +818,8 @@ impl EmulebbCore {
             shared_reload_gate: Arc::new(Mutex::new(())),
             shared_reload_running: Arc::new(AtomicBool::new(false)),
             shared_reload_pending: Arc::new(AtomicBool::new(false)),
+            shared_reload_control: Arc::new(shared_directories::ReloadControl::default()),
+            shared_reload_task: Arc::new(shared_directories::ReloadTaskSlot::default()),
             shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_worker: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_last: Arc::new(Mutex::new(None)),
@@ -795,7 +890,7 @@ impl EmulebbCore {
         name: String,
         size_bytes: u64,
         state_name: &str,
-        category: Option<(u32, String)>,
+        category: Option<(i64, String)>,
         redownload: bool,
     ) -> Result<Transfer> {
         let file_hash = hash.parse()?;
@@ -825,10 +920,9 @@ impl EmulebbCore {
                 .await?;
         }
         if let Some((category_id, _)) = category.as_ref() {
-            manifest = self
-                .ed2k_transfers
-                .set_category_id(&manifest.file_hash, *category_id)
+            self.assign_transfer_category(&manifest.file_hash, Some(*category_id))
                 .await?;
+            manifest.category_id = Some(*category_id);
         }
         let effective_state_name = if manifest.completed || manifest.final_rehash_pending {
             manifest_default_state_name(&manifest)
@@ -836,8 +930,19 @@ impl EmulebbCore {
             state_name
         };
         let mut transfer = self.transfer_from_manifest(&manifest, effective_state_name);
+        let _fence = self.ed2k_transfers.lock_category_publication().await;
+        let category_id = self
+            .ed2k_transfers
+            .current_category_id_fenced(&manifest.file_hash)
+            .await?;
         let mut state = self.state.lock().await;
-        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+        transfer.category_id = category_id;
+        transfer.category_name = category_id.and_then(|id| {
+            state
+                .categories
+                .get(&id)
+                .map(|category| category.name.clone())
+        });
         let event_type = if state.transfers.contains_key(&transfer.hash) {
             TransferEventType::Updated
         } else {
@@ -845,10 +950,6 @@ impl EmulebbCore {
         };
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
-        }
-        if let Some((category_id, category_name)) = category {
-            transfer.category_id = category_id;
-            transfer.category_name = category_name;
         }
         state
             .transfers
@@ -882,10 +983,20 @@ impl EmulebbCore {
         hash: &str,
         state_name: &str,
     ) -> Result<Option<Transfer>> {
-        let manifest = self.ed2k_transfers.manifest(hash).await?;
+        let Some(manifest) = self.ed2k_transfers.manifest_optional(hash).await? else {
+            return Ok(None);
+        };
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
+        let _fence = self.ed2k_transfers.lock_category_publication().await;
+        let category_id = self.ed2k_transfers.current_category_id_fenced(hash).await?;
         let mut state = self.state.lock().await;
-        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+        transfer.category_id = category_id;
+        transfer.category_name = category_id.and_then(|id| {
+            state
+                .categories
+                .get(&id)
+                .map(|category| category.name.clone())
+        });
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
             // A queued/background result may arrive after explicit control
@@ -902,7 +1013,9 @@ impl EmulebbCore {
     }
 
     async fn refresh_transfer_from_manifest_default(&self, hash: &str) -> Result<Option<Transfer>> {
-        let manifest = self.ed2k_transfers.manifest(hash).await?;
+        let Some(manifest) = self.ed2k_transfers.manifest_optional(hash).await? else {
+            return Ok(None);
+        };
         if manifest.transfer_row_removed {
             self.state
                 .lock()
@@ -913,8 +1026,16 @@ impl EmulebbCore {
         }
         let state_name = manifest_default_state_name(&manifest);
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
+        let _fence = self.ed2k_transfers.lock_category_publication().await;
+        let category_id = self.ed2k_transfers.current_category_id_fenced(hash).await?;
         let mut state = self.state.lock().await;
-        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+        transfer.category_id = category_id;
+        transfer.category_name = category_id.and_then(|id| {
+            state
+                .categories
+                .get(&id)
+                .map(|category| category.name.clone())
+        });
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
@@ -1038,44 +1159,30 @@ impl EmulebbCore {
 
     async fn resolve_transfer_category(
         &self,
-        category_id: Option<u32>,
+        category_id: Option<i64>,
         category_name: Option<&str>,
-    ) -> Result<(u32, String)> {
+    ) -> Result<Option<(i64, String)>> {
         let state = self.state.lock().await;
-        if let Some(category_id) = category_id {
-            let Some(category) = state.categories.get(&category_id) else {
-                anyhow::bail!("category is out of range");
-            };
-            return Ok((category.id, category.name.clone()));
-        }
-        let Some(category_name) = category_name.map(str::trim) else {
+        if let Some(id) = category_id {
             let category = state
                 .categories
-                .get(&0)
-                .expect("default category must exist");
-            return Ok((category.id, category.name.clone()));
+                .get(&id)
+                .context("category does not exist")?;
+            return Ok(Some((category.id, category.name.clone())));
+        }
+        let Some(name) = category_name else {
+            return Ok(None);
         };
         ensure!(
-            !category_name.is_empty(),
-            "categoryName does not match a configured category"
+            valid_category_name(name),
+            "category does not match a configured category"
         );
-        if category_name.eq_ignore_ascii_case("Default")
-            || category_name.eq_ignore_ascii_case("All")
-        {
-            let category = state
-                .categories
-                .get(&0)
-                .expect("default category must exist");
-            return Ok((category.id, category.name.clone()));
-        }
-        let Some(category) = state
+        let category = state
             .categories
             .values()
-            .find(|category| category.name.eq_ignore_ascii_case(category_name))
-        else {
-            anyhow::bail!("categoryName does not match a configured category");
-        };
-        Ok((category.id, category.name.clone()))
+            .find(|category| category.name.eq_ignore_ascii_case(name))
+            .context("category does not match a configured category")?;
+        Ok(Some((category.id, category.name.clone())))
     }
 
     async fn search_ed2k_servers(
@@ -1894,7 +2001,7 @@ impl EmulebbCore {
                         }
                         Ed2kPeerDownloadOutcome::Completed
                         | Ed2kPeerDownloadOutcome::AcceptedButIncomplete => {
-                            if let Some(target) = self.transfer(&alternate.file_hash).await
+                            if let Some(target) = self.transfer(&alternate.file_hash).await?
                                 && should_retry_download_attempt_state(&target.state)
                             {
                                 self.queue_ed2k_download_attempt(target);
@@ -2704,7 +2811,7 @@ impl EmulebbCore {
             () = tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)) => {}
             () = shutdown.cancelled() => return,
         }
-        let Some(transfer) = core.transfer(&hash).await else {
+        let Ok(Some(transfer)) = core.transfer(&hash).await else {
             crate::diag_sched::download_retry_outcome(&hash, "missing", false);
             return;
         };
@@ -4701,6 +4808,16 @@ async fn publish_kad_due_shared_files(
                 continue;
             }
         };
+        let Some(allowed) = runtime
+            .transfer_runtime
+            .admit_shared_hashes(&[file_hash.0], false)
+            .await?
+        else {
+            continue;
+        };
+        if !allowed[0] {
+            continue;
+        }
         let mut attempted_this_file = false;
 
         // MFC can start keyword and source store searches independently in one
@@ -4780,7 +4897,7 @@ async fn publish_kad_due_shared_files(
                 // The keyword batch is drawn from the completed-only keyword set,
                 // starting at the triggering file's position within it and
                 // wrapping (matching the >150-file cap rotation).
-                let keyword_entries = kad_keyword_publish_entries_for_shared_catalog_keyword(
+                let mut keyword_entries = kad_keyword_publish_entries_for_shared_catalog_keyword(
                     &runtime.transfer_runtime,
                     now_unix_ms,
                     &entry.file_hash,
@@ -4788,6 +4905,23 @@ async fn publish_kad_due_shared_files(
                     KAD_KEYWORD_PUBLISH_FILE_LIMIT,
                 )
                 .await?;
+                let hashes = keyword_entries
+                    .iter()
+                    .map(|(hash, _)| hash.parse::<Ed2kHash>().map(|hash| hash.0))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let Some(allowed) = runtime
+                    .transfer_runtime
+                    .admit_shared_hashes(&hashes, true)
+                    .await?
+                else {
+                    continue;
+                };
+                let mut allowed = allowed.into_iter();
+                keyword_entries.retain(|_| {
+                    allowed
+                        .next()
+                        .expect("one eligibility result per candidate")
+                });
                 if keyword_entries.is_empty() {
                     keyword_skipped_by_budget += 1;
                 } else {
@@ -7607,23 +7741,6 @@ fn path_is_within(path: &str, dir: &std::path::Path) -> bool {
     }
     let candidate = norm(path);
     candidate == base || candidate.starts_with(&format!("{base}\\"))
-}
-
-fn apply_persisted_transfer_category(
-    transfer: &mut Transfer,
-    manifest: &Ed2kResumeManifest,
-    categories: &BTreeMap<u32, Category>,
-) {
-    if let Some(category) = categories
-        .get(&manifest.category_id)
-        .or_else(|| categories.get(&0))
-    {
-        transfer.category_id = category.id;
-        transfer.category_name = category.name.clone();
-    } else {
-        transfer.category_id = 0;
-        transfer.category_name = default_transfer_category_name().to_string();
-    }
 }
 
 fn unique_runtime_dir(name: &str) -> std::path::PathBuf {

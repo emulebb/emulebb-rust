@@ -1,5 +1,6 @@
 use super::kad::kad_charge;
 use super::*;
+use std::sync::atomic::Ordering;
 
 pub(super) fn setup() -> (MetadataStore, Arc<Mutex<CoreState>>, Arc<PersistenceOwner>) {
     let store = MetadataStore::in_memory().unwrap();
@@ -27,6 +28,399 @@ pub(super) async fn wait_for_slots(owner: &PersistenceOwner, expected: usize) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
+    let uri = format!(
+        "file:root-failure-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let store =
+        MetadataStore::from_connection(rusqlite::Connection::open_with_flags(&uri, flags).unwrap())
+            .unwrap();
+    let root = crate::unique_runtime_dir("root-sql-failure");
+    let path = root.join("copy.bin");
+    std::fs::write(&path, b"root failure serving evidence").unwrap();
+    let mut roots_store = store.clone();
+    let root_row = crate::SharedDirectoryRoot {
+        path: root.to_string_lossy().into_owned(),
+        monitor_owned: false,
+        shareable: true,
+        accessible: true,
+    };
+    roots_store
+        .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
+            path: root_row.path.clone(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+    let runtime = Arc::new(
+        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
+            &root.join("transfers"),
+            store.clone(),
+        )
+        .unwrap(),
+    );
+    let shared = runtime.ingest_local_file(&path, "copy.bin").await.unwrap();
+    let native = emulebb_ed2k::long_path::long_path(&path);
+    let fingerprint = store
+        .local_file_instance(&native)
+        .unwrap()
+        .unwrap()
+        .verified_fingerprint;
+    assert!(
+        runtime
+            .admit_monitored_shared_path(
+                &shared.file_hash,
+                &root,
+                &native,
+                std::path::Path::new("copy.bin"),
+                &fingerprint,
+                None
+            )
+            .await
+            .unwrap()
+    );
+    let state = Arc::new(Mutex::new(
+        profile_state::load_core_state(&store, vec![root_row.clone()]).unwrap(),
+    ));
+    let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
+    let fault = rusqlite::Connection::open_with_flags(&uri, flags).unwrap();
+    fault.execute_batch("CREATE TRIGGER root_failure BEFORE DELETE ON shared_directory_root_origins WHEN old.origin='explicit' BEGIN SELECT RAISE(ABORT,'injected root failure'); END;").unwrap();
+    let make = || category::CategoryCommand::ReplaceRoots {
+        expected: vec![root_row.clone()],
+        implicit: vec![],
+        proposed: vec![],
+        sharing: category::CategorySharingContext {
+            runtime: Arc::clone(&runtime),
+            incoming: Arc::new(root.join("incoming")),
+            root_change: Arc::new(tokio::sync::Notify::new()),
+            probe_sender: std::sync::Weak::new(),
+        },
+        reload: None,
+    };
+    assert!(matches!(
+        owner.replace_explicit_roots(make(), None).await,
+        Err(PersistenceError::Storage(_))
+    ));
+    assert_eq!(
+        state.lock().await.shared_directories,
+        vec![root_row.clone()]
+    );
+    assert_eq!(store.shared_directory_roots().unwrap().len(), 1);
+    let hash: emulebb_kad_proto::Ed2kHash = shared.file_hash.parse().unwrap();
+    assert_eq!(
+        runtime.admit_shared_hashes(&[hash.0], true).await.unwrap(),
+        Some(vec![true])
+    );
+    fault.execute_batch("DROP TRIGGER root_failure;").unwrap();
+    assert!(owner.replace_explicit_roots(make(), None).await.unwrap());
+    assert!(state.lock().await.shared_directories.is_empty());
+    assert!(store.shared_directory_roots().unwrap().is_empty());
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_explicit_root_writer_is_published_before_drain() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    let (store, state, owner) = setup();
+    let root = crate::unique_runtime_dir("cancel-root-writer");
+    let runtime = Arc::new(
+        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
+            &root.join("transfers"),
+            store.clone(),
+        )
+        .unwrap(),
+    );
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let writer = {
+        let owner = Arc::clone(&owner);
+        let runtime = Arc::clone(&runtime);
+        let root = root.clone();
+        tokio::spawn(async move {
+            owner
+                .replace_explicit_roots(
+                    category::CategoryCommand::ReplaceRoots {
+                        expected: vec![],
+                        implicit: vec![],
+                        proposed: vec![crate::SharedDirectoryRoot {
+                            path: root.to_string_lossy().into_owned(),
+                            monitor_owned: false,
+                            shareable: true,
+                            accessible: true,
+                        }],
+                        sharing: category::CategorySharingContext {
+                            runtime,
+                            incoming: Arc::new(root.join("incoming")),
+                            root_change: Arc::new(tokio::sync::Notify::new()),
+                            probe_sender: std::sync::Weak::new(),
+                        },
+                        reload: None,
+                    },
+                    None,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .unwrap();
+    assert_eq!(store.shared_directory_roots().unwrap().len(), 1);
+    assert!(state.lock().await.shared_directories.is_empty());
+    writer.abort();
+    let _ = writer.await;
+    let mut drain = Box::pin(owner.close_and_drain());
+    assert!(
+        poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    gate.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.lock().await.shared_directories.len(), 1);
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn cancelled_root_request_still_scans_committed_directory() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let root = crate::unique_runtime_dir("cancel-root-scan");
+    std::fs::write(root.join("committed.bin"), b"committed scan").unwrap();
+    let execution = core.shared_reload_gate.lock().await;
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let writer = {
+        let core = core.clone();
+        let path = root.to_string_lossy().into_owned();
+        tokio::spawn(async move { core.add_shared_directory_root(&path).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .unwrap();
+    writer.abort();
+    let _ = writer.await;
+    gate.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while core.state.lock().await.shared_directories.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(core.shares().await.is_empty());
+    assert!(core.shared_reload_running.load(Ordering::Acquire));
+    // The canceled request cannot advance the worker: release the execution
+    // gate and require the owned scan to discover and publish the real file.
+    drop(execution);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if core
+                .shares()
+                .await
+                .iter()
+                .any(|share| share.name == "committed.bin")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(core.shared_monitor_stopped.load(Ordering::Acquire));
+    tokio::time::timeout(std::time::Duration::from_secs(5), core.drain_persistence())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sealed_reload_handoff_reports_committed_root_without_scan() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let root = crate::unique_runtime_dir("sealed-root-scan");
+    std::fs::write(root.join("committed.bin"), b"committed root").unwrap();
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let writer = {
+        let core = core.clone();
+        let path = root.to_string_lossy().into_owned();
+        tokio::spawn(async move { core.add_shared_directory_root(&path).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .unwrap();
+    assert_eq!(
+        core.metadata_store.shared_directory_roots().unwrap().len(),
+        1
+    );
+    assert!(core.state.lock().await.shared_directories.is_empty());
+    core.begin_shutdown();
+    gate.release.notify_one();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<PersistenceError>(),
+        Some(PersistenceError::CommittedPublicationFailed)
+    ));
+    assert_eq!(core.state.lock().await.shared_directories.len(), 1);
+    assert_eq!(
+        core.metadata_store.shared_directory_roots().unwrap().len(),
+        1
+    );
+    assert!(!core.shared_reload_pending.load(Ordering::Acquire));
+    assert!(core.shares().await.is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(5), core.drain_persistence())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(!core.shared_reload_running.load(Ordering::Acquire));
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn explicit_root_continuation_reconciles_each_removed_root() {
+    let uri = format!(
+        "file:root-multi-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let store =
+        MetadataStore::from_connection(rusqlite::Connection::open_with_flags(&uri, flags).unwrap())
+            .unwrap();
+    let base = crate::unique_runtime_dir("multi-root-owner");
+    let roots: Vec<_> = ["one", "two"]
+        .into_iter()
+        .map(|name| crate::SharedDirectoryRoot {
+            path: base.join(name).to_string_lossy().into_owned(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        })
+        .collect();
+    let rows: Vec<_> = roots
+        .iter()
+        .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
+            path: root.path.clone(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        })
+        .collect();
+    store.clone().replace_shared_directory_roots(&rows).unwrap();
+    let mut conn = rusqlite::Connection::open_with_flags(&uri, flags).unwrap();
+    let tx = conn.transaction().unwrap();
+    for (index, root) in roots.iter().enumerate() {
+        let hash = [u8::try_from(index + 1).unwrap(); 16];
+        tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES(?1,1,'sample',0,0,0)", [&hash[..]]).unwrap();
+        let known_id = tx.last_insert_rowid();
+        let path =
+            emulebb_metadata::NativePath::from(std::path::Path::new(&root.path).join("sample"));
+        let display = path.display_path();
+        tx.execute("INSERT INTO local_paths(display_path,native_path,search_key,sort_key,file_name_search_key,platform) VALUES(?1,?2,?1,?1,?1,?3)", rusqlite::params![display, path.storage_bytes(), emulebb_metadata::NativePath::platform()]).unwrap();
+        let path_id = tx.last_insert_rowid();
+        tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) VALUES(?1,?2,1,x'01',x'01',0)", rusqlite::params![path_id, known_id]).unwrap();
+        let root_native = emulebb_metadata::NativePath::from(std::path::Path::new(&root.path));
+        let root_id: i64 = tx.query_row("SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2", rusqlite::params![emulebb_metadata::NativePath::platform(), root_native.storage_bytes()], |row| row.get(0)).unwrap();
+        tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_ms,last_seen_at_ms) VALUES(?1,?2,?3,'sample',0,0)", rusqlite::params![root_id,path_id,known_id]).unwrap();
+    }
+    tx.commit().unwrap();
+    drop(conn);
+    let state = Arc::new(Mutex::new(
+        profile_state::load_core_state(&store, roots.clone()).unwrap(),
+    ));
+    let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
+    let runtime = Arc::new(
+        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
+            &base.join("transfers"),
+            store.clone(),
+        )
+        .unwrap(),
+    );
+    for value in 1..=2u8 {
+        runtime
+            .shared_catalog()
+            .write()
+            .await
+            .push(emulebb_ed2k::ed2k_transfer::Ed2kSharedEntry {
+                file_hash: emulebb_kad_proto::Ed2kHash::from_bytes([value; 16]).to_string(),
+                display_name: "sample".into(),
+                file_size: 1,
+                verified_complete: true,
+                verified_ranges: vec![],
+                compatibility_hint: false,
+                source_count_hint: None,
+                aich_root: None,
+                upload_priority: "normal".into(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+                media: Default::default(),
+                all_time_uploaded_bytes: 0,
+                complete_parts: vec![],
+                publish: Default::default(),
+            });
+    }
+    let result = owner.replace_explicit_roots(
+        category::CategoryCommand::ReplaceRoots {
+            expected: roots,
+            implicit: vec![],
+            proposed: vec![],
+            sharing: category::CategorySharingContext {
+                runtime: Arc::clone(&runtime),
+                incoming: Arc::new(base.join("incoming")),
+                root_change: Arc::new(tokio::sync::Notify::new()),
+                probe_sender: std::sync::Weak::new(),
+            },
+            reload: None,
+        },
+        None,
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), result)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert!(state.lock().await.shared_directories.is_empty());
+    assert_eq!(runtime.shared_catalog_count().await, 0);
+    owner.close_and_drain().await.unwrap();
 }
 
 #[tokio::test]
@@ -720,4 +1114,55 @@ async fn sqlite_writer_contention_keeps_runtime_responsive_and_drains_cancelled_
     assert!(reopened.has_friend(&"99".repeat(16)).unwrap());
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_queued_category_create_is_committed_and_published_before_drain() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let held = core.state.lock().await;
+    let friend = {
+        let owner = Arc::clone(&owner);
+        tokio::spawn(async move { owner.add("44".repeat(16), "sample".into()).await })
+    };
+    wait_for_slots(&owner, 1).await;
+    let pending = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            core.create_category(crate::CategoryCreate {
+                name: "Queued".into(),
+                temp_dir: crate::NullableStringField::Missing,
+                destination_dir: crate::NullableStringField::Missing,
+                comment: None,
+            })
+            .await
+        })
+    };
+    wait_for_slots(&owner, 2).await;
+    pending.abort();
+    let _ = pending.await;
+    drop(held);
+    friend.await.unwrap().unwrap();
+    owner.close_and_drain().await.unwrap();
+    assert_eq!(
+        core.metadata_store.load_categories().unwrap()[0].name,
+        "Queued"
+    );
+    assert_eq!(
+        core.state
+            .lock()
+            .await
+            .categories
+            .values()
+            .next()
+            .unwrap()
+            .name,
+        "Queued"
+    );
+    assert_eq!(usage(&owner), (0, 0));
 }

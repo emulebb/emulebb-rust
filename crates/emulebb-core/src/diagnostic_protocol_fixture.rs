@@ -284,6 +284,13 @@ impl EmulebbCore {
         let transfer = self
             .transfers()
             .await
+            .map_err(|error| {
+                fixture_failure(
+                    fixture,
+                    QueuedLowIdSourceFixtureErrorKind::TransferNotFound,
+                    error.to_string(),
+                )
+            })?
             .into_iter()
             .find(|transfer| transfer.hash == file_hash_hex)
             .ok_or_else(|| {
@@ -370,6 +377,12 @@ impl EmulebbCore {
         let transfer = self
             .transfers()
             .await
+            .map_err(|error| {
+                queued_source_control_error(
+                    QueuedSourceReaskControlErrorKind::TransferNotFound,
+                    error.to_string(),
+                )
+            })?
             .into_iter()
             .find(|transfer| transfer.hash == file_hash_hex)
             .ok_or_else(|| {

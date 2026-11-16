@@ -187,7 +187,7 @@ async fn api_root_updates_collapse_recursive_children_and_keep_siblings() {
         core.metadata_store.shared_directory_roots().unwrap().len(),
         2
     );
-    core.stop_shared_directory_monitor();
+    core.stop_shared_directory_monitor().await.unwrap();
     fs::remove_dir_all(temp).ok();
 }
 
@@ -199,6 +199,8 @@ async fn api_does_not_add_children_already_shared_by_incoming() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap())
         .unwrap()
         .with_incoming_dir(temp.clone());
+    // A successfully scanned implicit parent may consolidate its child.
+    core.reload_shared_directories().await.unwrap();
     let result = core
         .add_shared_directory_root(child.to_str().unwrap())
         .await
@@ -228,6 +230,30 @@ fn unavailable_configured_parent_still_covers_its_children() {
         }));
     assert_eq!(roots.len(), 1);
     assert_eq!(Path::new(&roots[0].path), parent);
+    fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn unavailable_parent_does_not_hide_an_available_child() {
+    let temp = scratch_dir("available-child-root");
+    let parent = temp.join("Parent");
+    let child = parent.join("Child");
+    fs::create_dir_all(&child).unwrap();
+    let roots = consolidate_shared_directory_roots([
+        MetadataSharedDirectoryRoot {
+            path: parent.display().to_string(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: false,
+        },
+        MetadataSharedDirectoryRoot {
+            path: child.display().to_string(),
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        },
+    ]);
+    assert_eq!(roots.len(), 2);
     fs::remove_dir_all(temp).ok();
 }
 
@@ -268,10 +294,11 @@ async fn category_destination_is_shared_and_withdrawn_with_category() {
     let category = core
         .create_category(crate::CategoryCreate {
             name: "Samples".to_string(),
-            path: crate::NullableStringField::Value(category_path.to_string_lossy().into_owned()),
+            temp_dir: crate::NullableStringField::Missing,
+            destination_dir: crate::NullableStringField::Value(
+                category_path.to_string_lossy().into_owned(),
+            ),
             comment: None,
-            color: crate::NullableU32Field::Missing,
-            priority: None,
         })
         .await
         .unwrap();
@@ -341,6 +368,127 @@ async fn synchronous_and_detached_reloads_share_one_execution_gate() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_reload_drain_keeps_worker_until_final_join() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let guard = core.shared_reload_gate.lock().await;
+    core.reload_shared_directories_detached().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while core.shared_reload_pending.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    core.begin_shutdown();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        core.finish_kad_persistence(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut first = Box::pin(drain_reload(&core));
+    assert!(
+        poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(first);
+    let mut second = Box::pin(drain_reload(&core));
+    assert!(
+        poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+async fn assert_concurrent_reload_drains(cancel_latest: bool) {
+    use std::future::{Future, poll_fn};
+
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    // This holds the existing execution gate, not a filesystem operation.
+    let execution = core.shared_reload_gate.lock().await;
+    core.reload_shared_directories_detached().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while core.shared_reload_pending.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    core.begin_shutdown();
+
+    let spawn_drain = || {
+        let core = core.clone();
+        let (pending, observed) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut drain = Box::pin(drain_reload(&core));
+            let mut pending = Some(pending);
+            poll_fn(|cx| {
+                let result = drain.as_mut().poll(cx);
+                if result.is_pending() {
+                    if let Some(pending) = pending.take() {
+                        let _ = pending.send(());
+                    }
+                }
+                result
+            })
+            .await
+        });
+        (task, observed)
+    };
+    let (first, first_pending) = spawn_drain();
+    tokio::time::timeout(std::time::Duration::from_secs(5), first_pending)
+        .await
+        .unwrap()
+        .unwrap();
+    let (latest, latest_pending) = spawn_drain();
+    tokio::time::timeout(std::time::Duration::from_secs(5), latest_pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!first.is_finished());
+    assert!(!latest.is_finished());
+    if cancel_latest {
+        latest.abort();
+    }
+    drop(execution);
+    tokio::time::timeout(std::time::Duration::from_secs(5), first)
+        .await
+        .expect("first drain lost its worker wakeup")
+        .unwrap()
+        .unwrap();
+    let latest = tokio::time::timeout(std::time::Duration::from_secs(5), latest)
+        .await
+        .expect("latest drain did not settle");
+    if cancel_latest {
+        assert!(latest.unwrap_err().is_cancelled());
+    } else {
+        latest.unwrap().unwrap();
+    }
+    assert!(core.shared_reload_task.task.lock().unwrap().is_none());
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_reload_drains_both_finish() {
+    assert_concurrent_reload_drains(false).await;
+}
+
+#[tokio::test]
+async fn cancelling_latest_reload_drain_preserves_first_waiter() {
+    assert_concurrent_reload_drains(true).await;
 }
 
 #[test]
