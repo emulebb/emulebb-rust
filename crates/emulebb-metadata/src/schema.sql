@@ -401,7 +401,7 @@ CREATE TABLE download_jobs (
     CHECK((completed = 1) = (visible_state = 'completed')),
     CHECK(payload_fingerprint IS NULL OR (completed = 1 AND final_rehash_pending = 0)),
     CHECK(terminal_completed_at_s IS NULL OR (completed = 1 AND final_rehash_pending = 0 AND delivery_state = 'delivered')),
-    CHECK(internal_storage_retired = 0 OR terminal_completed_at_s IS NOT NULL)
+    CHECK(internal_storage_retired = 0 OR terminal_completed_at_s IS NOT NULL OR removed_at_s IS NOT NULL)
 ) STRICT;
 
 -- A logically removed job with pending cleanup does not own future admission.
@@ -421,6 +421,13 @@ BEGIN SELECT RAISE(ABORT, 'download job physical storage authority is immutable'
 CREATE TRIGGER download_jobs_fixed_storage BEFORE UPDATE OF selected_temp_path_id ON download_jobs
 WHEN old.selected_temp_path_id IS NOT NULL AND new.selected_temp_path_id IS NOT old.selected_temp_path_id
 BEGIN SELECT RAISE(ABORT, 'download job storage is immutable once selected'); END;
+
+-- Durable materialization is a fact even before internal retirement commits.
+CREATE TRIGGER download_jobs_delivered_history BEFORE UPDATE ON download_jobs
+WHEN old.delivery_state = 'delivered' AND (
+    new.delivery_state != 'delivered' OR new.delivered_path_id IS NOT old.delivered_path_id
+    OR new.completed != 1 OR new.final_rehash_pending != 0)
+BEGIN SELECT RAISE(ABORT, 'durable download delivery is immutable'); END;
 
 CREATE TRIGGER download_jobs_terminal_history BEFORE UPDATE ON download_jobs
 WHEN old.terminal_completed_at_s IS NOT NULL AND (
@@ -451,10 +458,11 @@ WHEN new.latest_download_job_id IS NOT NULL
 AND NOT EXISTS(SELECT 1 FROM download_jobs WHERE id=new.latest_download_job_id AND known_file_id=new.id)
 BEGIN SELECT RAISE(ABORT, 'latest download job belongs to another content'); END;
 
--- A terminal job remains history while its owned piece directory is reclaimed.
--- The output has already become independent verified local content.
+-- Completion and explicit removal share this internal-storage authority.
+-- Output deletion has its own journal and never follows from this row.
 CREATE TABLE download_retirements (
     job_id INTEGER PRIMARY KEY REFERENCES download_jobs(id) ON DELETE RESTRICT,
+    target_path_id INTEGER REFERENCES local_paths(id),
     directory_identity BLOB,
     directory_marker_id TEXT,
     CHECK (
@@ -463,6 +471,12 @@ CREATE TABLE download_retirements (
             AND length(trim(directory_marker_id)) > 0)
     )
 ) STRICT;
+CREATE INDEX download_retirements_target_path_id_idx ON download_retirements(target_path_id);
+CREATE TRIGGER download_retirements_authority_immutable
+BEFORE UPDATE OF job_id,target_path_id,directory_identity,directory_marker_id ON download_retirements
+WHEN new.job_id IS NOT old.job_id OR new.target_path_id IS NOT old.target_path_id
+  OR new.directory_identity IS NOT old.directory_identity OR new.directory_marker_id IS NOT old.directory_marker_id
+BEGIN SELECT RAISE(ABORT, 'internal retirement authority is immutable'); END;
 
 -- WHY: A crash can leave an exclusively created but incomplete final name.
 -- Its sharing exclusion must outlive both the attempt and transfer deletion.

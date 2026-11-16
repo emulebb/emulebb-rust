@@ -74,6 +74,16 @@ pub struct MetadataTransferDirectoryDeletionAuthority {
     pub marker_id: Uuid,
 }
 
+/// Exact persisted internal cleanup intent. Paths alone never grant deletion
+/// authority; an unestablished allocation must preserve any existing objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataDownloadRetirement {
+    pub job_id: JobId,
+    pub source_path: Option<PathBuf>,
+    pub target_path: Option<PathBuf>,
+    pub authority: Option<MetadataTransferDirectoryDeletionAuthority>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferAichIdentity {
     pub root: Option<String>,
@@ -141,6 +151,7 @@ pub struct MetadataTransferFileNameObservation {
 /// Compact bounded transfer state used to preserve partial exchange.
 #[derive(Debug, Clone)]
 pub struct MetadataPartialShare {
+    pub job_token: JobToken,
     pub file_hash: String,
     pub display_name: String,
     pub file_size: u64,

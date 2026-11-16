@@ -383,6 +383,16 @@ fn retirement_creation_is_generation_fenced_and_pending_authority_blocks_job_del
             .finalize_transfer_retirement(resumed.token.job_id)
             .unwrap()
     );
+    if store
+        .transfer_retirement_pending(resumed.token.job_id)
+        .unwrap()
+    {
+        assert!(
+            store
+                .finalize_transfer_retirement(resumed.token.job_id)
+                .unwrap()
+        );
+    }
     assert!(
         store
             .finalize_transfer_deletion(resumed.token.job_id)
@@ -1906,7 +1916,12 @@ fn download_delivery_attempts_roundtrip_and_transition_idempotently() {
     pending_manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
     pending_manifest.delivered_path = None;
     pending_manifest.source_fingerprint = None;
-    store.upsert_transfer_manifest(&pending_manifest).unwrap();
+    assert!(store.upsert_transfer_manifest(&pending_manifest).is_err());
+    // Recovery settlement belongs to a genuinely pending job, not a rewind of
+    // durable delivery that could create a duplicate output after restart.
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_pending_download_manifest(&store);
+    store.upsert_transfer_manifest(&manifest).unwrap();
     let prepared = store
         .begin_transfer_delivery_attempt(manifest.token, attempt_id, &target_path, &staging_path)
         .unwrap();
@@ -1963,6 +1978,14 @@ fn delivery_attempt_requires_an_authoritative_pending_download() {
             .request_transfer_deletion(manifest.token.job_id)
             .unwrap()
     );
+    // Simulate completed exact internal cleanup while independent output
+    // authority remains. It alone must prevent physical owner-row deletion.
+    assert!(
+        store
+            .finalize_transfer_retirement(manifest.token.job_id)
+            .unwrap()
+    );
+
     assert!(
         store
             .begin_transfer_delivery_attempt(
@@ -2004,6 +2027,16 @@ fn delivery_attempt_requires_an_authoritative_pending_download() {
             .settle_recovered_delivery_attempt(recovery_token, &recovery)
             .unwrap()
     );
+    if store
+        .transfer_retirement_pending(manifest.token.job_id)
+        .unwrap()
+    {
+        assert!(
+            store
+                .finalize_transfer_retirement(manifest.token.job_id)
+                .unwrap()
+        );
+    }
     assert!(
         store
             .finalize_transfer_deletion(manifest.token.job_id)
@@ -2211,8 +2244,9 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     );
     assert_eq!(
         store
-            .transfer_directory_deletion_authority(manifest.token.job_id)
-            .unwrap(),
+            .download_job_retirement(manifest.token.job_id)
+            .unwrap()
+            .and_then(|intent| intent.authority),
         Some(directory_authority)
     );
     assert_eq!(
@@ -2353,6 +2387,16 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         .unwrap();
     assert_eq!(timestamps, (7, 11));
 
+    if store
+        .transfer_retirement_pending(manifest.token.job_id)
+        .unwrap()
+    {
+        assert!(
+            store
+                .finalize_transfer_retirement(manifest.token.job_id)
+                .unwrap()
+        );
+    }
     assert!(
         store
             .finalize_transfer_deletion(manifest.token.job_id)
@@ -2412,8 +2456,9 @@ fn deletion_intent_never_adopts_a_later_transfer_directory() {
     );
     assert_eq!(
         store
-            .transfer_directory_deletion_authority(manifest.token.job_id)
-            .unwrap(),
+            .download_job_retirement(manifest.token.job_id)
+            .unwrap()
+            .and_then(|intent| intent.authority),
         None
     );
 }
@@ -2432,6 +2477,13 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
     assert!(
         store
             .request_transfer_deletion(manifest.token.job_id)
+            .unwrap()
+    );
+    // Simulate completed exact internal cleanup while independent output
+    // authority remains. It alone must prevent physical owner-row deletion.
+    assert!(
+        store
+            .finalize_transfer_retirement(manifest.token.job_id)
             .unwrap()
     );
 
@@ -2591,6 +2643,16 @@ fn deletion_tombstone_roundtrips_and_transitions_idempotently() {
             .settle_recovered_output_tombstone(recovery_token, &moved)
             .unwrap()
     );
+    if store
+        .transfer_retirement_pending(manifest.token.job_id)
+        .unwrap()
+    {
+        assert!(
+            store
+                .finalize_transfer_retirement(manifest.token.job_id)
+                .unwrap()
+        );
+    }
     assert!(
         store
             .finalize_transfer_deletion(manifest.token.job_id)
@@ -2883,4 +2945,274 @@ fn live_schema_has_no_import_staging_tables() {
         )
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn delivered_verification_refresh_is_exact_unowned_and_preserves_terminal_history() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = completed_download_manifest(&store);
+    let path = std::env::temp_dir().join("Verified.Delivery.Refresh.bin");
+    let original = fingerprint(16, 91);
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+    manifest.delivered_path = Some(path.clone());
+    manifest.source_fingerprint = Some(original.clone());
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    register_shared_test_job(&store, manifest.token.job_id);
+    assert!(store.request_transfer_retirement(manifest.token).unwrap());
+    let completed = store.download_job(manifest.token.job_id).unwrap().unwrap();
+    let mut timestamp_only = original.clone();
+    timestamp_only.modified = fingerprint(16, 92).modified;
+    assert!(
+        !store
+            .refresh_delivered_verification(
+                manifest.token,
+                &path.with_extension("other"),
+                Some(&original),
+                MetadataTransferDeliveryOwnership::Owned,
+                &timestamp_only
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .refresh_delivered_verification(
+                manifest.token,
+                &path,
+                Some(&original),
+                MetadataTransferDeliveryOwnership::Owned,
+                &timestamp_only
+            )
+            .unwrap()
+    );
+    let after = store
+        .download_job_manifest(manifest.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.delivery_ownership,
+        MetadataTransferDeliveryOwnership::Unowned
+    );
+    assert_eq!(after.source_fingerprint, Some(timestamp_only.clone()));
+    assert_eq!(after.pieces, manifest.pieces);
+    assert_eq!(after.verified_ranges, manifest.verified_ranges);
+    assert_eq!(
+        store
+            .download_job(manifest.token.job_id)
+            .unwrap()
+            .unwrap()
+            .completed_at_s,
+        completed.completed_at_s
+    );
+    let replacement = fingerprint(16, 93);
+    assert!(
+        !store
+            .refresh_delivered_verification(
+                manifest.token,
+                &path,
+                Some(&original),
+                MetadataTransferDeliveryOwnership::Owned,
+                &replacement
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .refresh_delivered_verification(
+                manifest.token,
+                &path,
+                Some(&timestamp_only),
+                MetadataTransferDeliveryOwnership::Unowned,
+                &replacement
+            )
+            .unwrap()
+    );
+    assert!(store.remove_download_job(manifest.token.job_id).unwrap());
+    assert!(
+        !store
+            .refresh_delivered_verification(
+                manifest.token,
+                &path,
+                Some(&replacement),
+                MetadataTransferDeliveryOwnership::Unowned,
+                &original
+            )
+            .unwrap()
+    );
+}
+
+#[test]
+fn delivered_before_retirement_survives_reopen_without_becoming_pending() {
+    let database = unique_store_path("delivered-before-retirement");
+    let store = MetadataStore::open(&database).unwrap();
+    let mut manifest = completed_download_manifest(&store);
+    manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+    manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+    manifest.delivered_path = Some(std::env::temp_dir().join("Retained.Delivery.bin"));
+    manifest.source_fingerprint = Some(fingerprint(16, 98));
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .download_job(manifest.token.job_id)
+            .unwrap()
+            .unwrap()
+            .completed_at_s
+            .is_none()
+    );
+    drop(store);
+    let store = MetadataStore::open(&database).unwrap();
+    // Still selected for terminal admission/retirement, never materialization.
+    assert_eq!(
+        store.pending_delivery_jobs_after(None, 256).unwrap(),
+        vec![manifest.token.job_id]
+    );
+    assert_eq!(
+        store
+            .download_job(manifest.token.job_id)
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        MetadataTransferDeliveryState::Delivered
+    );
+    let mut stale = manifest.clone();
+    stale.delivery_state = MetadataTransferDeliveryState::Pending;
+    stale.delivery_ownership = MetadataTransferDeliveryOwnership::None;
+    stale.delivered_path = None;
+    stale.source_fingerprint = None;
+    assert!(store.upsert_transfer_manifest(&stale).is_err());
+    assert!(store.connection().unwrap().execute(
+        "UPDATE download_jobs SET delivery_state='pending',delivery_ownership='none',delivered_path_id=NULL WHERE id=?1",
+        [manifest.token.job_id]).is_err());
+    assert_eq!(
+        store
+            .download_job_manifest(manifest.token.job_id)
+            .unwrap()
+            .unwrap(),
+        manifest
+    );
+    register_shared_test_job(&store, manifest.token.job_id);
+    assert!(store.request_transfer_retirement(manifest.token).unwrap());
+    assert!(
+        store
+            .pending_delivery_jobs_after(None, 256)
+            .unwrap()
+            .is_empty()
+    );
+    drop(store);
+    remove_store_files(&database);
+}
+
+#[test]
+fn retirement_uses_fixed_physical_snapshot_across_reopen_and_repeated_remove() {
+    let database = unique_store_path("retirement-physical-snapshot");
+    let store = MetadataStore::open(&database).unwrap();
+    let manifest = completed_pending_download_manifest(&store);
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let running = store
+        .start_download_job(manifest.token, &std::env::temp_dir())
+        .unwrap()
+        .unwrap();
+    let storage = running.storage.unwrap();
+    let identity = NativeFileIdentity::Unix {
+        device_id: 71,
+        inode_number: 81,
+    };
+    assert!(
+        store
+            .establish_download_job_storage(running.token, identity)
+            .unwrap()
+    );
+    assert!(store.remove_download_job(running.token.job_id).unwrap());
+    let intent = store
+        .download_job_retirement(running.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(intent.source_path.as_ref(), Some(&storage.path));
+    assert_eq!(
+        intent.target_path.as_ref().unwrap().parent(),
+        storage.path.parent()
+    );
+    assert_ne!(intent.target_path, intent.source_path);
+    assert_eq!(intent.authority.unwrap().identity, identity);
+    assert_eq!(intent.authority.unwrap().marker_id, storage.marker_id);
+    assert!(
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE download_retirements SET target_path_id=NULL WHERE job_id=?1",
+                [running.token.job_id]
+            )
+            .is_err()
+    );
+    drop(store);
+    let store = MetadataStore::open(&database).unwrap();
+    assert!(!store.remove_download_job(running.token.job_id).unwrap());
+    assert_eq!(
+        store.download_job_retirement(running.token.job_id).unwrap(),
+        Some(intent)
+    );
+    drop(store);
+    remove_store_files(&database);
+}
+
+#[test]
+fn stale_checkpoint_cannot_restore_owned_delivery_or_old_verification() {
+    for originally_owned in [false, true] {
+        let store = MetadataStore::in_memory().unwrap();
+        let mut manifest = completed_download_manifest(&store);
+        let path = std::env::temp_dir().join("Delivery.Authority.Interleaving.bin");
+        let original = fingerprint(16, 601);
+        manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+        manifest.delivery_ownership = if originally_owned {
+            MetadataTransferDeliveryOwnership::Owned
+        } else {
+            MetadataTransferDeliveryOwnership::Unowned
+        };
+        manifest.delivered_path = Some(path.clone());
+        manifest.source_fingerprint = Some(original.clone());
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        let mut stale = manifest.clone();
+        stale.delivery_ownership = MetadataTransferDeliveryOwnership::Owned;
+        let fresh = fingerprint(16, 602);
+        assert!(
+            store
+                .refresh_delivered_verification(
+                    manifest.token,
+                    &path,
+                    Some(&original),
+                    manifest.delivery_ownership,
+                    &fresh
+                )
+                .unwrap()
+        );
+        let returned = store.upsert_transfer_manifest_reconciled(&stale).unwrap();
+        assert_eq!(
+            returned.delivery_ownership,
+            MetadataTransferDeliveryOwnership::Unowned
+        );
+        assert_eq!(returned.source_fingerprint, Some(fresh.clone()));
+        let durable = store
+            .download_job_manifest(manifest.token.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable, returned);
+        assert_eq!(
+            durable.delivery_state,
+            MetadataTransferDeliveryState::Delivered
+        );
+        assert_eq!(durable.delivered_path, Some(path));
+        assert_eq!(durable.verified_ranges, manifest.verified_ranges);
+        // Repeating the old clone is no stronger than its first checkpoint.
+        store.upsert_transfer_manifest(&stale).unwrap();
+        let durable = store
+            .download_job_manifest(manifest.token.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.delivery_ownership,
+            MetadataTransferDeliveryOwnership::Unowned
+        );
+        assert_eq!(durable.source_fingerprint, Some(fresh));
+    }
 }

@@ -227,6 +227,16 @@ fn removed_pending_cleanup_does_not_block_new_job_or_change_its_head() {
     let second = store.admit_download_job(&request(5, Some(16))).unwrap();
     assert!(second.created);
     assert!(second.job.token.job_id > first.token.job_id);
+    if store
+        .transfer_retirement_pending(first.token.job_id)
+        .unwrap()
+    {
+        assert!(
+            store
+                .finalize_transfer_retirement(first.token.job_id)
+                .unwrap()
+        );
+    }
     assert!(
         store
             .finalize_transfer_deletion(first.token.job_id)
@@ -408,8 +418,9 @@ fn physical_storage_is_fixed_and_distinct_between_fresh_profiles() {
     assert!(first.request_transfer_deletion(a.token.job_id).unwrap());
     assert_eq!(
         first
-            .transfer_directory_deletion_authority(a.token.job_id)
-            .unwrap(),
+            .download_job_retirement(a.token.job_id)
+            .unwrap()
+            .and_then(|intent| intent.authority),
         Some(crate::MetadataTransferDirectoryDeletionAuthority {
             identity,
             marker_id: storage.marker_id
@@ -429,12 +440,20 @@ fn allocation_intent_without_established_identity_never_authorizes_cleanup() {
         .unwrap()
         .unwrap();
     let storage = job.storage.clone().unwrap();
+    std::fs::create_dir(&storage.path).unwrap();
+    let foreign = storage.path.join("unknown.bin");
+    std::fs::write(&foreign, b"preserve unknown allocation residue").unwrap();
     assert!(store.request_transfer_deletion(job.token.job_id).unwrap());
-    assert!(
-        store
-            .transfer_directory_deletion_authority(job.token.job_id)
-            .unwrap()
-            .is_none()
+    let intent = store
+        .download_job_retirement(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(intent.source_path.as_ref(), Some(&storage.path));
+    assert!(intent.target_path.is_some());
+    assert!(intent.authority.is_none());
+    assert_eq!(
+        std::fs::read(&foreign).unwrap(),
+        b"preserve unknown allocation residue"
     );
     assert_eq!(
         store
@@ -442,7 +461,7 @@ fn allocation_intent_without_established_identity_never_authorizes_cleanup() {
             .unwrap()
             .unwrap()
             .storage,
-        Some(storage)
+        Some(storage.clone())
     );
     assert!(
         !store
@@ -455,4 +474,105 @@ fn allocation_intent_without_established_identity_never_authorizes_cleanup() {
             )
             .unwrap()
     );
+    std::fs::remove_file(foreign).unwrap();
+    std::fs::remove_dir(storage.path).unwrap();
+}
+
+#[test]
+fn stop_preserves_internal_data_but_remove_reserves_only_its_exact_internal_retirement() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store
+        .admit_download_job(&request(61, Some(16)))
+        .unwrap()
+        .job;
+    let temp = std::env::temp_dir().join("job-remove-internal");
+    let running = store
+        .start_download_job(first.token, &temp)
+        .unwrap()
+        .unwrap();
+    let identity = crate::NativeFileIdentity::Unix {
+        device_id: 7,
+        inode_number: 9,
+    };
+    assert!(
+        store
+            .establish_download_job_storage(running.token, identity)
+            .unwrap()
+    );
+    assert!(store.stop_download_job(running.token).unwrap());
+    // A stopped unfinished job remains resumable: the schema itself rejects
+    // retiring its pieces without completion or explicit logical removal.
+    assert!(
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE download_jobs SET internal_storage_retired = 1 WHERE id = ?1",
+                [first.token.job_id.get()],
+            )
+            .is_err()
+    );
+    assert!(
+        !store
+            .transfer_retirement_pending(first.token.job_id)
+            .unwrap()
+    );
+    assert!(store.remove_download_job(first.token.job_id).unwrap());
+    let removed = store.download_job(first.token.job_id).unwrap().unwrap();
+    assert!(removed.completed_at_s.is_none());
+    assert!(removed.removed_at_s.is_some());
+    assert!(
+        !store
+            .transfer_deletion_requested(first.token.job_id)
+            .unwrap()
+    );
+    assert!(
+        store
+            .latest_download_job(&first.file_hash)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .download_job_retirement(first.token.job_id)
+            .unwrap()
+            .unwrap()
+            .authority
+            .unwrap()
+            .identity,
+        identity
+    );
+    let next = store
+        .admit_download_job(&request(61, Some(16)))
+        .unwrap()
+        .job;
+    let next = store
+        .start_download_job(next.token, &temp)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        removed.storage.as_ref().unwrap().path,
+        next.storage.as_ref().unwrap().path
+    );
+    assert!(
+        store
+            .finalize_transfer_retirement(first.token.job_id)
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .latest_download_job(&first.file_hash)
+            .unwrap()
+            .unwrap()
+            .token,
+        next.token
+    );
+    assert!(
+        store
+            .download_job(first.token.job_id)
+            .unwrap()
+            .unwrap()
+            .internal_storage_retired
+    );
+    assert_eq!(store.table_count("known_files").unwrap(), 1);
 }

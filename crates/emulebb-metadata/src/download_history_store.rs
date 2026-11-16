@@ -312,6 +312,9 @@ mod tests {
         let store = MetadataStore::in_memory().unwrap();
         let mut manifest = completed_download_manifest(&store);
         manifest.completed = false;
+        manifest.delivery_state = MetadataTransferDeliveryState::Pending;
+        manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
+        manifest.delivered_path = None;
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert_eq!(transfer_completed_at_s(&store, manifest.token.job_id), None);
         assert!(
@@ -322,13 +325,16 @@ mod tests {
         );
 
         manifest.completed = true;
+        manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+        manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Unowned;
+        manifest.delivered_path = Some(std::env::temp_dir().join("completed.bin"));
         store.upsert_transfer_manifest(&manifest).unwrap();
-        const FIRST_COMPLETION_MS: i64 = 1_000;
+        const FIRST_COMPLETION_S: i64 = 1_000;
         {
             let conn = store.connection().unwrap();
             conn.execute(
                 "UPDATE download_jobs SET completed_at_s = ?1",
-                rusqlite::params![FIRST_COMPLETION_MS],
+                rusqlite::params![FIRST_COMPLETION_S],
             )
             .unwrap();
             conn.execute(
@@ -336,7 +342,7 @@ mod tests {
                 UPDATE download_history
                 SET first_completed_at_s = ?1, last_completed_at_s = ?1
                 "#,
-                rusqlite::params![FIRST_COMPLETION_MS],
+                rusqlite::params![FIRST_COMPLETION_S],
             )
             .unwrap();
         }
@@ -355,36 +361,73 @@ mod tests {
             metadata_refresh.aich_root.as_deref(),
             Some("1111111111111111111111111111111111111111")
         );
-        assert_eq!(metadata_refresh.first_completed_at_s, FIRST_COMPLETION_MS);
-        assert_eq!(metadata_refresh.last_completed_at_s, FIRST_COMPLETION_MS);
+        assert_eq!(metadata_refresh.first_completed_at_s, FIRST_COMPLETION_S);
+        assert_eq!(metadata_refresh.last_completed_at_s, FIRST_COMPLETION_S);
         assert_eq!(
             transfer_completed_at_s(&store, manifest.token.job_id),
-            Some(FIRST_COMPLETION_MS)
+            Some(FIRST_COMPLETION_S)
         );
 
+        // A second completion is a distinct attempt; durable Delivered state
+        // and the first job's timestamps must never be rewound to manufacture it.
+        let first_token = manifest.token;
+        store
+            .upsert_verified_local_content(&crate::MetadataVerifiedLocalContent {
+                secondary_identity: None,
+                file_hash: manifest.file_hash.clone(),
+                display_name: manifest.display_name.clone(),
+                file_size: 1024,
+                part_size: 1024,
+                md4_hashset: Vec::new(),
+                aich_root: metadata_refresh.aich_root.clone(),
+                aich_hashset: Vec::new(),
+                path: manifest.delivered_path.clone().unwrap(),
+                fingerprint: crate::NativeFileFingerprint {
+                    identity: crate::NativeFileIdentity::Unix {
+                        device_id: 1,
+                        inode_number: 2,
+                    },
+                    size_bytes: 1024,
+                    modified: crate::NativeFileTimestamp::new(1, 0).unwrap(),
+                    changed: None,
+                },
+                upload_priority: "normal".into(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+            })
+            .unwrap();
+        assert!(store.request_transfer_retirement(first_token).unwrap());
+        assert!(
+            store
+                .finalize_transfer_retirement(first_token.job_id)
+                .unwrap()
+        );
+        let second = store
+            .admit_download_job(&crate::DownloadJobRequest {
+                file_hash: manifest.file_hash.clone(),
+                display_name: "second.bin".into(),
+                expected_size_bytes: Some(1024),
+                category_id: None,
+                intent: crate::DownloadIntent::Started,
+                piece_size: 1024,
+            })
+            .unwrap()
+            .job;
+        assert_ne!(second.token.job_id, first_token.job_id);
+        manifest.token = second.token;
         manifest.delivery_state = MetadataTransferDeliveryState::Pending;
         manifest.delivery_ownership = MetadataTransferDeliveryOwnership::None;
         manifest.delivered_path = None;
-        store.upsert_transfer_manifest(&manifest).unwrap();
-        assert_eq!(
-            transfer_completed_at_s(&store, manifest.token.job_id),
-            Some(FIRST_COMPLETION_MS)
-        );
-        assert_eq!(
-            store
-                .download_history_by_hash(&manifest.file_hash)
-                .unwrap()
-                .unwrap()
-                .last_completed_at_s,
-            FIRST_COMPLETION_MS
-        );
-
         manifest.completed = false;
-        manifest.final_rehash_pending = true;
+        manifest.verified_ranges.clear();
+        manifest.pieces[0].state = "Missing".into();
+        manifest.pieces[0].bytes_written = 0;
         store.upsert_transfer_manifest(&manifest).unwrap();
+        assert_eq!(transfer_completed_at_s(&store, second.token.job_id), None);
         assert_eq!(
-            transfer_completed_at_s(&store, manifest.token.job_id),
-            Some(FIRST_COMPLETION_MS)
+            transfer_completed_at_s(&store, first_token.job_id),
+            Some(FIRST_COMPLETION_S)
         );
         assert_eq!(
             store
@@ -392,25 +435,33 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .last_completed_at_s,
-            FIRST_COMPLETION_MS
+            FIRST_COMPLETION_S
         );
-
         manifest.completed = true;
-        manifest.final_rehash_pending = false;
-        manifest.display_name = "completed-again.bin".to_string();
+        manifest.display_name = "completed-again.bin".into();
+        manifest.verified_ranges = vec![MetadataTransferRange {
+            start: 0,
+            end: 1024,
+        }];
+        manifest.pieces[0].state = "Verified".into();
+        manifest.pieces[0].bytes_written = 1024;
+        manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
+        manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Unowned;
+        manifest.delivered_path = Some(std::env::temp_dir().join("completed-again.bin"));
         store.upsert_transfer_manifest(&manifest).unwrap();
         let recompleted_at_s = transfer_completed_at_s(&store, manifest.token.job_id).unwrap();
         let recompleted_history = store
             .download_history_by_hash(&manifest.file_hash)
             .unwrap()
             .unwrap();
-        assert!(recompleted_at_s > FIRST_COMPLETION_MS);
-        assert_eq!(
-            recompleted_history.first_completed_at_s,
-            FIRST_COMPLETION_MS
-        );
+        assert!(recompleted_at_s > FIRST_COMPLETION_S);
+        assert_eq!(recompleted_history.first_completed_at_s, FIRST_COMPLETION_S);
         assert_eq!(recompleted_history.last_completed_at_s, recompleted_at_s);
         assert_eq!(recompleted_history.display_name, "completed-again.bin");
+        assert_eq!(
+            transfer_completed_at_s(&store, first_token.job_id),
+            Some(FIRST_COMPLETION_S)
+        );
     }
 
     #[test]

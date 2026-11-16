@@ -274,17 +274,13 @@ impl MetadataStore {
             .map(Option::flatten)
     }
 
-    /// Logical removal never resurrects an older job as the latest head.
-    /// Cleanup authority and child state remain until exact-job cleanup ends.
+    /// Logical removal clears only its own head and reserves internal-storage
+    /// retirement atomically. Completed output paths are never deletion authority
+    /// here; stop is the operation which retains resumable internal pieces.
     pub fn remove_download_job(&self, id: JobId) -> Result<bool> {
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        let changed = tx.execute("UPDATE download_jobs SET removed_at_s=?2,updated_at_s=?2,
-            execution_generation=execution_generation+1 WHERE id=?1 AND removed_at_s IS NULL AND execution_generation<9223372036854775807",
-            params![id,unix_s()])? != 0;
-        if changed {
-            tx.execute("UPDATE known_files SET latest_download_job_id=NULL WHERE latest_download_job_id=?1",[id])?;
-        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = crate::transfer_store::request_job_removal(&tx, id, false)?;
         tx.commit()?;
         Ok(changed)
     }

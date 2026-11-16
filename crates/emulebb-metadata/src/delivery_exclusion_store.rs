@@ -922,7 +922,14 @@ mod tests {
                 .settle_recovered_delivery_attempt(token, &recovery)
                 .unwrap()
         );
-        assert!(store.delete_transfer_manifest(job_id).unwrap());
+        assert!(store.delete_transfer_manifest(job_id).is_err());
+        // Normal lifecycle retains this compact owner until the barrier settles.
+        // Model a genuine preexisting orphan explicitly to exercise recovery.
+        store
+            .connection()
+            .unwrap()
+            .execute("DELETE FROM download_jobs WHERE id=?1", [job_id])
+            .unwrap();
         assert!(!store.reserve_delivery_output(token, &path, second).unwrap());
         let mut wrong = reservation.clone();
         wrong.reservation_id = second;

@@ -23,8 +23,9 @@ pub use local_catalog::MetadataPartialOffer;
 mod local_file_store;
 mod local_ingest_store;
 pub use local_ingest_store::{
-    MetadataIngestCommit, MetadataIngestCommitUncertain, MetadataIngestPathChanged,
-    MetadataIngestProjection, MetadataIngestRoot,
+    MetadataIngestCommit, MetadataIngestCommitUncertain, MetadataIngestJob,
+    MetadataIngestJobChanged, MetadataIngestPathChanged, MetadataIngestProjection,
+    MetadataIngestRoot,
 };
 mod model;
 mod native_file;
@@ -86,9 +87,9 @@ pub use shared_membership_store::ObservedRootChanged;
 pub use store::{InitialProfileStorage, MetadataStore};
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataDeliveryOutputReservation, MetadataFileImportRecord, MetadataPartialShare,
-    MetadataSharedSourceFailure, MetadataTransferAichIdentity, MetadataTransferCatalogEntry,
-    MetadataTransferCounts, MetadataTransferDeletionTombstone,
+    MetadataDeliveryOutputReservation, MetadataDownloadRetirement, MetadataFileImportRecord,
+    MetadataPartialShare, MetadataSharedSourceFailure, MetadataTransferAichIdentity,
+    MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferDeletionTombstone,
     MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
     MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
     MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,

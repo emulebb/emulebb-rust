@@ -5,7 +5,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::{
-    DownloadIntent, JobId, JobToken, NativeFileFingerprint, NativeFileIdentity, NativePath,
+    DownloadIntent, JobId, JobToken, MetadataDownloadRetirement, NativeFileFingerprint,
+    NativeFileIdentity, NativePath,
     download_history_store::{record_completed_download, records_download_completion},
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
@@ -66,7 +67,39 @@ impl super::MetadataStore {
             current.expected_size_bytes == manifest.expected_size_bytes,
             crate::MetadataContentConflict("download attempt has conflicting expected size")
         );
+        let persisted_delivery = tx
+            .query_row(
+                "SELECT p.platform, CASE WHEN length(p.native_path)<=65536 THEN p.native_path END,
+                j.delivery_ownership,j.source_fingerprint
+             FROM download_jobs j JOIN local_paths p ON p.id=j.delivered_path_id
+             WHERE j.id=?1 AND j.delivery_state='delivered'",
+                [manifest.token.job_id],
+                |row| {
+                    Ok((
+                        path_from_row(row, 0, 1)?,
+                        row.get::<_, String>(2)?,
+                        optional_fingerprint_from_row(row, 3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((path, _, _)) = &persisted_delivery {
+            ensure!(
+                manifest.delivery_state == MetadataTransferDeliveryState::Delivered
+                    && manifest.delivered_path.as_ref() == Some(path)
+                    && manifest.completed
+                    && !manifest.final_rehash_pending,
+                "durable delivery cannot be undone by a progress checkpoint"
+            );
+        }
         let mut reconciled = manifest.clone();
+        if let Some((_, ownership, fingerprint)) = persisted_delivery {
+            // WHY: a same-generation checkpoint can predate the dedicated
+            // evidence refresh. Persisted Unowned/new evidence must win, or a
+            // stale Owned clone would recreate destructive output authority.
+            reconciled.delivery_ownership = delivery_ownership_from_sql(&ownership)?;
+            reconciled.source_fingerprint = fingerprint;
+        }
         reconciled.expected_size_bytes = current.expected_size_bytes;
         reconciled.intent = current.intent;
         reconciled.transfer_row_removed = current.removed_at_s.is_some();
@@ -222,11 +255,11 @@ impl super::MetadataStore {
         const MAX_TEXT_BYTES: i64 = 65_536;
         const MAX_RANGES: i64 = 28_258;
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let header: Option<(i64, i64, i64, i64)> = conn.query_row(
-            "SELECT t.id,length(CAST(t.display_name AS BLOB)),length(CAST(t.comment AS BLOB)),length(CAST(t.upload_priority AS BLOB)) FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.delete_requested_at_s IS NULL",
-            [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        let header: Option<(i64, i64, i64, i64, u64)> = conn.query_row(
+            "SELECT t.id,length(CAST(t.display_name AS BLOB)),length(CAST(t.comment AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.execution_generation FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.delete_requested_at_s IS NULL",
+            [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,crate::sql_value::unsigned::<u64>(row,4)?)),
         ).optional()?;
-        let Some((id, name_len, comment_len, priority_len)) = header else {
+        let Some((id, name_len, comment_len, priority_len, generation)) = header else {
             return Ok(None);
         };
         ensure!(
@@ -264,6 +297,10 @@ impl super::MetadataStore {
         }
         drop(stmt);
         Ok(Some(crate::MetadataPartialShare {
+            job_token: JobToken {
+                job_id: JobId::new(id)?,
+                generation,
+            },
             file_hash: file_hash.to_owned(),
             display_name,
             file_size,
@@ -276,31 +313,28 @@ impl super::MetadataStore {
         }))
     }
 
-    /// Indexed identity-only read for cached transfer users. Do not load piece,
-    /// source, range or part-hash tables just to fence an AICH response.
-    pub fn transfer_aich_identity_by_hash(
+    /// Exact execution identity read; a stale callback cannot borrow a newer
+    /// same-content attempt's network consensus or trust generation.
+    pub fn download_job_aich_identity(
         &self,
-        file_hash: &str,
+        token: JobToken,
     ) -> Result<Option<MetadataTransferAichIdentity>> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let conn = self.connection()?;
-        read_transfer_aich_identity(&conn, &hash)
+        {
+            let conn = self.connection()?;
+            read_download_job_aich_identity(&conn, token)
+        }
     }
 
-    /// Publish a bounded in-memory AICH projection while holding the existing
-    /// connection mutex. Accepted identity writers cannot commit between this
-    /// read and publication. The callback must be synchronous, must not perform
-    /// I/O, and must not re-enter MetadataStore. Acquire runtime async guards
-    /// before invoking this helper on the blocking pool.
-    pub fn publish_transfer_aich_identity<T>(
+    /// Publish a bounded identity view under the existing SQLite mutex. The
+    /// captured token is rechecked here, never refreshed after network or I/O.
+    pub fn publish_download_job_aich_identity<T>(
         &self,
-        file_hash: &str,
+        token: JobToken,
         publish: impl FnOnce(MetadataTransferAichIdentity) -> Result<T>,
     ) -> Result<T> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let identity = read_transfer_aich_identity(&conn, &hash)?
-            .ok_or_else(|| anyhow::anyhow!("missing AICH transfer identity for {file_hash}"))?;
+        let identity = read_download_job_aich_identity(&conn, token)?
+            .ok_or_else(|| anyhow::anyhow!("stale or missing download job AICH identity"))?;
         publish(identity)
     }
 
@@ -1370,21 +1404,14 @@ impl super::MetadataStore {
         Ok(changed != 0)
     }
 
-    /// Persist destructive intent without minting ownership over a directory.
-    /// Cleanup uses only the authority established at exclusive allocation.
+    /// Additional delivered-output deletion intent. Internal pieces always use
+    /// the shared retirement journal, independent of this destructive choice.
     pub fn request_transfer_deletion(&self, id: JobId) -> Result<bool> {
-        let now = crate::download_job_store::unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed=tx.execute("UPDATE download_jobs SET delete_requested_at_s=?2,removed_at_s=coalesce(removed_at_s,?2),
-            updated_at_s=?2,
-            execution_generation=execution_generation+1
-            WHERE id=?1 AND delete_requested_at_s IS NULL AND execution_generation<9223372036854775807",
-            params![id,now])?;
-        if changed != 0 {
-            tx.execute("UPDATE known_files SET latest_download_job_id=NULL WHERE latest_download_job_id=?1",[id])?;
-        }
-        let requested=tx.query_row("SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND delete_requested_at_s IS NOT NULL)",[id],|row| row.get::<_,bool>(0))?;
+        request_job_removal(&tx, id, true)?;
+        let requested = tx.query_row("SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND delete_requested_at_s IS NOT NULL)",
+            [id], |row| row.get::<_,bool>(0))?;
         tx.commit()?;
         Ok(requested)
     }
@@ -1406,6 +1433,34 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
+    /// Refresh current verification after independently proving the recorded
+    /// output's bytes. This never restores destructive ownership or replays a
+    /// manifest's progress. Terminal completion remains a historical fact.
+    pub fn refresh_delivered_verification(
+        &self,
+        token: JobToken,
+        path: &Path,
+        expected_fingerprint: Option<&NativeFileFingerprint>,
+        expected_ownership: MetadataTransferDeliveryOwnership,
+        verified_fingerprint: &NativeFileFingerprint,
+    ) -> Result<bool> {
+        crate::download_job_store::validate_job_path(path)?;
+        let native = NativePath::from(path);
+        let changed = self.connection()?.execute(
+            "UPDATE download_jobs SET source_fingerprint=?7,delivery_ownership='unowned',updated_at_s=?8
+             WHERE id=?1 AND execution_generation=?2 AND removed_at_s IS NULL
+               AND delete_requested_at_s IS NULL AND delivery_state='delivered'
+               AND delivery_ownership=?6 AND source_fingerprint IS ?5
+               AND expected_size_bytes=?9
+               AND delivered_path_id IN(SELECT id FROM local_paths WHERE platform=?3 AND native_path=?4)",
+            params![token.job_id,i64::try_from(token.generation)?,NativePath::platform(),native.storage_bytes(),
+                expected_fingerprint.map(NativeFileFingerprint::storage_bytes),
+                delivery_ownership_to_sql(expected_ownership),verified_fingerprint.storage_bytes(),
+                crate::download_job_store::unix_s(),i64::try_from(verified_fingerprint.size_bytes)?],
+        )?;
+        Ok(changed != 0)
+    }
+
     pub fn transfer_retirement_pending(&self, id: JobId) -> Result<bool> {
         self.connection()?
             .query_row(
@@ -1420,28 +1475,6 @@ impl super::MetadataStore {
                 params![id],
                 |row| row.get(0),
             )
-            .map_err(Into::into)
-    }
-
-    pub fn transfer_directory_deletion_authority(
-        &self,
-        id: JobId,
-    ) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
-        self.connection()?
-            .query_row(
-                r#"
-                SELECT download_jobs.storage_directory_identity,
-                       CASE WHEN download_jobs.storage_directory_identity IS NOT NULL THEN download_jobs.storage_directory_marker_id END
-                FROM known_files
-                JOIN download_jobs ON download_jobs.known_file_id = known_files.id
-                WHERE download_jobs.id = ?1
-                  AND download_jobs.delete_requested_at_s IS NOT NULL
-                "#,
-                params![id],
-                |row| directory_cleanup_authority_from_row(row, 0),
-            )
-            .optional()
-            .map(Option::flatten)
             .map_err(Into::into)
     }
 
@@ -1476,12 +1509,7 @@ impl super::MetadataStore {
             "UPDATE download_jobs SET terminal_completed_at_s=coalesce(terminal_completed_at_s,?2), updated_at_s=?2 WHERE id=?1",
             params![job_id, crate::download_job_store::unix_s()],
         )?;
-        tx.execute(
-            "INSERT INTO download_retirements(job_id, directory_identity, directory_marker_id)
-             SELECT id,storage_directory_identity,CASE WHEN storage_directory_identity IS NOT NULL THEN storage_directory_marker_id END
-             FROM download_jobs WHERE id=?1 ON CONFLICT(job_id) DO NOTHING",
-            params![job_id],
-        )?;
+        reserve_internal_retirement(&tx, token.job_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -1511,26 +1539,11 @@ impl super::MetadataStore {
         .map_err(Into::into)
     }
 
-    pub fn transfer_retirement_authority(
-        &self,
-        id: JobId,
-    ) -> Result<Option<MetadataTransferDirectoryDeletionAuthority>> {
-        self.connection()?
-            .query_row(
-                r#"
-                SELECT download_retirements.directory_identity,
-                       download_retirements.directory_marker_id
-                FROM download_retirements
-                JOIN download_jobs ON download_jobs.id = download_retirements.job_id
-                JOIN known_files ON known_files.id = download_jobs.known_file_id
-                WHERE download_jobs.id = ?1
-                "#,
-                params![id],
-                |row| directory_cleanup_authority_from_row(row, 0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(Into::into)
+    /// Read one immutable retirement intent; never reconstruct paths from a
+    /// content hash or the current temp-directory setting.
+    pub fn download_job_retirement(&self, id: JobId) -> Result<Option<MetadataDownloadRetirement>> {
+        let conn = self.connection()?;
+        read_download_job_retirement(&conn, id)
     }
 
     /// Drop internal piece bookkeeping after owned directory cleanup. The compact
@@ -1539,19 +1552,12 @@ impl super::MetadataStore {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let pending: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM download_retirements r JOIN download_jobs j ON j.id=r.job_id
-            WHERE r.job_id=?1 AND j.terminal_completed_at_s IS NOT NULL)",[id],|row| row.get(0))?;
+            WHERE r.job_id=?1 AND (j.terminal_completed_at_s IS NOT NULL OR j.removed_at_s IS NOT NULL))",[id],|row| row.get(0))?;
         if !pending {
             return Ok(false);
         }
-        ensure!(
-            !tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM download_delivery_attempts WHERE job_id=?1)
-            OR EXISTS(SELECT 1 FROM download_delivery_tombstones WHERE job_id=?1)",
-                [id],
-                |row| row.get::<_, bool>(0)
-            )?,
-            "delivery authority must be settled before internal retirement"
-        );
+        // Output journals retain the compact owner row independently. They do
+        // not require large internal piece/source/hash children after safe cleanup.
         retire_job_children(&tx, id)?;
         tx.execute("DELETE FROM download_retirements WHERE job_id=?1", [id])?;
         tx.execute(
@@ -1915,8 +1921,112 @@ fn retire_job_children(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> 
 fn delete_job_row(tx: &rusqlite::Transaction<'_>, id: JobId) -> Result<()> {
     // Job deletion is not knowledge deletion. Accepted identity, names, origins,
     // upload history and policy remain even after the final job/path disappears.
+    ensure!(
+        !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE originating_job_id=?1)",
+            [id],
+            |row| row.get::<_, bool>(0)
+        )?,
+        "delivery exclusion authority must be settled before job deletion"
+    );
     tx.execute("DELETE FROM download_jobs WHERE id=?1", [id])?;
     Ok(())
+}
+
+/// One transaction for both removal choices: invalidate callbacks, clear only
+/// this job's head, and accept internal retirement before caller cancellation.
+pub(crate) fn request_job_removal(
+    conn: &rusqlite::Transaction<'_>,
+    id: JobId,
+    delete_output: bool,
+) -> Result<bool> {
+    let changed = conn.execute("UPDATE download_jobs SET removed_at_s=coalesce(removed_at_s,?2),
+        delete_requested_at_s=CASE WHEN ?3 THEN coalesce(delete_requested_at_s,?2) ELSE delete_requested_at_s END,
+        updated_at_s=?2,execution_generation=execution_generation+1
+        WHERE id=?1 AND (removed_at_s IS NULL OR (?3 AND delete_requested_at_s IS NULL))
+        AND execution_generation<9223372036854775807",
+        params![id,crate::download_job_store::unix_s(),delete_output])? != 0;
+    if changed {
+        conn.execute(
+            "UPDATE known_files SET latest_download_job_id=NULL WHERE latest_download_job_id=?1",
+            [id],
+        )?;
+    }
+    reserve_internal_retirement(conn, id)?;
+    Ok(changed)
+}
+
+/// Internal pieces only. This journal never authorizes delivered-output
+/// deletion; its path and native authority come from the fixed job allocation.
+pub(crate) fn reserve_internal_retirement(
+    conn: &rusqlite::Transaction<'_>,
+    id: JobId,
+) -> Result<()> {
+    if read_download_job_retirement(conn, id)?.is_some() {
+        return Ok(());
+    }
+    let source = conn
+        .query_row(
+            "SELECT p.platform, CASE WHEN length(p.native_path)<=65536 THEN p.native_path END
+         FROM download_jobs j LEFT JOIN local_paths p ON p.id=j.storage_path_id
+         WHERE j.id=?1 AND j.internal_storage_retired=0
+         AND (j.removed_at_s IS NOT NULL OR j.terminal_completed_at_s IS NOT NULL)",
+            [id],
+            |row| optional_path_from_row(row, 0, 1),
+        )
+        .optional()?;
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let target_path_id = if let Some(source) = source {
+        // Persist the physical target before any I/O. A short random sibling
+        // also avoids increasing the already accepted allocation path length.
+        let target = source.with_file_name(format!(".r-{}", Uuid::new_v4().simple()));
+        crate::download_job_store::validate_job_path(&target)?;
+        Some(upsert_local_path(conn, &target)?)
+    } else {
+        None
+    };
+    conn.execute(
+        "INSERT INTO download_retirements(job_id,target_path_id,directory_identity,directory_marker_id)
+        SELECT id,?2,storage_directory_identity,
+            CASE WHEN storage_directory_identity IS NOT NULL THEN storage_directory_marker_id END
+        FROM download_jobs WHERE id=?1 AND internal_storage_retired=0
+            AND (removed_at_s IS NOT NULL OR terminal_completed_at_s IS NOT NULL)",
+        params![id,target_path_id],
+    )?;
+    Ok(())
+}
+
+fn read_download_job_retirement(
+    conn: &rusqlite::Connection,
+    id: JobId,
+) -> Result<Option<MetadataDownloadRetirement>> {
+    Ok(conn.query_row(
+        "SELECT source.platform, CASE WHEN length(source.native_path)<=65536 THEN source.native_path END,
+            target.platform, CASE WHEN length(target.native_path)<=65536 THEN target.native_path END,
+            r.directory_identity,r.directory_marker_id
+         FROM download_retirements r JOIN download_jobs j ON j.id=r.job_id
+         LEFT JOIN local_paths source ON source.id=j.storage_path_id
+         LEFT JOIN local_paths target ON target.id=r.target_path_id WHERE r.job_id=?1",
+        [id], |row| Ok(MetadataDownloadRetirement {
+            job_id:id, source_path:optional_path_from_row(row,0,1)?,
+            target_path:optional_path_from_row(row,2,3)?,
+            authority:directory_cleanup_authority_from_row(row,4)?,
+        }),
+    ).optional()?)
+}
+
+fn read_download_job_aich_identity(
+    conn: &rusqlite::Connection,
+    token: JobToken,
+) -> Result<Option<MetadataTransferAichIdentity>> {
+    Ok(conn.query_row("SELECT CASE WHEN aich_root IS NULL THEN NULL ELSE lower(hex(aich_root)) END,
+        aich_root_origin,aich_trust_generation FROM download_jobs WHERE id=?1 AND execution_generation=?2
+        AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL",
+        params![token.job_id,i64::try_from(token.generation)?], |row| Ok(MetadataTransferAichIdentity {
+            root: row.get(0)?, origin: row.get(1)?, generation: crate::sql_value::unsigned::<u64>(row,2)?,
+        })).optional()?)
 }
 
 pub(crate) fn read_transfer_aich_identity(

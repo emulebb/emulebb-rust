@@ -34,11 +34,12 @@ pub(crate) const VERIFIED_SHARE_EXISTS_SQL: &str = concat!(
     crate::local_catalog::unexcluded_identity_sql!("i"),
     " AND EXISTS(SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL AND r.accessible=1 AND r.shareable=1))"
 );
-const PARTIAL_SHARE_OFFER_SQL: &str = "SELECT length(CAST(t.display_name AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.display_name,t.expected_size_bytes,t.upload_priority,t.rating FROM known_files k JOIN download_jobs t ON t.known_file_id=k.id WHERE k.ed2k_hash=?1 AND t.expected_size_bytes IS NOT NULL AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL AND t.delete_requested_at_s IS NULL AND EXISTS(SELECT 1 FROM download_job_verified_ranges r WHERE r.job_id=t.id)";
+const PARTIAL_SHARE_OFFER_SQL: &str = "SELECT length(CAST(t.display_name AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.display_name,t.expected_size_bytes,t.upload_priority,t.rating,t.id,t.execution_generation FROM known_files k JOIN download_jobs t ON t.known_file_id=k.id WHERE k.ed2k_hash=?1 AND t.expected_size_bytes IS NOT NULL AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL AND t.delete_requested_at_s IS NULL AND EXISTS(SELECT 1 FROM download_job_verified_ranges r WHERE r.job_id=t.id)";
 
 /// Compact, bounded fields needed to advertise an independent partial source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataPartialOffer {
+    pub job_token: crate::JobToken,
     pub name: String,
     pub size: u64,
     pub priority: String,
@@ -179,6 +180,10 @@ impl MetadataStore {
                 }
                 text_bytes = next;
                 Some(MetadataPartialOffer {
+                    job_token: crate::JobToken {
+                        job_id: row.get(6)?,
+                        generation: crate::sql_value::unsigned::<u64>(row, 7)?,
+                    },
                     name: row.get(2)?,
                     size: crate::sql_value::unsigned::<u64>(row, 3)?,
                     priority: row.get(4)?,
