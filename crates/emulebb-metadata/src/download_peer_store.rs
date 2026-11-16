@@ -223,7 +223,8 @@ impl MetadataStore {
             }
             MetadataDownloadPeerDelta::Rename(value) => {
                 ensure!(tx.execute("UPDATE download_jobs SET display_name=?3,updated_at_s=?4
-                    WHERE id=?1 AND execution_generation=?2 AND completed=0 AND delivery_state='pending'
+                    WHERE id=?1 AND execution_generation=?2 AND terminal_completed_at_s IS NULL AND removed_at_s IS NULL
+                      AND delete_requested_at_s IS NULL AND delivery_state='pending'
                       AND NOT EXISTS(SELECT 1 FROM download_delivery_attempts WHERE job_id=?1)",
                     params![token.job_id,i64::try_from(token.generation)?,value,crate::download_job_store::unix_s()])? == 1,
                     "only unfinished jobs without a delivery attempt may be renamed");

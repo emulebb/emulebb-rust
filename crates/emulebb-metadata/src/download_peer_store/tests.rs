@@ -224,3 +224,105 @@ fn source_rediscovery_preserves_description_and_first_seen() {
         .unwrap();
     assert_eq!(first, 1);
 }
+
+#[test]
+fn payload_verification_does_not_freeze_name_but_attempt_and_terminal_completion_do() {
+    let store = MetadataStore::in_memory().unwrap();
+    let current = job(&store);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET completed=1,visible_state='completed' WHERE id=?1",
+            [current.token.job_id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::Rename("operator-before-attempt.bin".into())
+            )
+            .unwrap()
+            .changed
+    );
+    let root = std::env::temp_dir();
+    let attempt = uuid::Uuid::new_v4();
+    store
+        .begin_transfer_delivery_attempt(
+            current.token,
+            attempt,
+            &root.join("delivered.bin"),
+            &root.join(format!(".emulebb-delivery-{attempt}.tmp")),
+        )
+        .unwrap();
+    assert!(
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::Rename("too-late.bin".into())
+            )
+            .is_err()
+    );
+    let snapshot = store
+        .download_job_delivery_attempt(current.token.job_id)
+        .unwrap()
+        .unwrap();
+    let target_id: i64 = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT target_path_id FROM download_delivery_attempts WHERE job_id=?1",
+            [current.token.job_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        store
+            .settle_recovered_delivery_attempt(current.token, &snapshot)
+            .unwrap()
+    );
+    // Establish a terminal historical fact; payload verification alone above
+    // deliberately did not do this. A completed output cannot be renamed.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET delivery_state='delivered',delivery_ownership='unowned',
+        delivered_path_id=?2 WHERE id=?1",
+            params![current.token.job_id, target_id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::Rename("delivered.bin".into())
+            )
+            .is_err()
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET terminal_completed_at_s=1 WHERE id=?1",
+            [current.token.job_id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::Rename("history.bin".into())
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .download_job(current.token.job_id)
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "operator-before-attempt.bin"
+    );
+}

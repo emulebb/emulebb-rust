@@ -12,7 +12,9 @@ mod download_history_model;
 mod download_history_store;
 mod download_job_model;
 mod download_job_store;
+mod download_payload_store;
 mod download_peer_store;
+pub use download_payload_store::{MetadataDownloadPayload, MetadataDownloadPayloadPage};
 mod download_progress_store;
 pub use download_execution_store::{
     MetadataDownloadExecutionHeader, MetadataDownloadExecutionRow, MetadataDownloadGeometry,

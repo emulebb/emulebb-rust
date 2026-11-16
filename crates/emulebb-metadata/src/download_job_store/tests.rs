@@ -576,3 +576,44 @@ fn stop_preserves_internal_data_but_remove_reserves_only_its_exact_internal_reti
     );
     assert_eq!(store.table_count("known_files").unwrap(), 1);
 }
+
+#[test]
+fn current_job_and_page_reject_marker_nul_suffix_before_string_allocation() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = store
+        .admit_download_job(&request(117, Some(16)))
+        .unwrap()
+        .job;
+    let marker = format!("{}\0{}", uuid::Uuid::new_v4(), "x".repeat(1024 * 1024));
+    {
+        let mut conn = store.connection().unwrap();
+        let tx = conn.transaction().unwrap();
+        let temp = std::env::temp_dir();
+        let storage = temp.join(format!("job-marker-{}", uuid::Uuid::new_v4()));
+        let temp_id = upsert_local_path(&tx, &temp).unwrap();
+        let storage_id = upsert_local_path(&tx, &storage).unwrap();
+        // First assignment preserves every storage immutability trigger; the
+        // NUL suffix passes SQLite length(TEXT)=36 but is not a bounded UUID.
+        tx.execute(
+            "UPDATE download_jobs SET selected_temp_path_id=?2,storage_path_id=?3,
+            storage_directory_marker_id=?4 WHERE id=?1",
+            params![job.token.job_id, temp_id, storage_id, marker],
+        )
+        .unwrap();
+        let lengths:(i64,i64)=tx.query_row("SELECT length(storage_directory_marker_id),length(CAST(storage_directory_marker_id AS BLOB))
+            FROM download_jobs WHERE id=?1",[job.token.job_id],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(lengths.0, 36);
+        assert!(lengths.1 > 1024 * 1024);
+        tx.commit().unwrap();
+    }
+    let error = store.download_job(job.token.job_id).unwrap_err();
+    assert!(
+        error.to_string().contains("job UUID exceeds byte bound"),
+        "{error:#}"
+    );
+    let error = store.download_jobs_after(None, 16, false).unwrap_err();
+    assert!(
+        error.to_string().contains("job UUID exceeds byte bound"),
+        "{error:#}"
+    );
+}

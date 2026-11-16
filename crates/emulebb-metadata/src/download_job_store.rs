@@ -64,6 +64,33 @@ pub(crate) fn bounded_row_bytes(
     Ok(bytes)
 }
 
+/// Decode a fixed UUID directly from SQLite's borrowed bytes. SQLite TEXT
+/// length counts characters and stops at NUL, so its CHECK is not a byte cap.
+pub(crate) fn bounded_uuid_from_row(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+) -> rusqlite::Result<uuid::Uuid> {
+    let value = row.get_ref(column)?.as_str()?;
+    if value.len() != 36 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "job UUID exceeds byte bound",
+            )
+            .into(),
+        ));
+    }
+    uuid::Uuid::parse_str(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 const JOB_COLUMNS: &str = "j.id,j.execution_generation,lower(hex(k.ed2k_hash)),
     CASE WHEN length(CAST(j.display_name AS BLOB))<=65536 THEN j.display_name END,
     k.size_bytes,j.expected_size_bytes,j.category_id,j.intent,p.platform,
@@ -108,14 +135,7 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJobRecord> {
         selected_temp: optional_path_from_row(row, 8, 9)?,
         storage: optional_path_from_row(row, 20, 21)?
             .map(|path| {
-                let marker: String = row.get(22)?;
-                let marker_id = marker.parse::<uuid::Uuid>().map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        22,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
+                let marker_id = bounded_uuid_from_row(row, 22)?;
                 let identity = row
                     .get::<_, Option<Vec<u8>>>(23)?
                     .map(|bytes| {
