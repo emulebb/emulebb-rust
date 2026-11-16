@@ -1188,6 +1188,8 @@ fn initial_publish_cohort_is_small_first_and_bounded() {
 
 #[tokio::test]
 async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
+    use std::future::{Future, poll_fn};
+
     let root = scratch_dir("initial-publish");
     for sequence in 0..3 {
         fs::write(
@@ -1214,15 +1216,30 @@ async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
         }])
         .unwrap();
 
-    let bootstrap = bootstrap_initial_publish_catalog(&core)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut bootstrap = Box::pin(bootstrap_initial_publish_catalog(&core));
+    let bootstrap = poll_fn(|cx| {
+        let result = bootstrap.as_mut().poll(cx);
+        // Check the actual producer at every suspension and completion through
+        // the same serialized progress surface consumed by REST clients.
+        let progress = serde_json::to_value(core.shared_directory_reload_progress()).unwrap();
+        assert!(
+            matches!(
+                progress["phase"].as_str(),
+                Some("idle" | "queued" | "scanning" | "planning" | "hashing")
+            ),
+            "reload phase outside the public contract: {}",
+            progress["phase"]
+        );
+        result
+    })
+    .await
+    .unwrap()
+    .unwrap();
 
     assert_eq!(bootstrap.progress.hashed_count, 3);
     assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 3);
     let progress = reload_progress_snapshot(&core);
-    assert_eq!(progress.phase, "bootstrapHashing");
+    assert_eq!(progress.phase, "hashing");
     assert_eq!(progress.hashed_count, 3);
     assert_eq!(progress.scanned_count, 3);
     fs::remove_dir_all(root).ok();

@@ -2189,7 +2189,7 @@ async fn bootstrap_initial_publish_catalog(
         return Ok(None);
     }
     record_reload_progress(core, |diagnostics| {
-        diagnostics.phase = "bootstrapScanning".to_string();
+        diagnostics.phase = "scanning".to_string();
     });
     let cohort = scan_initial_publish_cohort(core).await?;
     if cohort.is_empty() {
@@ -2197,7 +2197,7 @@ async fn bootstrap_initial_publish_catalog(
     }
     let cohort_size = cohort.len();
     record_reload_progress(core, |diagnostics| {
-        diagnostics.phase = "bootstrapPlanning".to_string();
+        diagnostics.phase = "planning".to_string();
         diagnostics.scanned_count = cohort_size;
     });
     // A bounded cohort is not authoritative for absence. Never prune persisted
@@ -2206,10 +2206,7 @@ async fn bootstrap_initial_publish_catalog(
     let queued = plan.to_hash.len();
     let reused = plan.reused_shares.len();
     record_reload_progress(core, |diagnostics| {
-        *diagnostics = plan
-            .stats
-            .clone()
-            .into_diagnostics("bootstrapHashing", true, false);
+        *diagnostics = plan.stats.clone().into_diagnostics("hashing", true, false);
     });
 
     for reused_share in &plan.reused_shares {
