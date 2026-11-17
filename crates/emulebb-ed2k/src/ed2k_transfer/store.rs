@@ -573,14 +573,37 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
+    /// Keep dirty bookkeeping and cache publication inside the same short
+    /// content fence as logical stop. A late old-token callback can publish
+    /// neither half after stop has invalidated its execution.
+    pub(super) async fn publish_dirty_manifest_unlocked(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        piece_index: u32,
+    ) -> Result<super::ResidentManifest> {
+        let _content = self.lock_content(&manifest.file_hash).await;
+        let current = self.cache_manifest_with_content(manifest).await?;
+        self.note_dirty_piece_unlocked(&current, piece_index)
+            .await?;
+        Ok(current)
+    }
+
     /// Publish only while category writers are fenced; an older progress clone
     /// must not replace the current cached assignment.
     pub(super) async fn cache_manifest_unlocked(
         &self,
         manifest: &Ed2kResumeManifest,
     ) -> Result<super::ResidentManifest> {
-        let token = manifest.token;
         let _content = self.lock_content(&manifest.file_hash).await;
+        self.cache_manifest_with_content(manifest).await
+    }
+
+    /// Caller retains the content fence through any compound publication.
+    async fn cache_manifest_with_content(
+        &self,
+        manifest: &Ed2kResumeManifest,
+    ) -> Result<super::ResidentManifest> {
+        let token = manifest.token;
         let _fence = self.category_assignment_gate.read().await;
         let job = self
             .download_job(token.job_id)
@@ -619,6 +642,17 @@ impl Ed2kTransferRuntime {
         manifest: &Ed2kResumeManifest,
     ) -> Result<super::ResidentManifest> {
         let current = self.cache_manifest_unlocked(manifest).await?;
+        // Stop may win after cache publication. Its short content fence also
+        // covers this acknowledgment, preventing late bookkeeping resurrection.
+        let _content = self.lock_content(&manifest.file_hash).await;
+        anyhow::ensure!(
+            self.manifest_cache
+                .lock()
+                .await
+                .get(&current.token.job_id)
+                .is_some_and(|cached| cached.token == current.token),
+            "stale execution cannot acknowledge persisted progress"
+        );
         let mut states = self.manifest_checkpoint_state.lock().await;
         let revision = states
             .get(&current.token)

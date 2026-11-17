@@ -590,6 +590,9 @@ impl Ed2kTransferRuntime {
             use tokio::io::{AsyncSeekExt, AsyncWriteExt};
             file.seek(std::io::SeekFrom::Start(start)).await?;
             file.write_all(data).await?;
+            // WHY: stop can checkpoint acknowledged dirty progress without
+            // waiting for this job's I/O guard. Publish only flushed payload.
+            file.flush().await?;
             self.store_payload_handle(token, file);
             let mut next = piece_snapshot.clone();
             next.bytes_written += data_len;
@@ -781,10 +784,11 @@ impl Ed2kTransferRuntime {
                 return Ok((outcome, manifest.freeze()?));
             }
 
+            file.flush().await?;
             self.store_payload_handle(token, file);
-            self.note_dirty_piece_unlocked(&manifest, piece_index)
+            let manifest = self
+                .publish_dirty_manifest_unlocked(&manifest, piece_index)
                 .await?;
-            let manifest = self.cache_manifest_unlocked(&manifest).await?;
             log_append_piece_block(AppendPieceBlockLog {
                 manifest: &manifest,
                 piece_index,

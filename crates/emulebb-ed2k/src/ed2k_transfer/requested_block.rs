@@ -187,9 +187,8 @@ impl Ed2kTransferRuntime {
                     .await?;
             } else {
                 checkpoint_reason = None;
-                self.note_dirty_piece_unlocked(manifest, piece_index)
+                self.publish_dirty_manifest_unlocked(manifest, piece_index)
                     .await?;
-                self.cache_manifest_unlocked(manifest).await?;
             }
         } else {
             self.store_manifest_unlocked(manifest).await?;

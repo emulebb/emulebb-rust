@@ -570,11 +570,33 @@ impl MetadataStore {
     }
 
     pub fn stop_download_job(&self, token: JobToken) -> Result<bool> {
+        self.checkpoint_and_stop_download_job(token, &[])
+    }
+
+    /// Persist already flushed cache-only progress and stop in the same commit.
+    /// The native owner supplies exact current deltas under its content fence;
+    /// stopped or stale executions never replay progress into a later attempt.
+    pub fn checkpoint_and_stop_download_job(
+        &self,
+        token: JobToken,
+        pieces: &[crate::MetadataTransferPiece],
+    ) -> Result<bool> {
         let generation = i64::try_from(token.generation)?;
         ensure!(generation < i64::MAX, "job generation exhausted");
-        Ok(self.connection()?.execute("UPDATE download_jobs SET intent='stopped',execution_generation=execution_generation+1,
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !pieces.is_empty()
+            && !crate::download_progress_store::checkpoint_download_progress_in(&tx, token, pieces)?
+        {
+            return Ok(false);
+        }
+        let changed = tx.execute("UPDATE download_jobs SET intent='stopped',execution_generation=execution_generation+1,
             updated_at_s=?3 WHERE id=?1 AND execution_generation=?2 AND intent='started' AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL",
-            params![token.job_id,generation,unix_s()])? != 0)
+            params![token.job_id,generation,unix_s()])? != 0;
+        if changed {
+            tx.commit()?;
+        }
+        Ok(changed)
     }
 
     pub fn download_jobs_after(
