@@ -79,6 +79,45 @@ fn write_repeating_pattern_file(path: &Path, size: usize, pattern: &[u8]) {
 }
 
 #[tokio::test]
+async fn source_diagnostic_stats_borrow_software_and_keep_execution_identity() {
+    let root = unique_test_dir("source-diagnostic-stats");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes([0x37; 16]),
+        "Sample.bin".into(),
+        ED2K_PART_SIZE + 1,
+    );
+    drop(runtime.ensure_job(&job).await.unwrap());
+    let peer: SocketAddr = "192.0.2.37:4662".parse().unwrap();
+    assert!(runtime.note_download_source_part_bitmap(
+        job.token,
+        peer,
+        None,
+        None,
+        vec![true, false]
+    ));
+    let software = String::from("Sample Client");
+    let original = software.as_ptr();
+    runtime.note_download_source_software(job.token, peer, software);
+    let endpoint = peer.to_string();
+    runtime.with_live_download_source_stats(job.token, &endpoint, |source| {
+        let source = source.unwrap();
+        assert_eq!(source.available_parts, 1);
+        assert_eq!(source.client_software, Some("Sample Client"));
+        assert_eq!(source.client_software.unwrap().as_ptr(), original);
+    });
+    let mut other = job.token;
+    other.generation += 1;
+    assert!(runtime.with_live_download_source_stats(other, &endpoint, |source| source.is_none()));
+    assert!(
+        runtime.with_live_download_source_stats(job.token, "192.0.2.38:4662", |source| source
+            .is_none())
+    );
+    runtime.drain_local_mutations().await.unwrap();
+}
+
+#[tokio::test]
 async fn download_activity_reports_average_speed_until_stale() {
     let root = unique_test_dir("ed2k-transfer-download-activity");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

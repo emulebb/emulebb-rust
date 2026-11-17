@@ -20,7 +20,9 @@ impl LocalMutationRegistry {
         );
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
-        let lease = Self::reserve_unit(&mut state, HASH_WORKSPACE, true, false)?;
+        let (resident_write, lease) = self.residents.reserve_with(token.job_id, || {
+            Self::reserve_unit(&mut state, HASH_WORKSPACE, true, false)
+        })?;
         let hashes = input.take().expect("admitted MD4 input");
         let metadata = runtime.metadata.clone();
         let locks = Arc::clone(&runtime.content_locks);
@@ -67,11 +69,13 @@ impl LocalMutationRegistry {
                     if let Some(manifest) =
                         cache.get_mut(&token.job_id).filter(|m| m.token == token)
                     {
-                        // Drop the old list before allocating its exact-capacity replacement.
-                        manifest.md4_hashset.clear();
-                        manifest.md4_hashset = Vec::with_capacity(hashes.len());
-                        manifest.md4_hashset.extend(hashes.iter().map(hex::encode));
-                        manifest.md4_hashset_acquired = true;
+                        manifest.write_with(resident_write, |manifest| {
+                            // Drop the old list before allocating its exact-capacity replacement.
+                            manifest.md4_hashset = Vec::with_capacity(hashes.len());
+                            manifest.md4_hashset.extend(hashes.iter().map(hex::encode));
+                            manifest.md4_hashset_acquired = true;
+                            Ok(())
+                        })?;
                     }
                 }
                 // Raw input and publication scratch do not overlap. The resident
@@ -177,11 +181,14 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&manifest).unwrap(),
             )
             .unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(job.token.job_id, manifest);
+        runtime.manifest_cache.lock().await.insert(
+            job.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&manifest)
+                .unwrap(),
+        );
         let (reached, ready) = oneshot::channel();
         let (release, resume) = std::sync::mpsc::channel();
         runtime

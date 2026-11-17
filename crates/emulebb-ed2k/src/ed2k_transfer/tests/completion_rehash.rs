@@ -224,7 +224,7 @@ async fn incomplete_hydration_requires_md4_authority() {
         .store_piece_data(job.token, 0, &payload)
         .await
         .unwrap();
-    let mut manifest = runtime.manifest(job.token).await.unwrap();
+    let mut manifest = runtime.manifest(job.token).await.unwrap().edit().unwrap();
     assert_eq!(runtime.shared_catalog_count().await, 1);
     manifest.md4_hashset_acquired = false;
     manifest.md4_hashset.clear();

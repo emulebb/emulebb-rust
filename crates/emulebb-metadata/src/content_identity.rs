@@ -12,6 +12,15 @@ pub(crate) fn check_accepted_identity(
     size_bytes: i64,
     aich_root: Option<&[u8]>,
 ) -> Result<()> {
+    check_accepted_claims(conn, hash, Some(size_bytes), aich_root)
+}
+
+pub(crate) fn check_accepted_claims(
+    conn: &Connection,
+    hash: &[u8],
+    size_bytes: Option<i64>,
+    aich_root: Option<&[u8]>,
+) -> Result<()> {
     // WHY: a removed download's completion history remains identity authority,
     // while an incomplete job still needs to learn provisional size/root claims.
     let mut stmt = conn.prepare(
@@ -31,7 +40,9 @@ pub(crate) fn check_accepted_identity(
     for row in rows {
         let (stored_size, stored_root) = row?;
         ensure!(
-            stored_size.is_none_or(|stored| stored == size_bytes),
+            stored_size
+                .zip(size_bytes)
+                .is_none_or(|(stored, claimed)| stored == claimed),
             MetadataContentConflict("ED2K identity has conflicting file size")
         );
         ensure!(

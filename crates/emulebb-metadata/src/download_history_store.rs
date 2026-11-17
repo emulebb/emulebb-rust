@@ -16,17 +16,18 @@ impl super::MetadataStore {
         self.connection()?
             .prepare_cached(
                 r#"
-                SELECT lower(hex(ed2k_hash)), display_name, size_bytes,
+                SELECT lower(hex(ed2k_hash)), CASE WHEN length(CAST(display_name AS BLOB))<=65536 THEN display_name END, size_bytes,
                        CASE
                            WHEN aich_root IS NULL THEN NULL
                            ELSE lower(hex(aich_root))
                        END,
-                       first_completed_at_s, last_completed_at_s
+                       first_completed_at_s, last_completed_at_s,length(CAST(display_name AS BLOB))
                 FROM download_history
                 WHERE ed2k_hash = ?1
                 "#,
             )?
             .query_row(params![hash], |row| {
+                crate::download_job_store::bounded_row_bytes(row,&[(6,65536,2)])?;
                 Ok(MetadataDownloadHistoryEntry {
                     file_hash: row.get(0)?,
                     display_name: row.get(1)?,

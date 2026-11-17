@@ -166,7 +166,7 @@ impl EmulebbCore {
         let cached = state.searches.remove(search_id).is_some();
         state
             .kad_aich_search_votes
-            .retain(|(candidate_search_id, _), _| candidate_search_id != search_id);
+            .retain(|(_, candidate_search_id), _| candidate_search_id != search_id);
         Ok(persisted || queued || cancelled || cached)
     }
 

@@ -75,6 +75,9 @@ pub struct Ed2kPeerDownloadFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kPeerFileDownloadOutcome {
+    /// Actual connected endpoint and decoded hello identity, absent when no
+    /// hello was observed. Discovery hints cannot populate this proof.
+    pub observed_peer: Option<(SocketAddr, [u8; 16])>,
     pub job_token: emulebb_metadata::JobToken,
     pub file_hash: Ed2kHash,
     pub outcome: Ed2kPeerDownloadOutcome,
@@ -100,6 +103,7 @@ impl Ed2kPeerDownloadReport {
     ) -> Self {
         Self {
             file_outcomes: vec![Ed2kPeerFileDownloadOutcome {
+                observed_peer: None,
                 job_token,
                 file_hash,
                 outcome,
@@ -307,6 +311,9 @@ pub async fn download_files_from_peer(
             match session_result {
                 Ok(outcome) => {
                     report.file_outcomes.push(Ed2kPeerFileDownloadOutcome {
+                        observed_peer: connection_state
+                            .observed_peer_hash()
+                            .map(|hash| (peer_addr, hash)),
                         job_token: file.job_token,
                         file_hash: file.file_hash,
                         outcome,

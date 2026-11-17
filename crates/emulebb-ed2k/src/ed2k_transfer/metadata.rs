@@ -15,8 +15,8 @@ use crate::{long_path::long_path, normalize_ed2k_file_name};
 
 use super::hashset::{decode_aich_hash_hex, validate_aich_hashset};
 use super::{
-    Ed2kAichHashset, Ed2kAichRootOrigin, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
-    Ed2kTransferJob, Ed2kTransferRuntime,
+    Ed2kAichHashset, Ed2kAichRootOrigin, Ed2kSharedEntry, Ed2kSourceHint, Ed2kTransferJob,
+    Ed2kTransferRuntime,
 };
 
 impl Ed2kTransferRuntime {
@@ -98,8 +98,19 @@ impl Ed2kTransferRuntime {
         Ok((entries, total, has_more))
     }
 
+    /// Compact live verification overlay; no geometry is copied or hydrated.
+    pub async fn verifying_downloads(&self) -> Vec<JobToken> {
+        self.manifest_cache
+            .lock()
+            .await
+            .values()
+            .filter(|manifest| manifest.final_rehash_pending)
+            .map(|manifest| manifest.token)
+            .collect()
+    }
+
     /// Ensure a transfer manifest exists for the provided job.
-    pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
+    pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<super::ResidentManifest> {
         self.prepare_download_job_storage(job.token).await?;
         let _lifecycle_guard = self.lock_lifecycle(job.token.job_id).await;
         let _guard = self.lock_manifest(job.token).await;
@@ -201,7 +212,7 @@ impl Ed2kTransferRuntime {
         &self,
         token: JobToken,
         md4_hashset: Vec<[u8; 16]>,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         self.activate_md4_hashes(token, md4_hashset).await?;
         self.manifest(token).await
     }
@@ -213,7 +224,7 @@ impl Ed2kTransferRuntime {
         &self,
         token: JobToken,
         aich_hashset: Ed2kAichHashset,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         let generation = self.manifest(token).await?.aich_trust_generation;
         self.store_aich_hashset_for_generation(token, aich_hashset, generation)
             .await
@@ -226,13 +237,13 @@ impl Ed2kTransferRuntime {
         token: JobToken,
         aich_hashset: Ed2kAichHashset,
         expected_generation: u64,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         let guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?.edit()?;
         let hash = manifest.file_hash.clone();
         let file_hash = hash.as_str();
         if manifest.aich_trust_generation != expected_generation {
-            return Ok(manifest);
+            return manifest.freeze();
         }
         validate_aich_hashset(manifest.file_size, &aich_hashset)?;
         let existing_root = manifest
@@ -269,9 +280,9 @@ impl Ed2kTransferRuntime {
         &self,
         token: JobToken,
         aich_root: Option<[u8; 20]>,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         let guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?.edit()?;
         let hash = manifest.file_hash.clone();
         let file_hash = hash.as_str();
         let expected_generation = manifest.aich_trust_generation;
@@ -303,7 +314,7 @@ impl Ed2kTransferRuntime {
                 .expect("aich corroboration mutex poisoned")
                 .remove(&token);
         }
-        Ok(manifest)
+        manifest.freeze()
     }
 
     /// Record a NETWORK-LEARNED AICH root proposed by one peer at `from_ip`.
@@ -326,7 +337,7 @@ impl Ed2kTransferRuntime {
         token: JobToken,
         aich_root: Option<[u8; 20]>,
         from_ip: std::net::IpAddr,
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         let observations = aich_root
             .map(|root| vec![(root, from_ip)])
             .unwrap_or_default();
@@ -342,17 +353,17 @@ impl Ed2kTransferRuntime {
         &self,
         token: JobToken,
         observations: &[([u8; 20], std::net::IpAddr)],
-    ) -> Result<Ed2kResumeManifest> {
+    ) -> Result<super::ResidentManifest> {
         let guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?.edit()?;
         if observations.is_empty() {
-            return Ok(manifest);
+            return manifest.freeze();
         }
 
         if manifest.aich_root.is_some()
             && manifest.aich_root_origin != Some(Ed2kAichRootOrigin::NetworkConsensus)
         {
-            return Ok(manifest);
+            return manifest.freeze();
         }
 
         let mut accumulator = {
@@ -363,7 +374,7 @@ impl Ed2kTransferRuntime {
             // An accepted persisted consensus resumes VERIFIED exactly as
             // stock. Only this runtime's live accumulator is reconsiderable.
             if manifest.aich_root.is_some() && !map.contains_key(&token) {
-                return Ok(manifest);
+                return manifest.freeze();
             }
             map.get(&token).cloned().unwrap_or_default()
         };
@@ -388,7 +399,7 @@ impl Ed2kTransferRuntime {
             .lock()
             .expect("aich corroboration mutex poisoned")
             .insert(token, accumulator);
-        Ok(manifest)
+        manifest.freeze()
     }
 
     /// Retain one endpoint hint without hydrating execution geometry.
@@ -506,35 +517,6 @@ impl Ed2kTransferRuntime {
         Ok(job.category_id)
     }
 
-    /// Take the category publication fence without acquiring per-transfer locks.
-    pub async fn lock_category_mutation(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
-        Arc::clone(&self.category_assignment_gate)
-            .write_owned()
-            .await
-    }
-
-    /// Publish a committed deletion while the exclusive fence is held.
-    pub async fn clear_deleted_category_from_cache(&self, category_id: i64) {
-        for manifest in self.manifest_cache.lock().await.values_mut() {
-            if manifest.category_id == Some(category_id) {
-                manifest.category_id = None;
-            }
-        }
-    }
-
-    /// Publish a committed assignment while the exclusive fence is held.
-    pub async fn publish_category_assignment(&self, token: JobToken, category_id: Option<i64>) {
-        if let Some(manifest) = self
-            .manifest_cache
-            .lock()
-            .await
-            .get_mut(&token.job_id)
-            .filter(|m| m.token == token)
-        {
-            manifest.category_id = category_id;
-        }
-    }
-
     /// Cache a delivered download as verified local content without rereading
     /// its payload. Root membership must be admitted separately by the caller.
     pub async fn register_delivered_local_content(
@@ -575,22 +557,23 @@ impl Ed2kTransferRuntime {
         );
         let content = MetadataVerifiedLocalContent {
             secondary_identity: evidence.secondary(),
-            file_hash: manifest.file_hash,
-            display_name: manifest.display_name,
+            file_hash: manifest.file_hash.clone(),
+            display_name: manifest.display_name.clone(),
             file_size: manifest.file_size,
             part_size: manifest.piece_size,
-            md4_hashset: manifest.md4_hashset,
+            md4_hashset: manifest.md4_hashset.clone(),
             aich_root: Some(
                 manifest
                     .aich_root
+                    .clone()
                     .context("delivered download has no AICH root")?,
             ),
-            aich_hashset: manifest.aich_hashset,
+            aich_hashset: manifest.aich_hashset.clone(),
             path: path.clone(),
             fingerprint: fingerprint.clone(),
-            upload_priority: manifest.upload_priority,
+            upload_priority: manifest.upload_priority.clone(),
             auto_upload_priority: manifest.auto_upload_priority,
-            comment: manifest.comment,
+            comment: manifest.comment.clone(),
             rating: manifest.rating,
         };
         let metadata = self.metadata.clone();
@@ -781,12 +764,15 @@ impl Ed2kTransferRuntime {
     }
 
     /// Exact job detail; protocol hashes are resolved only at explicit wire admission.
-    pub async fn manifest(&self, token: JobToken) -> Result<Ed2kResumeManifest> {
+    pub async fn manifest(&self, token: JobToken) -> Result<super::ResidentManifest> {
         let _guard = self.lock_manifest(token).await;
         self.load_aich_manifest_unlocked(token).await
     }
 
-    pub async fn manifest_optional(&self, token: JobToken) -> Result<Option<Ed2kResumeManifest>> {
+    pub async fn manifest_optional(
+        &self,
+        token: JobToken,
+    ) -> Result<Option<super::ResidentManifest>> {
         let _guard = self.lock_manifest(token).await;
         if self.load_manifest_optional_unlocked(token).await?.is_none() {
             return Ok(None);

@@ -701,6 +701,7 @@ impl EmulebbCore {
                     Arc::clone(&self.ed2k_transfers),
                     Arc::clone(&shutdown),
                     PassiveReplayWorker::Source,
+                    Arc::clone(&self.download_attempts),
                 )));
                 tasks.push(tokio::spawn(run_kad_passive_replay_loop(
                     dht.clone(),
@@ -709,6 +710,7 @@ impl EmulebbCore {
                     Arc::clone(&self.ed2k_transfers),
                     Arc::clone(&shutdown),
                     PassiveReplayWorker::General,
+                    Arc::clone(&self.download_attempts),
                 )));
             }
         }
@@ -939,6 +941,7 @@ impl EmulebbCore {
         kad_handoff.commit();
         self.ed2k_download_tasks.start();
         drop(runtime_guard);
+        self.start_download_scheduler();
         self.queue_ed2k_shared_catalog_publish();
         let status = self.ed2k_status().await;
         tracing::info!(

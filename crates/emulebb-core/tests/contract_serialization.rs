@@ -1,14 +1,11 @@
-//! REST-contract serialization guards for populated `TransferSource` / `Upload`
-//! values. The in-process REST smoke tests create no sources or uploads, so a
-//! struct that serialized extra (non-contract) fields would slip through schema
-//! validation. These tests construct populated values and assert the emitted
-//! JSON carries ONLY the eMuleBB-contract keys.
+//! Exact JSON surfaces for populated download sources, summaries and uploads.
 
 use std::collections::BTreeSet;
 
 use emulebb_core::{
-    SharedFileKadKeywordPublish, SharedFilePublicationStatus, SharedFilePublishLane,
-    SharedFilePublishState, Transfer, TransferEvent, TransferSource, Upload, UploadScoreBreakdown,
+    DownloadSource, DownloadState, DownloadSummary, SharedFileKadKeywordPublish,
+    SharedFilePublicationStatus, SharedFilePublishLane, SharedFilePublishState, Upload,
+    UploadScoreBreakdown,
 };
 use serde_json::{Value, json};
 
@@ -22,8 +19,8 @@ fn object_keys(value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-fn populated_transfer_source() -> TransferSource {
-    TransferSource {
+fn populated_download_source() -> DownloadSource {
+    DownloadSource {
         client_id: "0102030405060708090a0b0c0d0e0f10".to_string(),
         // Internal-only fields that must never leak into the contract JSON.
         hash: "00112233445566778899aabbccddeeff".to_string(),
@@ -40,8 +37,9 @@ fn populated_transfer_source() -> TransferSource {
         user_name: "peer".to_string(),
         client_software: "eMule".to_string(),
         reported_file_names: Vec::new(),
+        reported_file_names_has_more: false,
         download_state: "downloading".to_string(),
-        download_speed_ki_bps: 12.5,
+        download_rate_bytes_per_second: 12_800,
         available_parts: 3,
         part_count: 9,
         address: "192.0.2.10".to_string(),
@@ -54,43 +52,9 @@ fn populated_transfer_source() -> TransferSource {
     }
 }
 
-fn populated_transfer() -> Transfer {
-    Transfer {
-        hash: "00112233445566778899aabbccddeeff".to_string(),
-        name: "Event Stream.bin".to_string(),
-        name_consensus: Default::default(),
-        path: "Event Stream.bin".to_string(),
-        delivered_path: None,
-        delivery_error: None,
-        size_bytes: 4096,
-        completed_bytes: 0,
-        state: "paused".to_string(),
-        progress: 0.0,
-        sources: 0,
-        sources_transferring: 0,
-        download_speed_ki_bps: 0.0,
-        upload_speed_ki_bps: 0.0,
-        stopped: false,
-        ed2k_link: "ed2k://|file|Event.Stream.bin|4096|00112233445566778899aabbccddeeff|/"
-            .to_string(),
-        priority: "normal".to_string(),
-        category_id: None,
-        category_name: None,
-        eta: None,
-        added_at: Some(1),
-        completed_at: None,
-        parts_total: 1,
-        parts_obtained: 0,
-        parts_progress_text: "0".to_string(),
-        parts_available: 0,
-        auto_priority: false,
-        in_incoming: true,
-    }
-}
-
 #[test]
-fn transfer_source_serializes_only_contract_keys() {
-    let value = serde_json::to_value(populated_transfer_source()).unwrap();
+fn download_source_serializes_only_contract_keys() {
+    let value = serde_json::to_value(populated_download_source()).unwrap();
     let keys = object_keys(&value);
 
     let expected: BTreeSet<String> = [
@@ -102,7 +66,8 @@ fn transfer_source_serializes_only_contract_keys() {
         "downloadState",
         "clientSoftware",
         "reportedFileNames",
-        "downloadSpeedKiBps",
+        "reportedFileNamesHasMore",
+        "downloadRateBytesPerSecond",
         "availableParts",
         "partCount",
         "serverIp",
@@ -115,83 +80,55 @@ fn transfer_source_serializes_only_contract_keys() {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    assert_eq!(keys, expected, "TransferSource emitted non-contract keys");
+    assert_eq!(keys, expected, "DownloadSource emitted non-contract keys");
 
     // The six internal-only fields must be absent.
     for forbidden in ["hash", "ip", "tcpPort", "endpoint", "banned", "status"] {
         assert!(
             value.get(forbidden).is_none(),
-            "TransferSource must not serialize `{forbidden}`"
+            "DownloadSource must not serialize `{forbidden}`"
         );
     }
 }
 
 #[test]
-fn transfer_events_serialize_as_variant_specific_contract_shapes() {
-    let added = serde_json::to_value(TransferEvent::added(1, populated_transfer())).unwrap();
-    assert_eq!(added["type"], json!("transfer.added"));
-    assert_eq!(added["id"], json!(1));
-    assert!(added.get("transfer").is_some());
-    assert!(added.get("hash").is_none());
-    assert!(added.get("reason").is_none());
-
-    let updated = serde_json::to_value(TransferEvent::updated(2, populated_transfer())).unwrap();
-    assert_eq!(updated["type"], json!("transfer.updated"));
-    assert!(updated.get("transfer").is_some());
-    assert!(updated.get("hash").is_none());
-
-    let removed = serde_json::to_value(TransferEvent::removed(
-        3,
-        "00112233445566778899aabbccddeeff",
-    ))
-    .unwrap();
+fn download_summary_has_decimal_identity_seconds_and_no_nested_execution_history() {
+    let summary = DownloadSummary {
+        id: emulebb_metadata::JobId::new(1).unwrap(),
+        hash: "00112233445566778899aabbccddeeff".into(),
+        name: "Sample.bin".into(),
+        size_bytes: Some(4096),
+        progress: Some(0.0),
+        intent: emulebb_metadata::DownloadIntent::Stopped,
+        state: DownloadState::Stopped,
+        category: Some("Sample-Category".into()),
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_001,
+        completed_at: None,
+    };
+    let value = serde_json::to_value(summary).unwrap();
     assert_eq!(
-        object_keys(&removed),
-        ["hash", "id", "type"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        object_keys(&value),
+        [
+            "id",
+            "hash",
+            "name",
+            "sizeBytes",
+            "progress",
+            "intent",
+            "state",
+            "category",
+            "createdAt",
+            "updatedAt",
+            "completedAt"
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
     );
-    assert_eq!(removed["type"], json!("transfer.removed"));
-    assert_eq!(removed["hash"], json!("00112233445566778899aabbccddeeff"));
-
-    let lagged = serde_json::to_value(TransferEvent::reset_lagged(4, 9)).unwrap();
-    assert_eq!(
-        object_keys(&lagged),
-        ["id", "missed", "reason", "type"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    );
-    assert_eq!(lagged["type"], json!("sync.reset"));
-    assert_eq!(lagged["reason"], json!("lagged"));
-    assert_eq!(lagged["missed"], json!(9));
-
-    let resumed = serde_json::to_value(TransferEvent::reset_last_event_id(5, "4")).unwrap();
-    assert_eq!(
-        object_keys(&resumed),
-        ["id", "lastEventId", "reason", "type"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    );
-    assert_eq!(resumed["type"], json!("sync.reset"));
-    assert_eq!(resumed["reason"], json!("last-event-id"));
-    assert_eq!(resumed["lastEventId"], json!("4"));
-}
-
-#[test]
-fn transfer_delivery_error_is_optional_camel_case_contract_data() {
-    let mut transfer = populated_transfer();
-    let without_error = serde_json::to_value(&transfer).unwrap();
-    assert!(without_error.get("deliveryError").is_none());
-
-    transfer.delivery_error = Some("destination unavailable".to_string());
-    let with_error = serde_json::to_value(&transfer).unwrap();
-    assert_eq!(
-        with_error["deliveryError"],
-        json!("destination unavailable")
-    );
+    assert_eq!(value["id"], json!("1"));
+    assert_eq!(value["createdAt"], json!(1_700_000_000));
+    assert_eq!(value["intent"], json!("stopped"));
 }
 
 fn score_breakdown() -> UploadScoreBreakdown {

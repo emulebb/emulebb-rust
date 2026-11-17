@@ -64,7 +64,7 @@ pub(crate) struct CoreState {
     /// Cancellation handles for queued or running network searches, keyed by
     /// public search id. Terminal settlement and deletion remove the handle.
     pub(crate) search_cancels: HashMap<String, CancellationToken>,
-    pub(crate) kad_aich_search_votes: HashMap<(String, String), KadAichSearchVotes>,
+    pub(crate) kad_aich_search_votes: BTreeMap<(String, String), KadAichSearchVotes>,
     pub(crate) next_search_id: u32,
     pub(crate) transfers: HashMap<String, Transfer>,
     pub(crate) core_settings: CoreSettings,
@@ -74,11 +74,8 @@ pub(crate) struct CoreState {
     pub(crate) server_overrides: HashMap<String, ServerUpdate>,
     pub(crate) disabled_servers: HashSet<String>,
     pub(crate) server_fail_counts: HashMap<String, u32>,
-    pub(crate) banned_source_clients: HashSet<String>,
-    pub(crate) active_download_attempts: HashSet<String>,
-    pub(crate) download_cancels: HashMap<String, (u64, CancellationToken)>,
-    pub(crate) next_download_cancel_id: u64,
-    pub(crate) active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
+
+    pub(crate) active_download_peer_endpoints: HashMap<(Ipv4Addr, u16), emulebb_metadata::JobToken>,
     pub(crate) download_source_registry: DownloadSourceRegistry,
     /// Per-(file, source) dead-source list: sources that answered FNF are
     /// blocked from re-admission for 45 minutes (oracle

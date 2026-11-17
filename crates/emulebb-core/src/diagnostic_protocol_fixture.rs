@@ -345,6 +345,7 @@ impl EmulebbCore {
         let mut requested = HashSet::new();
         if !register_kad_buddy_source_for_reask(
             &reask_handle,
+            transfer.job_token(),
             file_hash,
             &source,
             fixture.source_udp_version,

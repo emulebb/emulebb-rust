@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_dht::{DhtNode, ForeignDatagramHandler};
 use emulebb_kad_proto::Ed2kHash;
-#[cfg(feature = "packet-diagnostics")]
 use tokio::sync::oneshot;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, trace};
@@ -136,6 +135,13 @@ pub enum ReaskCommand {
     /// Detach a source that queued us (eMuleBB §4.1 `QueuedDetached` transition),
     /// carrying its endpoint + buddy knowledge ([`ReaskDetachArgs`]).
     Register(ReaskDetachArgs),
+    /// Ordered execution retirement after its registration producers have
+    /// drained. The receipt covers source state and reply gates, not delivery
+    /// of already emitted events to Core; those retain their old token fence.
+    Retire {
+        job_token: emulebb_metadata::JobToken,
+        completed: oneshot::Sender<()>,
+    },
     /// Drop a source by endpoint (transfer completed / no longer wanted).
     Remove {
         job_token: emulebb_metadata::JobToken,
@@ -221,6 +227,26 @@ pub struct DiagnosticQueuedSourceReask {
 pub struct ReaskSourceHandle(mpsc::Sender<ReaskCommand>);
 
 impl ReaskSourceHandle {
+    /// Drain every registration producer before calling this method. Completion
+    /// is ordered after earlier commands and means all execution-owned UDP
+    /// state is gone. Keep the slot until this succeeds or the loop has stopped.
+    pub async fn retire_execution(
+        &self,
+        job_token: emulebb_metadata::JobToken,
+    ) -> Result<(), &'static str> {
+        let (completed, completion) = oneshot::channel();
+        self.0
+            .send(ReaskCommand::Retire {
+                job_token,
+                completed,
+            })
+            .await
+            .map_err(|_| "reask command channel is closed")?;
+        completion
+            .await
+            .map_err(|_| "reask loop stopped before execution retirement")
+    }
+
     /// Detach a queued source onto UDP reask. Best-effort: a full/closed channel
     /// silently drops the command (the source just stays on its TCP path).
     pub(crate) fn detach(&self, args: ReaskDetachArgs) {
@@ -474,8 +500,11 @@ pub async fn run_ed2k_udp_reask_loop(
                 )
                 .await;
             }
-            maybe = commands.recv(), if reask_enabled => {
+            maybe = commands.recv() => {
                 let Some(command) = maybe else { break };
+                if !reask_enabled && !matches!(&command, ReaskCommand::Retire { .. }) {
+                    continue;
+                }
                 // AnswerCallbackTcp needs async UDP I/O; the rest are sync.
                 match command {
                     ReaskCommand::AnswerCallbackTcp {
@@ -1123,6 +1152,18 @@ fn apply_reask_command(
     command: ReaskCommand,
 ) {
     match command {
+        ReaskCommand::Retire {
+            job_token,
+            completed,
+        } => {
+            service.retire_execution(job_token, |endpoint| {
+                let _ = events.send(ReaskEvent::SourceReleased {
+                    job_token,
+                    endpoint,
+                });
+            });
+            let _ = completed.send(());
+        }
         ReaskCommand::Register(args) => {
             let ReaskDetachArgs {
                 job_token,

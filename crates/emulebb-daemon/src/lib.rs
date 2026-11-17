@@ -824,77 +824,8 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     if let Err(error) = discovery_bootstrap::seed_pending_kad(&core).await {
         warn!(%error, "Kad discovery initialization unavailable; retrying next launch");
     }
-    let deletion_recovery = core.recover_pending_transfer_deletions().await?;
-    if deletion_recovery.recovered > 0 {
-        info!(
-            recovered_transfer_deletions = deletion_recovery.recovered,
-            "recovered pending destructive transfer deletions before REST startup"
-        );
-    }
-    if !deletion_recovery.failures.is_empty() {
-        warn!(
-            failed_transfer_deletions = deletion_recovery.failures.len(),
-            failures = ?deletion_recovery.failures,
-            "pending destructive transfer deletions remain hidden and will retry after startup"
-        );
-    }
-    let retirement_recovery = core.recover_pending_transfer_retirements().await?;
-    if retirement_recovery.recovered > 0 {
-        info!(
-            recovered_transfer_retirements = retirement_recovery.recovered,
-            "reclaimed retired download storage before REST startup"
-        );
-    }
-    if !retirement_recovery.failures.is_empty() {
-        warn!(
-            failed_transfer_retirements = retirement_recovery.failures.len(),
-            failures = ?retirement_recovery.failures,
-            "retired download storage remains pending for retry"
-        );
-    }
-    let transfer_root_reconciliation = core.reconcile_transfer_root().await?;
-    if transfer_root_reconciliation.reclaimed_paths > 0 {
-        info!(
-            reclaimed_paths = transfer_root_reconciliation.reclaimed_paths,
-            "reclaimed unmanaged empty transfer paths before REST startup"
-        );
-    }
-    if transfer_root_reconciliation.preserved_collisions > 0 {
-        warn!(
-            preserved_collisions = transfer_root_reconciliation.preserved_collisions,
-            "preserved unmanaged transfer-root collisions; affected hashes cannot be downloaded until repaired"
-        );
-    }
-    let download_storage_reconciliation = core.reconcile_managed_download_storage().await?;
-    if download_storage_reconciliation.restored_payloads > 0
-        || download_storage_reconciliation.demoted_downloads > 0
-        || download_storage_reconciliation.recreated_directories > 0
-    {
-        warn!(
-            inspected_downloads = download_storage_reconciliation.inspected_downloads,
-            restored_payloads = download_storage_reconciliation.restored_payloads,
-            demoted_downloads = download_storage_reconciliation.demoted_downloads,
-            quarantined_payloads = download_storage_reconciliation.quarantined_payloads,
-            reset_pieces = download_storage_reconciliation.reset_pieces,
-            recreated_directories = download_storage_reconciliation.recreated_directories,
-            "reconciled persisted downloads against canonical payload authority"
-        );
-    }
-    let hydrated_transfers = core.hydrate_persisted_transfer_rows().await?;
-    if hydrated_transfers > 0 {
-        info!(
-            hydrated_transfers,
-            "hydrated persisted transfer rows before REST startup"
-        );
-    }
-    let delivery_reconciliation_candidates =
-        core.reconcile_persisted_completed_deliveries().await?;
-    if delivery_reconciliation_candidates > 0 {
-        info!(
-            delivery_reconciliation_candidates,
-            "processed persisted completed delivery candidates before REST startup"
-        );
-    }
+    // Download storage is reconciled only when selected. Durable cleanup runs
+    // in bounded pages after listener startup; history is never hydrated here.
     let initial_shared_catalog_entries = core.hydrate_initial_shared_catalog().await?;
     info!(
         initial_shared_catalog_entries,
@@ -960,47 +891,12 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     let delivery_core = Arc::clone(&core);
     tokio::spawn(async move {
         loop {
-            match delivery_core.recover_pending_transfer_deletions().await {
-                Ok(report) => {
-                    if report.recovered > 0 {
-                        tracing::info!(
-                            recovered = report.recovered,
-                            "recovered pending destructive transfer deletions"
-                        );
-                    }
-                    if !report.failures.is_empty() {
-                        tracing::warn!(
-                            failed = report.failures.len(),
-                            failures = ?report.failures,
-                            "pending destructive transfer deletion retry remains incomplete"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to enumerate pending destructive transfer deletions");
-                }
+            if let Err(error)=delivery_core.maintain_download_cleanup().await {
+                tracing::warn!(%error,"download cleanup maintenance deferred");
             }
-            match delivery_core.recover_pending_transfer_retirements().await {
-                Ok(report) => {
-                    if report.recovered > 0 {
-                        tracing::info!(
-                            recovered = report.recovered,
-                            "reclaimed retired download storage"
-                        );
-                    }
-                    if !report.failures.is_empty() {
-                        tracing::warn!(
-                            failed = report.failures.len(),
-                            failures = ?report.failures,
-                            "retired download storage cleanup remains pending"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to enumerate pending download retirements");
-                }
+            if let Err(error) = delivery_core.maintain_download_delivery().await {
+                tracing::warn!(%error, "download delivery maintenance deferred");
             }
-            delivery_core.deliver_pending_completed_transfers().await;
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
@@ -1008,30 +904,6 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
         tokio::spawn(vpn_guard_monitor::run(Arc::clone(&core), monitor));
     }
     if ed2k_network_configured {
-        // MFC-style stop-all disk protection is re-evaluated on a deliberately
-        // slow cadence. Downloads in the public `insufficient` state do not
-        // participate in the ordinary seconds-scale source retry loop.
-        let disk_retry_core = Arc::clone(&core);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
-                let requeued = disk_retry_core.retry_insufficient_downloads().await;
-                if requeued > 0 {
-                    tracing::info!(requeued, "requeued downloads after disk-space recovery");
-                }
-            }
-        });
-        // Hydrate persisted downloads independently of server reachability. The
-        // core applies its own startup delay before queueing them, which gives
-        // ED2K/Kad initialization room to settle without making an unreachable
-        // auto-connect target hide the operator's persisted transfer list.
-        let resume_core = Arc::clone(&core);
-        tokio::spawn(async move {
-            let resumed = resume_core.resume_persisted_downloads().await;
-            if resumed > 0 {
-                info!(resumed, "resumed persisted incomplete downloads on startup");
-            }
-        });
         let connect_core = Arc::clone(&core);
         tokio::spawn(async move {
             if !connect_core.core_settings().await.auto_connect {

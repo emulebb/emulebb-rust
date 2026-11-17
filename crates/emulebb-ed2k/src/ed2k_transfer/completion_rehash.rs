@@ -73,7 +73,10 @@ impl Ed2kTransferRuntime {
         }
     }
 
-    async fn recheck_verified_partial_pieces(&self, snapshot: Ed2kResumeManifest) -> Result<bool> {
+    async fn recheck_verified_partial_pieces(
+        &self,
+        snapshot: super::ResidentManifest,
+    ) -> Result<bool> {
         if !snapshot
             .pieces
             .iter()
@@ -106,7 +109,7 @@ impl Ed2kTransferRuntime {
         let damaged_parts = damaged_verified_part_indexes(&snapshot, &computation)?;
 
         let _guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
         anyhow::ensure!(
             manifest.file_size == snapshot.file_size
                 && manifest.piece_size == snapshot.piece_size
@@ -151,10 +154,10 @@ impl Ed2kTransferRuntime {
     async fn final_rehash(&self, token: emulebb_metadata::JobToken, force: bool) -> Result<bool> {
         let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
         let transfer_dir = self.transfer_dir(token.job_id)?;
-        let file_hash = self.manifest(token).await?.file_hash;
+        let file_hash = self.manifest(token).await?.file_hash.clone();
         let (payload_path, expected_size, transfer_dir_id) = {
             let _guard = self.lock_manifest(token).await;
-            let mut manifest = self.load_manifest_unlocked(token).await?;
+            let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
             if manifest.delivery_state == super::Ed2kDeliveryState::Delivered {
                 // Materialization is durable even before retirement. Verification
                 // of its output is separate and never restarts this job.
@@ -202,7 +205,7 @@ impl Ed2kTransferRuntime {
                 .context("ED2K final completion rehash task failed")??;
 
         let _guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
         if !manifest.final_rehash_pending {
             return Ok(manifest.completed);
         }

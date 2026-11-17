@@ -1,7 +1,8 @@
 //! Category mutations serialized with the profile persistence owner.
 use super::*;
 use crate::Category;
-use emulebb_metadata::MetadataCategory;
+use emulebb_ed2k::ed2k_transfer::CategoryCacheMutation;
+use emulebb_metadata::{JobId, MetadataCategory};
 
 pub(super) const CATEGORY_PROBE_BYTES: usize = 256 * 1024;
 
@@ -76,7 +77,7 @@ pub(crate) enum CategoryCommand {
         reload: Option<crate::shared_directories::ReloadReservation>,
     },
     Assign {
-        hash: String,
+        job_id: JobId,
         id: Option<i64>,
         runtime: Arc<emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime>,
     },
@@ -85,14 +86,15 @@ pub(crate) enum CategoryCommand {
 pub(super) enum CategoryDbCommand {
     Create(Category, Arc<std::path::PathBuf>),
     Update(Category, Arc<std::path::PathBuf>),
-    Delete(Category, Arc<std::path::PathBuf>),
+    Delete(Category, Arc<std::path::PathBuf>, CategoryCacheMutation),
     ReplaceRoots(
         Vec<emulebb_metadata::MetadataSharedDirectoryRoot>,
         Vec<emulebb_metadata::MetadataSharedDirectoryRoot>,
     ),
     Assign {
-        hash: String,
+        job_id: JobId,
         id: Option<i64>,
+        publication: CategoryCacheMutation,
     },
     RootPage {
         root: std::path::PathBuf,
@@ -146,17 +148,31 @@ pub(super) fn execute(
                 store.update_category(&value, &incoming)?.then_some(value),
             ))
         }
-        CategoryDbCommand::Delete(value, incoming) => Ok(CategoryWrite::Category(
-            store
-                .delete_category(value.id, &incoming)?
-                .then(|| metadata(&value)),
-        )),
+        CategoryDbCommand::Delete(value, incoming, publication) => {
+            let changed = store.delete_category(value.id, &incoming)?;
+            if changed {
+                publication
+                    .publish()
+                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+            }
+            Ok(CategoryWrite::Category(changed.then(|| metadata(&value))))
+        }
         CategoryDbCommand::ReplaceRoots(implicit, roots) => store
             .replace_explicit_roots_if_implicit_matches(&implicit, &roots)
             .map(CategoryWrite::Roots),
-        CategoryDbCommand::Assign { hash, id } => store
-            .assign_transfer_category(&hash, id)
-            .map(CategoryWrite::Assigned),
+        CategoryDbCommand::Assign {
+            job_id,
+            id,
+            publication,
+        } => {
+            let changed = store.assign_transfer_category(job_id, id)?;
+            if changed {
+                publication
+                    .publish()
+                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+            }
+            Ok(CategoryWrite::Assigned(changed))
+        }
         CategoryDbCommand::RootPage { root, after } => store
             .category_root_hash_page(&root, after, 128)
             .map(CategoryWrite::RootPage),
@@ -235,7 +251,7 @@ impl CategoryCommand {
                     |sum, root| sum.saturating_add(root.path.capacity()),
                 )
             }
-            Self::Assign { hash, .. } => hash.capacity(),
+            Self::Assign { .. } => 0,
         }
     }
 }
@@ -460,17 +476,28 @@ pub(super) async fn process(
         CategoryCommand::ReplaceRoots { .. } => unreachable!(),
         CategoryCommand::Assign { .. } => None,
     };
-    let runtime = match &command {
-        CategoryCommand::Delete { sharing, .. } => Some(Arc::clone(&sharing.runtime)),
-        CategoryCommand::Assign { runtime, .. } => Some(Arc::clone(runtime)),
+    let mut publication = match &command {
+        CategoryCommand::Assign {
+            job_id,
+            id,
+            runtime,
+        } => Some(runtime.prepare_category_assignment(*job_id, *id).await),
+        CategoryCommand::Delete { id, sharing } => {
+            Some(sharing.runtime.prepare_category_removal(*id).await)
+        }
         _ => None,
-    };
-    let _category_fence = if let Some(runtime) = &runtime {
-        Some(runtime.lock_category_mutation().await)
-    } else {
-        None
-    };
-    if let CategoryCommand::Assign { hash, id, .. } = &command {
+    }
+    .transpose()
+    .map_err(|error| {
+        match error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>() {
+            Some(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy) => PersistenceError::Busy,
+            _ => PersistenceError::Worker,
+        }
+    })?;
+    let _category_fence = publication
+        .as_ref()
+        .map(CategoryCacheMutation::retain_fence);
+    if let CategoryCommand::Assign { job_id, id, .. } = &command {
         let selected = {
             let state = state.lock().await;
             if let Some(id) = id {
@@ -490,8 +517,9 @@ pub(super) async fn process(
         let (response, receive) = oneshot::channel();
         db.send(DbRequest {
             command: DbCommand::Category(CategoryDbCommand::Assign {
-                hash: hash.clone(),
+                job_id: *job_id,
                 id: *id,
+                publication: publication.take().expect("prepared category assignment"),
             }),
             response,
         })
@@ -505,11 +533,8 @@ pub(super) async fn process(
         if !changed {
             return Ok(Response::Category(Ok(None)));
         }
-        if let Some(runtime) = &runtime {
-            runtime.publish_category_assignment(hash, *id).await;
-        }
         let mut state = state.lock().await;
-        if let Some(transfer) = state.transfers.get_mut(hash) {
+        if let Some(transfer) = state.transfers.get_mut(&job_id.to_string()) {
             transfer.category_id = *id;
             transfer.category_name = selected.as_ref().map(|category| category.name.clone());
         }
@@ -605,6 +630,7 @@ pub(super) async fn process(
                     .expect("category sharing context")
                     .incoming
                     .clone(),
+                publication.take().expect("prepared category removal"),
             )
         } else {
             CategoryDbCommand::Update(
@@ -648,11 +674,6 @@ pub(super) async fn process(
         return Ok(Response::Category(Ok(None)));
     };
     let category = profile_state::category_from_metadata(value);
-    if deleting {
-        if let Some(runtime) = &runtime {
-            runtime.clear_deleted_category_from_cache(category.id).await;
-        }
-    }
     let mut state = state.lock().await;
     if deleting {
         state.categories.remove(&category.id);

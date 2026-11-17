@@ -199,7 +199,33 @@ impl MetadataStore {
     /// Allocate identity and latest pointer together. An unfinished duplicate
     /// returns unchanged, including intent, name, category, and fixed storage.
     pub fn admit_download_job(&self, request: &DownloadJobRequest) -> Result<DownloadJobAdmission> {
+        self.admit_download_job_inner(request, None)
+    }
+
+    /// Persistence half of native admission. The filesystem observation cannot
+    /// be used after any intervening metadata mutation or root-policy change.
+    pub fn admit_available_download_job(
+        &self,
+        request: &DownloadJobRequest,
+        gate: crate::DownloadAvailabilityAdmission<'_>,
+    ) -> Result<DownloadJobAdmission> {
+        self.admit_download_job_inner(request, Some(gate))
+    }
+
+    fn admit_download_job_inner(
+        &self,
+        request: &DownloadJobRequest,
+        gate: Option<crate::DownloadAvailabilityAdmission<'_>>,
+    ) -> Result<DownloadJobAdmission> {
+        if let Some(gate) = &gate {
+            gate.initial_peers.payload_bytes()?;
+        }
         let hash = decode_fixed_hex(&request.file_hash, 16, "ED2K hash")?;
+        let aich = gate
+            .as_ref()
+            .and_then(|g| g.aich_root)
+            .map(|root| decode_fixed_hex(root, 20, "AICH root"))
+            .transpose()?;
         ensure!(
             !request.display_name.trim().is_empty()
                 && request.display_name.len() <= MAX_JOB_TEXT_BYTES,
@@ -211,8 +237,39 @@ impl MetadataStore {
             expected.is_none_or(|size| size > 0),
             "download size must be positive or unknown"
         );
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // WHY: availability is a physical observation, not permission to wait
+        // behind unrelated work while its filesystem facts can change.
+        let conn = if gate.is_some() {
+            match self.conn.try_lock() {
+                Ok(conn) => conn,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(crate::MetadataAvailabilityChanged.into());
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    anyhow::bail!("metadata connection lock poisoned")
+                }
+            }
+        } else {
+            self.connection()?
+        };
+        let _no_wait = gate
+            .as_ref()
+            .map(|_| crate::download_availability::AvailabilityNoWait::new(&conn))
+            .transpose()?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| match &error {
+                rusqlite::Error::SqliteFailure(code, _)
+                    if gate.is_some()
+                        && matches!(
+                            code.code,
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        ) =>
+                {
+                    anyhow::Error::new(crate::MetadataAvailabilityChanged)
+                }
+                _ => error.into(),
+            })?;
         let existing = tx
             .query_row(
                 "SELECT j.id FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id
@@ -221,11 +278,21 @@ impl MetadataStore {
                 |row| row.get::<_, JobId>(0),
             )
             .optional()?;
-        if let Some(size) = expected {
-            crate::content_identity::check_accepted_identity(&tx, &hash, size, None)?;
-        }
+        crate::content_identity::check_accepted_claims(&tx, &hash, expected, aich.as_deref())?;
         if let Some(id) = existing {
             let job = read_job(&tx, id)?.expect("selected job");
+            let stored_aich: Option<Vec<u8>> = tx.query_row(
+                "SELECT aich_root FROM download_jobs WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                stored_aich
+                    .as_deref()
+                    .zip(aich.as_deref())
+                    .is_none_or(|(a, b)| a == b),
+                MetadataContentConflict("download attempt has conflicting AICH root")
+            );
             ensure!(
                 job.expected_size_bytes
                     .zip(request.expected_size_bytes)
@@ -236,6 +303,15 @@ impl MetadataStore {
                 created: false,
                 job,
             });
+        }
+        if let Some(gate) = &gate {
+            gate.cut.check(self, &tx)?;
+            gate.check_root()?;
+            ensure!(
+                gate.redownload
+                    || gate.availability == crate::LocalContentAvailability::ConfirmedAbsent,
+                crate::MetadataLocalContentChoiceRequired(gate.availability)
+            );
         }
         // Admission records a claim on the job, never accepted size on content.
         tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
@@ -256,15 +332,19 @@ impl MetadataStore {
             "zero-byte download execution is unsupported"
         );
         tx.execute("INSERT INTO download_jobs(known_file_id,expected_size_bytes,display_name,part_size_bytes,part_count,
-            intent,category_id,visible_state,delivery_state,created_at_s,updated_at_s)
-            VALUES(?1,?2,?3,?4,0,?5,?6,'queued','pending',?7,?7)",
-            params![known,expected,request.display_name,i64::try_from(request.piece_size)?,request.intent.as_str(),request.category_id,unix_s()])?;
+            intent,category_id,visible_state,delivery_state,created_at_s,updated_at_s,aich_root,aich_root_origin)
+            VALUES(?1,?2,?3,?4,0,?5,?6,'queued','pending',?7,?7,?8,CASE WHEN ?8 IS NOT NULL THEN 'operator_link' END)",
+            params![known,expected,request.display_name,i64::try_from(request.piece_size)?,request.intent.as_str(),request.category_id,unix_s(),aich])?;
         let id = JobId::new(tx.last_insert_rowid())?;
         tx.execute(
             "UPDATE known_files SET latest_download_job_id=?2 WHERE id=?1",
             params![known, id],
         )?;
         let job = read_job(&tx, id)?.expect("inserted job");
+        if let Some(gate) = &gate {
+            gate.initial_peers.insert(&tx, job.token)?;
+            gate.check_root()?;
+        }
         tx.commit()?;
         Ok(DownloadJobAdmission { created: true, job })
     }
@@ -329,36 +409,114 @@ impl MetadataStore {
     }
 
     /// The caller chooses category/global temp before first filesystem work.
-    /// Later starts retain that exact path and issue a new callback generation.
+    /// Starting an already healthy allocated job is unchanged. A first start,
+    /// restart after stop, or explicit storage retry issues a new generation;
+    /// the job's first selected path remains fixed.
     pub fn start_download_job(
         &self,
         token: JobToken,
         selected_temp: &std::path::Path,
     ) -> Result<Option<DownloadJobRecord>> {
-        validate_job_path(selected_temp)?;
-        ensure!(
-            selected_temp.is_absolute(),
-            "download temp path must be absolute"
-        );
+        self.activate_download_job(token, Some(selected_temp), false)
+    }
+
+    /// Begin a distinct selected execution without retrying a storage fault or
+    /// restarting stopped work. Discovery-only selection passes no temp path
+    /// and allocates no backing; every successful selection gets a fresh fence.
+    pub fn begin_download_job_execution(
+        &self,
+        token: JobToken,
+        selected_temp: Option<&std::path::Path>,
+    ) -> Result<Option<DownloadJobRecord>> {
+        self.activate_download_job(token, selected_temp, true)
+    }
+
+    /// Fence a quiesced selection while leaving its desired intent, progress
+    /// and fixed storage available for later selection. This is not a stop.
+    pub fn end_download_job_execution(&self, token: JobToken) -> Result<Option<DownloadJobRecord>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let generation = i64::try_from(token.generation)?
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("job generation exhausted"))?;
+        let changed = tx.execute(
+            "UPDATE download_jobs SET execution_generation=?3,updated_at_s=?4
+             WHERE id=?1 AND execution_generation=?2 AND intent='started'
+               AND storage_failure_code IS NULL AND removed_at_s IS NULL
+               AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL",
+            params![
+                token.job_id,
+                i64::try_from(token.generation)?,
+                generation,
+                unix_s()
+            ],
+        )? != 0;
+        let result = if changed {
+            read_job(&tx, token.job_id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn activate_download_job(
+        &self,
+        token: JobToken,
+        selected_temp: Option<&std::path::Path>,
+        selecting: bool,
+    ) -> Result<Option<DownloadJobRecord>> {
+        if let Some(path) = selected_temp {
+            validate_job_path(path)?;
+            ensure!(path.is_absolute(), "download temp path must be absolute");
+        }
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current = read_job(&tx, token.job_id)?;
         let Some(current) = current.filter(|job| {
-            job.token == token && job.removed_at_s.is_none() && job.completed_at_s.is_none()
+            job.token == token
+                && job.removed_at_s.is_none()
+                && job.completed_at_s.is_none()
+                && (!selecting
+                    || (job.intent == DownloadIntent::Started && job.storage_failure.is_none()))
         }) else {
             return Ok(None);
         };
-        let selected = current.selected_temp.as_deref().unwrap_or(selected_temp);
-        let path_id = upsert_local_path(&tx, selected)?;
-        let (storage_path, marker) = match &current.storage {
-            Some(storage) => (storage.path.clone(), storage.marker_id),
-            None => {
+        if !selecting
+            && current.intent == DownloadIntent::Started
+            && current.storage.is_some()
+            && current.storage_failure.is_none()
+        {
+            // WHY: an idempotent start must not fence healthy writers, reset
+            // their progress, or allocate a new path for an existing job.
+            tx.commit()?;
+            return Ok(Some(current));
+        }
+        let selected = current.selected_temp.as_deref().or(selected_temp);
+        let path_id = selected
+            .map(|path| upsert_local_path(&tx, path))
+            .transpose()?;
+        let storage = match (&current.storage, selected_temp) {
+            (Some(storage), _) => Some((storage.path.clone(), storage.marker_id)),
+            (None, Some(_)) => {
                 let marker = uuid::Uuid::new_v4();
-                (selected.join(format!("{}-{marker}", token.job_id)), marker)
+                Some((
+                    selected
+                        .expect("selected temp")
+                        .join(format!("{}-{marker}", token.job_id)),
+                    marker,
+                ))
             }
+            (None, None) => None,
         };
-        validate_job_path(&storage_path)?;
-        let storage_path_id = upsert_local_path(&tx, &storage_path)?;
+        let storage_path_id = storage
+            .as_ref()
+            .map(|(path, _)| {
+                validate_job_path(path)?;
+                upsert_local_path(&tx, path)
+            })
+            .transpose()?;
+        let marker = storage.as_ref().map(|(_, marker)| marker.to_string());
         let generation = i64::try_from(token.generation)?
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("job generation exhausted"))?;
@@ -367,7 +525,7 @@ impl MetadataStore {
             execution_generation=?3,intent='started',updated_at_s=?4,
             storage_failure_code=NULL,storage_failure_message=NULL,storage_failed_at_s=NULL,
             storage_path_id=coalesce(storage_path_id,?5),storage_directory_marker_id=coalesce(storage_directory_marker_id,?6) WHERE id=?1",
-            params![token.job_id, path_id, generation, unix_s(),storage_path_id,marker.to_string()],
+            params![token.job_id, path_id, generation, unix_s(),storage_path_id,marker],
         )?;
         let result = read_job(&tx, token.job_id)?;
         tx.commit()?;
@@ -412,11 +570,33 @@ impl MetadataStore {
     }
 
     pub fn stop_download_job(&self, token: JobToken) -> Result<bool> {
+        self.checkpoint_and_stop_download_job(token, &[])
+    }
+
+    /// Persist already flushed cache-only progress and stop in the same commit.
+    /// The native owner supplies exact current deltas under its content fence;
+    /// stopped or stale executions never replay progress into a later attempt.
+    pub fn checkpoint_and_stop_download_job(
+        &self,
+        token: JobToken,
+        pieces: &[crate::MetadataTransferPiece],
+    ) -> Result<bool> {
         let generation = i64::try_from(token.generation)?;
         ensure!(generation < i64::MAX, "job generation exhausted");
-        Ok(self.connection()?.execute("UPDATE download_jobs SET intent='stopped',execution_generation=execution_generation+1,
-            updated_at_s=?3 WHERE id=?1 AND execution_generation=?2 AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL",
-            params![token.job_id,generation,unix_s()])? != 0)
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !pieces.is_empty()
+            && !crate::download_progress_store::checkpoint_download_progress_in(&tx, token, pieces)?
+        {
+            return Ok(false);
+        }
+        let changed = tx.execute("UPDATE download_jobs SET intent='stopped',execution_generation=execution_generation+1,
+            updated_at_s=?3 WHERE id=?1 AND execution_generation=?2 AND intent='started' AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL",
+            params![token.job_id,generation,unix_s()])? != 0;
+        if changed {
+            tx.commit()?;
+        }
+        Ok(changed)
     }
 
     pub fn download_jobs_after(

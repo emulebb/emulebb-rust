@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use flate2::Decompress;
 
-use crate::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, PieceWriteOutcome};
+use crate::ed2k_transfer::{Ed2kTransferRuntime, PieceWriteOutcome, ResidentManifest};
 
 use super::super::{Ed2kFileIdentifier, Ed2kTransportMode, dump_ed2k_tcp_download_meta};
 use super::window::{ActiveDownloadPiece, PendingPartRequest};
@@ -35,7 +35,7 @@ pub(in crate::ed2k_tcp) struct ReadyDownloadBlocks<'a> {
     pub(in crate::ed2k_tcp) file_hash_hex: &'a str,
     pub(in crate::ed2k_tcp) pending_part_requests: &'a mut Vec<PendingPartRequest>,
     pub(in crate::ed2k_tcp) active_piece_request: &'a mut Option<ActiveDownloadPiece>,
-    pub(in crate::ed2k_tcp) manifest: &'a mut Ed2kResumeManifest,
+    pub(in crate::ed2k_tcp) manifest: &'a mut ResidentManifest,
     pub(in crate::ed2k_tcp) peer_addr: SocketAddr,
     pub(in crate::ed2k_tcp) transport_mode: Ed2kTransportMode,
     pub(in crate::ed2k_tcp) completed_block_count: &'a mut usize,
@@ -264,7 +264,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     file_hash_hex: &str,
     pending_part_requests: &mut Vec<PendingPartRequest>,
     active_piece_request: &mut Option<ActiveDownloadPiece>,
-    manifest: &mut Ed2kResumeManifest,
+    manifest: &mut ResidentManifest,
     peer_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     peer_user_hash: Option<[u8; 16]>,
@@ -382,7 +382,7 @@ pub(in crate::ed2k_tcp) async fn reconcile_download_manifest_metadata(
     transfer_runtime: &Ed2kTransferRuntime,
     file_hash_hex: &str,
     peer_addr: SocketAddr,
-    manifest: &mut Ed2kResumeManifest,
+    manifest: &mut ResidentManifest,
     request_file_identifier: &mut Ed2kFileIdentifier,
     peer_file_identifier: &Ed2kFileIdentifier,
 ) -> Result<()> {

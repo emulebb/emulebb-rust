@@ -105,7 +105,7 @@ impl EmulebbCore {
 
     pub(crate) async fn assign_transfer_category(
         &self,
-        hash: &str,
+        job_id: emulebb_metadata::JobId,
         id: Option<i64>,
     ) -> Result<Option<Category>> {
         let owner = self
@@ -113,7 +113,7 @@ impl EmulebbCore {
             .owner(&self.metadata_store, &self.state)?;
         let result = owner
             .category(CategoryCommand::Assign {
-                hash: hash.to_owned(),
+                job_id,
                 id,
                 runtime: Arc::clone(&self.ed2k_transfers),
             })

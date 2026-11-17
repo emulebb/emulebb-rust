@@ -354,9 +354,9 @@ async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() 
     let shares = core.reload_shared_directories().await.unwrap();
     assert_eq!(shares.len(), payloads.len(), "every file must be shared");
 
-    // The startup delivery sweep (run by the daemon on boot) must treat these
-    // shared complete files as share-in-place and deliver NOTHING.
-    core.deliver_pending_completed_transfers().await;
+    // Delivery maintenance reads only download jobs; plain library contents
+    // remain shared in place and never create output copies.
+    core.maintain_download_delivery().await.unwrap();
 
     // (1) The incoming dir was never created / never received a copy.
     if incoming_dir.exists() {

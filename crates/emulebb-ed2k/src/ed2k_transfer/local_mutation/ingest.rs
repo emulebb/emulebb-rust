@@ -143,6 +143,7 @@ impl LocalMutationRegistry {
         let job_locks = Arc::clone(&runtime.manifest_locks);
         let content_locks = Arc::clone(&runtime.content_locks);
         let manifests = Arc::clone(&runtime.manifest_cache);
+        let residents = Arc::clone(&self.residents);
         let publication = super::publication::ContentPublication::new(runtime);
         let eligibility = Arc::clone(&runtime.share_eligibility);
         let epoch = Arc::clone(&runtime.category_root_epoch);
@@ -217,6 +218,16 @@ impl LocalMutationRegistry {
                                 "required ingest root is no longer accessible"
                             );
                         }
+                        // Same job/content guards fence cache admission. Reserve
+                        // every affected execution before the durable bind.
+                        let resident_writes = tokens
+                            .iter()
+                            .map(|token| {
+                                residents
+                                    .reserve(token.job_id)
+                                    .map(|permit| (*token, permit))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
                         match metadata.commit_local_ingest(
                             &prepared.content,
                             &prepared.recovery,
@@ -237,14 +248,20 @@ impl LocalMutationRegistry {
                                 continue;
                             }
                             result => {
-                                committed_result =
-                                    Some((result?, job_guards, content_guards, stripe));
+                                committed_result = Some((
+                                    result?,
+                                    job_guards,
+                                    content_guards,
+                                    stripe,
+                                    resident_writes,
+                                ));
                                 break;
                             }
                         }
                     }
-                    let (result, _job_guards, _content_guards, stripe) = committed_result
-                        .ok_or_else(|| anyhow!("ingest binding could not stabilize"))?;
+                    let (result, _job_guards, _content_guards, stripe, mut resident_writes) =
+                        committed_result
+                            .ok_or_else(|| anyhow!("ingest binding could not stabilize"))?;
                     committed = true;
                     if let Some(error) = result.recovery_error {
                         tracing::warn!(%error, "Verified MD4 content retained without AICH recovery cache");
@@ -264,15 +281,25 @@ impl LocalMutationRegistry {
                             });
                             if let (Some(manifest), Some(aich)) = (current, projection.aich) {
                                 if manifest.aich_trust_generation < aich.generation {
-                                    manifest.aich_root = aich.root;
-                                    manifest.aich_root_origin = aich
-                                        .origin
-                                        .as_deref()
-                                        .map(transfer::Ed2kAichRootOrigin::parse)
-                                        .transpose()?;
-                                    manifest.aich_trust_generation = aich.generation;
-                                    manifest.aich_hashset.clear();
-                                    manifest.aich_hashset_acquired = false;
+                                    let index = resident_writes
+                                        .iter()
+                                        .position(|(token, _)| *token == manifest.token)
+                                        .ok_or_else(|| {
+                                            anyhow!("ingest cache lacks preadmitted write credit")
+                                        })?;
+                                    let (_, permit) = resident_writes.swap_remove(index);
+                                    manifest.write_with(permit, |manifest| {
+                                        manifest.aich_root = aich.root;
+                                        manifest.aich_root_origin = aich
+                                            .origin
+                                            .as_deref()
+                                            .map(transfer::Ed2kAichRootOrigin::parse)
+                                            .transpose()?;
+                                        manifest.aich_trust_generation = aich.generation;
+                                        manifest.aich_hashset.clear();
+                                        manifest.aich_hashset_acquired = false;
+                                        Ok(())
+                                    })?;
                                 }
                             }
                         }

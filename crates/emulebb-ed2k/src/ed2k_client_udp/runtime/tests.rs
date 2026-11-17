@@ -28,6 +28,58 @@ fn service() -> (ReaskService, ReachabilityRuntimeLease) {
     (ReaskService::new([0x10; 16], 4, public_ip), lease)
 }
 
+#[tokio::test]
+async fn retirement_receipt_removes_only_its_execution_sources_and_reply_gates() {
+    let (mut svc, _reachability) = service();
+    let (events, mut rx) = reask_event_channel();
+    let hash = Ed2kHash::from_bytes([0xA7; 16]);
+    let (store, old) = admitted_job(hash);
+    let next = store
+        .begin_download_job_execution(old, None)
+        .unwrap()
+        .unwrap()
+        .token;
+    let old_endpoint = (Ipv4Addr::new(198, 51, 100, 10), 4672);
+    let next_endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4672);
+    let now = Instant::now();
+    for (token, endpoint) in [(old, old_endpoint), (next, next_endpoint)] {
+        svc.register_source(
+            hash,
+            ReaskSource::new(token, endpoint, hash, 4, now).with_lease_endpoint((endpoint.0, 4662)),
+        );
+        assert!(svc.mark_reask_sent(endpoint, Some(vec![false]), now));
+    }
+    let (handle, mut commands) = reask_command_channel();
+    let retirement = tokio::spawn(async move { handle.retire_execution(old).await });
+    let command = commands.recv().await.unwrap();
+    assert!(
+        !retirement.is_finished(),
+        "receipt must wait for actual state retirement"
+    );
+    apply_reask_command(&mut svc, &events, command);
+    retirement.await.unwrap().unwrap();
+    assert_eq!(svc.source_count(), 1);
+    assert_eq!(svc.source_token(old_endpoint), None);
+    assert!(!svc.mark_reask_sent(old_endpoint, None, now));
+    assert_eq!(svc.source_token(next_endpoint), Some(next));
+    assert!(
+        matches!(rx.try_recv(), Ok(ReaskEvent::SourceReleased { job_token, endpoint }) if job_token == old && endpoint == (old_endpoint.0, 4662))
+    );
+    assert!(rx.try_recv().is_err());
+    let (completed, completion) = oneshot::channel();
+    apply_reask_command(
+        &mut svc,
+        &events,
+        ReaskCommand::Retire {
+            job_token: old,
+            completed,
+        },
+    );
+    completion.await.unwrap();
+    assert_eq!(svc.source_count(), 1);
+    assert!(rx.try_recv().is_err());
+}
+
 async fn unbootstrapped_dht(node_byte: u8) -> DhtNode {
     use emulebb_kad_dht::DhtConfig;
     use emulebb_kad_proto::NodeId;

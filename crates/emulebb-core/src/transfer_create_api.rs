@@ -1,179 +1,205 @@
 use super::*;
+use emulebb_ed2k::ed2k_transfer::RetainedRead;
+use emulebb_metadata::{
+    DownloadJobRequest, MetadataDownloadInitialPeers, MetadataTransferFileNameObservation,
+    MetadataTransferSource,
+};
+
+/// Prepared content and peer evidence; no execution state or storage is allocated.
+struct DownloadAdmissionInput {
+    hash: String,
+    name: String,
+    size: Option<u64>,
+    aich: Option<String>,
+    peers: MetadataDownloadInitialPeers,
+}
 
 impl EmulebbCore {
+    /// Admit exactly one durable job without allocating or hydrating execution.
+    pub async fn create_download(
+        &self,
+        request: DownloadCreate,
+    ) -> Result<(bool, RetainedRead<DownloadSummary>)> {
+        let (hash, name, size, aich, sources) = match request.source {
+            DownloadCreateSource::Ed2kLink { link } => {
+                let parsed = parse_ed2k_link(&link)?;
+                (
+                    parsed.file_hash,
+                    parsed.name,
+                    Some(parsed.size_bytes),
+                    parsed.aich_root.map(hex::encode),
+                    parsed.sources,
+                )
+            }
+            DownloadCreateSource::Content {
+                hash,
+                name,
+                size_bytes,
+            } => (hash, name, size_bytes, None, Vec::new()),
+        };
+        let peers = MetadataDownloadInitialPeers {
+            sources: sources.into_iter().map(initial_source).collect(),
+            observations: Vec::new(),
+        };
+        self.admit_download(
+            DownloadAdmissionInput {
+                hash,
+                name,
+                size,
+                aich,
+                peers,
+            },
+            request.category,
+            request.intent,
+            request.redownload,
+        )
+        .await
+    }
+
     pub async fn download_search_result(
         &self,
         search_id: &str,
         hash: &str,
         request: SearchResultDownloadCreate,
-    ) -> Result<Option<Transfer>> {
-        let _creation_guard = self.transfer_creation_gate.lock().await;
-        let category_guard = self.category_mutation_gate.lock().await;
-        ensure_category_selector_is_unambiguous(
-            request.category_id,
-            request.category_name.as_deref(),
-        )?;
-        let category = self
-            .resolve_transfer_category(request.category_id, request.category_name.as_deref())
-            .await?;
-        let result_and_aich = {
+    ) -> Result<Option<(bool, RetainedRead<DownloadSummary>)>> {
+        let result = {
             let state = self.state.lock().await;
-            let result = state
+            state
                 .searches
                 .get(search_id)
                 .and_then(|search| search.results.iter().find(|result| result.hash == hash))
-                .cloned();
-            result.map(|result| {
-                let observations = state
-                    .kad_aich_search_votes
-                    .get(&(search_id.to_string(), result.hash.clone()))
-                    .map(crate::KadAichSearchVotes::observations)
-                    .unwrap_or_default();
-                (result, observations)
-            })
+                .cloned()
         };
-        let Some((result, aich_observations)) = result_and_aich else {
+        let Some(result) = result else {
             return Ok(None);
         };
         ensure!(
-            result.size_bytes != 0,
+            result.size_bytes > 0,
             "search result has no usable file size"
         );
-        let source_hints = search_result_source_hints(&result);
-        let file_name_observations = result.observations.clone();
-        let request_identity = ParsedEd2kLink {
-            file_hash: result.hash.clone(),
-            name: result.name.clone(),
-            size_bytes: result.size_bytes,
-            aich_root: None,
-            sources: Vec::new(),
-        };
-        let preflight = self
-            .preflight_downloads(
-                std::slice::from_ref(&request_identity),
-                request.known_file_policy,
-            )
-            .await?;
-        let transfer = self
-            .upsert_transfer_from_parts(
-                result.hash,
-                result.name,
-                result.size_bytes,
-                transfer_create_state_name(request.paused),
-                category,
-                preflight.should_redownload(&request_identity.file_hash),
-            )
-            .await?;
-        drop(category_guard);
-        if !aich_observations.is_empty() {
-            // The search row's hidden AICH string is display metadata only.
-            // Trust receives the actual live responder/root observations.
-            self.ed2k_transfers
-                .record_network_aich_observations(&transfer.hash, &aich_observations)
-                .await?;
-        }
-        for source_hint in source_hints {
-            // WHY: server search entries carry an immediately usable source
-            // endpoint. Retain every distinct observation so a hash-level
-            // result does not force redundant rediscovery after download starts.
-            self.ed2k_transfers
-                .remember_source(&transfer.hash, source_hint)
-                .await?;
-        }
-        for observation in file_name_observations {
-            let source = observation
-                .source_client_id
-                .zip(observation.source_client_port)
-                .and_then(|(client_id, tcp_port)| search_source_hint(client_id, tcp_port));
-            self.ed2k_transfers
-                .remember_source_file_name(
-                    &transfer.hash,
-                    source,
-                    &observation.name,
-                    None,
-                    &observation.origin,
-                    observation.server_endpoint.as_deref(),
-                )
-                .await?;
-        }
-        let refreshed = self
-            .refresh_transfer_from_manifest_silent(&transfer.hash, &transfer.state)
-            .await?
-            .unwrap_or(transfer);
-        Ok(Some(refreshed))
+        let sources = search_result_source_hints(&result)
+            .into_iter()
+            .map(initial_source)
+            .collect();
+        let observations = result
+            .observations
+            .into_iter()
+            .map(|observation| {
+                let endpoint = observation
+                    .source_client_id
+                    .zip(observation.source_client_port)
+                    .and_then(|(id, port)| search_source_hint(id, port));
+                MetadataTransferFileNameObservation {
+                    source_ip: endpoint.as_ref().map(|v| v.ip.clone()),
+                    source_tcp_port: endpoint.as_ref().map(|v| v.tcp_port),
+                    user_hash: None,
+                    client_software: String::new(),
+                    origin: observation.origin,
+                    server_endpoint: observation.server_endpoint,
+                    normalized_name: emulebb_ed2k::normalize_ed2k_file_name(&observation.name),
+                    raw_name: observation.name,
+                    observed_at_s: observation.observed_at.timestamp(),
+                }
+            })
+            .collect();
+        // Live Kad trust votes remain session-local search provenance. The
+        // selected execution must consume them; cached search metadata is not trust.
+        self.admit_download(
+            DownloadAdmissionInput {
+                hash: result.hash,
+                name: result.name,
+                size: Some(result.size_bytes),
+                aich: None,
+                peers: MetadataDownloadInitialPeers {
+                    sources,
+                    observations,
+                },
+            },
+            request.category,
+            request.intent,
+            request.redownload,
+        )
+        .await
+        .map(Some)
     }
 
-    pub async fn create_transfer(&self, request: TransferCreate) -> Result<Transfer> {
-        let mut transfers = self.create_transfers(request).await?;
-        ensure!(
-            transfers.len() == 1,
-            "create_transfer requires exactly one transfer link"
-        );
-        Ok(transfers.remove(0))
-    }
-
-    pub async fn create_transfers(&self, request: TransferCreate) -> Result<Vec<Transfer>> {
-        let _creation_guard = self.transfer_creation_gate.lock().await;
+    async fn admit_download(
+        &self,
+        input: DownloadAdmissionInput,
+        category: Option<String>,
+        intent: emulebb_metadata::DownloadIntent,
+        redownload: bool,
+    ) -> Result<(bool, RetainedRead<DownloadSummary>)> {
+        let DownloadAdmissionInput {
+            hash,
+            name,
+            size,
+            aich,
+            peers,
+        } = input;
+        // Keep category resolution and the durable admission on one coherent
+        // category cut. The native owner retains the admitted command on abort.
         let _category_guard = self.category_mutation_gate.lock().await;
-        ensure_category_selector_is_unambiguous(
-            request.category_id,
-            request.category_name.as_deref(),
-        )?;
+        self.persistence_owner.check_coherent_state()?;
         let category = self
-            .resolve_transfer_category(request.category_id, request.category_name.as_deref())
+            .resolve_transfer_category(None, category.as_deref())
             .await?;
-        let state_name = transfer_create_state_name(request.paused);
-        let known_file_policy = request.known_file_policy;
-        let links = transfer_create_links(request)?;
-        let parsed_links = links
-            .iter()
-            .map(|link| parse_ed2k_link(link))
-            .collect::<Result<Vec<_>>>()?;
-        let preflight = self
-            .preflight_downloads(&parsed_links, known_file_policy)
+        let hash = hash.parse::<Ed2kHash>()?.to_string();
+        let request = DownloadJobRequest {
+            file_hash: hash,
+            display_name: emulebb_ed2k::normalize_ed2k_file_name(&name),
+            expected_size_bytes: size,
+            piece_size: ED2K_PART_SIZE,
+            category_id: category.as_ref().map(|v| v.0),
+            intent,
+        };
+        let admitted = self
+            .ed2k_transfers
+            .admit_download_job(&request, redownload, aich.as_deref(), &peers)
             .await?;
-        let mut transfers = Vec::with_capacity(links.len());
-        for parsed in parsed_links {
-            let redownload = preflight.should_redownload(&parsed.file_hash);
-            let transfer = self
-                .upsert_transfer_from_parts(
-                    parsed.file_hash,
-                    parsed.name,
-                    parsed.size_bytes,
-                    state_name,
-                    category.clone(),
-                    redownload,
-                )
-                .await?;
-            if let Some(aich_root) = parsed.aich_root {
-                self.ed2k_transfers
-                    .reconcile_aich_root(&transfer.hash, Some(aich_root))
-                    .await?;
-            }
-            for source in parsed.sources {
-                self.ed2k_transfers
-                    .remember_source(&transfer.hash, source)
-                    .await?;
-            }
-            let refreshed = self
-                .refresh_transfer_from_manifest_silent(&transfer.hash, &transfer.state)
-                .await?
-                .unwrap_or(transfer);
-            transfers.push(refreshed);
+        if admitted.created {
+            self.download_attempts.changed.notify_one();
         }
-        Ok(transfers)
-    }
-
-    pub async fn transfers(&self) -> Result<Vec<Transfer>> {
-        self.hydrate_persisted_transfer_rows().await?;
+        // Duplicates project the actual stored category, name, and intent.
+        let _fence = self.ed2k_transfers.lock_category_publication().await;
+        let running = self.download_attempts.snapshot();
+        let verifying = self.ed2k_transfers.verifying_downloads().await;
         let state = self.state.lock().await;
         self.persistence_owner.check_coherent_state()?;
-        let mut transfers: Vec<Transfer> = state.transfers.values().cloned().collect();
-        drop(state);
-        for transfer in &mut transfers {
-            self.apply_live_transfer_fields(transfer);
-        }
-        Ok(transfers)
+        let category = admitted
+            .job
+            .category_id
+            .map(|id| {
+                state
+                    .categories
+                    .get(&id)
+                    .context("job category is missing from coherent Core state")
+            })
+            .transpose()?;
+        let created = admitted.created;
+        let bytes = 4096
+            + admitted.job.display_name.capacity()
+            + admitted.job.file_hash.capacity()
+            + category.map_or(0, |category| category.name.len());
+        let projected = admitted.try_project(bytes, |admitted| {
+            let job = admitted.job;
+            let observed = crate::downloads::observed_state(&job, &running, &verifying);
+            let progress = job.progress();
+            Ok(DownloadSummary {
+                id: job.token.job_id,
+                hash: job.file_hash,
+                name: job.display_name,
+                size_bytes: job.expected_size_bytes,
+                progress,
+                intent: job.intent,
+                state: observed,
+                category: category.map(|category| category.name.clone()),
+                created_at: job.created_at_s,
+                updated_at: job.updated_at_s,
+                completed_at: job.completed_at_s,
+            })
+        })?;
+        Ok((created, projected))
     }
 
     /// Overlay live in-flight download state onto a (possibly stale) cached
@@ -184,8 +210,8 @@ impl EmulebbCore {
     /// per-block session byte counter and live source set surface real in-flight
     /// progress, speed, and source counts to REST/UI while the transfer runs.
     pub(crate) fn apply_live_transfer_fields(&self, transfer: &mut Transfer) {
-        let hash = transfer.hash.as_str();
-        let live_bytes = self.ed2k_transfers.downloaded_session_bytes(hash);
+        let token = transfer.job_token();
+        let live_bytes = self.ed2k_transfers.downloaded_session_bytes(token);
         transfer.completed_bytes = transfer
             .completed_bytes
             .max(live_bytes)
@@ -197,9 +223,9 @@ impl EmulebbCore {
         };
         transfer.sources = transfer
             .sources
-            .max(self.ed2k_transfers.live_download_sources(hash).len() as u32);
-        transfer.sources_transferring = self.ed2k_transfers.transferring_source_count(hash);
-        let speed_bps = self.ed2k_transfers.download_speed_bytes_per_sec(hash);
+            .max(self.ed2k_transfers.live_download_sources(token).len() as u32);
+        transfer.sources_transferring = self.ed2k_transfers.transferring_source_count(token);
+        let speed_bps = self.ed2k_transfers.download_speed_bytes_per_sec(token);
         transfer.download_speed_ki_bps = speed_bps as f64 / 1024.0;
         // Recompute ETA from the live speed + the overlaid completed_bytes (the
         // cached value was computed at manifest-build time and goes stale), and
@@ -212,7 +238,18 @@ impl EmulebbCore {
         };
         transfer.parts_available = self
             .ed2k_transfers
-            .available_part_count(hash, transfer.parts_total);
+            .available_part_count(token, transfer.parts_total);
+    }
+}
+
+fn initial_source(source: Ed2kSourceHint) -> MetadataTransferSource {
+    MetadataTransferSource {
+        ip: source.ip,
+        tcp_port: source.tcp_port,
+        user_hash: source.user_hash,
+        connect_options: source.connect_options,
+        file_comment: source.file_comment,
+        file_rating: source.file_rating,
     }
 }
 

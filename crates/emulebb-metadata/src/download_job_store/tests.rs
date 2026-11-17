@@ -12,6 +12,131 @@ fn request(hash: u8, size: Option<u64>) -> DownloadJobRequest {
 }
 
 #[test]
+fn ending_selection_preserves_started_intent_backing_and_manual_faults() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store
+        .admit_download_job(&request(90, Some(16)))
+        .unwrap()
+        .job;
+    let selected = store
+        .begin_download_job_execution(first.token, Some(&std::env::temp_dir()))
+        .unwrap()
+        .unwrap();
+    let ended = store
+        .end_download_job_execution(selected.token)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.intent, DownloadIntent::Started);
+    assert_eq!(ended.storage, selected.storage);
+    assert_eq!(ended.selected_temp, selected.selected_temp);
+    assert!(ended.token.generation > selected.token.generation);
+    assert!(
+        store
+            .end_download_job_execution(selected.token)
+            .unwrap()
+            .is_none()
+    );
+    let fault =
+        crate::DownloadJobStorageFailure::new("TEMP_UNAVAILABLE", "Sample storage offline", 1)
+            .unwrap();
+    let failed = store
+        .fail_download_job_storage(ended.token, &fault)
+        .unwrap()
+        .job
+        .unwrap();
+    assert!(
+        store
+            .end_download_job_execution(failed.token)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.download_job(failed.token.job_id).unwrap().unwrap(),
+        failed
+    );
+}
+
+#[test]
+fn selections_issue_distinct_fences_without_allocating_discovery_backing_or_retrying_faults() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store.admit_download_job(&request(89, None)).unwrap().job;
+    let preparation = store
+        .begin_download_job_execution(first.token, None)
+        .unwrap()
+        .unwrap();
+    assert!(preparation.token.generation > first.token.generation);
+    assert!(preparation.storage.is_none());
+    assert!(preparation.selected_temp.is_none());
+    assert!(!store.learn_download_job_size(first.token, 16).unwrap());
+    assert!(
+        store
+            .learn_download_job_size(preparation.token, 16)
+            .unwrap()
+    );
+
+    let root = std::env::temp_dir();
+    let active = store
+        .begin_download_job_execution(preparation.token, Some(&root))
+        .unwrap()
+        .unwrap();
+    assert!(active.token.generation > preparation.token.generation);
+    assert!(active.storage.is_some());
+    let reselected = store
+        .begin_download_job_execution(active.token, Some(&root.join("other")))
+        .unwrap()
+        .unwrap();
+    assert!(reselected.token.generation > active.token.generation);
+    assert_eq!(reselected.storage, active.storage);
+    assert_eq!(reselected.selected_temp, active.selected_temp);
+    assert!(
+        store
+            .begin_download_job_execution(active.token, None)
+            .unwrap()
+            .is_none()
+    );
+    let unchanged = store
+        .start_download_job(reselected.token, &root)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged, reselected);
+
+    let fault =
+        crate::DownloadJobStorageFailure::new("TEMP_UNAVAILABLE", "Sample storage offline", 1)
+            .unwrap();
+    let failed = store
+        .fail_download_job_storage(reselected.token, &fault)
+        .unwrap()
+        .job
+        .unwrap();
+    assert!(
+        store
+            .begin_download_job_execution(failed.token, Some(&root))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.download_job(failed.token.job_id).unwrap().unwrap(),
+        failed
+    );
+    let retried = store
+        .start_download_job(failed.token, &root)
+        .unwrap()
+        .unwrap();
+    assert!(store.stop_download_job(retried.token).unwrap());
+    let stopped = store.download_job(retried.token.job_id).unwrap().unwrap();
+    assert!(
+        store
+            .begin_download_job_execution(stopped.token, None)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.download_job(stopped.token.job_id).unwrap().unwrap(),
+        stopped
+    );
+}
+
+#[test]
 fn new_attempt_without_size_uses_accepted_content_but_duplicate_does_not_enrich() {
     let store = MetadataStore::in_memory().unwrap();
     let first = store.admit_download_job(&request(41, None)).unwrap().job;
@@ -75,6 +200,61 @@ fn compact_pages_bound_bytes_and_resume_without_skipping_rows() {
         .unwrap();
     assert!(store.download_job(job.job_id).is_err());
     assert!(store.download_jobs_after(None, 256, false).is_err());
+}
+
+#[test]
+fn repeated_start_and_stop_preserve_tokens_and_do_not_write_unchanged_jobs() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store
+        .admit_download_job(&request(42, Some(4096)))
+        .unwrap()
+        .job;
+    let root = std::env::temp_dir();
+    let running = store
+        .start_download_job(first.token, &root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(running.token, first.token);
+    let before = store.connection().unwrap().total_changes();
+    let unchanged = store
+        .start_download_job(running.token, &root.join("other"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged, running);
+    assert_eq!(store.connection().unwrap().total_changes(), before);
+
+    assert!(store.stop_download_job(running.token).unwrap());
+    let stopped = store.download_job(running.token.job_id).unwrap().unwrap();
+    let before = store.connection().unwrap().total_changes();
+    assert!(!store.stop_download_job(stopped.token).unwrap());
+    assert_eq!(
+        store.download_job(stopped.token.job_id).unwrap().unwrap(),
+        stopped
+    );
+    assert_eq!(store.connection().unwrap().total_changes(), before);
+
+    let resumed = store
+        .start_download_job(stopped.token, &root.join("other"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(resumed.token, stopped.token);
+    assert_eq!(resumed.selected_temp, running.selected_temp);
+    assert_eq!(resumed.storage, running.storage);
+    let fault =
+        crate::DownloadJobStorageFailure::new("TEMP_UNAVAILABLE", "Sample storage offline", 1)
+            .unwrap();
+    let failed = store
+        .fail_download_job_storage(resumed.token, &fault)
+        .unwrap()
+        .job
+        .unwrap();
+    let retried = store
+        .start_download_job(failed.token, &root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(retried.token, failed.token);
+    assert!(retried.storage_failure.is_none());
+    assert_eq!(retried.storage, running.storage);
 }
 
 #[test]

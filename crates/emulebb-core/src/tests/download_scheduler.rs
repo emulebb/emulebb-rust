@@ -5,10 +5,11 @@ async fn direct_download_scheduler_releases_all_slots_on_worker_panic() {
     // A panicking download worker must not leak the connection-budget slots
     // held by the other in-flight workers: the error path drains and releases
     // every remaining slot before returning (FIX B1).
-    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size, job_token) =
         completed_ed2k_transfer_runtime("emulebb-core-direct-download-panic").await;
     let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
     let mut options = direct_download_options(
+        job_token,
         Arc::clone(&transfer_runtime),
         secure_ident,
         file_hash_hex,
@@ -30,6 +31,7 @@ async fn direct_download_scheduler_releases_all_slots_on_worker_panic() {
               _hello_identity,
               _secure_ident,
               _transfer_runtime,
+              _job_token,
               _file_name,
               _file_size,
               _connect_timeout| async move {
@@ -103,12 +105,13 @@ async fn disconnect_drains_download_tasks_and_releases_connection_budget() {
 
 #[tokio::test]
 async fn direct_download_scheduler_retries_other_peer_after_failure() {
-    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size, job_token) =
         completed_ed2k_transfer_runtime("emulebb-core-direct-download-retry").await;
     let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
     let attempts = Arc::new(Mutex::new(Vec::new()));
     let outcome = run_ed2k_direct_downloads(
         direct_download_options(
+            job_token,
             transfer_runtime,
             secure_ident,
             file_hash_hex,
@@ -126,6 +129,7 @@ async fn direct_download_scheduler_retries_other_peer_after_failure() {
                   _hello_identity,
                   _secure_ident,
                   _transfer_runtime,
+                  job_token,
                   _file_name,
                   _file_size,
                   _connect_timeout| {
@@ -136,6 +140,7 @@ async fn direct_download_scheduler_retries_other_peer_after_failure() {
                         anyhow::bail!("simulated first peer failure");
                     }
                     Ok(Ed2kPeerDownloadReport::single(
+                        job_token,
                         source.file_hash,
                         Ed2kPeerDownloadOutcome::Completed,
                     ))
@@ -154,14 +159,33 @@ async fn direct_download_scheduler_retries_other_peer_after_failure() {
 
 #[tokio::test]
 async fn direct_download_scheduler_attributes_a4af_results_to_the_switched_file() {
-    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size, job_token) =
         completed_ed2k_transfer_runtime("emulebb-core-direct-download-a4af-attribution").await;
     let primary_hash: Ed2kHash = file_hash_hex.parse().unwrap();
     let alternate_hash = Ed2kHash::from_bytes([0xA4; 16]);
+    let alternate = transfer_runtime
+        .admit_download_job(
+            &emulebb_metadata::DownloadJobRequest {
+                file_hash: alternate_hash.to_string(),
+                display_name: "Alternate.bin".into(),
+                expected_size_bytes: Some(16),
+                category_id: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+            },
+            false,
+            None,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    let alternate_token = alternate.job.token;
+    drop(alternate);
     let source = direct_test_source(primary_hash, Ipv4Addr::new(192, 0, 2, 20), 41020);
 
     let outcome = run_ed2k_direct_downloads(
         direct_download_options(
+            job_token,
             transfer_runtime,
             secure_ident,
             file_hash_hex,
@@ -174,16 +198,21 @@ async fn direct_download_scheduler_attributes_a4af_results_to_the_switched_file(
               _hello_identity,
               _secure_ident,
               _transfer_runtime,
+              job_token,
               _file_name,
               _file_size,
               _connect_timeout| async move {
             Ok(Ed2kPeerDownloadReport {
                 file_outcomes: vec![
                     emulebb_ed2k::ed2k_tcp::Ed2kPeerFileDownloadOutcome {
+                        observed_peer: None,
+                        job_token,
                         file_hash: source.file_hash,
                         outcome: Ed2kPeerDownloadOutcome::Completed,
                     },
                     emulebb_ed2k::ed2k_tcp::Ed2kPeerFileDownloadOutcome {
+                        observed_peer: None,
+                        job_token: alternate_token,
                         file_hash: alternate_hash,
                         outcome: Ed2kPeerDownloadOutcome::FileNotFound,
                     },
@@ -198,6 +227,10 @@ async fn direct_download_scheduler_attributes_a4af_results_to_the_switched_file(
     assert!(outcome.completed);
     assert!(outcome.file_not_found_sources.is_empty());
     assert_eq!(outcome.alternate_file_outcomes.len(), 1);
+    assert_eq!(
+        outcome.alternate_file_outcomes[0].job_token,
+        alternate_token
+    );
     let alternate = &outcome.alternate_file_outcomes[0];
     assert_eq!(alternate.file_hash, alternate_hash.to_string());
     assert_eq!(alternate.source.file_hash, alternate_hash);
@@ -224,14 +257,19 @@ async fn direct_download_scheduler_retries_loopback_peer_after_connection_refuse
     let file_hash: Ed2kHash = summary.file_hash.parse().unwrap();
     let file_hash_hex = summary.file_hash;
     let file_size = summary.file_size;
-    transfer_runtime
-        .ensure_job(&new_transfer_job(file_hash, file_name.clone(), file_size))
-        .await
-        .unwrap();
+    let job_token = admit_scheduler_test_job(
+        &transfer_runtime,
+        &runtime_dir.join("transfers"),
+        file_hash,
+        file_name.clone(),
+        file_size,
+    )
+    .await;
     let attempts = Arc::new(Mutex::new(Vec::new()));
     let success_after_attempt = 3usize;
     let outcome = run_ed2k_direct_downloads(
         direct_download_options(
+            job_token,
             transfer_runtime,
             secure_ident,
             file_hash_hex.clone(),
@@ -242,18 +280,17 @@ async fn direct_download_scheduler_retries_loopback_peer_after_connection_refuse
         {
             let attempts = Arc::clone(&attempts);
             let payload = Arc::clone(&payload);
-            let file_hash_hex = file_hash_hex.clone();
             move |_bind_ip,
                   source,
                   _hello_identity,
                   _secure_ident,
                   transfer_runtime,
+                  job_token,
                   _file_name,
                   _file_size,
                   _connect_timeout| {
                 let attempts = Arc::clone(&attempts);
                 let payload = Arc::clone(&payload);
-                let file_hash_hex = file_hash_hex.clone();
                 async move {
                     attempts.lock().await.push(source.tcp_port);
                     if attempts.lock().await.len() < success_after_attempt {
@@ -262,12 +299,13 @@ async fn direct_download_scheduler_retries_loopback_peer_after_connection_refuse
                         )));
                     }
                     transfer_runtime
-                        .store_md4_hashset(&file_hash_hex, Vec::new())
+                        .store_md4_hashset(job_token, Vec::new())
                         .await?;
                     transfer_runtime
-                        .store_piece_data(&file_hash_hex, 0, payload.as_slice())
+                        .store_piece_data(job_token, 0, payload.as_slice())
                         .await?;
                     Ok(Ed2kPeerDownloadReport::single(
+                        job_token,
                         source.file_hash,
                         Ed2kPeerDownloadOutcome::Completed,
                     ))
@@ -286,12 +324,13 @@ async fn direct_download_scheduler_retries_loopback_peer_after_connection_refuse
 
 #[tokio::test]
 async fn direct_download_scheduler_tracks_accepted_incomplete_peer() {
-    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size, job_token) =
         completed_ed2k_transfer_runtime("emulebb-core-direct-download-incomplete").await;
     let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
     let attempts = Arc::new(Mutex::new(Vec::new()));
     let outcome = run_ed2k_direct_downloads(
         direct_download_options(
+            job_token,
             transfer_runtime,
             secure_ident,
             file_hash_hex,
@@ -309,6 +348,7 @@ async fn direct_download_scheduler_tracks_accepted_incomplete_peer() {
                   _hello_identity,
                   _secure_ident,
                   _transfer_runtime,
+                  job_token,
                   _file_name,
                   _file_size,
                   _connect_timeout| {
@@ -317,11 +357,13 @@ async fn direct_download_scheduler_tracks_accepted_incomplete_peer() {
                     attempts.lock().await.push(source.tcp_port);
                     if source.tcp_port == 41001 {
                         return Ok(Ed2kPeerDownloadReport::single(
+                            job_token,
                             source.file_hash,
                             Ed2kPeerDownloadOutcome::AcceptedButIncomplete,
                         ));
                     }
                     Ok(Ed2kPeerDownloadReport::single(
+                        job_token,
                         source.file_hash,
                         Ed2kPeerDownloadOutcome::Completed,
                     ))
@@ -340,7 +382,7 @@ async fn direct_download_scheduler_tracks_accepted_incomplete_peer() {
 
 #[tokio::test]
 async fn direct_download_scheduler_does_not_downgrade_failed_obfuscated_peer() {
-    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+    let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size, job_token) =
         completed_ed2k_transfer_runtime("emulebb-core-direct-download-no-plaintext-downgrade")
             .await;
     let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
@@ -351,6 +393,7 @@ async fn direct_download_scheduler_does_not_downgrade_failed_obfuscated_peer() {
     source.user_hash = Some([0x22; 16]);
     let outcome = run_ed2k_direct_downloads(
         direct_download_options(
+            job_token,
             transfer_runtime,
             secure_ident,
             file_hash_hex,
@@ -365,6 +408,7 @@ async fn direct_download_scheduler_does_not_downgrade_failed_obfuscated_peer() {
                   _hello_identity,
                   _secure_ident,
                   _transfer_runtime,
+                  job_token,
                   _file_name,
                   _file_size,
                   _connect_timeout| {
@@ -379,6 +423,7 @@ async fn direct_download_scheduler_does_not_downgrade_failed_obfuscated_peer() {
                         anyhow::bail!("simulated obfuscated peer close");
                     }
                     Ok(Ed2kPeerDownloadReport::single(
+                        job_token,
                         source.file_hash,
                         Ed2kPeerDownloadOutcome::Completed,
                     ))
@@ -462,7 +507,9 @@ fn direct_download_candidates_skip_required_obfuscation_without_user_hash() {
 async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let lower_hash = Ed2kHash::from_bytes([0x48; 16]).to_string();
+    let lower_hash_owner = a4af_test_owner(&core, &lower_hash.to_string());
     let higher_hash = Ed2kHash::from_bytes([0x49; 16]).to_string();
+    let higher_hash_owner = a4af_test_owner(&core, &higher_hash.to_string());
     let source = direct_test_source(
         Ed2kHash::from_bytes([0x48; 16]),
         Ipv4Addr::new(192, 0, 2, 12),
@@ -474,7 +521,6 @@ async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: lower_hash.clone(),
-                file_priority: 1,
                 needed_parts: 8,
                 rare_parts: 0,
                 source: source.clone(),
@@ -485,9 +531,8 @@ async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: higher_hash.clone(),
-                file_priority: 9,
                 needed_parts: 1,
-                rare_parts: 0,
+                rare_parts: 1,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -495,10 +540,18 @@ async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
     }
 
     let (lower_sources, lower_deferred, lower_delay) = core
-        .acquire_direct_download_source_leases(&lower_hash, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            lower_hash_owner.token(),
+            &lower_hash,
+            std::slice::from_ref(&source),
+        )
         .await;
     let (higher_sources, higher_deferred, higher_delay) = core
-        .acquire_direct_download_source_leases(&higher_hash, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            higher_hash_owner.token(),
+            &higher_hash,
+            std::slice::from_ref(&source),
+        )
         .await;
 
     assert!(lower_sources.is_empty());
@@ -507,8 +560,11 @@ async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
     assert_eq!(higher_sources, vec![source.clone()]);
     assert_eq!(higher_deferred, 0);
     assert!(higher_delay.is_none());
-    core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
-        .await;
+    core.release_direct_download_source_leases(
+        higher_hash_owner.token(),
+        &[source_endpoint_key(&source)],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -520,6 +576,7 @@ async fn disconnect_releases_detached_reask_source_leases_and_re_engages() {
     // after a reconnect.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let file_hash = Ed2kHash::from_bytes([0x4a; 16]).to_string();
+    let file_hash_owner = a4af_test_owner(&core, &file_hash.to_string());
     let source = direct_test_source(
         Ed2kHash::from_bytes([0x4a; 16]),
         Ipv4Addr::new(192, 0, 2, 50),
@@ -531,7 +588,6 @@ async fn disconnect_releases_detached_reask_source_leases_and_re_engages() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: file_hash.clone(),
-                file_priority: 5,
                 needed_parts: 4,
                 rare_parts: 0,
                 source: source.clone(),
@@ -543,7 +599,11 @@ async fn disconnect_releases_detached_reask_source_leases_and_re_engages() {
     // Engage (lease) the source, as a download attempt would before detaching
     // it onto the reask loop.
     let (engaged, deferred, retry_delay) = core
-        .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            file_hash_owner.token(),
+            &file_hash,
+            std::slice::from_ref(&source),
+        )
         .await;
     assert_eq!(engaged, vec![source.clone()]);
     assert_eq!(deferred, 0);
@@ -572,7 +632,11 @@ async fn disconnect_releases_detached_reask_source_leases_and_re_engages() {
 
     // The lease is gone, but the endpoint retry cooldown still gates redial.
     let (re_engaged, re_deferred, re_retry_delay) = core
-        .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            file_hash_owner.token(),
+            &file_hash,
+            std::slice::from_ref(&source),
+        )
         .await;
     assert!(re_engaged.is_empty());
     assert_eq!(re_deferred, 1);
@@ -589,6 +653,7 @@ async fn lease_release_is_tcp_keyed_so_a_udp_endpoint_never_matches() {
     // the loop to carry the TCP lease key in its release events.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let file_hash = Ed2kHash::from_bytes([0x5b; 16]).to_string();
+    let file_hash_owner = a4af_test_owner(&core, &file_hash.to_string());
     let ip = Ipv4Addr::new(192, 0, 2, 60);
     let tcp_port = 4662u16;
     let udp_port = 4672u16;
@@ -599,7 +664,6 @@ async fn lease_release_is_tcp_keyed_so_a_udp_endpoint_never_matches() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: file_hash.clone(),
-                file_priority: 5,
                 needed_parts: 4,
                 rare_parts: 0,
                 source: source.clone(),
@@ -608,14 +672,18 @@ async fn lease_release_is_tcp_keyed_so_a_udp_endpoint_never_matches() {
         );
     }
     let (engaged, _, _) = core
-        .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            file_hash_owner.token(),
+            &file_hash,
+            std::slice::from_ref(&source),
+        )
         .await;
     assert_eq!(engaged, vec![source.clone()]);
 
     // Releasing by the peer's UDP endpoint (what the reask loop routes on)
     // must not free the TCP-keyed lease — the endpoints live in different
     // keyspaces, so this is a no-op by construction.
-    core.release_direct_download_source_leases(&[(ip, udp_port)])
+    core.release_direct_download_source_leases(file_hash_owner.token(), &[(ip, udp_port)])
         .await;
     {
         let state = core.state.lock().await;
@@ -632,8 +700,11 @@ async fn lease_release_is_tcp_keyed_so_a_udp_endpoint_never_matches() {
     }
 
     // Releasing by the TCP lease key (what SourceReleased now carries) frees it.
-    core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
-        .await;
+    core.release_direct_download_source_leases(
+        file_hash_owner.token(),
+        &[source_endpoint_key(&source)],
+    )
+    .await;
     {
         let state = core.state.lock().await;
         assert!(state.active_download_peer_endpoints.is_empty());
@@ -648,12 +719,16 @@ async fn run_attempt_stops_immediately_when_pre_cancelled() {
     // makes the attempt a no-op that returns Ok(None) so the queued-attempt
     // wrapper neither rewrites the transfer state nor re-queues a retry.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let transfer = a4af_test_transfer(&Ed2kHash::from_bytes([0x80; 16]).to_string(), "downloading");
+    let transfer = a4af_test_transfer(
+        &core,
+        &Ed2kHash::from_bytes([0x80; 16]).to_string(),
+        "downloading",
+    );
     let cancel = CancellationToken::new();
     cancel.cancel();
 
     let result = core
-        .run_ed2k_download_attempt(&transfer, &cancel)
+        .run_ed2k_download_attempt(&transfer, transfer.job_token(), &cancel)
         .await
         .unwrap();
     assert!(
@@ -663,14 +738,12 @@ async fn run_attempt_stops_immediately_when_pre_cancelled() {
 }
 
 #[test]
-fn queued_active_download_attempts_remain_retryable() {
+fn queued_jobs_remain_retryable() {
     assert!(should_retry_download_attempt_state("downloading"));
     assert!(should_retry_download_attempt_state("queued"));
-    assert!(!should_retry_download_attempt_state("paused"));
-    assert!(!should_retry_download_attempt_state("insufficient"));
     assert!(!should_retry_download_attempt_state("stopped"));
     assert!(!should_retry_download_attempt_state("completed"));
-    assert!(!should_retry_download_attempt_state("error"));
+    assert!(!should_retry_download_attempt_state("failed"));
 }
 
 #[test]
@@ -680,7 +753,7 @@ fn hash_only_transfer_without_sources_remains_queued() {
 }
 
 #[tokio::test]
-async fn hash_only_transfer_with_explicit_source_dials_without_server_config() {
+async fn explicit_link_source_dials_without_server_config() {
     let runtime_dir = unique_runtime_dir("emulebb-core-hash-only-explicit-source");
     let mut network = test_network_config_with_store(
         &runtime_dir,
@@ -701,25 +774,29 @@ async fn hash_only_transfer_with_explicit_source_dials_without_server_config() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let source_port = listener.local_addr().unwrap().port();
     let hash = Ed2kHash::from_bytes([0x81; 16]).to_string();
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(format!(
-                "ed2k://|file|{hash}|0|{hash}|sources,127.0.0.1:{source_port}|/"
-            )),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
+    let (_, download) = core
+        .create_download(DownloadCreate {
+            source: DownloadCreateSource::Ed2kLink {
+                link: format!(
+                    "ed2k://|file|Sample.bin|4096|{hash}|sources,127.0.0.1:{source_port}|/"
+                ),
+            },
+            category: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            redownload: false,
         })
         .await
         .unwrap();
+    let id = download.id;
+    drop(download);
+    let (guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
     let cancel = CancellationToken::new();
     let attempt_core = core.clone();
     let attempt_cancel = cancel.clone();
     let attempt = tokio::spawn(async move {
+        let _guard = guard;
         attempt_core
-            .run_ed2k_download_attempt(&transfer, &attempt_cancel)
+            .run_ed2k_download_attempt(&transfer, transfer.job_token(), &attempt_cancel)
             .await
     });
 
@@ -731,48 +808,36 @@ async fn hash_only_transfer_with_explicit_source_dials_without_server_config() {
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), attempt)
         .await
-        .expect("cancelled hash-only attempt should stop");
+        .expect("cancelled source attempt should stop");
 }
 
 #[tokio::test]
-async fn delete_transfer_files_cancels_attempt_and_releases_hash_leases() {
-    // Delete must promptly free everything the running attempt holds for the
-    // hash: cancel its in-flight token, release the hash's leases + the
-    // matching active endpoints, and clear the dedup + cancel slots so a
-    // re-create can immediately re-download (it no longer early-returns on a
-    // stale dedup slot or finds the peer deferred by a leaked lease).
-    let runtime_dir = unique_runtime_dir("emulebb-core-delete-cancels-attempt");
-    let transfer_root = runtime_dir.join("transfers");
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
-    // Create paused so no background attempt is queued to race the simulated
-    // running-attempt state we install below.
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Cancel.Me.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    let hash = transfer.hash.clone();
+async fn removal_cancels_but_retains_peer_ownership_until_worker_retirement() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let request = DownloadCreate {
+        source: DownloadCreateSource::Content {
+            hash: "00112233445566778899aabbccddeeff".into(),
+            name: "Sample.bin".into(),
+            size_bytes: Some(4096),
+        },
+        category: None,
+        intent: emulebb_metadata::DownloadIntent::Started,
+        redownload: false,
+    };
+    let (_, download) = core.create_download(request.clone()).await.unwrap();
+    let id = download.id;
+    drop(download);
+    let (guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
+    let token = guard.token();
+    let hash = transfer.hash;
     let source = direct_test_source(hash.parse().unwrap(), Ipv4Addr::new(192, 0, 2, 60), 41030);
     let endpoint = source_endpoint_key(&source);
-
-    // Simulate a running attempt for this hash: a registered + leased source
-    // (active endpoint), the dedup slot, and an installed cancel token.
-    let cancel = CancellationToken::new();
     {
         let mut state = core.state.lock().await;
         state.download_source_registry.add_candidate(
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: hash.clone(),
-                file_priority: 5,
                 needed_parts: 4,
                 rare_parts: 0,
                 source: source.clone(),
@@ -785,86 +850,151 @@ async fn delete_transfer_files_cancels_attempt_and_releases_hash_leases() {
                 .lease_best_for_file(Instant::now(), Duration::ZERO, &source, &hash)
                 .is_some()
         );
-        state.active_download_peer_endpoints.insert(endpoint);
-        state.active_download_attempts.insert(hash.clone());
-        state
-            .download_cancels
-            .insert(hash.clone(), (0, cancel.clone()));
+        state.active_download_peer_endpoints.insert(endpoint, token);
     }
-
-    let deleted = core.delete_transfer_files(&hash).await.unwrap().unwrap();
-    assert_eq!(deleted.hash, hash);
-
-    // The in-flight attempt is signalled to stop.
-    assert!(
-        cancel.is_cancelled(),
-        "delete must cancel the in-flight attempt for the hash"
-    );
-    let state = core.state.lock().await;
     assert_eq!(
-        state.download_source_registry.leased_peer_count(),
-        0,
-        "delete must release the hash's leases"
+        core.remove_download(id, false).await.unwrap(),
+        DownloadChange::Changed
     );
+    assert!(guard.cancellation().is_cancelled());
     assert_eq!(
-        state
-            .download_source_registry
-            .candidate_count_for_file(Instant::now(), &hash),
-        0,
-        "delete must forget the hash's source candidates"
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .get(&endpoint),
+        Some(&token)
+    );
+    let (_, next) = core.create_download(request).await.unwrap();
+    let next_id = next.id;
+    drop(next);
+    assert_ne!(next_id, id);
+    assert!(
+        core.select_download_execution(next_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    core.release_download_source_file(token, &hash).await;
+    drop(guard);
+    assert!(
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .is_empty()
     );
     assert!(
-        !state.active_download_peer_endpoints.contains(&endpoint),
-        "delete must drop the matching active download endpoint"
-    );
-    assert!(
-        !state.active_download_attempts.contains(&hash),
-        "delete must clear the dedup slot so a re-create can re-download"
-    );
-    assert!(
-        !state.download_cancels.contains_key(&hash),
-        "delete must clear the cancel slot"
+        core.select_download_execution(next_id)
+            .await
+            .unwrap()
+            .is_some()
     );
 }
 
 #[tokio::test]
-async fn pause_transfer_cancels_in_flight_attempt() {
-    // Pause must stop the transfer now: the driver does not read control_state
-    // mid-attempt, so pause cancels the in-flight attempt's token (the loop
-    // then stops at its next cancel check) rather than only suppressing the
-    // next retry.
-    let runtime_dir = unique_runtime_dir("emulebb-core-pause-cancels-attempt");
-    let transfer_root = runtime_dir.join("transfers");
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
-    // Create paused so no background attempt is queued to race our manually
-    // installed token (the attempt's own token would otherwise overwrite it).
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Pause.Me.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
+async fn stop_cancels_an_admitted_execution_before_returning() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let (_, download) = core
+        .create_download(DownloadCreate {
+            source: DownloadCreateSource::Content {
+                hash: "00112233445566778899aabbccddeeff".into(),
+                name: "Sample.bin".into(),
+                size_bytes: Some(4096),
+            },
+            category: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            redownload: false,
         })
         .await
         .unwrap();
-    let hash = transfer.hash.clone();
+    let id = download.id;
+    drop(download);
+    let (guard, _) = core.select_download_execution(id).await.unwrap().unwrap();
+    assert_eq!(
+        core.stop_download(id).await.unwrap(),
+        DownloadChange::Changed
+    );
+    assert!(guard.cancellation().is_cancelled());
+}
 
-    // Simulate a running attempt's cancel token for this hash.
-    let cancel = CancellationToken::new();
-    core.state
-        .lock()
+#[tokio::test]
+async fn late_peer_release_cannot_release_a_new_execution_lease() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let hash = "00112233445566778899aabbccddeeff";
+    let old = a4af_test_owner(&core, hash);
+    let old_token = old.token();
+    core.stop_download(old_token.job_id).await.unwrap();
+    drop(old);
+    core.start_download(old_token.job_id).await.unwrap();
+    let current = core
+        .ed2k_transfers
+        .download_job(old_token.job_id)
         .await
-        .download_cancels
-        .insert(hash.clone(), (0, cancel.clone()));
-
-    let paused = core.pause_transfer(&hash).await.unwrap().unwrap();
-    assert_eq!(paused.state, "paused");
+        .unwrap()
+        .unwrap()
+        .token;
+    let _guard = core
+        .download_attempts
+        .try_enter(current, hash.parse().unwrap())
+        .unwrap();
+    let source = direct_test_source(hash.parse().unwrap(), Ipv4Addr::new(192, 0, 2, 61), 41031);
+    let endpoint = source_endpoint_key(&source);
+    {
+        let mut state = core.state.lock().await;
+        state.download_source_registry.add_candidate(
+            Instant::now(),
+            DownloadSourceCandidate {
+                file_hash: hash.into(),
+                needed_parts: 1,
+                rare_parts: 0,
+                source: source.clone(),
+                last_seen: Instant::now(),
+            },
+        );
+        assert!(
+            state
+                .download_source_registry
+                .lease_best_for_file(Instant::now(), Duration::ZERO, &source, hash)
+                .is_some()
+        );
+        state
+            .active_download_peer_endpoints
+            .insert(endpoint, current);
+    }
+    core.release_direct_download_source_leases(old_token, &[endpoint])
+        .await;
+    assert_eq!(
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .get(&endpoint),
+        Some(&current)
+    );
+    assert_eq!(
+        core.state
+            .lock()
+            .await
+            .download_source_registry
+            .leased_peer_count(),
+        1
+    );
+    core.release_direct_download_source_leases(current, &[endpoint])
+        .await;
     assert!(
-        cancel.is_cancelled(),
-        "pause must cancel the in-flight attempt so it stops now, not at next retry"
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .is_empty()
+    );
+    assert_eq!(
+        core.state
+            .lock()
+            .await
+            .download_source_registry
+            .leased_peer_count(),
+        0
     );
 }

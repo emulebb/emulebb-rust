@@ -61,6 +61,7 @@ pub(crate) async fn run_kad_passive_replay_loop(
     transfer_runtime: Arc<Ed2kTransferRuntime>,
     shutdown: Arc<AtomicBool>,
     worker: PassiveReplayWorker,
+    attempts: Arc<crate::download_attempts::DownloadAttemptControl>,
 ) {
     let interval = match worker {
         PassiveReplayWorker::General => Duration::from_secs(PASSIVE_GENERAL_CRAWL_SECS),
@@ -80,7 +81,15 @@ pub(crate) async fn run_kad_passive_replay_loop(
         let Some(selected) = selected else {
             continue;
         };
-        run_selected_passive_replay(&dht, &snoop_queue, &index, &transfer_runtime, selected).await;
+        run_selected_passive_replay(
+            &dht,
+            &snoop_queue,
+            &index,
+            &transfer_runtime,
+            &attempts,
+            selected,
+        )
+        .await;
     }
 }
 
@@ -122,6 +131,7 @@ async fn run_selected_passive_replay(
     snoop_queue: &Arc<Mutex<SnoopQueue>>,
     index: &Arc<Mutex<FileIndex>>,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    attempts: &crate::download_attempts::DownloadAttemptControl,
     selected: PassiveReplaySelection,
 ) {
     let outcome = match selected {
@@ -140,10 +150,13 @@ async fn run_selected_passive_replay(
                     .max(1)
             };
             let logical_key = selected.logical_key;
+            let token = attempts.selected_token(selected.request.target.0);
             let source_results =
                 run_passive_source_replay(dht, selected.request, source_stop_after_results).await;
             if let Some(source_results) = source_results {
-                remember_passive_source_results(transfer_runtime, &source_results).await;
+                if let Some(token) = token {
+                    remember_passive_source_results(transfer_runtime, token, &source_results).await;
+                }
                 Some((logical_key, source_results.len()))
             } else {
                 None
@@ -151,9 +164,12 @@ async fn run_selected_passive_replay(
         }
         PassiveReplaySelection::Notes(selected) => {
             let logical_key = selected.logical_key;
+            let token = attempts.selected_token(selected.request.target.0);
             let note_results = run_passive_notes_replay(dht, selected.request).await;
             if let Some(note_results) = note_results {
-                remember_passive_note_results(transfer_runtime, &note_results).await;
+                if let Some(token) = token {
+                    remember_passive_note_results(transfer_runtime, token, &note_results).await;
+                }
                 Some((logical_key, note_results.len()))
             } else {
                 None
@@ -264,6 +280,7 @@ async fn run_passive_source_replay(
 
 pub(crate) async fn remember_passive_source_results(
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    token: emulebb_metadata::JobToken,
     results: &[SourceResult],
 ) {
     for result in results {
@@ -281,10 +298,7 @@ pub(crate) async fn remember_passive_source_results(
             file_comment: String::new(),
             file_rating: 0,
         };
-        if let Err(error) = transfer_runtime
-            .remember_source(&result.file_hash.to_string(), hint)
-            .await
-        {
+        if let Err(error) = transfer_runtime.remember_source(token, hint).await {
             tracing::debug!(
                 file_hash = %result.file_hash,
                 source = %SocketAddr::new(IpAddr::V4(result.ip), result.tcp_port),
@@ -342,11 +356,12 @@ async fn run_passive_notes_replay(
 
 pub(crate) async fn remember_passive_note_results(
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    token: emulebb_metadata::JobToken,
     results: &[KadNoteResult],
 ) {
     for result in results {
         let file_hash = result.file_hash.to_string();
-        let Ok(manifest) = transfer_runtime.manifest(&file_hash).await else {
+        let Ok(manifest) = transfer_runtime.manifest(token).await else {
             tracing::debug!(
                 file_hash,
                 "skipping passive Kad note memory for unknown transfer"

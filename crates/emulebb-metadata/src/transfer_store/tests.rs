@@ -3078,6 +3078,86 @@ fn delivered_verification_refresh_is_exact_unowned_and_preserves_terminal_histor
 }
 
 #[test]
+fn delivery_maintenance_respects_stop_and_manual_storage_retry() {
+    let store = MetadataStore::in_memory().unwrap();
+    {
+        let conn = store.connection().unwrap();
+        let mut plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {PENDING_DELIVERY_PAGE_SQL}"))
+            .unwrap();
+        let steps = plan
+            .query_map(params![0i64, 1i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|step| step.contains("download_jobs_pending_delivery_page_idx")),
+            "delivery pages must seek the eligible subset: {steps:?}"
+        );
+        assert!(
+            !steps.iter().any(|step| step.contains("USE TEMP B-TREE")),
+            "{steps:?}"
+        );
+    }
+    let manifest = completed_pending_download_manifest(&store);
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let id = manifest.token.job_id;
+    assert_eq!(
+        store.pending_delivery_jobs_after(None, 1).unwrap(),
+        vec![id]
+    );
+    assert!(store.stop_download_job(manifest.token).unwrap());
+    assert!(
+        store
+            .pending_delivery_jobs_after(None, 1)
+            .unwrap()
+            .is_empty()
+    );
+    let stopped = store.download_job(id).unwrap().unwrap();
+    assert!(stopped.payload_verified);
+    let started = store
+        .start_download_job(stopped.token, &std::env::temp_dir())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.pending_delivery_jobs_after(None, 1).unwrap(),
+        vec![id]
+    );
+    let fault =
+        crate::DownloadJobStorageFailure::new("DELIVERY_FAILED", "Sample delivery offline", 1)
+            .unwrap();
+    let failed = store
+        .fail_download_job_storage(started.token, &fault)
+        .unwrap()
+        .job
+        .unwrap();
+    assert!(
+        store
+            .pending_delivery_jobs_after(None, 1)
+            .unwrap()
+            .is_empty()
+    );
+    let restarted = store
+        .start_download_job(failed.token, &std::env::temp_dir())
+        .unwrap()
+        .unwrap();
+    assert!(restarted.storage_failure.is_none());
+    assert_eq!(
+        store.pending_delivery_jobs_after(None, 1).unwrap(),
+        vec![id]
+    );
+    assert!(store.remove_download_job(id).unwrap());
+    assert!(
+        store
+            .pending_delivery_jobs_after(None, 1)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn delivered_before_retirement_survives_reopen_without_becoming_pending() {
     let database = unique_store_path("delivered-before-retirement");
     let store = MetadataStore::open(&database).unwrap();

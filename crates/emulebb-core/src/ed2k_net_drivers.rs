@@ -36,6 +36,7 @@ use emulebb_ed2k::{
 };
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
 use emulebb_kad_dht::DhtNode;
+use futures_util::FutureExt;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 
@@ -267,7 +268,7 @@ pub(crate) async fn run_advertised_ports_sync(
 
 /// Re-engage consumer: drains [`ReaskEvent`]s the reask loop raises and reconnects
 /// the named transfer over TCP *now*, reusing the normal download attempt (whose
-/// `active_download_attempts` guard debounces duplicates). The loop only raises
+/// job-attempt guard debounces duplicates). The loop only raises
 /// `SourceReady` when a source's queue rank is imminent, so this claims the slot
 /// instead of waiting for the periodic download cycle.
 pub(crate) async fn run_ed2k_reask_reengage(
@@ -280,19 +281,18 @@ pub(crate) async fn run_ed2k_reask_reengage(
         let Some(event) = events.recv().await else {
             break;
         };
-        // Isolate each event: a transient panic while handling one event must not
-        // tear down the whole consumer, which would permanently stop source-lease
-        // releases (leaking leases and killing re-engage) (FIX B4a). Handling runs
-        // in a spawned task we await, so a panic surfaces as a JoinError we log and
-        // skip, keeping the loop alive.
-        let handler_core = core.clone();
-        let handle = tokio::spawn(handle_reask_event(
-            handler_core,
+        // WHY: a detached handler could cross disconnect's lease reset. Poll it
+        // within this consumer while retaining per-event panic isolation; abort
+        // now drops the handler before the consumer's join receipt completes.
+        let result = std::panic::AssertUnwindSafe(handle_reask_event(
+            core.clone(),
             event,
             direct_callback.clone(),
-        ));
-        if let Err(join_error) = handle.await {
-            tracing::warn!("ED2K reask re-engage event handler panicked; continuing: {join_error}");
+        ))
+        .catch_unwind()
+        .await;
+        if result.is_err() {
+            tracing::warn!("ED2K reask re-engage event handler panicked; continuing");
         }
     }
 }
@@ -321,6 +321,7 @@ async fn handle_reask_event(
             .await;
         }
         ReaskEvent::SourceDead {
+            job_token,
             file_hash,
             source_tcp_endpoint,
             source_user_hash,
@@ -330,13 +331,17 @@ async fn handle_reask_event(
             // block BEFORE the SourceReleased that follows frees its lease, so
             // the released endpoint is not immediately re-acquirable.
             core.dead_list_udp_fnf_source(
+                job_token,
                 &file_hash.to_string(),
                 source_tcp_endpoint,
                 source_user_hash,
             )
             .await;
         }
-        ReaskEvent::SourceReleased { endpoint } => {
+        ReaskEvent::SourceReleased {
+            job_token,
+            endpoint,
+        } => {
             // The reask loop dropped a detached source: free the lease it kept
             // (active_download_peer_endpoints + the registry) so the next
             // download cycle — or the SourceReady that follows — can re-acquire
@@ -345,15 +350,17 @@ async fn handle_reask_event(
             // defers it, leaking the lease and killing re-engage. `endpoint` is
             // the source's TCP endpoint (the loop carries core's lease key,
             // RUST-PAR-017 DL-11), so it matches these TCP-keyed sets directly.
-            core.release_direct_download_source_leases(&[endpoint])
+            core.release_direct_download_source_leases(job_token, &[endpoint])
                 .await;
         }
-        ReaskEvent::SourceReady { file_hash } => {
-            let hash = file_hash.to_string();
-            let Ok(Some(transfer)) = core.transfer(&hash).await else {
+        ReaskEvent::SourceReady {
+            file_hash,
+            job_token,
+        } => {
+            let Ok(Some(transfer)) = core.selected_transfer(job_token).await else {
                 return;
             };
-            if transfer.state == "downloading" {
+            if transfer.hash == file_hash.to_string() && transfer.state == "downloading" {
                 core.queue_ed2k_download_attempt(transfer);
             }
         }

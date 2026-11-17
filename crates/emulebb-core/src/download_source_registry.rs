@@ -36,7 +36,6 @@ const NNP_PURGE_INTERVAL: Duration = Duration::from_secs(40);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadSourceCandidate {
     pub file_hash: String,
-    pub file_priority: u32,
     pub needed_parts: u32,
     pub rare_parts: u32,
     pub source: Ed2kFoundSource,
@@ -510,12 +509,8 @@ fn is_stale(candidate: &DownloadSourceCandidate, now: Instant) -> bool {
     now.saturating_duration_since(candidate.last_seen) > CANDIDATE_LIVENESS_TTL
 }
 
-fn candidate_score(candidate: &DownloadSourceCandidate) -> (u32, u32, u32) {
-    (
-        candidate.file_priority,
-        candidate.rare_parts,
-        candidate.needed_parts,
-    )
+fn candidate_score(candidate: &DownloadSourceCandidate) -> (u32, u32) {
+    (candidate.rare_parts, candidate.needed_parts)
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ impl LocalMutationRegistry {
         let comment = comment.map(|(s, b)| (s.to_owned(), b));
         let metadata = runtime.metadata.clone();
         let cache = Arc::clone(&runtime.manifest_cache);
+        let residents = Arc::clone(&self.residents);
         let locks = Arc::clone(&runtime.content_locks);
         let eligibility = Arc::clone(&runtime.share_eligibility);
         let queue = Arc::clone(&runtime.upload_queue);
@@ -41,6 +42,20 @@ impl LocalMutationRegistry {
                     transfer::store::scoped_lock(&locks, hash_text.clone()).blocking_lock_owned();
                 let _stripe = eligibility.begin_mutation(&[hash.0])?;
                 let mutation = priority.is_some() || comment.is_some();
+                let observed = metadata.capture_local_ingest_jobs(&[hash_text.clone()])?[0].token;
+                let mut resident_write = if let Some(token) = observed.filter(|_| mutation) {
+                    if cache
+                        .blocking_lock()
+                        .get(&token.job_id)
+                        .is_some_and(|m| m.token == token)
+                    {
+                        Some(residents.reserve(token.job_id)?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let token = if mutation {
                     metadata
                         .update_shared_content_metadata(
@@ -50,7 +65,7 @@ impl LocalMutationRegistry {
                         )?
                         .ok_or_else(|| anyhow!("missing shared content or current download job"))?
                 } else {
-                    metadata.capture_local_ingest_jobs(&[hash_text.clone()])?[0].token
+                    observed
                 };
                 committed = mutation;
                 #[cfg(test)]
@@ -58,20 +73,26 @@ impl LocalMutationRegistry {
                     let _ = reached.send(());
                     let _ = release.recv();
                 }
-                if let Some(token) = token {
+                if let Some(token) = token.filter(|_| mutation) {
                     if let Some(current) = cache
                         .blocking_lock()
                         .get_mut(&token.job_id)
                         .filter(|m| m.token == token)
                     {
-                        if let Some((value, auto)) = &priority {
-                            current.upload_priority = value.clone();
-                            current.auto_upload_priority = *auto;
-                        }
-                        if let Some((value, rating)) = &comment {
-                            current.comment = value.clone();
-                            current.rating = *rating;
-                        }
+                        let permit = resident_write.take().ok_or_else(|| {
+                            anyhow!("content cache lacks preadmitted write credit")
+                        })?;
+                        current.write_with(permit, |current| {
+                            if let Some((value, auto)) = &priority {
+                                current.upload_priority = value.clone();
+                                current.auto_upload_priority = *auto;
+                            }
+                            if let Some((value, rating)) = &comment {
+                                current.comment = value.clone();
+                                current.rating = *rating;
+                            }
+                            Ok(())
+                        })?;
                     }
                 }
                 if let Some((value, auto)) = &priority {

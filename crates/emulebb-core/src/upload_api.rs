@@ -100,11 +100,6 @@ impl EmulebbCore {
             parse_ban_ip(&upload.address),
             parse_ban_hash(upload.user_hash.as_deref()),
         );
-        self.state
-            .lock()
-            .await
-            .banned_source_clients
-            .insert(upload.client_id);
         Ok(Some(true))
     }
 
@@ -116,11 +111,6 @@ impl EmulebbCore {
         self.ed2k_transfers
             .ban_store()
             .unban(parse_ban_ip(&upload.address), hash.as_ref());
-        self.state
-            .lock()
-            .await
-            .banned_source_clients
-            .remove(&upload.client_id);
         Ok(Some(false))
     }
 
