@@ -139,6 +139,7 @@ async fn every_compact_result_variant_reuses_and_releases_the_registry_control()
         JobRead::Publish(None, 1),
         JobRead::Endpoints(job.token, 0, 1),
         JobRead::Sources(job.token, 0, 1),
+        JobRead::Comments(job.token, 0, 1),
         JobRead::Names(job.token, 0, 1),
         JobRead::Delivery(None, 1),
         JobRead::Retirement(None, 1),

@@ -755,6 +755,8 @@ CREATE UNIQUE INDEX download_job_sources_identity_idx
 ON download_job_sources(job_id, ip, tcp_port);
 
 CREATE INDEX download_job_sources_page_idx ON download_job_sources(job_id, id);
+CREATE INDEX download_job_sources_comments_idx ON download_job_sources(job_id, id)
+WHERE file_comment<>'' OR file_rating>0;
 CREATE INDEX download_job_sources_user_idx ON download_job_sources(job_id, user_hash, id);
 
 CREATE TABLE download_job_file_name_observations (

@@ -1,5 +1,109 @@
 use super::*;
 
+#[test]
+fn sparse_comment_pages_seek_the_comment_index_and_fence_old_generations() {
+    let store = MetadataStore::in_memory().unwrap();
+    let current = job(&store);
+    {
+        let mut conn = store.connection().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "WITH RECURSIVE source_ids(n) AS (
+            VALUES(1) UNION ALL SELECT n+1 FROM source_ids WHERE n<100000)
+            INSERT INTO download_job_sources(job_id,ip,tcp_port,first_seen_at_s,last_seen_at_s)
+            SELECT ?1,'192.0.2.' || (1+(n-1)/65535),1+(n-1)%65535,0,0 FROM source_ids",
+            params![current.token.job_id],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE download_job_sources SET
+            file_comment=CASE id WHEN 2 THEN 'first' WHEN 99999 THEN 'last' ELSE '' END,
+            file_rating=CASE WHEN id=50000 THEN 4 ELSE 0 END
+            WHERE job_id=?1 AND id IN (2,50000,99999)",
+            params![current.token.job_id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let mut explain = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {COMMENTS_SQL}"))
+            .unwrap();
+        let plan = explain
+            .query_map(
+                params![current.token.job_id, 2, current.token.generation as i64, 2],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("download_job_sources_comments_idx"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+    let first = store
+        .download_job_comments_after(current.token, 0, 1)
+        .unwrap();
+    assert_eq!(first.comments.len(), 1);
+    assert_eq!(first.comments[0].id, 2);
+    assert_eq!(first.comments[0].comment, "first");
+    assert!(first.has_more);
+    let second = store
+        .download_job_comments_after(current.token, 2, 1)
+        .unwrap();
+    assert_eq!(second.comments.len(), 1);
+    assert_eq!(second.comments[0].id, 50000);
+    assert_eq!(second.comments[0].rating, 4);
+    assert!(second.has_more);
+    let last = store
+        .download_job_comments_after(current.token, 50000, 2)
+        .unwrap();
+    assert_eq!(last.comments.len(), 1);
+    assert_eq!(last.comments[0].id, 99999);
+    assert!(!last.has_more);
+    assert!(store.stop_download_job(current.token).unwrap());
+    let stale = store
+        .download_job_comments_after(current.token, 0, 2)
+        .unwrap();
+    assert!(stale.comments.is_empty() && !stale.has_more);
+    let stopped = store.download_job(current.token.job_id).unwrap().unwrap();
+    assert_eq!(
+        store
+            .download_job_comments_after(stopped.token, 0, 256)
+            .unwrap()
+            .comments
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn comment_pages_continue_at_the_byte_boundary_without_losing_rows() {
+    let store = MetadataStore::in_memory().unwrap();
+    let current = job(&store);
+    for last in 1..=20 {
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::Source {
+                    source: source(last, "c".repeat(65_536)),
+                    description_only: false,
+                },
+            )
+            .unwrap();
+    }
+    let first = store
+        .download_job_comments_after(current.token, 0, 256)
+        .unwrap();
+    assert!(!first.comments.is_empty() && first.comments.len() < 20);
+    assert!(first.has_more);
+    let frontier = first.comments.last().unwrap().id;
+    let last = store
+        .download_job_comments_after(current.token, frontier, 256)
+        .unwrap();
+    assert_eq!(first.comments.len() + last.comments.len(), 20);
+    assert!(last.comments[0].id > frontier);
+    assert!(!last.has_more);
+}
+
 fn job(store: &MetadataStore) -> crate::DownloadJobRecord {
     store
         .admit_download_job(&crate::DownloadJobRequest {

@@ -12,6 +12,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Execution(emulebb_metadata::JobToken),
     SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
+    Comments(emulebb_metadata::JobToken, i64, usize),
     Source(
         emulebb_metadata::JobToken,
         emulebb_metadata::MetadataDownloadSourceSelector,
@@ -32,6 +33,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
+    Comments(RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>),
     Source(RetainedRead<Option<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
     Names(RetainedRead<Vec<emulebb_metadata::MetadataDownloadNameEntry>>),
@@ -67,7 +69,9 @@ impl LocalMutationRegistry {
                 );
                 32 * 1024
             }
-            JobRead::Sources(_, after, limit) | JobRead::Names(_, after, limit) => {
+            JobRead::Sources(_, after, limit)
+            | JobRead::Names(_, after, limit)
+            | JobRead::Comments(_, after, limit) => {
                 ensure!(
                     after >= 0 && (1..=256).contains(&limit),
                     "invalid peer diagnostic page"
@@ -138,6 +142,11 @@ impl LocalMutationRegistry {
                     .download_job_sources_after(token, after, limit)
                     .map(|value| {
                         JobReadResult::Sources(RetainedRead::new(value, capacity.take_result()))
+                    }),
+                JobRead::Comments(token, after, limit) => metadata
+                    .download_job_comments_after(token, after, limit)
+                    .map(|value| {
+                        JobReadResult::Comments(RetainedRead::new(value, capacity.take_result()))
                     }),
                 JobRead::Source(token, selector) => {
                     metadata.download_job_source(token, selector).map(|value| {
@@ -329,6 +338,21 @@ impl transfer::Ed2kTransferRuntime {
         };
         Ok(page)
     }
+    pub async fn download_comments_after(
+        &self,
+        token: emulebb_metadata::JobToken,
+        after: i64,
+        limit: usize,
+    ) -> Result<RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>> {
+        let JobReadResult::Comments(page) = self
+            .read_job_metadata(JobRead::Comments(token, after, limit))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+
     pub async fn download_source(
         &self,
         token: emulebb_metadata::JobToken,

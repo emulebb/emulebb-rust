@@ -35,9 +35,9 @@ pub use download_job_model::{
     JobToken,
 };
 pub use download_peer_store::{
-    MetadataDownloadInitialPeers, MetadataDownloadNameEntry, MetadataDownloadPeerChange,
-    MetadataDownloadPeerDelta, MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry,
-    MetadataDownloadSourceSelector,
+    MetadataDownloadCommentEntry, MetadataDownloadCommentPage, MetadataDownloadInitialPeers,
+    MetadataDownloadNameEntry, MetadataDownloadPeerChange, MetadataDownloadPeerDelta,
+    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry, MetadataDownloadSourceSelector,
 };
 mod identity_model;
 mod identity_store;

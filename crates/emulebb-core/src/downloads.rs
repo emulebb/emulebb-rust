@@ -316,8 +316,8 @@ pub struct DownloadCommentPage {
 }
 
 impl EmulebbCore {
-    /// Comments remain separate from source/header detail. A short or empty
-    /// filtered page advances its source frontier and explicitly reports more.
+    /// Seek the comment-only index and preserve its bounded continuation.
+    /// Neither source-name windows nor execution geometry are loaded.
     pub async fn download_comments_page(
         &self,
         id: JobId,
@@ -338,55 +338,37 @@ impl EmulebbCore {
         let token = job.token;
         let page = self
             .ed2k_transfers
-            .download_sources_after(token, after, limit)
+            .download_comments_after(token, after, limit)
             .await?;
-        let mut bytes = 4096usize + page.len() * std::mem::size_of::<crate::TransferComment>();
+        let mut bytes =
+            4096usize + page.comments.len() * std::mem::size_of::<crate::TransferComment>();
         let mut frontier = None;
         let mut consumed = 0;
-        for row in page.iter() {
-            let source = &row.source;
-            if !source.file_comment.is_empty() || source.file_rating > 0 {
-                let charge = source.file_comment.capacity()
-                    + source.ip.capacity() * 2
-                    + 64
-                    + job.display_name.len();
-                if bytes + charge > 1024 * 1024 {
-                    break;
-                }
-                bytes += charge;
+        for row in &page.comments {
+            let charge =
+                row.comment.capacity() + row.ip.capacity() * 2 + 64 + job.display_name.len();
+            if bytes + charge > 1024 * 1024 {
+                break;
             }
+            bytes += charge;
             frontier = Some(row.id);
             consumed += 1;
         }
         ensure!(
-            page.is_empty() || consumed > 0,
+            page.comments.is_empty() || consumed > 0,
             "comment exceeds projection allowance"
         );
-        let has_more = if consumed < page.len() {
-            true
-        } else if let Some(last) = frontier {
-            !self
-                .ed2k_transfers
-                .download_source_endpoints_after(token, last, 1)
-                .await?
-                .is_empty()
-        } else {
-            false
-        };
-        let projected = page.try_project(bytes, |rows| {
+        let has_more = consumed < page.comments.len() || page.has_more;
+        let projected = page.try_project(bytes, |page| {
             let mut comments = Vec::with_capacity(consumed);
-            for row in rows.into_iter().take(consumed) {
-                let source = row.source;
-                if source.file_comment.is_empty() && source.file_rating == 0 {
-                    continue;
-                }
-                let endpoint = format!("{}:{}", source.ip, source.tcp_port);
+            for row in page.comments.into_iter().take(consumed) {
+                let endpoint = format!("{}:{}", row.ip, row.tcp_port);
                 comments.push(crate::TransferComment {
-                    source: source.user_hash.unwrap_or_else(|| endpoint.clone()),
+                    source: row.user_hash.unwrap_or_else(|| endpoint.clone()),
                     user_name: Some(endpoint),
                     file_name: job.display_name.clone(),
-                    comment: source.file_comment,
-                    rating: source.file_rating,
+                    comment: row.comment,
+                    rating: row.rating,
                 });
             }
             Ok(DownloadCommentPage {
