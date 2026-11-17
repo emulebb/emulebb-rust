@@ -695,6 +695,7 @@ mod tests {
             })
             .await;
         let file_hash = Ed2kHash::from_bytes([0x91; 16]);
+        crate::ed2k_transfer::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
         let server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 8), 4661));
 
         let mut active_peer = low_id_waiter(false, None);

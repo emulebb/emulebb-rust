@@ -654,6 +654,7 @@ pub(crate) struct Ed2kUploadFirewallContext {
 #[derive(Debug)]
 pub(super) struct Ed2kUploadQueueState {
     config: Ed2kUploadQueueConfig,
+    shared_catalog: Option<std::sync::Weak<tokio::sync::RwLock<super::IndexedSharedCatalog>>>,
     sessions: HashMap<Ed2kUploadSessionKey, Ed2kUploadSessionEntry>,
     waiting_order: Vec<Ed2kUploadSessionKey>,
     /// Slots granted to waiters with no live connection, awaiting the
@@ -687,6 +688,7 @@ impl Ed2kUploadQueueState {
     pub(super) fn new(config: Ed2kUploadQueueConfig) -> Self {
         Self {
             config,
+            shared_catalog: None,
             sessions: HashMap::new(),
             waiting_order: Vec::new(),
             pending_promotions: Vec::new(),
@@ -699,6 +701,10 @@ impl Ed2kUploadQueueState {
             ban_store: None,
             aggregate_rate_meter: WindowedRateMeter::new(AGGREGATE_RATE_WINDOW),
         }
+    }
+
+    pub(super) fn set_shared_catalog(&mut self, catalog: &super::Ed2kSharedCatalog) {
+        self.shared_catalog = Some(Arc::downgrade(catalog));
     }
 
     /// Attach the shared ban store so a no-request repeat offender that crosses
@@ -2672,6 +2678,28 @@ impl Ed2kUploadQueueState {
         key: &Ed2kUploadSessionKey,
         allow_detached_low_id: bool,
     ) -> bool {
+        if let Some(catalog) = &self.shared_catalog {
+            let Some(catalog) = catalog.upgrade() else {
+                return false;
+            };
+            let Ok(catalog) = catalog.try_read() else {
+                return false;
+            };
+            let Ok(hash) = key.file_hash.parse::<emulebb_kad_proto::Ed2kHash>() else {
+                return false;
+            };
+            // WHY: promotion also runs outside maintenance. Borrow the current
+            // projection without blocking or retaining another eligibility set.
+            if !catalog
+                .entry_by_hash(&hash)
+                .is_some_and(|entry| entry.is_servable())
+                || catalog
+                    .eligibility()
+                    .is_some_and(|provider| provider.stripe_snapshot(&[hash.0]).is_none())
+            {
+                return false;
+            }
+        }
         let Some(session) = self.sessions.get(key) else {
             return false;
         };

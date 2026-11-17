@@ -108,3 +108,35 @@ pub(crate) fn admit_unallocated_job(
     let job = super::new_transfer_job(row.token, hash, row.display_name, size);
     (store, job)
 }
+
+/// Synthetic catalog membership for queue-algorithm fixtures. This grants no
+/// physical payload authority; protocol-serving fixtures use verified files.
+pub(crate) async fn seed_upload_queue_catalog(
+    runtime: &Ed2kTransferRuntime,
+    hashes: &[emulebb_kad_proto::Ed2kHash],
+) {
+    let mut catalog = runtime.shared_catalog.write().await;
+    for hash in hashes {
+        catalog.upsert_verified(
+            *hash,
+            Some(super::Ed2kSharedEntry {
+                file_hash: hash.to_string(),
+                display_name: "Sample Queue.bin".into(),
+                file_size: 1024,
+                verified_complete: true,
+                verified_ranges: Vec::new(),
+                compatibility_hint: false,
+                source_count_hint: None,
+                aich_root: None,
+                upload_priority: "normal".into(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+                media: Default::default(),
+                all_time_uploaded_bytes: 0,
+                complete_parts: Vec::new(),
+                publish: Default::default(),
+            }),
+        );
+    }
+}

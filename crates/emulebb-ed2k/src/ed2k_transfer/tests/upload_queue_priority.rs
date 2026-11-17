@@ -80,23 +80,22 @@ async fn upload_queue_refreshes_waiter_score_after_priority_change() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let active_file = Ed2kHash::from_bytes([0xD1; 16]);
-    let older_file = Ed2kHash::from_bytes([0xD2; 16]);
-    let boosted_file = Ed2kHash::from_bytes([0xD3; 16]);
-
-    for (file_hash, name) in [
-        (older_file, "Older.Priority.bin"),
-        (boosted_file, "Boosted.Priority.bin"),
+    let mut files = Vec::new();
+    for (name, bytes) in [
+        ("Older.Priority.bin", b"older verified upload".as_slice()),
+        (
+            "Boosted.Priority.bin",
+            b"boosted verified upload".as_slice(),
+        ),
     ] {
-        runtime
-            .ensure_job(&crate::ed2k_transfer::test_support::admit_download_job(
-                &runtime,
-                file_hash,
-                name.to_string(),
-                1024,
-            ))
-            .await
-            .unwrap();
+        let path = root.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let shared = runtime.ingest_local_file(&path, name).await.unwrap();
+        super::super::test_support::admit_local_share(&runtime, &root, &path).await;
+        files.push(shared.file_hash.parse::<Ed2kHash>().unwrap());
     }
+    let older_file = files[0];
+    let boosted_file = files[1];
 
     let now = Instant::now();
     let (_active_handle, active_status) = runtime

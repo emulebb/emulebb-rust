@@ -197,15 +197,26 @@ impl MetadataStore {
     }
 
     pub fn library_sharing_enabled(&self, hash: &str) -> Result<Option<bool>> {
+        self.with_library_sharing_policy(hash, Ok)
+    }
+
+    /// Publish a compact projection while holding the flag's SQLite mutex.
+    /// The callback must perform only short in-memory work, with no SQL or I/O.
+    pub fn with_library_sharing_policy<T>(
+        &self,
+        hash: &str,
+        publish: impl FnOnce(Option<bool>) -> Result<T>,
+    ) -> Result<T> {
         let hash = decode_fixed_hex(hash, 16, "ED2K hash")?;
-        self.connection()?
+        let conn = self.connection()?;
+        let enabled = conn
             .query_row(
                 "SELECT sharing_enabled FROM known_files WHERE ed2k_hash=?1",
                 [hash],
                 |row| row.get(0),
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        publish(enabled)
     }
 
     /// Set the hash policy; None means unknown content, Some(false) is unchanged.

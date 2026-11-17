@@ -598,7 +598,7 @@ fn ingest_job_snapshot_fences_absence_and_generation_after_real_fallback_abort()
     assert!(db.download_job_aich_identity(token).unwrap().is_none());
     let mut called = false;
     assert!(
-        db.publish_download_job_aich_identity(token, |_| {
+        db.publish_download_job_state(token, |_, _| {
             called = true;
             Ok(())
         })
@@ -606,7 +606,7 @@ fn ingest_job_snapshot_fences_absence_and_generation_after_real_fallback_abort()
     );
     assert!(!called);
     assert!(
-        db.publish_download_job_aich_identity(restarted, |_| Ok(()))
+        db.publish_download_job_state(restarted, |_, _| Ok(()))
             .is_ok()
     );
     assert_eq!(capture_jobs(&db, &content, None)[0].token, Some(restarted));

@@ -4398,7 +4398,7 @@ async fn publish_kad_due_shared_files(
         };
         let Some(allowed) = runtime
             .transfer_runtime
-            .admit_shared_hashes(&[file_hash.0], false)
+            .admit_shared_hashes(&[file_hash.0], source_candidate.completed)
             .await?
         else {
             continue;
@@ -5099,6 +5099,7 @@ struct KadPublishCandidateSets {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KadSourcePublishCandidate {
+    completed: bool,
     entry: MetadataTransferPublishEntry,
     keyword_terms: Option<Vec<String>>,
 }
@@ -5361,6 +5362,7 @@ fn compute_kad_publish_candidates(
             let ranked_pos = (source_cursor_start + offset) % source_item_count;
             let entry = source_refs[source_order[ranked_pos]];
             KadSourcePublishCandidate {
+                completed: entry.verified_complete,
                 entry: kad_publish_entry_from_shared_entry(entry),
                 keyword_terms: kad_keyword_publish_eligible(entry)
                     .then(|| significant_keyword_words_unique(&entry.display_name)),

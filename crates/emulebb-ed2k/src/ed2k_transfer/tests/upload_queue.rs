@@ -60,6 +60,7 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x32; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (_active_handle, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x24, 0x0A00_0024), &file_hash)
@@ -113,6 +114,7 @@ async fn upload_queue_opens_elastic_slot_after_sustained_underfill() {
         })
         .await;
     let file_hash = Ed2kHash::from_bytes([0x41; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
     let now = std::time::Instant::now();
 
     let (_active_handle, active_status) = runtime
@@ -461,6 +463,7 @@ async fn upload_queue_grants_immediately_then_promotes_waiter() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x5A; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (first_handle, first_status) = runtime
         .begin_upload_session(upload_peer(1, 0x11, 1), &file_hash)
@@ -497,6 +500,7 @@ async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
         })
         .await;
     let file_hash = Ed2kHash::from_bytes([0x5B; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
     let now = std::time::Instant::now();
 
     let (active_handle, active_status) = runtime
@@ -564,6 +568,7 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
         })
         .await;
     let file_hash = Ed2kHash::from_bytes([0x5C; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
     let now = std::time::Instant::now();
 
     let (active_handle, active_status) = runtime
@@ -807,6 +812,7 @@ async fn upload_queue_friend_slot_ranks_before_older_waiter() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0xD4; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active_handle, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
@@ -841,6 +847,7 @@ async fn upload_queue_connected_low_id_waiter_keeps_stock_rank() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0xE5; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active_handle, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x44, 0x0A00_0011), &file_hash)
@@ -878,6 +885,7 @@ async fn upload_queue_low_id_friend_slot_does_not_bypass_high_id_waiter() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0xF6; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active_handle, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x77, 0x0A00_0021), &file_hash)
@@ -1076,6 +1084,7 @@ async fn upload_queue_reask_reattaches_disconnected_waiter_without_wait_reset() 
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x7D; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
     let t0 = std::time::Instant::now() - std::time::Duration::from_secs(60);
 
     let (_active_handle, active_status) = runtime
@@ -1143,6 +1152,7 @@ async fn upload_queue_slot_grant_to_disconnected_waiter_queues_outbound_promotio
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x7E; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
     let t0 = std::time::Instant::now() - std::time::Duration::from_secs(20);
 
     let (active_handle, active_status) = runtime
@@ -1194,6 +1204,7 @@ async fn upload_queue_expired_promotion_revokes_its_lease_and_frees_the_slot() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x7F; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x31, 0x0A00_0031), &file_hash)
@@ -1227,6 +1238,7 @@ async fn upload_queue_connected_waiter_promotion_needs_no_outbound_connect() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x7F; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active_handle, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
@@ -1259,6 +1271,7 @@ async fn low_id_callback_intent_keeps_waiting_while_ready_peer_fills_base_slot()
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x80; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x41, 0x0A00_0041), &file_hash)
@@ -1354,6 +1367,7 @@ async fn low_id_callback_timeout_retains_missed_turn_for_reask() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x81; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x51, 0x0A00_0051), &file_hash)
@@ -1410,6 +1424,7 @@ async fn callback_claim_allows_only_one_temporary_overflow_slot() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x82; 16]);
+    super::super::test_support::seed_upload_queue_catalog(&runtime, &[file_hash]).await;
 
     let (active, active_status) = runtime
         .begin_upload_session(upload_peer(1, 0x61, 0x0A00_0061), &file_hash)
@@ -1630,4 +1645,42 @@ async fn unshared_purge_observes_catalog_mutation_after_cached_scan() {
     let snapshot = runtime.upload_queue_snapshot().await;
     assert_eq!(snapshot.len(), 1, "only the active slot holder remains");
     assert_eq!(snapshot[0].phase, Ed2kUploadSessionPhaseSnapshot::Granted);
+}
+
+#[tokio::test]
+async fn disabled_hash_waiter_is_not_promoted_when_an_active_slot_is_released() {
+    let root = unique_test_dir("sharing-waiter-selection");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let path = root.join("Sample Upload.bin");
+    std::fs::write(&path, b"verified queue selection content").unwrap();
+    let shared = runtime
+        .ingest_local_file(&path, "Sample Upload.bin")
+        .await
+        .unwrap();
+    super::super::test_support::admit_local_share(&runtime, &root, &path).await;
+    let hash = shared.file_hash.parse().unwrap();
+    let (active, status) = runtime
+        .begin_upload_session(upload_peer(1, 1, 0x0a000001), &hash)
+        .await;
+    assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+    let (waiter, status) = runtime
+        .begin_upload_session(upload_peer(2, 2, 0x0a000002), &hash)
+        .await;
+    assert_eq!(status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    runtime
+        .set_library_sharing_enabled(hash, false)
+        .await
+        .unwrap();
+    // No mutation-time sweep. A normal promotion path must consult current policy.
+    assert_eq!(
+        runtime.poll_upload_session(&waiter, false).await,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+    runtime.release_upload_session(&active).await;
+    assert_eq!(
+        runtime.poll_upload_session(&waiter, true).await,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+    runtime.drain_local_mutations().await.unwrap();
 }

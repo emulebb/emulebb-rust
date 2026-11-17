@@ -832,7 +832,18 @@ pub(super) async fn send_offer_files_advertisement(
             Some(batch) => catalog.admit_eligibility_batch(batch),
             None => catalog.admit_clean_epoch(epoch, &stripes),
         };
-        if !admitted {
+        if !admitted
+            || (checked.is_none()
+                && !encoded.entries.iter().all(|entry| {
+                    catalog
+                        .entry_by_hash(&emulebb_kad_proto::Ed2kHash::from_bytes(entry.0))
+                        .is_some_and(|current| {
+                            !current.compatibility_hint
+                                && current.is_servable()
+                                && current.verified_complete == entry.4
+                        })
+                }))
+        {
             return Ok(deferred_offer_files_stats(session, current_cursor));
         }
     }

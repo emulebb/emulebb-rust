@@ -333,17 +333,21 @@ impl super::MetadataStore {
         }
     }
 
-    /// Publish a bounded identity view under the existing SQLite mutex. The
+    /// Publish bounded identity and sharing state under the existing SQLite mutex. The
     /// captured token is rechecked here, never refreshed after network or I/O.
-    pub fn publish_download_job_aich_identity<T>(
+    pub fn publish_download_job_state<T>(
         &self,
         token: JobToken,
-        publish: impl FnOnce(MetadataTransferAichIdentity) -> Result<T>,
+        publish: impl FnOnce(MetadataTransferAichIdentity, bool) -> Result<T>,
     ) -> Result<T> {
         let conn = self.connection()?;
         let identity = read_download_job_aich_identity(&conn, token)?
             .ok_or_else(|| anyhow::anyhow!("stale or missing download job AICH identity"))?;
-        publish(identity)
+        let enabled = conn.query_row(
+            "SELECT k.sharing_enabled FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id WHERE j.id=?1",
+            [token.job_id.get()], |row| row.get(0),
+        )?;
+        publish(identity, enabled)
     }
 
     pub fn download_job_manifest(&self, id: JobId) -> Result<Option<MetadataTransferManifest>> {

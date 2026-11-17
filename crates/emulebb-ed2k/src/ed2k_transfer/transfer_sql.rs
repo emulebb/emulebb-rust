@@ -360,6 +360,9 @@ pub(super) fn completed_catalog_page_from_metadata_store(
     let has_more = cursor.is_some();
     let mut entries = Vec::with_capacity(candidates.len());
     for mut entry in candidates {
+        if metadata.library_sharing_enabled(&entry.file_hash)? != Some(true) {
+            continue;
+        }
         let Some(source) = super::duplicate::first_present_source(
             metadata.current_shared_files_by_hash(&entry.file_hash)?,
         ) else {

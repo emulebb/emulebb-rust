@@ -124,7 +124,10 @@ impl LocalMutationRegistry {
                         let page = metadata.download_payloads_after(after, limit)?;
                         let mut entries = Vec::with_capacity(page.entries.len());
                         for candidate in page.entries {
-                            if probe(&metadata, &candidate)? {
+                            if metadata.library_sharing_enabled(&candidate.catalog.file_hash)?
+                                == Some(true)
+                                && probe(&metadata, &candidate)?
+                            {
                                 entries.push(
                                     transfer::transfer_sql::shared_entry_from_catalog_entry(
                                         candidate.catalog,

@@ -149,6 +149,16 @@ pub(crate) struct Ed2kVerifiedRangeReader {
 }
 
 impl Ed2kVerifiedRangeReader {
+    fn matches_upload_source(&self, view: &super::Ed2kFileServingView) -> bool {
+        if view.completed {
+            self.incomplete_authority.is_none()
+        } else {
+            self.incomplete_authority
+                .as_ref()
+                .is_some_and(|authority| Some(authority.token) == view.job_token)
+        }
+    }
+
     pub(crate) async fn read_range(&mut self, start: u64, end: u64) -> Result<Option<Vec<u8>>> {
         self.read_range_with_read_ahead(start, end, UPLOAD_READ_AHEAD_BYTES)
             .await
@@ -870,16 +880,75 @@ impl Ed2kTransferRuntime {
         }
     }
 
+    /// Admit one payload request against a stable source and policy cut. The
+    /// returned reader remains usable for that request after later policy edits.
+    pub(crate) async fn admit_upload_reader(
+        &self,
+        hash: &Ed2kHash,
+        cached: Option<Ed2kVerifiedRangeReader>,
+    ) -> Result<Option<(super::Ed2kSharedEntry, Ed2kVerifiedRangeReader)>> {
+        let epoch = self.share_eligibility.epoch();
+        let Some(stripes) = self.share_eligibility.stripe_snapshot(&[hash.0]) else {
+            return Ok(None);
+        };
+        let Some(view) = self.local_serving_view(hash).await? else {
+            return Ok(None);
+        };
+        let entry = super::Ed2kSharedEntry::from_serving_view(&view);
+        if !entry.is_servable() {
+            return Ok(None);
+        }
+        let reader = match cached.filter(|reader| reader.matches_upload_source(&view)) {
+            Some(reader) => reader,
+            None => {
+                let partial = if view.completed { None } else { view.job_token };
+                if !view.completed && partial.is_none() {
+                    return Ok(None);
+                }
+                let Some(reader) = self
+                    .open_verified_range_reader_for_source(hash, partial)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                reader
+            }
+        };
+        let catalog = self.shared_catalog.read().await;
+        if !catalog.admit_revalidated_epoch(epoch, &stripes)
+            || !catalog.entry_by_hash(hash).is_some_and(|current| {
+                !current.compatibility_hint
+                    && current.is_servable()
+                    && current.verified_complete == view.completed
+            })
+        {
+            return Ok(None);
+        }
+        Ok(Some((entry, reader)))
+    }
+
     pub(crate) async fn open_verified_range_reader(
         &self,
         file_hash: &Ed2kHash,
     ) -> Result<Option<Ed2kVerifiedRangeReader>> {
+        self.open_verified_range_reader_for_source(file_hash, None)
+            .await
+    }
+
+    async fn open_verified_range_reader_for_source(
+        &self,
+        file_hash: &Ed2kHash,
+        partial_job: Option<emulebb_metadata::JobToken>,
+    ) -> Result<Option<Ed2kVerifiedRangeReader>> {
         let hash_hex = file_hash.to_string();
         let metadata = self.metadata.clone();
         let lookup_hash = hash_hex.clone();
-        let local =
+        let local = if partial_job.is_some() {
+            None
+        } else {
             tokio::task::spawn_blocking(move || metadata.active_local_file_by_hash(&lookup_hash))
-                .await??;
+                .await??
+        };
         // Read the manifest geometry (verified-range check + payload path) under
         // the per-file manifest lock, then drop it before touching the payload, so
         // the file open/seek/read does not hold the lock and serialize concurrent
@@ -903,7 +972,10 @@ impl Ed2kTransferRuntime {
                 None,
             )
         } else {
-            let Some(token) = self.resolve_protocol_job(&hash_hex).await? else {
+            let Some(token) = (match partial_job {
+                Some(token) => Some(token),
+                None => self.resolve_protocol_job(&hash_hex).await?,
+            }) else {
                 return Ok(None);
             };
             let _guard = self.lock_manifest(token).await;
@@ -926,6 +998,9 @@ impl Ed2kTransferRuntime {
             let Some(manifest) = self.load_manifest_optional_unlocked(token).await? else {
                 return Ok(None);
             };
+            if partial_job.is_some() && manifest.completed {
+                return Ok(None);
+            }
             match manifest.verified_ranges.is_empty() {
                 false => {
                     let (authority, incomplete_authority) = if manifest.completed {

@@ -3,6 +3,10 @@ use super::*;
 use crate::ed2k_transfer as transfer;
 use std::sync::atomic::Ordering;
 const WORKSPACE: usize = PUBLICATION_WORKSPACE + 768 * 1024;
+struct ContentMetadataOutcome {
+    accepted: bool,
+    sharing_change: Option<bool>,
+}
 impl LocalMutationRegistry {
     fn submit_content_metadata(
         &self,
@@ -11,7 +15,8 @@ impl LocalMutationRegistry {
         priority: Option<(&str, bool)>,
         comment: Option<(&str, u8)>,
         watch: Option<(u64, u64)>,
-    ) -> Result<oneshot::Receiver<Result<bool>>> {
+        sharing: Option<bool>,
+    ) -> Result<oneshot::Receiver<Result<ContentMetadataOutcome>>> {
         ensure!(
             priority.is_none_or(|v| v.0.len() <= 64) && comment.is_none_or(|v| v.0.len() <= 65_536),
             LocalMutationError::TooLarge
@@ -41,6 +46,17 @@ impl LocalMutationRegistry {
                 let _content =
                     transfer::store::scoped_lock(&locks, hash_text.clone()).blocking_lock_owned();
                 let _stripe = eligibility.begin_mutation(&[hash.0])?;
+                let sharing_change = sharing
+                    .map(|enabled| metadata.set_library_sharing_enabled(&hash_text, enabled))
+                    .transpose()?
+                    .flatten();
+                if sharing.is_some() && sharing_change.is_none() {
+                    return Ok(ContentMetadataOutcome {
+                        accepted: false,
+                        sharing_change: None,
+                    });
+                }
+                committed = sharing_change == Some(true);
                 let mutation = priority.is_some() || comment.is_some();
                 let observed = metadata.capture_local_ingest_jobs(&[hash_text.clone()])?[0].token;
                 let mut resident_write = if let Some(token) = observed.filter(|_| mutation) {
@@ -67,7 +83,7 @@ impl LocalMutationRegistry {
                 } else {
                     observed
                 };
-                committed = mutation;
+                committed |= mutation;
                 #[cfg(test)]
                 if let Some((reached, release)) = gate {
                     let _ = reached.send(());
@@ -114,7 +130,10 @@ impl LocalMutationRegistry {
                         job: None,
                     },
                 )?;
-                Ok(publication.watch_accepted())
+                Ok(ContentMetadataOutcome {
+                    accepted: publication.watch_accepted(),
+                    sharing_change,
+                })
             }));
             let (result, outcome) = match result {
                 Ok(Ok(accepted)) => (Ok(accepted), 0),
@@ -142,7 +161,7 @@ impl transfer::Ed2kTransferRuntime {
         priority: Option<(&str, bool)>,
         comment: Option<(&str, u8)>,
     ) -> Result<()> {
-        self.publish_content_command(hash, priority, comment, None)
+        self.publish_content_command(hash, priority, comment, None, None)
             .await
             .map(|_| ())
     }
@@ -151,8 +170,21 @@ impl transfer::Ed2kTransferRuntime {
         hash: emulebb_kad_proto::Ed2kHash,
         watch: (u64, u64),
     ) -> Result<bool> {
-        self.publish_content_command(hash, None, None, Some(watch))
+        self.publish_content_command(hash, None, None, Some(watch), None)
             .await
+            .map(|outcome| outcome.accepted)
+    }
+    /// Persist a complete-library hash policy and publish its current eligibility.
+    /// Admitted work retains ownership after caller disconnect. Unknown hashes
+    /// return None; Some(false) reports an explicitly unchanged durable value.
+    pub async fn set_library_sharing_enabled(
+        &self,
+        hash: emulebb_kad_proto::Ed2kHash,
+        enabled: bool,
+    ) -> Result<Option<bool>> {
+        self.publish_content_command(hash, None, None, None, Some(enabled))
+            .await
+            .map(|outcome| outcome.sharing_change)
     }
     async fn publish_content_command(
         &self,
@@ -160,12 +192,13 @@ impl transfer::Ed2kTransferRuntime {
         priority: Option<(&str, bool)>,
         comment: Option<(&str, u8)>,
         watch: Option<(u64, u64)>,
-    ) -> Result<bool> {
+        sharing: Option<bool>,
+    ) -> Result<ContentMetadataOutcome> {
         loop {
             let capacity_revision = self.local_mutations.capacity_revision();
             match self
                 .local_mutations
-                .submit_content_metadata(self, hash, priority, comment, watch)
+                .submit_content_metadata(self, hash, priority, comment, watch, sharing)
             {
                 Ok(receipt) => return receipt.await.map_err(|_| LocalMutationError::Unknown)?,
                 Err(error)
@@ -183,3 +216,6 @@ impl transfer::Ed2kTransferRuntime {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

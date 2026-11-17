@@ -585,6 +585,16 @@ impl Ed2kTransferRuntime {
     /// Return local serving metadata even when only part of the
     /// payload has been verified already.
     pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {
+        Ok(self
+            .local_serving_view(file_hash)
+            .await?
+            .map(|view| Ed2kSharedEntry::from_serving_view(&view)))
+    }
+
+    pub(super) async fn local_serving_view(
+        &self,
+        file_hash: &Ed2kHash,
+    ) -> Result<Option<super::Ed2kFileServingView>> {
         let hash_hex = file_hash.to_string();
         let token = self.resolve_protocol_job(&hash_hex).await?;
         let _guard = if let Some(token) = token {
@@ -592,10 +602,8 @@ impl Ed2kTransferRuntime {
         } else {
             None
         };
-        Ok(self
-            .load_serving_view_optional_unlocked(&hash_hex, token)
-            .await?
-            .map(|view| Ed2kSharedEntry::from_serving_view(&view)))
+        self.load_serving_view_optional_unlocked(&hash_hex, token)
+            .await
     }
 
     /// Like [`Self::local_entry`] but only returns an entry that may be served
