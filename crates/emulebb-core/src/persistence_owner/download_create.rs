@@ -100,7 +100,8 @@ pub(super) async fn process(
     }
     let _fence = command.runtime.lock_category_publication().await;
     let running = command.attempts.snapshot();
-    let verifying = command.runtime.verifying_downloads().await;
+    let mut verifying = command.runtime.verifying_downloads().await;
+    verifying.extend(command.attempts.verifications());
     let state = state.lock().await;
     let category = admitted
         .job

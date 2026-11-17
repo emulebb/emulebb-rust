@@ -675,6 +675,7 @@ impl PersistenceOwner {
             let mut active_category: Option<ActiveCategory> = None;
             let mut parked_categories = VecDeque::new();
             let mut receiver_closed = false;
+            let mut download_work = tokio::task::JoinSet::new();
             loop {
                 let mut request = if active_category.is_none() && !parked_categories.is_empty() {
                     parked_categories
@@ -682,6 +683,13 @@ impl PersistenceOwner {
                         .expect("nonempty category queue")
                 } else if let Some(active) = active_category.as_mut() {
                     tokio::select! {
+                        Some(outcome) = download_work.join_next(), if !download_work.is_empty() => {
+                            if download::finish(outcome).is_err() {
+                                failures = true;
+                                quota.lock().map_err(|_| PersistenceError::Worker)?.faulted = true;
+                            }
+                            continue;
+                        }
                         outcome = &mut active.completion => {
                             let active = active_category.take().expect("active category");
                             let result = match outcome {
@@ -709,14 +717,22 @@ impl PersistenceOwner {
                             }
                         }
                     }
-                } else if receiver_closed {
+                } else if receiver_closed && download_work.is_empty() {
                     break;
                 } else {
-                    match receiver.recv().await {
-                        Some(request) => request,
-                        None => {
-                            receiver_closed = true;
+                    tokio::select! {
+                        Some(outcome) = download_work.join_next(), if !download_work.is_empty() => {
+                            if download::finish(outcome).is_err() {
+                                failures = true;
+                                quota.lock().map_err(|_| PersistenceError::Worker)?.faulted = true;
+                            }
                             continue;
+                        }
+                        next = receiver.recv(), if !receiver_closed => {
+                            match next {
+                                Some(request) => request,
+                                None => { receiver_closed = true; continue; }
+                            }
                         }
                     }
                 };
@@ -726,6 +742,22 @@ impl PersistenceOwner {
                     "persistence request admitted to worker"
                 );
                 let faulted = quota.lock().map_err(|_| PersistenceError::Worker)?.faulted;
+                if !faulted
+                    && matches!(&request.command, Command::Downloads(command) if command.is_verification())
+                {
+                    #[cfg(test)]
+                    let gate = Arc::clone(&coordinator_gate);
+                    download_work.spawn(async move {
+                        let result = download::process(
+                            &mut request,
+                            #[cfg(test)]
+                            &gate,
+                        )
+                        .await;
+                        (request, result)
+                    });
+                    continue;
+                }
                 let mut category_continuation = None;
                 let result = if faulted {
                     Err(PersistenceError::CommitUnknown)

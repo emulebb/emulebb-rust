@@ -11,6 +11,41 @@ pub(super) struct DownloadCommand {
     context: DownloadControlContext,
 }
 
+impl DownloadCommand {
+    pub(super) fn is_verification(&self) -> bool {
+        matches!(self.action, DownloadAction::Verify)
+    }
+}
+
+/// Verification is still profile-owned and quota-bounded, but long filesystem
+/// reads must not block unrelated profile commands. Closing the owner drains it.
+pub(super) fn finish(
+    outcome: Result<(Request, Result<Response, PersistenceError>), tokio::task::JoinError>,
+) -> Result<(), PersistenceError> {
+    let (request, result) = outcome.map_err(|error| {
+        tracing::error!(%error, "owned download control task failed");
+        PersistenceError::Worker
+    })?;
+    let failed = matches!(
+        result,
+        Err(PersistenceError::Worker | PersistenceError::CommitUnknown)
+    );
+    let Request {
+        response,
+        permit,
+        released,
+        ..
+    } = request;
+    let _ = response.send(result);
+    drop(permit);
+    let _ = released.send(());
+    if failed {
+        Err(PersistenceError::Worker)
+    } else {
+        Ok(())
+    }
+}
+
 impl PersistenceOwner {
     pub(crate) async fn downloads(
         &self,

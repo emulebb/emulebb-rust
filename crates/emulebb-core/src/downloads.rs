@@ -99,14 +99,14 @@ pub(crate) fn observed_state(
     if attempt.is_some_and(|(token, cancelled)| *cancelled || *token != job.token) {
         return DownloadState::Stopping;
     }
+    if verifying.contains(&job.token) {
+        return DownloadState::Verifying;
+    }
     if job.intent == DownloadIntent::Stopped {
         return DownloadState::Stopped;
     }
     if job.expected_size_bytes.is_none() {
         return DownloadState::WaitingMetadata;
-    }
-    if verifying.contains(&job.token) {
-        return DownloadState::Verifying;
     }
     if job.payload_verified {
         return DownloadState::Delivering;
@@ -127,7 +127,8 @@ impl EmulebbCore {
         self.persistence_owner.check_coherent_state()?;
         let _fence = self.ed2k_transfers.lock_category_publication().await;
         let page = self.ed2k_transfers.query_download_jobs(query).await?;
-        let verifying = self.ed2k_transfers.verifying_downloads().await;
+        let mut verifying = self.ed2k_transfers.verifying_downloads().await;
+        verifying.extend(self.download_attempts.verifications());
         let running = self.download_attempts.snapshot();
         let state = self.state.lock().await;
         self.persistence_owner.check_coherent_state()?;

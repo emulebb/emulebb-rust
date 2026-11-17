@@ -63,7 +63,8 @@ impl EmulebbCore {
         let Some(detail) = self.ed2k_transfers.download_detail(id).await? else {
             return Ok(None);
         };
-        let verifying = self.ed2k_transfers.verifying_downloads().await;
+        let mut verifying = self.ed2k_transfers.verifying_downloads().await;
+        verifying.extend(self.download_attempts.verifications());
         let running = self.download_attempts.snapshot();
         let state = self.state.lock().await;
         self.persistence_owner.check_coherent_state()?;

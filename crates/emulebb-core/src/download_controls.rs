@@ -13,11 +13,12 @@ pub enum DownloadChange {
     NotFound,
 }
 
-/// Explicit execution controls. Verification has a separate native lifecycle.
+/// Explicit job controls. Verification preserves desired execution intent.
 #[derive(Debug, Clone, Copy)]
 pub enum DownloadAction {
     Start,
     Stop,
+    Verify,
     Remove { delete_data: bool },
 }
 
@@ -27,6 +28,8 @@ pub enum DownloadControlError {
     Completed,
     Unavailable,
     Failed,
+    OutputMissing,
+    OutputDamaged,
 }
 impl std::fmt::Display for DownloadControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,6 +37,8 @@ impl std::fmt::Display for DownloadControlError {
             Self::Completed => "a completed job cannot be started again",
             Self::Unavailable => "download control is temporarily unavailable",
             Self::Failed => "download control failed",
+            Self::OutputMissing => "completed output is missing",
+            Self::OutputDamaged => "completed output failed verification",
         })
     }
 }
@@ -98,6 +103,10 @@ impl EmulebbCore {
         self.control_download(id, DownloadAction::Stop).await
     }
 
+    pub async fn verify_download(&self, id: JobId) -> Result<DownloadChange> {
+        self.control_download(id, DownloadAction::Verify).await
+    }
+
     /// Physical retirement remains owned by the automatic cleanup journal.
     pub async fn remove_download(&self, id: JobId, delete_data: bool) -> Result<DownloadChange> {
         self.control_download(id, DownloadAction::Remove { delete_data })
@@ -149,6 +158,7 @@ impl DownloadControlContext {
         let result = match action {
             DownloadAction::Start => self.start(id).await,
             DownloadAction::Stop => self.stop(id).await,
+            DownloadAction::Verify => self.verify(id).await,
             DownloadAction::Remove { delete_data } => self.remove(id, delete_data).await,
         };
         let outcome = result.map_err(|error| {
@@ -206,6 +216,68 @@ impl DownloadControlContext {
         } else {
             DownloadChange::Unchanged
         })
+    }
+
+    async fn verify(&self, id: JobId) -> Result<DownloadChange> {
+        use crate::download_attempts::AdmissionDenied;
+        use emulebb_ed2k::ed2k_transfer::CompletedOutputVerification;
+        let Some(job) = self.runtime.download_job(id).await? else {
+            return Ok(DownloadChange::NotFound);
+        };
+        if job.removed_at_s.is_some() {
+            return Ok(DownloadChange::NotFound);
+        }
+        let guard = match self.attempts.try_verify(job.token, job.file_hash.parse()?) {
+            Ok(guard) => guard,
+            Err(AdmissionDenied::Duplicate) => return Ok(DownloadChange::Unchanged),
+            Err(AdmissionDenied::Busy) => return Err(DownloadControlError::Unavailable.into()),
+            Err(AdmissionDenied::Exhausted) => anyhow::bail!("download admission nonce exhausted"),
+        };
+        drop(job);
+        guard.wait_for_execution().await;
+        // A drained execution fences its callbacks with a new generation.
+        // Read the current job after that boundary; never reuse its old token.
+        let Some(job) = self.runtime.download_job(id).await? else {
+            return Ok(DownloadChange::NotFound);
+        };
+        if job.removed_at_s.is_some() {
+            return Ok(DownloadChange::NotFound);
+        }
+        guard.rebind(job.token);
+        let token = job.token;
+        if job.completed_at_s.is_some() {
+            drop(job);
+            return match self.runtime.verify_completed_output(token).await? {
+                None => Ok(DownloadChange::NotFound),
+                Some(CompletedOutputVerification::Verified) => Ok(DownloadChange::Changed),
+                Some(CompletedOutputVerification::Missing) => {
+                    Err(DownloadControlError::OutputMissing.into())
+                }
+                Some(CompletedOutputVerification::Damaged) => {
+                    Err(DownloadControlError::OutputDamaged.into())
+                }
+            };
+        }
+        if job.storage.is_none()
+            || job.internal_storage_retired
+            || job.expected_size_bytes.is_none()
+        {
+            return Ok(DownloadChange::Unchanged);
+        }
+        drop(job);
+        let checked = async {
+            self.runtime
+                .reopen_download_job_storage_for_verification(token)
+                .await?;
+            self.runtime.recheck_transfer(token).await
+        }
+        .await;
+        // Both success and failure retire this quiesced view. Otherwise a large
+        // explicit selection would leave stopped/faulted jobs resident forever.
+        let released = self.runtime.release_download_job_execution(token).await;
+        checked?;
+        released?;
+        Ok(DownloadChange::Changed)
     }
 
     async fn stop(&self, id: JobId) -> Result<DownloadChange> {
