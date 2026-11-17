@@ -132,7 +132,7 @@ fn project(conn: &Connection, hash: &str) -> Result<MetadataIngestProjection> {
         JOIN local_paths ON local_paths.id=local_file_instances.path_id
         JOIN temp.session_verified_local_paths v ON v.path_id=local_paths.id
             AND v.verified_fingerprint=local_file_instances.verified_fingerprint
-        WHERE known_files.ed2k_hash=?1
+        WHERE known_files.ed2k_hash=?1 AND known_files.sharing_enabled=1
         AND ",
             crate::local_catalog::unexcluded_identity_sql!("local_file_instances"),
             "

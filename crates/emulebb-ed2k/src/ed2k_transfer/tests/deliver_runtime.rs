@@ -2593,3 +2593,55 @@ async fn materialize_completed_payload_under_long_incoming_path() {
     );
     assert!(!long_path(&delivered).exists());
 }
+
+#[tokio::test]
+async fn sharing_policy_blocks_internal_payload_admission_without_revoking_physical_evidence() {
+    let root = unique_test_dir("sharing-payload-admission");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = ingest_completed(&runtime, &root, "Sample Payload.bin").await;
+    let hash: emulebb_kad_proto::Ed2kHash = job.file_hash.parse().unwrap();
+    let candidate = runtime
+        .metadata
+        .download_payload_candidate(&job.file_hash)
+        .unwrap()
+        .unwrap();
+    let before = runtime
+        .share_eligibility
+        .try_batch(&[hash.0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.complete, vec![true]);
+    drop(before);
+    runtime
+        .metadata
+        .set_library_sharing_enabled(&job.file_hash, false)
+        .unwrap();
+    let disabled = runtime
+        .share_eligibility
+        .try_batch(&[hash.0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(disabled.complete, vec![false]);
+    assert!(disabled.partial[0].is_none());
+    drop(disabled);
+    // A policy change is not a physical ownership or integrity change.
+    assert!(
+        runtime
+            .metadata
+            .download_payload_is_current(&candidate)
+            .unwrap()
+    );
+    runtime
+        .metadata
+        .set_library_sharing_enabled(&job.file_hash, true)
+        .unwrap();
+    let enabled = runtime
+        .share_eligibility
+        .try_batch(&[hash.0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(enabled.complete, vec![true]);
+}

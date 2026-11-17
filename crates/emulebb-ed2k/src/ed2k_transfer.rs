@@ -810,6 +810,7 @@ impl Ed2kTransferRuntime {
             Arc::new(crate::tracked_client_identity::TrackedClientIdentityStore::new());
         let mut upload_queue_state = Ed2kUploadQueueState::new(upload_queue_config);
         upload_queue_state.set_ban_store(Arc::clone(&ban_store));
+        upload_queue_state.set_shared_catalog(&shared_catalog);
         let runtime = Self {
             root_dir: root_dir.to_path_buf(),
             metadata,

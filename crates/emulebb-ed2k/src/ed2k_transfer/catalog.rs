@@ -297,6 +297,10 @@ impl SharedEligibility {
         }))
     }
 
+    pub(super) fn publication_is_faulted(&self) -> bool {
+        self.publication_failed.load(Ordering::Acquire)
+    }
+
     pub fn requires_revalidation(&self) -> bool {
         self.root_dirty.load(Ordering::Acquire) || self.publication_failed.load(Ordering::Acquire)
     }

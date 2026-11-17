@@ -114,6 +114,10 @@ impl ContentPublication {
     /// rechecked against its captured token, exclusion barrier and exact row.
     fn select(&self, text: &str, prepared: Option<PayloadProof>) -> Result<Selection> {
         let (local, mut partial) = self.metadata.shared_path_projection(text)?;
+        if self.metadata.library_sharing_enabled(text)? != Some(true) {
+            drop(prepared);
+            return Ok(Selection::Ready(self.partial(text, partial)?));
+        }
         if local {
             drop(prepared);
             drop(partial);

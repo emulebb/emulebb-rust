@@ -265,7 +265,7 @@ impl Ed2kTransferRuntime {
             .maintain(&shared_file_hashes, Instant::now());
     }
 
-    async fn servable_shared_file_hashes(
+    pub(super) async fn servable_shared_file_hashes(
         &self,
     ) -> std::sync::Arc<std::collections::HashSet<String>> {
         loop {

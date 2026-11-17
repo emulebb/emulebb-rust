@@ -104,7 +104,7 @@ impl LocalMutationRegistry {
                     // A content authority may have advanced after this decision's
                     // commit. Revalidate under the provider's existing short
                     // SQL/publication cut; never publish the earlier receipt.
-                    metadata.publish_download_job_aich_identity(token, |identity| {
+                    metadata.publish_download_job_state(token, |identity, _| {
                         if stored.identity.root != identity.root {
                             stored.hashes.clear();
                             stored.acquired = false;

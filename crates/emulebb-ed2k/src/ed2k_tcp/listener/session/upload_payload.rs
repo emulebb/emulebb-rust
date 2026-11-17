@@ -210,7 +210,11 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     // Serve a fully verified file or an in-progress partfile holding at least one
     // complete part; a range inside a not-yet-complete part is skipped below by
     // read_verified_range returning None (master serves only complete parts).
-    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
+    if transfer_runtime
+        .local_servable_entry(&requested)
+        .await?
+        .is_none()
+    {
         let reply = encode_file_req_ans_nofil(&requested);
         transport
             .write_all_diagnostic("listener", peer_addr, "request_parts_nofil", &reply)
@@ -224,7 +228,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             &request_diag,
         );
         return Ok(UploadPayloadOutcome::Continue { requested });
-    };
+    }
 
     let queue_decision = upload_queue
         .ensure_session_for_parts(
@@ -291,7 +295,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     };
     transfer_runtime.note_file_upload_accept(&requested).await;
     let verified_reader_open_start = Instant::now();
-    let Some(mut verified_reader) = upload_queue
+    let Some((shared, mut verified_reader)) = upload_queue
         .take_verified_reader(transfer_runtime, &requested)
         .await?
     else {

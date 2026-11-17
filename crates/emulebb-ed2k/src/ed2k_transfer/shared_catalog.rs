@@ -375,7 +375,27 @@ impl Ed2kTransferRuntime {
         let Some(stripes) = provider.stripe_snapshot(hashes) else {
             return Ok(None);
         };
-        if provider.requires_revalidation() {
+        if !provider.requires_revalidation() {
+            let catalog = self.shared_catalog.read().await;
+            let projected = hashes
+                .iter()
+                .map(|hash| {
+                    catalog
+                        .entry_by_hash(&Ed2kHash::from_bytes(*hash))
+                        .map(|entry| {
+                            !entry.compatibility_hint
+                                && entry.is_servable()
+                                && (!complete_only || entry.verified_complete)
+                        })
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(projected) = projected {
+                return Ok(catalog
+                    .admit_clean_epoch(epoch, &stripes)
+                    .then_some(projected));
+            }
+        }
+        {
             let mut allowed = Vec::with_capacity(hashes.len());
             let mut offset = 0;
             while offset < hashes.len() {
@@ -404,12 +424,6 @@ impl Ed2kTransferRuntime {
                 return Ok(None);
             }
             Ok(Some(allowed))
-        } else {
-            let catalog = self.shared_catalog.read().await;
-            if !catalog.admit_clean_epoch(epoch, &stripes) {
-                return Ok(None);
-            }
-            Ok(Some(vec![true; hashes.len()]))
         }
     }
 
@@ -716,6 +730,32 @@ impl Ed2kTransferRuntime {
             // A download may acquire verified parts while the same hash is already
             // shared as a complete local file. The local file owns the effective
             // protocol entry until its root membership is withdrawn.
+            let metadata = self.metadata.clone();
+            let text = manifest.file_hash.clone();
+            let enabled =
+                tokio::task::spawn_blocking(move || metadata.library_sharing_enabled(&text)).await;
+            let enabled = match enabled {
+                Ok(Ok(enabled)) => enabled == Some(true),
+                error => {
+                    tracing::warn!(?error, "failed to read complete-file sharing policy");
+                    return;
+                }
+            };
+            if !enabled {
+                if self
+                    .upsert_partial_catalog_entry(
+                        manifest,
+                        file_hash,
+                        refresh_missing_media,
+                        Some(root_epoch),
+                        enabled,
+                    )
+                    .await
+                {
+                    return;
+                }
+                continue;
+            }
             match self
                 .metadata
                 .active_local_catalog_entry(&manifest.file_hash)
@@ -736,6 +776,7 @@ impl Ed2kTransferRuntime {
                                 file_hash,
                                 refresh_missing_media,
                                 Some(root_epoch),
+                                enabled,
                             )
                             .await
                         {
@@ -750,13 +791,36 @@ impl Ed2kTransferRuntime {
                     }
                     match super::transfer_sql::shared_entry_from_catalog_entry(local) {
                         Ok(entry) => {
-                            let mut catalog = self.shared_catalog.write().await;
+                            let mut catalog = Arc::clone(&self.shared_catalog).write_owned().await;
                             if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
-                                drop(catalog);
                                 continue;
                             }
-                            catalog.upsert_verified(file_hash, Some(entry));
-                            self.note_shared_catalog_entries_changed();
+                            let metadata = self.metadata.clone();
+                            let text = manifest.file_hash.clone();
+                            let generation = Arc::clone(&self.shared_catalog_generation);
+                            let hashes = Arc::clone(&self.servable_shared_hash_cache);
+                            let published = tokio::task::spawn_blocking(move || {
+                                let mut hashes =
+                                    hashes.lock().expect("servable hash cache mutex poisoned");
+                                metadata.with_library_sharing_policy(&text, |enabled| {
+                                    if enabled != Some(true) {
+                                        return Ok(false);
+                                    }
+                                    catalog.upsert_verified(file_hash, Some(entry));
+                                    generation.fetch_add(1, Ordering::AcqRel);
+                                    hashes.hashes = None;
+                                    Ok(true)
+                                })
+                            })
+                            .await;
+                            match published {
+                                Ok(Ok(true)) => return,
+                                Ok(Ok(false)) => continue,
+                                error => tracing::warn!(
+                                    ?error,
+                                    "failed to publish complete sharing policy"
+                                ),
+                            }
                         }
                         Err(error) => {
                             tracing::warn!(%error, "failed to project local shared entry")
@@ -776,6 +840,7 @@ impl Ed2kTransferRuntime {
                     file_hash,
                     refresh_missing_media,
                     Some(root_epoch),
+                    enabled,
                 )
                 .await
             {
@@ -790,6 +855,7 @@ impl Ed2kTransferRuntime {
         file_hash: Ed2kHash,
         refresh_missing_media: bool,
         expected_root_epoch: Option<u64>,
+        expected_enabled: bool,
     ) -> bool {
         // Build the replacement entry (if any) before taking the write lock so the
         // lock hold covers only the in-place upsert.
@@ -858,19 +924,30 @@ impl Ed2kTransferRuntime {
         let hashes = Arc::clone(&self.servable_shared_hash_cache);
         let published = tokio::task::spawn_blocking(move || {
             let mut hashes = hashes.lock().expect("servable hash cache mutex poisoned");
-            metadata.publish_download_job_aich_identity(token, |identity| {
+            metadata.publish_download_job_state(token, |identity, enabled| {
+                if enabled != expected_enabled {
+                    return Ok(false);
+                }
+                if !enabled
+                    && new_entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.verified_complete)
+                {
+                    new_entry = None;
+                }
                 if let Some(entry) = new_entry.as_mut() {
                     entry.aich_root = identity.root;
                 }
                 entries.upsert_verified(file_hash, new_entry);
                 generation.fetch_add(1, Ordering::AcqRel);
                 hashes.hashes = None;
-                Ok(())
+                Ok(true)
             })
         })
         .await;
         match published {
-            Ok(Ok(())) => {}
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => return false,
             Ok(Err(error)) => tracing::warn!(%error, "failed to fence shared AICH identity"),
             Err(error) => tracing::warn!(%error, "shared AICH publication task panicked"),
         }

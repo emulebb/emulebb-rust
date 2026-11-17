@@ -125,6 +125,15 @@ mod discovery_fetch;
 mod disk_guard;
 mod download_attempts;
 mod download_controls;
+mod library_policy;
+pub use library_policy::LibraryReply;
+mod library_sharing;
+pub use library_sharing::{LibraryFileChange, LibrarySharingOutcome, LibrarySharingRequest};
+mod library_tags;
+pub use library_tags::{
+    LibraryTag, LibraryTagAssignment, LibraryTagChange, LibraryTagPage, LibraryTagRequest,
+    LibraryTagValue,
+};
 mod download_events;
 pub use download_events::{
     DownloadEvent, DownloadEventDiagnostics, DownloadEventResetReason, DownloadEventSubscription,
@@ -180,7 +189,7 @@ mod local_search_response;
 mod network_api;
 mod network_binding;
 mod persistence_owner;
-pub use emulebb_metadata::valid_category_name;
+pub use emulebb_metadata::{LibraryTagError, valid_category_name};
 pub use persistence_owner::CategoryNameConflict;
 mod physical_disk;
 mod profile_state;
@@ -4393,7 +4402,7 @@ async fn publish_kad_due_shared_files(
         };
         let Some(allowed) = runtime
             .transfer_runtime
-            .admit_shared_hashes(&[file_hash.0], false)
+            .admit_shared_hashes(&[file_hash.0], source_candidate.completed)
             .await?
         else {
             continue;
@@ -5094,6 +5103,7 @@ struct KadPublishCandidateSets {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KadSourcePublishCandidate {
+    completed: bool,
     entry: MetadataTransferPublishEntry,
     keyword_terms: Option<Vec<String>>,
 }
@@ -5356,6 +5366,7 @@ fn compute_kad_publish_candidates(
             let ranked_pos = (source_cursor_start + offset) % source_item_count;
             let entry = source_refs[source_order[ranked_pos]];
             KadSourcePublishCandidate {
+                completed: entry.verified_complete,
                 entry: kad_publish_entry_from_shared_entry(entry),
                 keyword_terms: kad_keyword_publish_eligible(entry)
                     .then(|| significant_keyword_words_unique(&entry.display_name)),

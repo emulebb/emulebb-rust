@@ -76,6 +76,24 @@ pub fn router_with_shutdown(
         .route("/api/v1/nat/operations/refresh", post(refresh_nat))
         .route("/api/v1/vpn-guard", get(vpn_guard))
         .route("/api/v1/vpn-guard/operations/probe", post(probe_vpn_guard))
+        .route(
+            "/api/v1/library/tags",
+            get(library_tags).post(create_library_tag),
+        )
+        .route(
+            "/api/v1/library/tags/{tagName}",
+            get(library_tag).delete(delete_library_tag),
+        )
+        .route("/api/v1/library/files/{hash}/tags", get(library_file_tags))
+        .route("/api/v1/library/files/sharing", post(set_library_sharing))
+        .route(
+            "/api/v1/library/files/tags/add",
+            post(add_library_file_tags),
+        )
+        .route(
+            "/api/v1/library/files/tags/remove",
+            post(remove_library_file_tags),
+        )
         .route("/api/v1/categories", get(categories).post(create_category))
         .route(
             "/api/v1/categories/{categoryName}",

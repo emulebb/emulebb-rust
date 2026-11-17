@@ -180,6 +180,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     ];
     const URL_IMPORT: &[&str] = &["url"];
     const KAD_BOOTSTRAP: &[&str] = &["address", "port"];
+    const LIBRARY_SHARING: &[&str] = &["enabled", "hashes"];
+    const LIBRARY_TAG_CREATE: &[&str] = &["name"];
+    const LIBRARY_TAG_ASSIGN: &[&str] = &["tag", "hashes"];
     const EMPTY: &[&str] = &[];
     #[cfg(feature = "packet-diagnostics")]
     const QUEUED_LOWID_SOURCE_FIXTURE: &[&str] = &[
@@ -223,6 +226,20 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         return Some(QUEUED_SOURCE_REASK_CONTROL);
     }
 
+    if method == "POST" && path == "/api/v1/library/files/sharing" {
+        return Some(LIBRARY_SHARING);
+    }
+    if method == "POST" && path == "/api/v1/library/tags" {
+        return Some(LIBRARY_TAG_CREATE);
+    }
+    if method == "POST"
+        && matches!(
+            path,
+            "/api/v1/library/files/tags/add" | "/api/v1/library/files/tags/remove"
+        )
+    {
+        return Some(LIBRARY_TAG_ASSIGN);
+    }
     if method == "POST" && path == "/api/v1/downloads" {
         return Some(DOWNLOAD_CREATE);
     }

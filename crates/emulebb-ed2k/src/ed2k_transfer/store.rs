@@ -261,6 +261,11 @@ impl Ed2kTransferRuntime {
         }
         let hash = file_hash.parse::<Ed2kHash>()?;
         let complete_only = view.as_ref().is_some_and(|value| value.completed);
+        // Metadata and callback ownership for an unfinished job do not require
+        // verified upload parts. Payload admission checks servability separately.
+        if !complete_only {
+            return Ok(view);
+        }
         let Some(allowed) = self.admit_shared_hashes(&[hash.0], complete_only).await? else {
             return Ok(None);
         };
@@ -353,7 +358,7 @@ impl Ed2kTransferRuntime {
                 let mut map = corroboration
                     .lock()
                     .expect("aich corroboration mutex poisoned");
-                metadata.publish_download_job_aich_identity(token, |identity| {
+                metadata.publish_download_job_state(token, |identity, _| {
                     manifest.write_with(resident_write, |manifest| {
                         manifest.category_id = category_id;
                         super::aich_trust::merge_persisted_identity(manifest, &identity)
