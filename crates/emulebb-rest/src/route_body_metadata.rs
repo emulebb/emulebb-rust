@@ -14,12 +14,10 @@ use validators::{
     validate_app_settings_patch_body_fields, validate_category_create_body_fields,
     validate_category_patch_body_fields, validate_destructive_confirmation_body_field,
     validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
-    validate_known_file_policy_body_field, validate_paused_body_field,
     validate_search_create_body_fields, validate_server_create_body_fields,
     validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
     validate_shared_directory_root_body_fields, validate_shared_file_ignore_pattern_body_fields,
     validate_shared_file_ignore_rule_body_fields, validate_shared_file_patch_body_fields,
-    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
     validate_url_import_body_fields,
 };
 
@@ -91,12 +89,6 @@ fn validate_route_specific_body_fields(
     path: &str,
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
-    if method == "POST" && path == "/api/v1/transfers" {
-        return validate_transfer_add_body_fields(object);
-    }
-    if method == "PATCH" && path_matches_transfer(path) {
-        return validate_transfer_patch_body_fields(object);
-    }
     if method == "PATCH" && path_matches_shared_file(path) {
         return validate_shared_file_patch_body_fields(object);
     }
@@ -141,10 +133,6 @@ fn validate_route_specific_body_fields(
     if method == "POST" && path == "/api/v1/kad/operations/bootstrap" {
         return validate_kad_bootstrap_body_fields(object);
     }
-    if uses_paused_body(method, path) {
-        validate_paused_body_field(object)?;
-        return validate_known_file_policy_body_field(object);
-    }
     if method == "POST" && path == "/api/v1/diagnostics/bundles" {
         return validate_destructive_confirmation_body(method, path, object);
     }
@@ -152,9 +140,11 @@ fn validate_route_specific_body_fields(
 }
 
 fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {
-    const TRANSFER_ADD: &[&str] = &["link", "links", "category", "paused", "knownFilePolicy"];
-    const TRANSFER_PATCH: &[&str] = &["displayName", "priority", "category"];
-    const SEARCH_RESULT_DOWNLOAD: &[&str] = &["category", "paused", "knownFilePolicy"];
+    const DOWNLOAD_CREATE: &[&str] = &["source", "category", "intent", "redownload"];
+    const DOWNLOAD_IDS: &[&str] = &["ids"];
+    const DOWNLOAD_REMOVE: &[&str] = &["ids", "deleteData"];
+    const DOWNLOAD_PATCH: &[&str] = &["name", "category", "sizeBytes"];
+    const SEARCH_RESULT_DOWNLOAD: &[&str] = &["category", "intent", "redownload"];
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
@@ -166,7 +156,6 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const APP_SETTINGS: &[&str] = &[
         "core", "daemon", "ed2k", "kad", "nat", "vpnGuard", "ipFilter",
     ];
-    const CONFIRM_CLEAR_COMPLETED: &[&str] = &["confirmClearCompleted"];
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static", "enabled"];
@@ -234,8 +223,19 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         return Some(QUEUED_SOURCE_REASK_CONTROL);
     }
 
-    if method == "POST" && path == "/api/v1/transfers" {
-        return Some(TRANSFER_ADD);
+    if method == "POST" && path == "/api/v1/downloads" {
+        return Some(DOWNLOAD_CREATE);
+    }
+    if method == "POST"
+        && matches!(
+            path,
+            "/api/v1/downloads/start" | "/api/v1/downloads/stop" | "/api/v1/downloads/verify"
+        )
+    {
+        return Some(DOWNLOAD_IDS);
+    }
+    if method == "POST" && path == "/api/v1/downloads/remove" {
+        return Some(DOWNLOAD_REMOVE);
     }
     if method == "PATCH" && path == "/api/v1/shared-directories" {
         return Some(SHARED_DIRECTORIES_PATCH);
@@ -257,9 +257,6 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "PATCH" && path == "/api/v1/app/settings" {
         return Some(APP_SETTINGS);
-    }
-    if method == "POST" && path == "/api/v1/transfers/operations/clear-completed" {
-        return Some(CONFIRM_CLEAR_COMPLETED);
     }
     if method == "POST" && path == "/api/v1/logs/operations/clear" {
         return Some(CONFIRM_CLEAR_LOGS);
@@ -293,7 +290,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     let segments = api_segments(path)?;
     match (method, segments.as_slice()) {
-        ("PATCH", ["transfers", _]) => Some(TRANSFER_PATCH),
+        ("PATCH", ["downloads", _]) => Some(DOWNLOAD_PATCH),
+        ("POST", ["downloads", _, "sources", _, "operations", _]) => Some(EMPTY),
         ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
         ("PATCH", ["shared-directories", "ignores", "defaults", _]) => {
             Some(SHARED_FILE_IGNORE_RULE)
@@ -305,10 +303,6 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         }
         _ => None,
     }
-}
-
-fn path_matches_transfer(path: &str) -> bool {
-    api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["transfers", _]))
 }
 
 fn path_matches_shared_file(path: &str) -> bool {
@@ -333,7 +327,7 @@ fn path_matches_category(path: &str) -> bool {
 }
 
 fn uses_category_selector_body(method: &str, path: &str) -> bool {
-    if method == "POST" && path == "/api/v1/transfers" {
+    if method == "POST" && path == "/api/v1/downloads" {
         return true;
     }
     let Some(segments) = api_segments(path) else {
@@ -341,23 +335,12 @@ fn uses_category_selector_body(method: &str, path: &str) -> bool {
     };
     matches!(
         (method, segments.as_slice()),
-        ("PATCH", ["transfers", _])
+        ("PATCH", ["downloads", _])
             | (
                 "POST",
                 ["searches", _, "results", _, "operations", "download"]
             )
     )
-}
-
-fn uses_paused_body(method: &str, path: &str) -> bool {
-    method == "POST"
-        && (path == "/api/v1/transfers"
-            || api_segments(path).is_some_and(|segments| {
-                matches!(
-                    segments.as_slice(),
-                    ["searches", _, "results", _, "operations", "download"]
-                )
-            }))
 }
 
 fn uses_url_import_body(method: &str, path: &str) -> bool {
@@ -393,10 +376,6 @@ fn destructive_confirmation_field(
         ("POST", "/api/v1/diagnostics/crash-tests") => {
             Some(("confirmCrash", "confirmCrash must be true"))
         }
-        ("POST", "/api/v1/transfers/operations/clear-completed") => Some((
-            "confirmClearCompleted",
-            "confirmClearCompleted must be true",
-        )),
         ("POST", "/api/v1/logs/operations/clear") => {
             Some(("confirmClearLogs", "confirmClearLogs must be true"))
         }

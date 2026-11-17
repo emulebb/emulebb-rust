@@ -47,7 +47,16 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             .into_response();
         }
         if name == "limit"
-            && let Err(error) = parse_bounded_query_value(value, 1, 1000, "limit")
+            && let Err(error) = parse_bounded_query_value(
+                value,
+                1,
+                if path == "/api/v1/downloads" || path.starts_with("/api/v1/downloads/") {
+                    200
+                } else {
+                    1000
+                },
+                "limit",
+            )
         {
             return query_scalar_error_response(error).into_response();
         }
@@ -63,14 +72,6 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
                 "category must be a valid category name",
             )
             .into_response();
-        }
-        if name == "state" && !is_transfer_state_name(value) {
-            return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_ARGUMENT",
-                    "state must be one of downloading, paused, queued, checking, completing, completed, insufficient, error, missingfiles",
-                )
-                .into_response();
         }
         if name == "sort" && !is_search_result_sort(value) {
             return api_error(
@@ -191,21 +192,6 @@ fn parse_query_fields(query: &str) -> Result<Vec<(String, String)>, Box<Response
     Ok(fields)
 }
 
-fn is_transfer_state_name(value: &str) -> bool {
-    matches!(
-        value,
-        "downloading"
-            | "paused"
-            | "queued"
-            | "checking"
-            | "completing"
-            | "completed"
-            | "insufficient"
-            | "error"
-            | "missingfiles"
-    )
-}
-
 fn is_search_result_sort(value: &str) -> bool {
     matches!(
         value,
@@ -262,19 +248,7 @@ fn validate_destructive_query_confirmation(
 }
 
 fn uses_destructive_query_confirmation(method: &str, path: &str) -> bool {
-    if method == "DELETE" && path == "/api/v1/searches" {
-        return true;
-    }
-    let Some(segments) = path
-        .strip_prefix("/api/v1/")
-        .map(|path| path.split('/').collect::<Vec<_>>())
-    else {
-        return false;
-    };
-    matches!(
-        (method, segments.as_slice()),
-        ("DELETE", ["transfers", _, "files"])
-    )
+    method == "DELETE" && path == "/api/v1/searches"
 }
 
 #[derive(Clone, Copy)]
@@ -357,18 +331,34 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         }
         ("GET" | "PATCH", ["shared-files", hash])
         | ("GET", ["shared-files", hash, "ed2k-link"])
-        | ("GET", ["shared-files", hash, "comments"])
-        | ("GET" | "PATCH" | "DELETE", ["transfers", hash])
-        | ("DELETE", ["transfers", hash, "files"])
-        | ("GET", ["transfers", hash, "details"])
-        | ("GET", ["transfers", hash, "comments"])
-        | ("GET", ["transfers", hash, "sources"])
-        | ("POST", ["transfers", hash, "operations", _]) => {
-            validate_lowercase_md4_hex(hash, "hash")?
+        | ("GET", ["shared-files", hash, "comments"]) => validate_lowercase_md4_hex(hash, "hash")?,
+        ("GET" | "PATCH", ["downloads", id])
+        | ("GET", ["downloads", id, "parts" | "sources" | "comments"]) => {
+            let id = decode_path_parameter(id, "id")?;
+            id.parse::<emulebb_core::JobId>().map_err(|_| {
+                Box::new(
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_ARGUMENT",
+                        "id must be a positive decimal i64 string",
+                    )
+                    .into_response(),
+                )
+            })?;
         }
-        ("GET", ["transfers", hash, "sources", client_id])
-        | ("POST", ["transfers", hash, "sources", client_id, "operations", _]) => {
-            validate_lowercase_md4_hex(hash, "hash")?;
+        ("GET", ["downloads", id, "sources", client_id])
+        | ("POST", ["downloads", id, "sources", client_id, "operations", _]) => {
+            let id = decode_path_parameter(id, "id")?;
+            id.parse::<emulebb_core::JobId>().map_err(|_| {
+                Box::new(
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_ARGUMENT",
+                        "id must be a positive decimal i64 string",
+                    )
+                    .into_response(),
+                )
+            })?;
             let client_id = decode_path_parameter(client_id, "clientId")?;
             validate_client_id_path_token(&client_id)?;
         }
@@ -532,11 +522,21 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const SNAPSHOT: &[&str] = &["limit"];
     const PAGE: &[&str] = &["offset", "limit"];
     const SHARED_FILES: &[&str] = &["limit", "cursor", "q", "priority"];
-    const TRANSFERS: &[&str] = &["state", "category", "offset", "limit"];
+    const DOWNLOADS: &[&str] = &["view", "category", "cursor", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
     const UPLOAD_QUEUE: &[&str] = &["offset", "limit", "includeScoreBreakdown"];
+
+    if matches!(
+        path,
+        "/api/v1/downloads/start"
+            | "/api/v1/downloads/stop"
+            | "/api/v1/downloads/verify"
+            | "/api/v1/downloads/remove"
+    ) {
+        return (method == "POST").then_some(NONE);
+    }
 
     #[cfg(feature = "packet-diagnostics")]
     if method == "POST"
@@ -594,8 +594,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("POST", "/api/v1/shared-directories/operations/reload")
         | ("GET", "/api/v1/uploads")
         | ("GET", "/api/v1/upload-queue")
-        | ("POST", "/api/v1/transfers")
-        | ("POST", "/api/v1/transfers/operations/clear-completed")
+        | ("POST", "/api/v1/downloads")
         | ("POST", "/api/v1/logs/operations/clear")
         | ("POST", "/api/v1/app/shutdown")
         | ("POST", "/api/v1/diagnostics/bundles")
@@ -606,7 +605,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
         ("GET", "/api/v1/shared-files") => Some(SHARED_FILES),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
-        ("GET", "/api/v1/transfers") => Some(TRANSFERS),
+        ("GET", "/api/v1/downloads") => Some(DOWNLOADS),
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),
         ("DELETE", "/api/v1/shared-directories/roots") => Some(SHARED_DIRECTORY_ROOT),
@@ -620,7 +619,6 @@ fn route_query_fields_for_parameterized(
     path: &str,
 ) -> Option<&'static [&'static str]> {
     const NONE: &[&str] = &[];
-    const CONFIRM: &[&str] = &["confirm"];
     const SEARCH: &[&str] = &[
         "offset",
         "limit",
@@ -648,34 +646,20 @@ fn route_query_fields_for_parameterized(
         | ("PATCH", ["shared-directories", "ignores", "defaults", _])
         | ("GET", ["shared-files", _, "ed2k-link"])
         | ("GET", ["shared-files", _, "comments"])
-        | ("GET", ["transfers", _])
-        | ("PATCH", ["transfers", _])
-        | ("DELETE", ["transfers", _])
-        | ("GET", ["transfers", _, "details"])
-        | ("GET", ["transfers", _, "comments"])
-        | ("GET", ["transfers", _, "sources"])
-        | ("GET", ["transfers", _, "sources", _])
+        | ("GET", ["downloads", _])
+        | ("PATCH", ["downloads", _])
+        | ("GET", ["downloads", _, "sources", _])
         | ("GET", ["uploads", _])
         | ("GET", ["upload-queue", _]) => Some(NONE),
         ("POST", ["nat", "operations", "refresh"])
         | ("POST", ["servers", _, "operations", "connect"])
         | ("POST", ["vpn-guard", "operations", "probe"])
         | ("POST", ["searches", _, "results", _, "operations", "download"]) => Some(NONE),
-        ("POST", ["transfers", _, "operations", operation])
-            if matches!(*operation, "pause" | "resume" | "stop" | "recheck") =>
-        {
-            Some(NONE)
-        }
-        ("POST", ["transfers", _, "sources", _, "operations", operation])
+        ("GET", ["downloads", _, "parts" | "comments" | "sources"]) => Some(&["cursor", "limit"]),
+        ("POST", ["downloads", _, "sources", _, "operations", operation])
             if matches!(
                 *operation,
-                "browse"
-                    | "add-friend"
-                    | "remove-friend"
-                    | "remove"
-                    | "ban"
-                    | "unban"
-                    | "release-slot"
+                "browse" | "add-friend" | "remove-friend" | "remove" | "ban" | "unban"
             ) =>
         {
             Some(NONE)
@@ -690,7 +674,6 @@ fn route_query_fields_for_parameterized(
             Some(NONE)
         }
         ("GET", ["searches", _]) => Some(SEARCH),
-        ("DELETE", ["transfers", _, "files"]) => Some(CONFIRM),
         _ => None,
     }
 }

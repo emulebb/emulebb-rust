@@ -12,13 +12,13 @@ use std::{
 use emulebb_core::{
     AppInfo, AppLifecycle, BUILD_ARCHITECTURE, BUILD_CHANNEL, BUILD_FLAVOR, BUILD_SOURCE_REVISION,
     LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus, Search, SearchResult,
-    SearchSpec, ServerInfo, SharedFileListItem, SharedFilePublishState, Status, Transfer,
-    TransferEventDiagnostics, TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus,
-    VpnGuardStatus, normal_path_display, normalize_ed2k_file_name,
+    SearchSpec, ServerInfo, SharedFileListItem, SharedFilePublishState, Status,
+    TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
+    normal_path_display, normalize_ed2k_file_name,
 };
 use serde_json::{Value, json};
 
-use crate::{BulkOperationResult, RestState, SearchResultsPage, SharedFileResponse};
+use crate::{RestState, SearchResultsPage, SharedFileResponse};
 
 pub(crate) const CONTRACT_VERSION: &str = "2.0.0";
 
@@ -184,24 +184,11 @@ async fn runtime_diagnostics_response_with(
         "diagnosticWriter": state.core.diagnostic_writer_health(),
         "ed2kPublish": state.core.ed2k_publish_diagnostics(),
         "kadPublish": state.core.kad_publish_diagnostics(),
-        "transferEvents": state.core.transfer_event_diagnostics(),
+        "downloadEvents": state.core.download_event_diagnostics(),
         "downloadFileCount": download_file_count,
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
         "geolocation": null
-    })
-}
-
-pub(crate) fn transfer_event_diagnostics_response(diagnostics: &TransferEventDiagnostics) -> Value {
-    json!({
-        "enabled": diagnostics.enabled,
-        "stream": diagnostics.stream,
-        "channelCapacity": diagnostics.channel_capacity,
-        "queuedEventCount": diagnostics.queued_event_count,
-        "subscriberCount": diagnostics.subscriber_count,
-        "latestEventId": diagnostics.latest_event_id,
-        "nextEventId": diagnostics.next_event_id,
-        "resumeBehavior": diagnostics.resume_behavior,
     })
 }
 
@@ -745,26 +732,6 @@ pub(crate) fn shared_file_directory(path: &str) -> String {
             .map(|directory| directory.display().to_string())
             .unwrap_or_default(),
     )
-}
-
-pub(crate) fn bulk_result_from_transfer(transfer: &Transfer) -> BulkOperationResult {
-    BulkOperationResult {
-        ok: true,
-        id: None,
-        hash: Some(transfer.hash.clone()),
-        name: Some(transfer.name.clone()),
-        error: None,
-    }
-}
-
-pub(crate) fn bulk_result_from_hash(hash: &str) -> BulkOperationResult {
-    BulkOperationResult {
-        ok: true,
-        id: None,
-        hash: Some(hash.to_string()),
-        name: None,
-        error: None,
-    }
 }
 
 #[cfg(test)]

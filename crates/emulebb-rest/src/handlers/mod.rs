@@ -18,6 +18,7 @@ pub(crate) mod prelude {
 
 pub(crate) mod app;
 pub(crate) mod categories;
+pub(crate) mod downloads;
 pub(crate) mod friends;
 pub(crate) mod ip_filter;
 pub(crate) mod kad;
@@ -26,7 +27,6 @@ pub(crate) mod persistence;
 pub(crate) mod searches;
 pub(crate) mod servers;
 pub(crate) mod shared_files;
-pub(crate) mod transfers;
 pub(crate) mod uploads;
 
 pub(crate) use app::{
@@ -36,6 +36,12 @@ pub(crate) use app::{
 };
 pub(crate) use categories::{
     categories, category, create_category, delete_category, update_category,
+};
+pub(crate) use downloads::{
+    create_download, download, download_comments, download_parts, download_remove, download_source,
+    download_source_add_friend, download_source_ban, download_source_browse,
+    download_source_remove, download_source_remove_friend, download_source_unban, download_sources,
+    download_start, download_stop, download_verify, downloads, update_download,
 };
 pub(crate) use friends::{create_friend, delete_friend, friends};
 pub(crate) use ip_filter::{ip_filter, reload_ip_filter};
@@ -55,13 +61,6 @@ pub(crate) use shared_files::{
     remove_shared_directory_root, remove_shared_file_ignore_pattern, shared_directories,
     shared_file, shared_file_comments, shared_file_ed2k_link, shared_file_ignores, shared_files,
     update_shared_directories, update_shared_file, update_shared_file_ignore_rule,
-};
-pub(crate) use transfers::{
-    clear_completed_transfers, create_transfer, transfer, transfer_comments, transfer_delete,
-    transfer_delete_files, transfer_details, transfer_pause, transfer_recheck, transfer_resume,
-    transfer_source, transfer_source_add_friend, transfer_source_ban, transfer_source_browse,
-    transfer_source_release_slot, transfer_source_remove, transfer_source_remove_friend,
-    transfer_source_unban, transfer_sources, transfer_stop, transfers, update_transfer,
 };
 pub(crate) use uploads::{
     upload, upload_add_friend, upload_ban, upload_queue, upload_queue_client, upload_release_slot,

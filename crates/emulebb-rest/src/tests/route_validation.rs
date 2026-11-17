@@ -50,12 +50,9 @@ async fn write_routes_use_canonical_json_error_envelope() {
             "PATCH",
             "/api/v1/shared-files/00112233445566778899aabbccddeeff",
         ),
-        ("POST", "/api/v1/transfers"),
-        ("POST", "/api/v1/transfers/operations/clear-completed"),
-        (
-            "PATCH",
-            "/api/v1/transfers/00112233445566778899aabbccddeeff",
-        ),
+        ("POST", "/api/v1/downloads"),
+        ("POST", "/api/v1/downloads/remove"),
+        ("PATCH", "/api/v1/downloads/1"),
         ("POST", "/api/v1/logs/operations/clear"),
     ];
     for (method, uri) in cases {
@@ -76,7 +73,7 @@ async fn malformed_json_uses_canonical_error_envelope() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from("{"))
@@ -95,7 +92,7 @@ async fn malformed_json_uses_canonical_error_envelope() {
 async fn json_body_must_be_an_object_for_canonical_contract() {
     let cases = [
         ("POST", "/api/v1/app/shutdown", "[]"),
-        ("POST", "/api/v1/transfers", "[]"),
+        ("POST", "/api/v1/downloads", "[]"),
         ("PATCH", "/api/v1/categories/Media", "\"name\""),
         ("POST", "/api/v1/kad/operations/start", "true"),
     ];
@@ -118,11 +115,11 @@ async fn json_body_requires_json_content_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "text/plain")
                 .body(Body::from(
-                    r#"{"links":["ed2k://|file|Alpha.bin|1|00112233445566778899aabbccddeeff|/"]}"#,
+                    r#"{"source":{"type":"ed2k-link","link":"ed2k://|file|Alpha.bin|1|00112233445566778899aabbccddeeff|/"}}"#,
                 ))
                 .unwrap(),
         )
@@ -141,10 +138,10 @@ async fn json_body_requires_json_content_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .body(Body::from(
-                    r#"{"links":["ed2k://|file|Gamma.bin|1|0123456789abcdeffedcba9876543210|/"]}"#,
+                    r#"{"source":{"type":"ed2k-link","link":"ed2k://|file|Gamma.bin|1|0123456789abcdeffedcba9876543210|/"}}"#,
                 ))
                 .unwrap(),
         )
@@ -156,7 +153,7 @@ async fn json_body_requires_json_content_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -177,17 +174,17 @@ async fn json_body_requires_json_content_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json; charset=utf-8")
                 .body(Body::from(
-                    r#"{"links":["ed2k://|file|Beta.bin|1|ffeeddccbbaa99887766554433221100|/"]}"#,
+                    r#"{"source":{"type":"ed2k-link","link":"ed2k://|file|Beta.bin|1|ffeeddccbbaa99887766554433221100|/"}}"#,
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(accepted.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -309,7 +306,7 @@ async fn query_routes_use_canonical_error_envelope() {
             "DELETE",
             "/api/v1/shared-directories/ignores?unsupportedQuery=true",
         ),
-        ("GET", "/api/v1/transfers?unsupportedQuery=true"),
+        ("GET", "/api/v1/downloads?unsupportedQuery=true"),
         ("GET", "/api/v1/upload-queue?unsupportedQuery=true"),
         ("GET", "/api/v1/logs?unsupportedQuery=true"),
         ("GET", "/api/v1/app?unsupportedQuery=true"),
@@ -324,10 +321,7 @@ async fn query_routes_use_canonical_error_envelope() {
             "/api/v1/vpn-guard/operations/probe?unsupportedQuery=true",
         ),
         ("POST", "/api/v1/kad/operations/start?unsupportedQuery=true"),
-        (
-            "DELETE",
-            "/api/v1/transfers/00112233445566778899aabbccddeeff/files?unsupportedQuery=true",
-        ),
+        ("DELETE", "/api/v1/searches/1?unsupportedQuery=true"),
     ];
     for (method, uri) in cases {
         assert_invalid_query_response(test_router(), method, uri).await;
@@ -413,9 +407,7 @@ async fn query_routes_use_canonical_error_envelope() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(
-                    "/api/v1/transfers/00112233445566778899aabbccddeeff/operations/unknown?unsupportedQuery=true",
-                )
+                .uri("/api/v1/downloads/1/unknown?unsupportedQuery=true")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -638,11 +630,11 @@ async fn method_not_allowed_sets_allow_header_and_error_envelope() {
 }
 
 #[tokio::test]
-async fn transfers_reject_unknown_state_query_values() {
+async fn downloads_reject_unknown_view_query_values() {
     let response = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/transfers?state=bogus")
+                .uri("/api/v1/downloads?view=bogus")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -655,13 +647,13 @@ async fn transfers_reject_unknown_state_query_values() {
     assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
     assert_eq!(
         value["error"]["message"],
-        "state must be one of downloading, paused, queued, checking, completing, completed, insufficient, error, missingfiles"
+        "view must be unfinished, completed or all"
     );
 
     let accepted = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/transfers?state=insufficient")
+                .uri("/api/v1/downloads?view=all")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),

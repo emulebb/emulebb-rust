@@ -114,9 +114,12 @@ pub(crate) async fn upload_remove(
             "upload client not found",
         )
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -132,9 +135,12 @@ pub(crate) async fn upload_release_slot(
             "upload client not found",
         )
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -179,9 +185,12 @@ pub(crate) async fn upload_ban(
             "upload client not found",
         )
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -197,9 +206,12 @@ pub(crate) async fn upload_unban(
             "upload client not found",
         )
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 

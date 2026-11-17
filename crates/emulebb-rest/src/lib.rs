@@ -69,6 +69,9 @@ mod route_body_category_validation_tests;
 #[path = "tests/route_body_validation.rs"]
 mod route_body_validation_tests;
 #[cfg(test)]
+#[path = "tests/route_downloads.rs"]
+mod route_downloads_tests;
+#[cfg(test)]
 #[path = "tests/route_entities.rs"]
 mod route_entities_tests;
 #[cfg(test)]
@@ -77,9 +80,6 @@ mod route_path_validation_tests;
 #[cfg(test)]
 #[path = "tests/route_query_validation.rs"]
 mod route_query_validation_tests;
-#[cfg(test)]
-#[path = "tests/route_transfers.rs"]
-mod route_transfers_tests;
 #[cfg(test)]
 #[path = "tests/route_validation.rs"]
 mod route_validation_tests;

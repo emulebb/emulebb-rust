@@ -166,53 +166,45 @@ pub fn router_with_shutdown(
             "/api/v1/searches/{searchId}/results/{hash}/operations/download",
             post(download_search_result),
         )
-        .route("/api/v1/transfers", get(transfers).post(create_transfer))
+        .route("/api/v1/downloads", get(downloads).post(create_download))
+        .route("/api/v1/downloads/start", post(download_start))
+        .route("/api/v1/downloads/stop", post(download_stop))
+        .route("/api/v1/downloads/verify", post(download_verify))
+        .route("/api/v1/downloads/remove", post(download_remove))
         .route(
-            "/api/v1/transfers/operations/clear-completed",
-            post(clear_completed_transfers),
+            "/api/v1/downloads/{id}",
+            get(download).patch(update_download),
+        )
+        .route("/api/v1/downloads/{id}/parts", get(download_parts))
+        .route("/api/v1/downloads/{id}/sources", get(download_sources))
+        .route("/api/v1/downloads/{id}/comments", get(download_comments))
+        .route(
+            "/api/v1/downloads/{id}/sources/{clientId}",
+            get(download_source),
         )
         .route(
-            "/api/v1/transfers/{hash}",
-            get(transfer).patch(update_transfer).delete(transfer_delete),
+            "/api/v1/downloads/{id}/sources/{clientId}/operations/browse",
+            post(download_source_browse),
         )
         .route(
-            "/api/v1/transfers/{hash}/files",
-            delete(transfer_delete_files),
-        )
-        .route("/api/v1/transfers/{hash}/details", get(transfer_details))
-        .route("/api/v1/transfers/{hash}/comments", get(transfer_comments))
-        .route("/api/v1/transfers/{hash}/sources", get(transfer_sources))
-        .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}",
-            get(transfer_source),
+            "/api/v1/downloads/{id}/sources/{clientId}/operations/add-friend",
+            post(download_source_add_friend),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}/operations/browse",
-            post(transfer_source_browse),
+            "/api/v1/downloads/{id}/sources/{clientId}/operations/remove-friend",
+            post(download_source_remove_friend),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}/operations/add-friend",
-            post(transfer_source_add_friend),
+            "/api/v1/downloads/{id}/sources/{clientId}/operations/remove",
+            post(download_source_remove),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}/operations/remove-friend",
-            post(transfer_source_remove_friend),
+            "/api/v1/downloads/{id}/sources/{clientId}/operations/ban",
+            post(download_source_ban),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}/operations/remove",
-            post(transfer_source_remove),
-        )
-        .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}/operations/ban",
-            post(transfer_source_ban),
-        )
-        .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}/operations/unban",
-            post(transfer_source_unban),
-        )
-        .route(
-            "/api/v1/transfers/{hash}/sources/{clientId}/operations/release-slot",
-            post(transfer_source_release_slot),
+            "/api/v1/downloads/{id}/sources/{clientId}/operations/unban",
+            post(download_source_unban),
         )
         .route("/api/v1/uploads", get(uploads))
         .route("/api/v1/uploads/{clientId}", get(upload))
@@ -265,22 +257,6 @@ pub fn router_with_shutdown(
         .route(
             "/api/v1/upload-queue/{clientId}/operations/unban",
             post(upload_unban),
-        )
-        .route(
-            "/api/v1/transfers/{hash}/operations/pause",
-            post(transfer_pause),
-        )
-        .route(
-            "/api/v1/transfers/{hash}/operations/resume",
-            post(transfer_resume),
-        )
-        .route(
-            "/api/v1/transfers/{hash}/operations/stop",
-            post(transfer_stop),
-        )
-        .route(
-            "/api/v1/transfers/{hash}/operations/recheck",
-            post(transfer_recheck),
         )
         .route("/api/v1/logs", get(logs))
         .route("/api/v1/logs/operations/clear", post(clear_logs))
