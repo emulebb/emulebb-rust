@@ -174,52 +174,98 @@ fn validate_source(source: &MetadataTransferSource) -> Result<()> {
     }
     Ok(())
 }
+fn source_bytes(source: &MetadataTransferSource) -> Result<usize> {
+    validate_source(source)?;
+    Ok(std::mem::size_of::<MetadataTransferSource>()
+        + source.ip.capacity()
+        + source.file_comment.capacity()
+        + source.user_hash.as_ref().map_or(0, String::capacity))
+}
+
+fn observation_bytes(value: &MetadataTransferFileNameObservation) -> Result<usize> {
+    ensure!(
+        !value.raw_name.trim().is_empty()
+            && !value.normalized_name.trim().is_empty()
+            && value.raw_name.len() <= 65_536
+            && value.normalized_name.len() <= 65_536
+            && value.client_software.len() <= 65_536
+            && value.origin.len() <= 64
+            && value
+                .server_endpoint
+                .as_ref()
+                .is_none_or(|v| v.len() <= 256)
+            && value.observed_at_s >= 0
+            && value.source_ip.is_some() == value.source_tcp_port.is_some(),
+        "filename observation exceeds bounded diagnostic fields"
+    );
+    if let Some(ip) = &value.source_ip {
+        ip.parse::<std::net::Ipv4Addr>()?;
+    }
+    if let Some(hash) = &value.user_hash {
+        crate::store::decode_fixed_hex(hash, 16, "source user hash")?;
+    }
+    Ok(std::mem::size_of::<MetadataTransferFileNameObservation>()
+        + value.raw_name.capacity()
+        + value.normalized_name.capacity()
+        + value.client_software.capacity()
+        + value.origin.capacity()
+        + value.source_ip.as_ref().map_or(0, String::capacity)
+        + value.user_hash.as_ref().map_or(0, String::capacity)
+        + value.server_endpoint.as_ref().map_or(0, String::capacity))
+}
+
+/// Source hints and diagnostic names committed with a newly admitted job.
+/// Duplicate admission never modifies the existing job's peer state.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataDownloadInitialPeers {
+    pub sources: Vec<MetadataTransferSource>,
+    pub observations: Vec<MetadataTransferFileNameObservation>,
+}
+impl MetadataDownloadInitialPeers {
+    /// Validate caller backing before the native owner clones the command.
+    pub fn payload_bytes(&self) -> Result<usize> {
+        let mut bytes = std::mem::size_of::<Self>()
+            + self.sources.capacity() * std::mem::size_of::<MetadataTransferSource>()
+            + self.observations.capacity()
+                * std::mem::size_of::<MetadataTransferFileNameObservation>();
+        for source in &self.sources {
+            bytes = bytes
+                .checked_add(source_bytes(source)?)
+                .ok_or_else(|| anyhow::anyhow!("initial peer size overflow"))?;
+        }
+        for observation in &self.observations {
+            bytes = bytes
+                .checked_add(observation_bytes(observation)?)
+                .ok_or_else(|| anyhow::anyhow!("initial peer size overflow"))?;
+        }
+        ensure!(
+            bytes <= 512 * 1024,
+            "initial peers exceed command allowance"
+        );
+        Ok(bytes)
+    }
+    pub(crate) fn insert(&self, conn: &Connection, token: JobToken) -> Result<()> {
+        for source in &self.sources {
+            upsert_source(conn, token, source, false)?;
+        }
+        for observation in &self.observations {
+            insert_observation(conn, token, observation)?;
+        }
+        Ok(())
+    }
+}
+
 impl MetadataDownloadPeerDelta {
     /// Validate before command cloning/admission. This is the owned text size,
     /// not a claim about SQLite's separate connection/page cache.
     pub fn payload_bytes(&self) -> Result<usize> {
-        let source_bytes = |source: &MetadataTransferSource| -> Result<usize> {
-            validate_source(source)?;
-            Ok(std::mem::size_of::<MetadataTransferSource>()
-                + source.ip.capacity()
-                + source.file_comment.capacity()
-                + source.user_hash.as_ref().map_or(0, String::capacity))
-        };
         Ok(match self {
             Self::Source { source, .. } => source_bytes(source)?,
             Self::ObserveName {
                 observation: value,
                 source,
             } => {
-                ensure!(
-                    !value.raw_name.trim().is_empty()
-                        && !value.normalized_name.trim().is_empty()
-                        && value.raw_name.len() <= 65_536
-                        && value.normalized_name.len() <= 65_536
-                        && value.client_software.len() <= 65_536
-                        && value.origin.len() <= 64
-                        && value
-                            .server_endpoint
-                            .as_ref()
-                            .is_none_or(|v| v.len() <= 256)
-                        && value.observed_at_s >= 0
-                        && value.source_ip.is_some() == value.source_tcp_port.is_some(),
-                    "filename observation exceeds bounded diagnostic fields"
-                );
-                if let Some(ip) = &value.source_ip {
-                    ip.parse::<std::net::Ipv4Addr>()?;
-                }
-                if let Some(hash) = &value.user_hash {
-                    crate::store::decode_fixed_hex(hash, 16, "source user hash")?;
-                }
-                std::mem::size_of::<MetadataTransferFileNameObservation>()
-                    + value.raw_name.capacity()
-                    + value.normalized_name.capacity()
-                    + value.client_software.capacity()
-                    + value.origin.capacity()
-                    + value.source_ip.as_ref().map_or(0, String::capacity)
-                    + value.user_hash.as_ref().map_or(0, String::capacity)
-                    + value.server_endpoint.as_ref().map_or(0, String::capacity)
+                observation_bytes(value)?
                     + source.as_ref().map(source_bytes).transpose()?.unwrap_or(0)
             }
             Self::RemoveSource { .. } => 128,
@@ -273,6 +319,28 @@ fn upsert_source(
         params![token.job_id, source.ip, source.tcp_port, hash, source.connect_options, source.file_comment, source.file_rating, now])? != 0)
 }
 
+fn insert_observation(
+    conn: &Connection,
+    token: JobToken,
+    value: &MetadataTransferFileNameObservation,
+) -> Result<()> {
+    let hash = value
+        .user_hash
+        .as_deref()
+        .map(|hash| crate::store::decode_fixed_hex(hash, 16, "source user hash"))
+        .transpose()?;
+    conn.execute("INSERT INTO download_job_file_name_observations(job_id,position,source_ip,source_tcp_port,user_hash,
+                    client_software,origin,server_endpoint,raw_name,normalized_name,observed_at_s)
+                    VALUES(?1,(SELECT coalesce(max(position)+1,0) FROM download_job_file_name_observations WHERE job_id=?1),?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    params![token.job_id,value.source_ip,value.source_tcp_port,hash,value.client_software,value.origin,
+                        value.server_endpoint,value.raw_name,value.normalized_name,value.observed_at_s])?;
+    // Diagnostic history keeps the existing latest 512-observation
+    // window in SQL; it is never an automatic name-selection policy.
+    conn.execute("DELETE FROM download_job_file_name_observations WHERE job_id=?1 AND id<(
+                    SELECT id FROM download_job_file_name_observations WHERE job_id=?1 ORDER BY id DESC LIMIT 1 OFFSET 511)", [token.job_id])?;
+    Ok(())
+}
+
 impl MetadataStore {
     pub fn apply_download_peer_delta(
         &self,
@@ -308,20 +376,7 @@ impl MetadataStore {
                 if let Some(source) = source {
                     upsert_source(&tx, token, source, false)?;
                 }
-                let hash = value
-                    .user_hash
-                    .as_deref()
-                    .map(|hash| crate::store::decode_fixed_hex(hash, 16, "source user hash"))
-                    .transpose()?;
-                tx.execute("INSERT INTO download_job_file_name_observations(job_id,position,source_ip,source_tcp_port,user_hash,
-                    client_software,origin,server_endpoint,raw_name,normalized_name,observed_at_s)
-                    VALUES(?1,(SELECT coalesce(max(position)+1,0) FROM download_job_file_name_observations WHERE job_id=?1),?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                    params![token.job_id,value.source_ip,value.source_tcp_port,hash,value.client_software,value.origin,
-                        value.server_endpoint,value.raw_name,value.normalized_name,value.observed_at_s])?;
-                // Diagnostic history keeps the existing latest 512-observation
-                // window in SQL; it is never an automatic name-selection policy.
-                tx.execute("DELETE FROM download_job_file_name_observations WHERE job_id=?1 AND id<(
-                    SELECT id FROM download_job_file_name_observations WHERE job_id=?1 ORDER BY id DESC LIMIT 1 OFFSET 511)", [token.job_id])?;
+                insert_observation(&tx, token, value)?;
                 true
             }
             MetadataDownloadPeerDelta::RemoveSource {

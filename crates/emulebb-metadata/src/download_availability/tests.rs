@@ -122,6 +122,7 @@ fn exact_cut_and_root_epoch_are_checked_inside_creating_transaction() {
         .execute("UPDATE download_job_counts SET unfinished=unfinished", [])
         .unwrap();
     let gate = DownloadAvailabilityAdmission {
+        initial_peers: &Default::default(),
         cut: &cut,
         availability: LocalContentAvailability::ConfirmedAbsent,
         redownload: false,
@@ -137,6 +138,7 @@ fn exact_cut_and_root_epoch_are_checked_inside_creating_transaction() {
     let cut = store.capture_download_availability().unwrap();
     epoch.store(2, Ordering::Release);
     let gate = DownloadAvailabilityAdmission {
+        initial_peers: &Default::default(),
         cut: &cut,
         availability: LocalContentAvailability::ConfirmedAbsent,
         redownload: false,
@@ -163,7 +165,9 @@ fn claims_and_active_duplicate_precede_local_choice() {
     let store = MetadataStore::in_memory().unwrap();
     let epoch = AtomicU64::new(0);
     let cut = store.capture_download_availability().unwrap();
+    let initial_peers = Default::default();
     let gate = || DownloadAvailabilityAdmission {
+        initial_peers: &initial_peers,
         cut: &cut,
         availability: LocalContentAvailability::Unavailable,
         redownload: false,
@@ -202,6 +206,7 @@ fn admission_refuses_a_held_metadata_connection_without_using_old_evidence() {
     let result = store.admit_available_download_job(
         &request(),
         DownloadAvailabilityAdmission {
+            initial_peers: &Default::default(),
             cut: &cut,
             availability: LocalContentAvailability::ConfirmedAbsent,
             redownload: false,
@@ -232,6 +237,7 @@ fn admission_refuses_external_writer_and_restores_normal_busy_policy() {
     let result = store.admit_available_download_job(
         &request(),
         DownloadAvailabilityAdmission {
+            initial_peers: &Default::default(),
             cut: &cut,
             availability: LocalContentAvailability::ConfirmedAbsent,
             redownload: false,
@@ -258,6 +264,7 @@ fn admission_refuses_external_writer_and_restores_normal_busy_policy() {
         .admit_available_download_job(
             &request(),
             DownloadAvailabilityAdmission {
+                initial_peers: &Default::default(),
                 cut: &cut,
                 availability: LocalContentAvailability::ConfirmedAbsent,
                 redownload: false,
@@ -308,4 +315,103 @@ fn availability_queries_use_content_keysets_without_temp_sort_or_history_scan() 
             "{details:?}"
         );
     }
+}
+
+#[test]
+fn initial_peers_are_atomic_for_stopped_jobs_and_duplicates_are_unchanged() {
+    use crate::{
+        DownloadIntent, MetadataDownloadInitialPeers, MetadataTransferFileNameObservation,
+        MetadataTransferSource,
+    };
+    let store = MetadataStore::in_memory().unwrap();
+    let epoch = std::sync::atomic::AtomicU64::new(0);
+    let peers = MetadataDownloadInitialPeers {
+        sources: vec![MetadataTransferSource {
+            ip: "192.0.2.1".into(),
+            tcp_port: 4662,
+            user_hash: None,
+            connect_options: None,
+            file_comment: String::new(),
+            file_rating: 0,
+        }],
+        observations: vec![MetadataTransferFileNameObservation {
+            source_ip: Some("192.0.2.1".into()),
+            source_tcp_port: Some(4662),
+            user_hash: None,
+            client_software: String::new(),
+            origin: "ed2k".into(),
+            server_endpoint: None,
+            raw_name: "sample.bin".into(),
+            normalized_name: "sample.bin".into(),
+            observed_at_s: 1,
+        }],
+    };
+    let mut input = request();
+    input.intent = DownloadIntent::Stopped;
+    // A failure in the final child write must roll back the entire admission.
+    store.connection().unwrap().execute_batch("CREATE TRIGGER fail_initial_name BEFORE INSERT ON download_job_file_name_observations BEGIN SELECT RAISE(ABORT,'test child failure'); END;").unwrap();
+    let admit = |cut: &crate::MetadataAvailabilityCut| {
+        store.admit_available_download_job(
+            &input,
+            DownloadAvailabilityAdmission {
+                cut,
+                availability: LocalContentAvailability::ConfirmedAbsent,
+                redownload: false,
+                aich_root: None,
+                initial_peers: &peers,
+                root_epoch: (&epoch, 0),
+            },
+        )
+    };
+    assert!(admit(&store.capture_download_availability().unwrap()).is_err());
+    for table in [
+        "download_jobs",
+        "download_job_sources",
+        "download_job_file_name_observations",
+        "known_files",
+    ] {
+        assert_eq!(
+            store
+                .connection()
+                .unwrap()
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_initial_name")
+        .unwrap();
+    let job = admit(&store.capture_download_availability().unwrap())
+        .unwrap()
+        .job;
+    assert_eq!(job.intent, DownloadIntent::Stopped);
+    let rows = store.download_job_sources_after(job.token, 0, 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source.ip, "192.0.2.1");
+    assert_eq!(rows[0].reported_file_names.len(), 1);
+    let duplicate = admit(&store.capture_download_availability().unwrap()).unwrap();
+    assert!(!duplicate.created);
+    assert_eq!(duplicate.job, job);
+    assert_eq!(
+        store.download_job_sources_after(job.token, 0, 10).unwrap()[0]
+            .reported_file_names
+            .len(),
+        1
+    );
+    // Initial admission authority must not authorize stopped network callbacks.
+    assert!(
+        store
+            .apply_download_peer_delta(
+                job.token,
+                &crate::MetadataDownloadPeerDelta::Source {
+                    source: peers.sources[0].clone(),
+                    description_only: false,
+                }
+            )
+            .is_err()
+    );
 }

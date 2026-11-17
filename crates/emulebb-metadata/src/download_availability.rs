@@ -75,6 +75,7 @@ pub struct DownloadAvailabilityAdmission<'a> {
     pub cut: &'a MetadataAvailabilityCut,
     pub availability: LocalContentAvailability,
     pub redownload: bool,
+    pub initial_peers: &'a crate::MetadataDownloadInitialPeers,
     pub aich_root: Option<&'a str>,
     pub root_epoch: (&'a std::sync::atomic::AtomicU64, u64),
 }

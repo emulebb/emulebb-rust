@@ -217,6 +217,9 @@ impl MetadataStore {
         request: &DownloadJobRequest,
         gate: Option<crate::DownloadAvailabilityAdmission<'_>>,
     ) -> Result<DownloadJobAdmission> {
+        if let Some(gate) = &gate {
+            gate.initial_peers.payload_bytes()?;
+        }
         let hash = decode_fixed_hex(&request.file_hash, 16, "ED2K hash")?;
         let aich = gate
             .as_ref()
@@ -339,6 +342,7 @@ impl MetadataStore {
         )?;
         let job = read_job(&tx, id)?.expect("inserted job");
         if let Some(gate) = &gate {
+            gate.initial_peers.insert(&tx, job.token)?;
             gate.check_root()?;
         }
         tx.commit()?;

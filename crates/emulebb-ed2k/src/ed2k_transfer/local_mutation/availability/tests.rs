@@ -45,13 +45,13 @@ async fn present_requires_choice_and_active_redownload_is_unchanged() {
     let (_root, runtime, _path, hash) = fixture().await;
     choice(
         runtime
-            .admit_download_job(&request(&hash), false, None)
+            .admit_download_job(&request(&hash), false, None, &Default::default())
             .await
             .unwrap_err(),
         Availability::Present,
     );
     let admitted = runtime
-        .admit_download_job(&request(&hash), true, None)
+        .admit_download_job(&request(&hash), true, None, &Default::default())
         .await
         .unwrap();
     assert!(admitted.created);
@@ -61,7 +61,7 @@ async fn present_requires_choice_and_active_redownload_is_unchanged() {
     changed.display_name = "different.bin".into();
     changed.intent = DownloadIntent::Stopped;
     let duplicate = runtime
-        .admit_download_job(&changed, true, None)
+        .admit_download_job(&changed, true, None, &Default::default())
         .await
         .unwrap();
     assert!(!duplicate.created);
@@ -70,14 +70,19 @@ async fn present_requires_choice_and_active_redownload_is_unchanged() {
     changed.expected_size_bytes = Some(9);
     assert!(
         runtime
-            .admit_download_job(&changed, true, None)
+            .admit_download_job(&changed, true, None, &Default::default())
             .await
             .unwrap_err()
             .is::<emulebb_metadata::MetadataContentConflict>()
     );
     assert!(
         runtime
-            .admit_download_job(&request(&hash), true, Some(&"11".repeat(20)))
+            .admit_download_job(
+                &request(&hash),
+                true,
+                Some(&"11".repeat(20)),
+                &Default::default()
+            )
             .await
             .unwrap_err()
             .is::<emulebb_metadata::MetadataContentConflict>()
@@ -90,7 +95,7 @@ async fn leaf_absence_admits_but_missing_root_and_changed_fingerprint_require_ch
     std::fs::write(&path, b"87654321").unwrap();
     choice(
         runtime
-            .admit_download_job(&request(&hash), false, None)
+            .admit_download_job(&request(&hash), false, None, &Default::default())
             .await
             .unwrap_err(),
         Availability::Unavailable,
@@ -101,14 +106,14 @@ async fn leaf_absence_admits_but_missing_root_and_changed_fingerprint_require_ch
     std::fs::rename(parent, &moved).unwrap();
     choice(
         runtime
-            .admit_download_job(&request(&hash), false, None)
+            .admit_download_job(&request(&hash), false, None, &Default::default())
             .await
             .unwrap_err(),
         Availability::Unavailable,
     );
     std::fs::rename(moved, parent).unwrap();
     let admitted = runtime
-        .admit_download_job(&request(&hash), false, None)
+        .admit_download_job(&request(&hash), false, None, &Default::default())
         .await
         .unwrap();
     assert!(admitted.created);
@@ -129,7 +134,7 @@ async fn offline_root_is_not_hidden_and_another_present_copy_wins() {
         .unwrap();
     choice(
         runtime
-            .admit_download_job(&request(&hash), false, None)
+            .admit_download_job(&request(&hash), false, None, &Default::default())
             .await
             .unwrap_err(),
         Availability::Unavailable,
@@ -161,7 +166,7 @@ async fn native_sharing_denial_is_unavailable() {
         .unwrap();
     choice(
         runtime
-            .admit_download_job(&request(&hash), false, None)
+            .admit_download_job(&request(&hash), false, None, &Default::default())
             .await
             .unwrap_err(),
         Availability::Unavailable,
@@ -182,14 +187,14 @@ async fn history_work_budget_does_not_become_absence() {
     }
     choice(
         runtime
-            .admit_download_job(&input, false, None)
+            .admit_download_job(&input, false, None, &Default::default())
             .await
             .unwrap_err(),
         Availability::Unavailable,
     );
     assert!(
         runtime
-            .admit_download_job(&input, true, None)
+            .admit_download_job(&input, true, None, &Default::default())
             .await
             .unwrap()
             .created
@@ -208,8 +213,11 @@ async fn content_or_root_change_after_probe_refuses_without_creating() {
         capacity.install_probe_gate(reached, gate);
         let worker = Arc::clone(&runtime);
         let input = request(&hash);
-        let task =
-            tokio::spawn(async move { worker.admit_download_job(&input, false, None).await });
+        let task = tokio::spawn(async move {
+            worker
+                .admit_download_job(&input, false, None, &Default::default())
+                .await
+        });
         ready.await.unwrap();
         if change_root {
             runtime
@@ -252,7 +260,7 @@ async fn cancelled_native_admission_and_drain_keep_probe_owned() {
     let worker = Arc::clone(&runtime);
     let caller = tokio::spawn(async move {
         worker
-            .admit_download_job(&request(&"45".repeat(16)), false, None)
+            .admit_download_job(&request(&"45".repeat(16)), false, None, &Default::default())
             .await
     });
     ready.await.unwrap();
@@ -289,7 +297,11 @@ async fn physical_reappearance_after_probe_does_not_admit_from_stale_absence() {
     capacity.install_probe_gate(reached, gate);
     let worker = Arc::clone(&runtime);
     let input = request(&hash);
-    let caller = tokio::spawn(async move { worker.admit_download_job(&input, false, None).await });
+    let caller = tokio::spawn(async move {
+        worker
+            .admit_download_job(&input, false, None, &Default::default())
+            .await
+    });
     ready.await.unwrap();
     // No SQLite/root epoch update accompanies this external filesystem change.
     std::fs::write(&path, b"87654321").unwrap();
@@ -320,7 +332,11 @@ async fn publication_capacity_contention_refuses_before_creating() {
     let worker = Arc::clone(&runtime);
     let hash = "46".repeat(16);
     let input = request(&hash);
-    let caller = tokio::spawn(async move { worker.admit_download_job(&input, false, None).await });
+    let caller = tokio::spawn(async move {
+        worker
+            .admit_download_job(&input, false, None, &Default::default())
+            .await
+    });
     ready.await.unwrap();
     let held = capacity.reserve(4 * 1024 * 1024, false, false).unwrap();
     let backing = vec![0u8; 4 * 1024 * 1024];
