@@ -35,9 +35,14 @@ pub(crate) fn initialize(conn: &Connection) -> Result<()> {
             })
             .collect::<Vec<_>>()
             .join(" UNION ");
+        let changed = if event == "UPDATE" {
+            "WHEN old.path_id IS NOT new.path_id OR old.verified_fingerprint IS NOT new.verified_fingerprint"
+        } else {
+            ""
+        };
         conn.execute_batch(&format!(
             "CREATE TEMP TRIGGER session_library_verified_{event}
-             AFTER {event} ON session_verified_local_paths
+             AFTER {event} ON session_verified_local_paths {changed}
              BEGIN INSERT OR IGNORE INTO session_library_pending {select}; END;"
         ))?;
     }

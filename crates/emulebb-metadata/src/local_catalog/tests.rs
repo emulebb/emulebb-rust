@@ -235,6 +235,7 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         conn.execute_batch(
             "CREATE TEMP TRIGGER protect_all_content BEFORE DELETE ON session_library_catalog
              BEGIN SELECT RAISE(ABORT,'policy rebuilt physical catalog'); END;
+             UPDATE temp.session_verified_local_paths SET verified_fingerprint=verified_fingerprint;
              UPDATE known_files SET sharing_enabled=0 WHERE id=2;
              INSERT INTO library_tags(name) VALUES('Batch');
              INSERT INTO known_file_tags SELECT 2,id FROM library_tags WHERE name='Batch';",
