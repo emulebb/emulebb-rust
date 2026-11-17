@@ -47,14 +47,15 @@ const snapshot = {
       },
       ed2kPublish: { phase: "published" },
       kadPublish: { phase: "waiting" },
-      transferEvents: {
+      downloadEvents: {
         enabled: true,
         stream: "sse",
+        epoch: "00000000-0000-4000-8000-000000000001",
         channelCapacity: 1024,
-        queuedEventCount: 1,
+        queuedEventCount: 0,
         subscriberCount: 1,
-        latestEventId: 1,
-        nextEventId: 2,
+        latestEventId: 0,
+        nextEventId: 1,
         resumeBehavior: "reset"
       }
     },
@@ -70,17 +71,7 @@ const snapshot = {
       serverCount: 1
     }
   },
-  transfers: [
-    {
-      hash: transferHash,
-      displayName: "Sample Transfer.bin",
-      state: "downloading",
-      sizeBytes: 4096,
-      completedBytes: 1024,
-      downloadRateBytesPerSec: 2048,
-      category: "Sample-Category"
-    }
-  ],
+  downloads: { unfinished: 1, completed: 0 },
   searches: [],
   servers: [{ endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, auxiliaryPorts: [4662, 4663] }],
   kad: { enabled: true, connected: true, firewalled: false },
@@ -123,6 +114,11 @@ const secondSharedFile = {
   path: "F:\\Sample\\Second Shared Sample.bin"
 };
 
+export function mockDownloadFixture() {
+  return [{ id: "1", hash: transferHash.toLowerCase(), name: "Sample Transfer.bin", state: "downloading" as const,
+    intent: "started" as const, progress: 0.25, sizeBytes: 4096, category: "Sample-Category", createdAt: 1, updatedAt: 1, completedAt: null }];
+}
+
 /** Fresh mutable dashboard state for stateful browser workflow tests. */
 export function mockSnapshotFixture(): typeof snapshot {
   return structuredClone(snapshot);
@@ -151,6 +147,17 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       return;
     }
 
+    if (request.method() === "GET" && (path === "downloads" || /^downloads\/1\/(sources|parts|comments)$/.test(path))) {
+      const data = path === "downloads"
+        ? url.searchParams.get("view") === "completed" ? [] : mockDownloadFixture()
+        : path.endsWith("sources") ? [{ clientId: "192.0.2.40:4662", userName: "Sample Peer", downloadState: "downloading", downloadRateBytesPerSecond: 2048, reportedFileNames: [], reportedFileNamesHasMore: false }] : [];
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data, meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } }) });
+      return;
+    }
+    if (request.method() === "POST" && /^downloads\/(start|stop|verify|remove)$/.test(path)) {
+      await route.fulfill({ status: 207, contentType: "application/json", body: JSON.stringify({ data: request.postDataJSON().ids.map((id: string) => ({ id, status: "accepted", httpStatus: 202 })) }) });
+      return;
+    }
     const data = request.method() === "GET" && path === "shared-files"
       ? url.searchParams.has("cursor")
         ? { items: [secondSharedFile], total: 2, nextCursor: null }
@@ -164,8 +171,8 @@ export function installMockApi(requests: RecordedApiRequest[]) {
         contentType: "text/event-stream",
         body: [
           "event: sync.reset",
-          "id: 1",
-          'data: {"id":1,"type":"sync.reset","reason":"last-event-id","lastEventId":"0"}',
+          "id: 00000000-0000-4000-8000-000000000001:0",
+          'data: {"id":0,"epoch":"00000000-0000-4000-8000-000000000001","type":"sync.reset","reason":"initial"}',
           "",
           ""
         ].join("\n")
@@ -214,7 +221,7 @@ function dataFor(method: string, path: string): unknown {
     case "events":
       return eventStream;
     case "events/status":
-      return snapshot.status.runtimeDiagnostics.transferEvents;
+      return snapshot.status.runtimeDiagnostics.downloadEvents;
     case "snapshot":
       return snapshot;
     case "searches":
@@ -677,16 +684,14 @@ function dataFor(method: string, path: string): unknown {
         name: "eMuleBB",
         version: "0.1.0-beta.2",
         apiVersion: "v1",
-        capabilities: { transfers: true, "transfers.sse": true, "transfers.sse.status": true }
+        capabilities: { downloads: true, "downloads.sse": true, "downloads.sse.status": true }
       };
     case "capabilities":
-      return { contractVersion: "2.0.0", apiVersion: "v1", capabilities: ["transfers", "transfers.sse", "transfers.sse.status"] };
+      return { contractVersion: "2.0.0", apiVersion: "v1", capabilities: ["downloads", "downloads.sse", "downloads.sse.status"] };
     case "diagnostics":
       return snapshot.status.runtimeDiagnostics;
-    case `transfers/${transferHash}/details`:
-      return { hash: transferHash, displayName: "Sample Transfer.bin" };
-    case `transfers/${transferHash}/sources`:
-      return { items: [{ clientId: "sample-peer", userName: "Sample Peer", state: "downloading" }] };
+    case "downloads/1":
+      return { ...mockDownloadFixture()[0], payloadVerified: false, delivery: { path: null, state: "pending", ownership: "none" }, failure: null };
     default:
       return undefined;
   }

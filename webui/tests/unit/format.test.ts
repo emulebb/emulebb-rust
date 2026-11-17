@@ -31,15 +31,14 @@ describe("format helpers", () => {
   });
 
   it("prefers explicit progress and clamps it", () => {
-    expect(formatProgress({ hash: "hash", progress: 1 })).toBe("100.0%");
-    expect(formatProgress({ hash: "hash", progress: 0.3829 })).toBe("38.3%");
-    expect(formatProgress({ hash: "hash", progress: 123 })).toBe("100.0%");
-    expect(formatProgress({ hash: "hash", progress: -4 })).toBe("0.0%");
+    expect(formatProgress({ progress: 1 })).toBe("100.0%");
+    expect(formatProgress({ progress: 0.3829 })).toBe("38.3%");
+    expect(formatProgress({ progress: 123 })).toBe("100.0%");
+    expect(formatProgress({ progress: -4 })).toBe("0.0%");
   });
 
-  it("derives progress from completed bytes when needed", () => {
-    expect(formatProgress({ hash: "hash", sizeBytes: 1000, completedBytes: 499 })).toBe("50%");
-    expect(formatProgress({ hash: "hash", sizeBytes: 0, completedBytes: 499 })).toBe("0%");
+  it("shows unknown progress without inventing a size", () => {
+    expect(formatProgress({ progress: null })).toBe("Unknown");
   });
 
   it("normalizes lifecycle values", () => {

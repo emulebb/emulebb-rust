@@ -11,22 +11,6 @@ export type ApiError = {
   };
 };
 
-export type KnownFilePolicy = "reject" | "redownload";
-
-export type DownloadConflictEvidence = {
-  hash: string;
-  kind: "activeTransfer" | "presentLocalFile" | "previouslyCompleted" | "identityMismatch" | "requestDuplicate";
-  requestedName: string;
-  requestedSizeBytes: number;
-  recordedName: string;
-  recordedSizeBytes: number;
-  transferState: string | null;
-  currentPaths: string[];
-  firstCompletedAtMs: number | null;
-  lastCompletedAtMs: number | null;
-  redownloadAllowed: boolean;
-};
-
 export class RestError extends Error {
   constructor(
     message: string,
@@ -37,17 +21,6 @@ export class RestError extends Error {
     super(message);
     this.name = "RestError";
   }
-}
-
-export function downloadConflicts(error: unknown): DownloadConflictEvidence[] | null {
-  if (!(error instanceof RestError) || error.code !== "DOWNLOAD_CONFLICT" || !isRecord(error.details)) {
-    return null;
-  }
-  const conflicts = error.details.conflicts;
-  if (!Array.isArray(conflicts) || conflicts.length === 0 || !conflicts.every(isDownloadConflictEvidence)) {
-    return null;
-  }
-  return conflicts;
 }
 
 export type Page<T> = {
@@ -121,7 +94,7 @@ export type RuntimeDiagnostics = {
   sharedDirectoryReloadProgress?: SharedDirectoryReloadProgress;
   ed2kPublish?: Record<string, unknown>;
   kadPublish?: Record<string, unknown>;
-  transferEvents?: TransferEventRuntimeDiagnostics;
+  downloadEvents?: DownloadEventRuntimeDiagnostics;
   downloadFileCount?: number;
   activeUploads?: number;
   waitingUploads?: number;
@@ -136,9 +109,10 @@ export type ProcessResources = {
   cpuSampleIntervalMs: number | null;
 };
 
-export type TransferEventRuntimeDiagnostics = {
+export type DownloadEventRuntimeDiagnostics = {
   enabled?: boolean;
   stream?: string;
+  epoch?: string;
   channelCapacity?: number;
   queuedEventCount?: number;
   subscriberCount?: number;
@@ -148,83 +122,54 @@ export type TransferEventRuntimeDiagnostics = {
   [key: string]: unknown;
 };
 
-export type Transfer = {
+export type DownloadSummary = {
+  id: string;
   hash: string;
-  displayName?: string;
-  nameConsensus?: TransferNameConsensus;
-  path?: string;
-  deliveredPath?: string | null;
-  deliveryError?: string | null;
-  state?: string;
-  sizeBytes?: number;
-  completedBytes?: number;
-  progress?: number;
-  downloadRateBytesPerSec?: number;
-  uploadRateBytesPerSec?: number;
-  downloadSpeedKiBps?: number;
-  uploadSpeedKiBps?: number;
-  priority?: string;
-  category?: string | null;
-  sources?: number;
-  sourcesTransferring?: number;
-  stopped?: boolean;
-  ed2kLink?: string;
-  [key: string]: unknown;
+  name: string;
+  sizeBytes: number | null;
+  progress: number | null;
+  intent: "started" | "stopped";
+  state: "queued" | "waiting-metadata" | "downloading" | "stopping" | "stopped" | "verifying" | "delivering" | "completed" | "removing" | "failed";
+  category: string | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
 };
 
-export type TransferNameConsensus = {
-  selectedName: string;
-  pinned: boolean;
-  followMajority: boolean;
-  observationCount: number;
-  candidates: Array<{
-    normalizedName: string;
-    votes: number;
-    rawNames: string[];
-  }>;
+export type DownloadDetail = DownloadSummary & {
+  payloadVerified: boolean;
+  delivery: { path: string | null; state: "pending" | "delivered"; ownership: "none" | "owned" | "unowned" } | null;
+  failure: { code: string; message: string; failedAt: number } | null;
 };
 
-export type TransferAddedEvent = {
+export type CursorPage<T> = {
+  data: T[];
+  meta: { apiVersion: string; nextCursor: string | null; hasMore: boolean };
+};
+
+export type DownloadBatchItem = {
+  id: string;
+  status: "accepted" | "unchanged" | "failed";
+  httpStatus: number;
+  error?: { code: string; message: string; details: unknown };
+};
+
+export type DownloadEvent = {
   id: number;
-  type: "transfer.added";
-  transfer: Transfer;
-  [key: string]: unknown;
-};
+  epoch: string;
+} & (
+  | { type: "download.changed" | "download.removed"; downloadId: string }
+  | { type: "sync.reset"; reason: "initial" | "reconnect" | "lagged" | "epoch-changed"; missed?: number }
+);
 
-export type TransferUpdatedEvent = {
-  id: number;
-  type: "transfer.updated";
-  transfer: Transfer;
-  [key: string]: unknown;
-};
-
-export type TransferRemovedEvent = {
-  id: number;
-  type: "transfer.removed";
-  hash: string;
-  [key: string]: unknown;
-};
-
-export type SyncResetEvent = {
-  id: number;
-  type: "sync.reset";
-  reason: "lagged" | "last-event-id";
-  missed?: number;
-  lastEventId?: string;
-  [key: string]: unknown;
-};
-
-export type TransferEvent = TransferAddedEvent | TransferUpdatedEvent | TransferRemovedEvent | SyncResetEvent;
-
-export type TransferSource = {
+export type DownloadSource = {
   clientId?: string;
   userName?: string;
   userHash?: string | null;
-  state?: string;
+  downloadState?: string;
   address?: string;
   port?: number;
-  downloadRateBytesPerSec?: number;
-  downloadSpeedKiBps?: number;
+  downloadRateBytesPerSecond?: number;
   requestedFileName?: string | null;
   clientSoftware?: string;
   reportedFileNames?: Array<{
@@ -232,8 +177,9 @@ export type TransferSource = {
     normalizedName: string;
     origin: string;
     serverEndpoint?: string | null;
-    observedAt: string;
+    observedAt: number;
   }>;
+  reportedFileNamesHasMore?: boolean;
   banned?: boolean;
   friend?: boolean;
   lowId?: boolean;
@@ -953,7 +899,7 @@ export type Snapshot = {
   app?: AppInfo;
   status?: Status;
   stats?: Stats;
-  transfers?: Transfer[];
+  downloads?: { unfinished: number; completed: number };
   servers?: ServerItem[];
   kad?: KadStatus;
   uploads?: Upload[];
@@ -969,7 +915,7 @@ export type RestClientOptions = {
   fetch?: typeof fetch;
 };
 
-export type StreamTransferEventsOptions = {
+export type StreamDownloadEventsOptions = {
   signal?: AbortSignal;
   lastEventId?: string;
 };
@@ -996,6 +942,25 @@ export class RestClient {
     return this.request<T>("GET", path);
   }
 
+  /** Read the current bounded data array together with its opaque continuation. */
+  async getPage<T>(path: string): Promise<CursorPage<T>> {
+    return this.request<CursorPage<T>>("GET", path, undefined, "json");
+  }
+
+  async controlDownloads(action: "start" | "stop" | "verify", ids: string[]): Promise<DownloadBatchItem[]>;
+  async controlDownloads(action: "remove", ids: string[], deleteData: boolean): Promise<DownloadBatchItem[]>;
+  async controlDownloads(action: "start" | "stop" | "verify" | "remove", ids: string[], deleteData?: boolean): Promise<DownloadBatchItem[]> {
+    const items = await this.post<DownloadBatchItem[]>(`downloads/${action}`,
+      action === "remove" ? { ids, deleteData } : { ids });
+    const failed = items.filter((item) => item.status === "failed");
+    if (failed.length) {
+      const first = failed[0];
+      throw new RestError(failed.map((item) => `${item.id}: ${item.error?.message ?? "Operation failed"}`).join("; "),
+        first.httpStatus, first.error?.code, items);
+    }
+    return items;
+  }
+
   async post<T>(path: string, body: unknown = {}): Promise<T> {
     return this.request<T>("POST", path, body);
   }
@@ -1019,9 +984,9 @@ export class RestClient {
     return this.request<T>("DELETE", path, body);
   }
 
-  async streamTransferEvents(
-    onEvent: (event: TransferEvent) => void,
-    options: StreamTransferEventsOptions = {}
+  async streamDownloadEvents(
+    onEvent: (event: DownloadEvent, cursor?: string) => void,
+    options: StreamDownloadEventsOptions = {}
   ): Promise<void> {
     const headers: Record<string, string> = { Accept: "text/event-stream" };
     if (this.apiKey) {
@@ -1048,7 +1013,7 @@ export class RestClient {
     if (!response.body) {
       throw new Error(`GET ${requestPath} returned no stream body`);
     }
-    await readTransferEventStream(response.body, onEvent, options.signal);
+    await readDownloadEventStream(response.body, onEvent, options.signal);
   }
 
   private async request<T>(method: string, path: string, body?: unknown, responseKind: "envelope" | "json" = "envelope"): Promise<T> {
@@ -1077,31 +1042,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isDownloadConflictEvidence(value: unknown): value is DownloadConflictEvidence {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return typeof value.hash === "string"
-    && typeof value.kind === "string"
-    && typeof value.requestedName === "string"
-    && typeof value.requestedSizeBytes === "number"
-    && typeof value.recordedName === "string"
-    && typeof value.recordedSizeBytes === "number"
-    && (typeof value.transferState === "string" || value.transferState === null)
-    && Array.isArray(value.currentPaths)
-    && value.currentPaths.every((path) => typeof path === "string")
-    && (typeof value.firstCompletedAtMs === "number" || value.firstCompletedAtMs === null)
-    && (typeof value.lastCompletedAtMs === "number" || value.lastCompletedAtMs === null)
-    && typeof value.redownloadAllowed === "boolean";
-}
-
 function normalizeBasePath(basePath: string): string {
   return basePath.replace(/\/+$/, "");
 }
 
-async function readTransferEventStream(
+async function readDownloadEventStream(
   body: ReadableStream<Uint8Array>,
-  onEvent: (event: TransferEvent) => void,
+  onEvent: (event: DownloadEvent, cursor?: string) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const reader = body.getReader();
@@ -1118,6 +1065,9 @@ async function readTransferEventStream(
       }
       buffer += decoder.decode(value, { stream: true });
       buffer = drainSseFrames(buffer, onEvent);
+      if (buffer.length > 65_536) {
+        throw new Error("Download event frame exceeds the stream buffer limit");
+      }
     }
     buffer += decoder.decode();
     drainSseFrames(`${buffer}\n\n`, onEvent);
@@ -1126,7 +1076,7 @@ async function readTransferEventStream(
   }
 }
 
-function drainSseFrames(buffer: string, onEvent: (event: TransferEvent) => void): string {
+function drainSseFrames(buffer: string, onEvent: (event: DownloadEvent, cursor?: string) => void): string {
   for (;;) {
     const separator = sseFrameSeparator(buffer);
     if (separator === undefined) {
@@ -1134,9 +1084,9 @@ function drainSseFrames(buffer: string, onEvent: (event: TransferEvent) => void)
     }
     const frame = buffer.slice(0, separator.index);
     buffer = buffer.slice(separator.index + separator.length);
-    const event = parseTransferEventFrame(frame);
+    const event = parseDownloadEventFrame(frame);
     if (event) {
-      onEvent(event);
+      onEvent(event.event, event.cursor);
     }
   }
 }
@@ -1153,7 +1103,7 @@ function sseFrameSeparator(buffer: string): { index: number; length: number } | 
   return { index: crlf, length: 4 };
 }
 
-function parseTransferEventFrame(frame: string): TransferEvent | undefined {
+function parseDownloadEventFrame(frame: string): { event: DownloadEvent; cursor?: string } | undefined {
   const data = frame
     .split(/\r?\n/)
     .filter((line) => line.startsWith("data:"))
@@ -1162,7 +1112,13 @@ function parseTransferEventFrame(frame: string): TransferEvent | undefined {
   if (!data) {
     return undefined;
   }
-  return JSON.parse(data) as TransferEvent;
+  // Preserve the server's opaque SSE cursor verbatim. Rebuilding it from the
+  // JSON numeric revision loses precision above JavaScript's safe integer range.
+  const cursor = frame.split(/\r?\n/)
+    .filter((line) => line.startsWith("id:"))
+    .map((line) => line.slice(3).replace(/^ /, ""))
+    .at(-1);
+  return { event: JSON.parse(data) as DownloadEvent, cursor };
 }
 
 function parseApiEnvelope<T>(
