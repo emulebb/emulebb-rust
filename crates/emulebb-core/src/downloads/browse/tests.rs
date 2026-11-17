@@ -34,6 +34,8 @@ async fn detail_matches_summary_and_exposes_bounded_storage_failure_without_reco
     assert_eq!(detail.delivery.ownership, DownloadDeliveryOwnership::None);
     let value = serde_json::to_value(&*detail).unwrap();
     assert_eq!(value["delivery"]["ownership"], "none");
+    assert_eq!(value["delivery"]["state"], "pending");
+    assert_eq!(value["payloadVerified"], false);
     assert!(value["failure"].is_null());
     assert!(value.get("parts").is_none() && value.get("sources").is_none());
     drop(detail);

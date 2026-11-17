@@ -6,6 +6,7 @@ use super::*;
 pub struct DownloadDetail {
     #[serde(flatten)]
     pub summary: DownloadSummary,
+    pub payload_verified: bool,
     pub delivery: DownloadDelivery,
     pub failure: Option<DownloadFailure>,
 }
@@ -15,8 +16,16 @@ mod tests;
 
 #[derive(Debug, Serialize)]
 pub struct DownloadDelivery {
+    pub state: DownloadDeliveryState,
     pub path: Option<String>,
     pub ownership: DownloadDeliveryOwnership,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DownloadDeliveryState {
+    Pending,
+    Delivered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -110,7 +119,16 @@ impl EmulebbCore {
                     DownloadDeliveryOwnership::Unowned
                 }
             };
+            let delivery_state = match detail.job.delivery_state {
+                emulebb_metadata::MetadataTransferDeliveryState::Pending => {
+                    DownloadDeliveryState::Pending
+                }
+                emulebb_metadata::MetadataTransferDeliveryState::Delivered => {
+                    DownloadDeliveryState::Delivered
+                }
+            };
             Ok(DownloadDetail {
+                payload_verified: detail.job.payload_verified,
                 summary: summary_from_job(
                     detail.job,
                     category.map(|value| value.name.as_str()),
@@ -118,6 +136,7 @@ impl EmulebbCore {
                     &verifying,
                 ),
                 delivery: DownloadDelivery {
+                    state: delivery_state,
                     path: detail
                         .delivered_path
                         .as_ref()

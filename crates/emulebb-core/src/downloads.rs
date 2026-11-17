@@ -7,8 +7,8 @@ use serde::Serialize;
 
 mod browse;
 pub use browse::{
-    DownloadDelivery, DownloadDeliveryOwnership, DownloadDetail, DownloadFailure, DownloadPart,
-    DownloadPartPage,
+    DownloadDelivery, DownloadDeliveryOwnership, DownloadDeliveryState, DownloadDetail,
+    DownloadFailure, DownloadPart, DownloadPartPage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
