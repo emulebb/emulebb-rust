@@ -183,21 +183,12 @@ impl EmulebbCore {
             + category.map_or(0, |category| category.name.len());
         let projected = admitted.try_project(bytes, |admitted| {
             let job = admitted.job;
-            let observed = crate::downloads::observed_state(&job, &running, &verifying);
-            let progress = job.progress();
-            Ok(DownloadSummary {
-                id: job.token.job_id,
-                hash: job.file_hash,
-                name: job.display_name,
-                size_bytes: job.expected_size_bytes,
-                progress,
-                intent: job.intent,
-                state: observed,
-                category: category.map(|category| category.name.clone()),
-                created_at: job.created_at_s,
-                updated_at: job.updated_at_s,
-                completed_at: job.completed_at_s,
-            })
+            Ok(crate::downloads::summary_from_job(
+                job,
+                category.map(|value| value.name.as_str()),
+                &running,
+                &verifying,
+            ))
         })?;
         Ok((created, projected))
     }

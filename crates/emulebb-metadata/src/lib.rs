@@ -21,7 +21,11 @@ mod download_job_query;
 pub use download_job_query::{
     DownloadJobCounts, DownloadJobPage, DownloadJobQuery, DownloadJobView,
 };
+mod download_browse_store;
 mod download_job_store;
+pub use download_browse_store::{
+    MetadataDownloadDetail, MetadataDownloadPart, MetadataDownloadPartPage,
+};
 mod download_payload_store;
 mod download_peer_store;
 pub use download_payload_store::{MetadataDownloadPayload, MetadataDownloadPayloadPage};

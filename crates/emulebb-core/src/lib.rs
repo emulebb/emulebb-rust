@@ -137,7 +137,9 @@ pub use download_controls::{
 mod downloads;
 use download_attempts::DownloadAttemptControl;
 pub use downloads::{
-    DownloadCommentPage, DownloadPage, DownloadSourcePage, DownloadState, DownloadSummary,
+    DownloadCommentPage, DownloadDelivery, DownloadDeliveryOwnership, DownloadDetail,
+    DownloadFailure, DownloadPage, DownloadPart, DownloadPartPage, DownloadSourcePage,
+    DownloadState, DownloadSummary,
 };
 mod download_source_registry;
 mod download_task_supervisor;

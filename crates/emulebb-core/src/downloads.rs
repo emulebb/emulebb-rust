@@ -5,6 +5,12 @@ use emulebb_ed2k::ed2k_transfer::RetainedRead;
 use emulebb_metadata::{DownloadIntent, DownloadJobQuery, DownloadJobRecord, JobId, JobToken};
 use serde::Serialize;
 
+mod browse;
+pub use browse::{
+    DownloadDelivery, DownloadDeliveryOwnership, DownloadDetail, DownloadFailure, DownloadPart,
+    DownloadPartPage,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DownloadState {
@@ -50,6 +56,29 @@ fn serialize_intent<S: serde::Serializer>(
 ) -> std::result::Result<S::Ok, S::Error> {
     serializer.serialize_str(intent.as_str())
 }
+pub(crate) fn summary_from_job(
+    job: DownloadJobRecord,
+    category: Option<&str>,
+    running: &[(JobToken, bool)],
+    verifying: &[JobToken],
+) -> DownloadSummary {
+    let state = observed_state(&job, running, verifying);
+    let progress = job.progress();
+    DownloadSummary {
+        id: job.token.job_id,
+        hash: job.file_hash,
+        name: job.display_name,
+        size_bytes: job.expected_size_bytes,
+        progress,
+        intent: job.intent,
+        state,
+        category: category.map(str::to_owned),
+        created_at: job.created_at_s,
+        updated_at: job.updated_at_s,
+        completed_at: job.completed_at_s,
+    }
+}
+
 pub(crate) fn observed_state(
     job: &DownloadJobRecord,
     running: &[(JobToken, bool)],
@@ -137,24 +166,11 @@ impl EmulebbCore {
         page.try_project(bytes, |page| {
             let mut downloads = Vec::with_capacity(page.jobs.len());
             for job in page.jobs {
-                let observed = observed_state(&job, &running, &verifying);
-                let progress = job.progress();
-                downloads.push(DownloadSummary {
-                    id: job.token.job_id,
-                    hash: job.file_hash,
-                    name: job.display_name,
-                    size_bytes: job.expected_size_bytes,
-                    progress,
-                    intent: job.intent,
-                    state: observed,
-                    category: job
-                        .category_id
-                        .and_then(|id| state.categories.get(&id))
-                        .map(|category| category.name.clone()),
-                    created_at: job.created_at_s,
-                    updated_at: job.updated_at_s,
-                    completed_at: job.completed_at_s,
-                });
+                let category = job
+                    .category_id
+                    .and_then(|id| state.categories.get(&id))
+                    .map(|value| value.name.as_str());
+                downloads.push(summary_from_job(job, category, &running, &verifying));
             }
             Ok(DownloadPage {
                 downloads,

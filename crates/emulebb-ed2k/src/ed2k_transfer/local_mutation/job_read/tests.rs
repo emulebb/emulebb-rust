@@ -14,6 +14,52 @@ async fn reap_workers(registry: &LocalMutationRegistry) {
 }
 
 #[tokio::test]
+async fn detail_and_large_part_reads_leave_the_manifest_cache_empty() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+    let job = runtime
+        .metadata
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: "4b".repeat(16),
+            display_name: "large.bin".into(),
+            expected_size_bytes: Some(0x4000000000),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            piece_size: transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    let detail = runtime
+        .download_detail(job.token.job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(detail.job.storage.is_none());
+    assert!(
+        runtime
+            .manifest_cache
+            .lock()
+            .await
+            .get(&job.token.job_id)
+            .is_none()
+    );
+    let page = runtime
+        .download_parts_after(job.token.job_id, None, 200)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.parts.len(), 200);
+    assert!(
+        runtime
+            .manifest_cache
+            .lock()
+            .await
+            .get(&job.token.job_id)
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn received_page_conversion_retains_charge_after_reap() {
     let root = tempfile::tempdir().unwrap();
     let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
@@ -134,6 +180,8 @@ async fn every_compact_result_variant_reuses_and_releases_the_registry_control()
         JobRead::Query(emulebb_metadata::DownloadJobQuery::default()),
         JobRead::Counts,
         JobRead::Exact(job.token.job_id),
+        JobRead::Detail(job.token.job_id),
+        JobRead::Parts(job.token.job_id, None, 1),
         JobRead::Latest(hash),
         JobRead::Page(None, 1, false),
         JobRead::Publish(None, 1),
