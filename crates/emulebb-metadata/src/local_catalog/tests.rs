@@ -242,6 +242,16 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         )
         .unwrap();
     }
+    // Re-observation uses the real admission writer, retaining its success
+    // result while leaving identical index evidence untouched.
+    assert!(
+        store
+            .mark_session_verified_local_path(
+                &restored.entries[0].path,
+                &NativeFileFingerprint::from_storage_bytes(&fingerprint).unwrap(),
+            )
+            .unwrap()
+    );
     assert_eq!(
         store
             .query_active_local_share_entries(&MetadataSharedFileQuery {
