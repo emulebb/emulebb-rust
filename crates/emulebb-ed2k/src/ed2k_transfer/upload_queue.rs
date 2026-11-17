@@ -2693,9 +2693,10 @@ impl Ed2kUploadQueueState {
             if !catalog
                 .entry_by_hash(&hash)
                 .is_some_and(|entry| entry.is_servable())
-                || catalog
-                    .eligibility()
-                    .is_some_and(|provider| provider.stripe_snapshot(&[hash.0]).is_none())
+                || catalog.eligibility().is_some_and(|provider| {
+                    provider.publication_is_faulted()
+                        || provider.stripe_snapshot(&[hash.0]).is_none()
+                })
             {
                 return false;
             }

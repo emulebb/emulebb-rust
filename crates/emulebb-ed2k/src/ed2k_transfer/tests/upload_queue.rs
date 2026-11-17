@@ -1649,38 +1649,81 @@ async fn unshared_purge_observes_catalog_mutation_after_cached_scan() {
 
 #[tokio::test]
 async fn disabled_hash_waiter_is_not_promoted_when_an_active_slot_is_released() {
-    let root = unique_test_dir("sharing-waiter-selection");
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    runtime.configure_upload_queue(one_slot_config()).await;
-    let path = root.join("Sample Upload.bin");
-    std::fs::write(&path, b"verified queue selection content").unwrap();
-    let shared = runtime
-        .ingest_local_file(&path, "Sample Upload.bin")
-        .await
-        .unwrap();
-    super::super::test_support::admit_local_share(&runtime, &root, &path).await;
-    let hash = shared.file_hash.parse().unwrap();
-    let (active, status) = runtime
-        .begin_upload_session(upload_peer(1, 1, 0x0a000001), &hash)
-        .await;
-    assert_eq!(status, Ed2kUploadSessionStatus::Granted);
-    let (waiter, status) = runtime
-        .begin_upload_session(upload_peer(2, 2, 0x0a000002), &hash)
-        .await;
-    assert_eq!(status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
-    runtime
-        .set_library_sharing_enabled(hash, false)
-        .await
-        .unwrap();
-    // No mutation-time sweep. A normal promotion path must consult current policy.
-    assert_eq!(
-        runtime.poll_upload_session(&waiter, false).await,
-        Ed2kUploadSessionStatus::Waiting { rank: 1 }
-    );
-    runtime.release_upload_session(&active).await;
-    assert_eq!(
-        runtime.poll_upload_session(&waiter, true).await,
-        Ed2kUploadSessionStatus::Waiting { rank: 1 }
-    );
-    runtime.drain_local_mutations().await.unwrap();
+    for force_publication_failure in [false, true] {
+        let root = unique_test_dir("sharing-waiter-selection");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        runtime.configure_upload_queue(one_slot_config()).await;
+        let path = root.join("Sample Upload.bin");
+        std::fs::write(&path, b"verified queue selection content").unwrap();
+        let shared = runtime
+            .ingest_local_file(&path, "Sample Upload.bin")
+            .await
+            .unwrap();
+        super::super::test_support::admit_local_share(&runtime, &root, &path).await;
+        let hash = shared.file_hash.parse().unwrap();
+        let (active, status) = runtime
+            .begin_upload_session(upload_peer(1, 1, 0x0a000001), &hash)
+            .await;
+        assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+        let (waiter, status) = runtime
+            .begin_upload_session(upload_peer(2, 2, 0x0a000002), &hash)
+            .await;
+        assert_eq!(status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+        if force_publication_failure {
+            let epoch = runtime
+                .category_root_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
+            assert_eq!(epoch % 2, 0);
+            // Keep a real root fence in progress until the bounded publisher gives
+            // up after commit; do not inject a different fake publication path.
+            runtime
+                .category_root_epoch
+                .store(epoch + 1, std::sync::atomic::Ordering::Release);
+            let error = runtime
+                .set_library_sharing_enabled(hash, false)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<super::super::LocalMutationError>(),
+                Some(super::super::LocalMutationError::Committed)
+            ));
+            runtime
+                .category_root_epoch
+                .store(epoch + 2, std::sync::atomic::Ordering::Release);
+            assert!(
+                runtime
+                    .shared_catalog
+                    .read()
+                    .await
+                    .entry_by_hash(&hash)
+                    .is_some()
+            );
+            assert_eq!(
+                runtime
+                    .metadata
+                    .library_sharing_enabled(&hash.to_string())
+                    .unwrap(),
+                Some(false)
+            );
+        } else {
+            runtime
+                .set_library_sharing_enabled(hash, false)
+                .await
+                .unwrap();
+        }
+        // No mutation-time sweep. A normal promotion path must consult current policy.
+        assert_eq!(
+            runtime.poll_upload_session(&waiter, false).await,
+            Ed2kUploadSessionStatus::Waiting { rank: 1 }
+        );
+        runtime.release_upload_session(&active).await;
+        assert_eq!(
+            runtime.poll_upload_session(&waiter, true).await,
+            Ed2kUploadSessionStatus::Waiting { rank: 1 }
+        );
+        assert_eq!(
+            runtime.drain_local_mutations().await.is_err(),
+            force_publication_failure
+        );
+    }
 }
