@@ -147,12 +147,118 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         .unwrap();
     assert_eq!(filtered.entries.len(), 1);
     assert!(filtered.next_cursor.is_none());
+    // A one-content mutation must not rewrite the other 99,999 index rows.
+    {
+        let conn = store.connection().unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER keep_projection;
+             CREATE TEMP TRIGGER protect_other_content BEFORE DELETE ON session_library_catalog
+             WHEN old.known_file_id != 1
+             BEGIN SELECT RAISE(ABORT,'unrelated content rewritten'); END;
+             UPDATE temp.session_verified_local_paths SET verified_fingerprint=x'00' WHERE path_id=2;",
+        ).unwrap();
+    }
+    let withdrawn = store
+        .query_active_local_share_entries(&MetadataSharedFileQuery {
+            limit: 2,
+            count_total: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(withdrawn.total, 99_999);
+    assert_eq!(withdrawn.entries[0].display_name, "sample-000002.bin");
+    {
+        let conn = store.connection().unwrap();
+        conn.execute(
+            "UPDATE temp.session_verified_local_paths SET verified_fingerprint=?1 WHERE path_id=2",
+            [&fingerprint],
+        )
+        .unwrap();
+    }
+    let restored = store
+        .query_active_local_share_entries(&MetadataSharedFileQuery {
+            limit: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(restored.entries[0].display_name, "sample-000001.bin");
+    // Durable changes made by a second connection cannot be consumed by it.
+    {
+        let other = MetadataStore::from_connection(open()).unwrap();
+        other
+            .connection()
+            .unwrap()
+            .execute("UPDATE local_paths SET sort_key='zz-last' WHERE id=2", [])
+            .unwrap();
+        let page = store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.entries[0].display_name, "sample-000002.bin");
+        other
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE local_paths SET sort_key=lower(display_path) WHERE id=2",
+                [],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap()
+            .entries[0]
+            .display_name,
+        "sample-000001.bin"
+    );
+    {
+        let conn = store.connection().unwrap();
+        let mut explain = conn.prepare(
+            "EXPLAIN QUERY PLAN SELECT known_file_id FROM library_catalog_changes INDEXED BY library_catalog_changes_revision_idx WHERE revision > ?1 AND revision <= ?2"
+        ).unwrap();
+        let plan = explain
+            .query_map(params![1, i64::MAX], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(plan.iter().any(|p| p.contains("SEARCH") && p.contains("library_catalog_changes_revision_idx")), "{plan:?}");
+    }
+    // Tag/policy changes are read directly and do not alter physical membership.
+    {
+        let conn = store.connection().unwrap();
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER protect_all_content BEFORE DELETE ON session_library_catalog
+             BEGIN SELECT RAISE(ABORT,'policy rebuilt physical catalog'); END;
+             UPDATE known_files SET sharing_enabled=0 WHERE id=2;
+             INSERT INTO library_tags(name) VALUES('Batch');
+             INSERT INTO known_file_tags SELECT 2,id FROM library_tags WHERE name='Batch';",
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
     store
         .connection()
         .unwrap()
         .execute_batch(
-            "DROP TRIGGER keep_projection;
-        UPDATE local_file_instances SET known_file_id = 1 WHERE known_file_id != 1;",
+            "DROP TRIGGER protect_other_content;
+         DROP TRIGGER protect_all_content;
+         UPDATE local_file_instances SET known_file_id = 1 WHERE known_file_id != 1;",
         )
         .unwrap();
     let root_page = store.category_root_hash_page(&root, 0, 128).unwrap();
