@@ -5404,7 +5404,8 @@ fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTrans
         all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
         all_time_upload_requests: entry.publish.all_time_request_count,
         all_time_upload_accepts: entry.publish.all_time_accept_count,
-        last_upload_request_ms: entry.publish.last_request_unix_ms,
+        last_upload_requested_at_s: (entry.publish.last_request_unix_ms > 0)
+            .then_some(entry.publish.last_request_unix_ms / 1000),
         comment: entry.comment.clone(),
         rating: entry.rating,
     }
@@ -5438,7 +5439,10 @@ fn kad_publishable_shared_file_entries(
                 all_time_accept_count: entry.all_time_upload_accepts,
                 all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
                 session_uploaded_bytes: entry.session_uploaded_bytes,
-                last_request_unix_ms: entry.last_upload_request_ms,
+                last_request_unix_ms: entry
+                    .last_upload_requested_at_s
+                    .map(|s| s.saturating_mul(1000))
+                    .unwrap_or_default(),
                 last_publish_unix_ms: last_publish_unix_ms(&entry.file_hash),
                 sequence,
                 now_unix_ms,
@@ -5483,7 +5487,10 @@ fn select_best_notes_publish_candidate(
                 all_time_accept_count: entry.all_time_upload_accepts,
                 all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
                 session_uploaded_bytes: entry.session_uploaded_bytes,
-                last_request_unix_ms: entry.last_upload_request_ms,
+                last_request_unix_ms: entry
+                    .last_upload_requested_at_s
+                    .map(|s| s.saturating_mul(1000))
+                    .unwrap_or_default(),
                 last_publish_unix_ms: schedule.notes_last_publish_unix_ms(
                     &entry.file_hash,
                     now_instant,

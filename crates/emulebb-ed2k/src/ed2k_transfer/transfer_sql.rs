@@ -412,7 +412,10 @@ pub(super) fn shared_entry_from_catalog_entry(
         publish: Ed2kSharedPublishStats {
             all_time_request_count: entry.all_time_upload_requests,
             all_time_accept_count: entry.all_time_upload_accepts,
-            last_request_unix_ms: entry.last_upload_request_ms,
+            last_request_unix_ms: entry
+                .last_upload_requested_at_s
+                .map(|s| s.saturating_mul(1000))
+                .unwrap_or_default(),
             ..Default::default()
         },
     })

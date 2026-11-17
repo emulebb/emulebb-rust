@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
@@ -12,6 +12,7 @@ pub struct MetadataFileUploadDelta {
     pub file_hash: String,
     pub uploaded_bytes: u64,
     pub accepted_sessions: u64,
+    pub last_uploaded_at_s: Option<i64>,
 }
 
 impl super::MetadataStore {
@@ -116,9 +117,9 @@ impl super::MetadataStore {
     pub fn apply_credit_deltas(
         &self,
         peer_deltas: &[(String, u64, u64)],
-        file_uploaded_deltas: &[MetadataFileUploadDelta],
+        file_deltas: &[MetadataFileUploadDelta],
     ) -> Result<()> {
-        if peer_deltas.is_empty() && file_uploaded_deltas.is_empty() {
+        if peer_deltas.is_empty() && file_deltas.is_empty() {
             return Ok(());
         }
         let now = unix_ms();
@@ -161,17 +162,24 @@ impl super::MetadataStore {
                 now,
             ])?;
         }
-        for delta in file_uploaded_deltas {
+        for delta in file_deltas {
+            ensure!(
+                delta
+                    .last_uploaded_at_s
+                    .is_none_or(|at| at >= 0 && delta.uploaded_bytes > 0),
+                "invalid actual-upload timestamp"
+            );
             let hash = decode_fixed_hex(&delta.file_hash, 16, "ED2K hash")?;
             tx.prepare_cached(
                 r#"
                 UPDATE known_files
                 SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes),
-                    all_time_upload_accepts = all_time_upload_accepts + min(?3, 9223372036854775807 - all_time_upload_accepts)
+                    all_time_upload_accepts = all_time_upload_accepts + min(?3, 9223372036854775807 - all_time_upload_accepts),
+                    last_uploaded_at_s = CASE WHEN ?4 IS NULL THEN last_uploaded_at_s ELSE max(coalesce(last_uploaded_at_s,?4),?4) END
                 WHERE ed2k_hash = ?1
                 "#,
             )?
-            .execute(params![hash, u64_to_i64_saturating(delta.uploaded_bytes), u64_to_i64_saturating(delta.accepted_sessions)])?;
+            .execute(params![hash, u64_to_i64_saturating(delta.uploaded_bytes), u64_to_i64_saturating(delta.accepted_sessions), delta.last_uploaded_at_s])?;
         }
         tx.commit()?;
         Ok(())
@@ -440,6 +448,94 @@ mod tests {
         assert_eq!(pruned, 1);
         assert!(store.peer_credit_by_hash(fresh).unwrap().is_some());
         assert!(store.peer_credit_by_hash(stale).unwrap().is_none());
+    }
+
+    #[test]
+    fn upload_timestamps_are_optional_seconds_and_require_actual_byte_events() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let hash = "45".repeat(16);
+        store
+            .upsert_indexed_file(
+                &crate::MetadataIndexedFile {
+                    ed2k_hash: hash.clone(),
+                    name: "Sample.bin".into(),
+                    size_bytes: 1024,
+                    content_type: String::new(),
+                    availability_score: 0,
+                },
+                crate::MetadataIndexedFileOrigin::PassiveCache,
+            )
+            .unwrap();
+        let times = || {
+            store
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT last_upload_requested_at_s,last_uploaded_at_s FROM known_files",
+                    [],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(times(), (None, None));
+        store.add_file_upload_request(&hash, 0).unwrap();
+        assert_eq!(times(), (Some(0), None));
+        store.add_file_upload_request(&hash, 1_700_000_010).unwrap();
+        store.add_file_upload_request(&hash, 1_700_000_001).unwrap();
+        assert_eq!(times(), (Some(1_700_000_010), None));
+        let bytes = |at| MetadataFileUploadDelta {
+            file_hash: hash.clone(),
+            uploaded_bytes: 5,
+            last_uploaded_at_s: Some(at),
+            ..Default::default()
+        };
+        store.apply_credit_deltas(&[], &[bytes(0)]).unwrap();
+        assert_eq!(times(), (Some(1_700_000_010), Some(0)));
+        store
+            .apply_credit_deltas(&[], &[bytes(1_700_000_009)])
+            .unwrap();
+        store
+            .apply_credit_deltas(&[], &[bytes(1_700_000_002)])
+            .unwrap();
+        store
+            .apply_credit_deltas(
+                &[],
+                &[MetadataFileUploadDelta {
+                    file_hash: hash.clone(),
+                    accepted_sessions: 1,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        assert_eq!(times(), (Some(1_700_000_010), Some(1_700_000_009)));
+        assert!(store.add_file_upload_request(&hash, -1).is_err());
+        assert!(
+            store
+                .apply_credit_deltas(&[("78".repeat(16), 1, 0)], &[bytes(-1)])
+                .is_err()
+        );
+        assert!(
+            store
+                .apply_credit_deltas(
+                    &[],
+                    &[MetadataFileUploadDelta {
+                        file_hash: hash.clone(),
+                        last_uploaded_at_s: Some(1_700_000_011),
+                        ..Default::default()
+                    }]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM peers", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store.set_library_sharing_enabled(&hash, false).unwrap();
+        assert_eq!(times(), (Some(1_700_000_010), Some(1_700_000_009)));
     }
 
     #[test]

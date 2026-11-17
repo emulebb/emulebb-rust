@@ -257,6 +257,12 @@ async fn accepted_stint_checkpoint_failure_preserves_credit_bytes_and_exactly_on
         .unwrap();
     runtime.flush_parked_credit().await;
     assert_eq!(totals(), (18, 1));
+    let uploaded_at: Option<i64> = database
+        .query_row("SELECT last_uploaded_at_s FROM known_files", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(uploaded_at.is_some_and(|at| at > 0 && at <= super::super::upload::unix_time_s()));
     assert_eq!(
         runtime
             .peer_credit_by_hash(peer)
@@ -282,6 +288,17 @@ async fn accepted_stint_checkpoint_failure_preserves_credit_bytes_and_exactly_on
                 .get::<_, i64>(0))
             .unwrap(),
         1
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT last_uploaded_at_s FROM known_files", [], |r| r
+                .get::<_, Option<
+                i64,
+            >>(
+                0
+            ))
+            .unwrap(),
+        uploaded_at
     );
     assert_eq!(
         reopened

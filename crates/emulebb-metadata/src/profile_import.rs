@@ -84,7 +84,7 @@ impl MetadataStore {
             "UPDATE known_files SET aich_root=coalesce(aich_root,?2) WHERE ed2k_hash=?1",
             params![hash, root],
         )?;
-        tx.execute("UPDATE known_files SET all_time_uploaded_bytes=max(all_time_uploaded_bytes,?2),all_time_upload_requests=max(all_time_upload_requests,?3),all_time_upload_accepts=max(all_time_upload_accepts,?4),last_upload_requested_at_ms=max(last_upload_requested_at_ms,?5) WHERE ed2k_hash=?1",params![hash,i64::try_from(entry.all_time_uploaded_bytes)?,i64::try_from(entry.all_time_upload_requests)?,i64::try_from(entry.all_time_upload_accepts)?,entry.last_upload_request_ms])?;
+        tx.execute("UPDATE known_files SET all_time_uploaded_bytes=max(all_time_uploaded_bytes,?2),all_time_upload_requests=max(all_time_upload_requests,?3),all_time_upload_accepts=max(all_time_upload_accepts,?4),last_upload_requested_at_s=CASE WHEN ?5 IS NULL THEN last_upload_requested_at_s ELSE max(coalesce(last_upload_requested_at_s,?5),?5) END WHERE ed2k_hash=?1",params![hash,i64::try_from(entry.all_time_uploaded_bytes)?,i64::try_from(entry.all_time_upload_requests)?,i64::try_from(entry.all_time_upload_accepts)?,entry.last_upload_requested_at_s])?;
         tx.commit()?;
         Ok(true)
     }
@@ -175,14 +175,14 @@ impl MetadataStore {
                 all_time_uploaded_bytes = max(all_time_uploaded_bytes, ?2),
                 all_time_upload_requests = max(all_time_upload_requests, ?3),
                 all_time_upload_accepts = max(all_time_upload_accepts, ?4),
-                last_upload_requested_at_ms = max(last_upload_requested_at_ms, ?5)
+                last_upload_requested_at_s=CASE WHEN ?5 IS NULL THEN last_upload_requested_at_s ELSE max(coalesce(last_upload_requested_at_s,?5),?5) END
              WHERE ed2k_hash = ?1",
                 params![
                     hash,
                     i64::try_from(entry.all_time_uploaded_bytes)?,
                     i64::try_from(entry.all_time_upload_requests)?,
                     i64::try_from(entry.all_time_upload_accepts)?,
-                    entry.last_upload_request_ms
+                    entry.last_upload_requested_at_s
                 ],
             )?;
         }
@@ -209,7 +209,7 @@ mod tests {
             all_time_uploaded_bytes: 0,
             all_time_upload_requests: 0,
             all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
+            last_upload_requested_at_s: None,
         }
     }
 

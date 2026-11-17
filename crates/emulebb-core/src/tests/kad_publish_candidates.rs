@@ -15,7 +15,7 @@ fn kad_publishable_shared_files_follow_mfc_publish_rank() {
         all_time_uploaded_bytes: 0,
         all_time_upload_requests: 0,
         all_time_upload_accepts: 0,
-        last_upload_request_ms: 0,
+        last_upload_requested_at_s: None,
         comment: "synthetic note".to_string(),
         rating: 4,
     };
@@ -53,7 +53,7 @@ fn kad_publish_rank_age_term_favors_longest_unpublished() {
         all_time_uploaded_bytes: 0,
         all_time_upload_requests: 0,
         all_time_upload_accepts: 0,
-        last_upload_request_ms: 0,
+        last_upload_requested_at_s: None,
         comment: String::new(),
         rating: 0,
     };
@@ -133,7 +133,7 @@ fn best_notes_candidate_uses_notes_clock_not_source_clock() {
         all_time_uploaded_bytes: 0,
         all_time_upload_requests: 0,
         all_time_upload_accepts: 0,
-        last_upload_request_ms: 0,
+        last_upload_requested_at_s: None,
         comment: "synthetic note".to_string(),
         rating: 3,
     };
@@ -234,7 +234,7 @@ fn keyword_ordering_holds_age_constant_and_ignores_source_publish_clock() {
         all_time_uploaded_bytes: 0,
         all_time_upload_requests: 0,
         all_time_upload_accepts: 0,
-        last_upload_request_ms: 0,
+        last_upload_requested_at_s: None,
         comment: String::new(),
         rating: 0,
     };

@@ -1539,12 +1539,12 @@ fn upload_demand_counters_persist_on_known_files() {
     );
     assert!(
         store
-            .add_file_upload_request(&manifest.file_hash, 1_700_000_001_000)
+            .add_file_upload_request(&manifest.file_hash, 1_700_000_001)
             .unwrap()
     );
     assert!(
         store
-            .add_file_upload_request(&manifest.file_hash, 1_700_000_000_000)
+            .add_file_upload_request(&manifest.file_hash, 1_700_000_000)
             .unwrap()
     );
     store
@@ -1571,7 +1571,7 @@ fn upload_demand_counters_persist_on_known_files() {
     assert_eq!(publish.len(), 1);
     assert_eq!(publish[0].all_time_upload_requests, 2);
     assert_eq!(publish[0].all_time_upload_accepts, 1);
-    assert_eq!(publish[0].last_upload_request_ms, 1_700_000_001_000);
+    assert_eq!(publish[0].last_upload_requested_at_s, Some(1_700_000_001));
 
     register_shared_test_job(&store, manifest.token.job_id);
     let catalog = store
@@ -1579,7 +1579,7 @@ fn upload_demand_counters_persist_on_known_files() {
         .unwrap();
     assert_eq!(catalog[0].all_time_upload_requests, 2);
     assert_eq!(catalog[0].all_time_upload_accepts, 1);
-    assert_eq!(catalog[0].last_upload_request_ms, 1_700_000_001_000);
+    assert_eq!(catalog[0].last_upload_requested_at_s, Some(1_700_000_001));
 }
 
 #[test]

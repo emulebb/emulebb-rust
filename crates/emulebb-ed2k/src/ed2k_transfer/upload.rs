@@ -403,7 +403,7 @@ impl Ed2kTransferRuntime {
 
     /// Record one inbound OP_REQUESTPARTS demand signal for a shared file.
     pub(crate) async fn note_file_upload_request(&self, file_hash: &Ed2kHash) {
-        let now = unix_time_ms();
+        let now = unix_time_s();
         let _ = self
             .metadata
             .add_file_upload_request(&file_hash.to_string(), now);
@@ -412,7 +412,10 @@ impl Ed2kTransferRuntime {
                 entry.publish.session_request_count.saturating_add(1);
             entry.publish.all_time_request_count =
                 entry.publish.all_time_request_count.saturating_add(1);
-            entry.publish.last_request_unix_ms = entry.publish.last_request_unix_ms.max(now);
+            entry.publish.last_request_unix_ms = entry
+                .publish
+                .last_request_unix_ms
+                .max(now.saturating_mul(1000));
         })
         .await;
         self.notify_shared_publish_demand_changed();
@@ -874,9 +877,9 @@ impl Ed2kTransferRuntime {
     }
 }
 
-fn unix_time_ms() -> i64 {
+pub(super) fn unix_time_s() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or_default()
 }

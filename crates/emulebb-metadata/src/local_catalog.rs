@@ -56,7 +56,7 @@ pub(crate) const COLUMNS: &str = r#"lower(hex(known_files.ed2k_hash)), known_fil
                     known_files.all_time_uploaded_bytes,
                     known_files.all_time_upload_requests,
                     known_files.all_time_upload_accepts,
-                    known_files.last_upload_requested_at_ms,
+                    known_files.last_upload_requested_at_s,
                     local_paths.platform, local_paths.native_path,
                     known_files.media_artist, known_files.media_album,
                     known_files.media_title, known_files.media_length_seconds,
@@ -126,7 +126,7 @@ pub(crate) fn catalog_entry(row: &Row<'_>) -> rusqlite::Result<MetadataTransferC
         all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 8)?,
         all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 9)?,
         all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 10)?,
-        last_upload_request_ms: row.get(11)?,
+        last_upload_requested_at_s: row.get(11)?,
         media_path: Some(path),
         media: MetadataTransferMediaMetadata {
             artist: row.get(14)?,

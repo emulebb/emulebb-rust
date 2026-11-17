@@ -44,6 +44,7 @@ type ParkedFileDeltas = HashMap<String, ParkedFileCounters>;
 struct ParkedFileCounters {
     uploaded_bytes: u64,
     accepted_sessions: u64,
+    last_uploaded_at_s: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -90,6 +91,7 @@ impl ParkedCreditLedger {
             slot.accepted_sessions = slot
                 .accepted_sessions
                 .saturating_add(delta.accepted_sessions);
+            slot.last_uploaded_at_s = slot.last_uploaded_at_s.max(delta.last_uploaded_at_s);
         }
     }
 }
@@ -117,6 +119,7 @@ fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) {
             file_hash: file_hash.clone(),
             uploaded_bytes: delta.uploaded_bytes,
             accepted_sessions: delta.accepted_sessions,
+            last_uploaded_at_s: delta.last_uploaded_at_s,
         })
         .collect();
     if let Err(error) = runtime_parts
@@ -183,6 +186,9 @@ impl Ed2kTransferRuntime {
             let mut ledger = self.parked_credit.lock();
             let slot = ledger.files.entry(file_hash.to_string()).or_default();
             slot.uploaded_bytes = slot.uploaded_bytes.saturating_add(delta);
+            slot.last_uploaded_at_s = slot
+                .last_uploaded_at_s
+                .max(Some(super::upload::unix_time_s()));
             ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
         };
         self.accumulate_and_try_flush_catalog_upload(file_hash, delta);

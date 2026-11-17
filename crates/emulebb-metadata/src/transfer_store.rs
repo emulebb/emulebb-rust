@@ -398,7 +398,8 @@ impl super::MetadataStore {
     }
 
     /// Record one inbound upload request for a known file.
-    pub fn add_file_upload_request(&self, file_hash: &str, at_ms: i64) -> Result<bool> {
+    pub fn add_file_upload_request(&self, file_hash: &str, at_s: i64) -> Result<bool> {
+        ensure!(at_s >= 0, "invalid upload request timestamp");
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
         let updated = conn
@@ -406,11 +407,11 @@ impl super::MetadataStore {
                 r#"
                 UPDATE known_files
                 SET all_time_upload_requests = all_time_upload_requests + min(1, 9223372036854775807 - all_time_upload_requests),
-                    last_upload_requested_at_ms = max(last_upload_requested_at_ms, ?2)
+                    last_upload_requested_at_s = max(coalesce(last_upload_requested_at_s, ?2), ?2)
                 WHERE ed2k_hash = ?1
                 "#,
             )?
-            .execute(params![hash, at_ms])?;
+            .execute(params![hash, at_s])?;
         Ok(updated != 0)
     }
 
@@ -500,7 +501,7 @@ impl super::MetadataStore {
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
-                   known_files.last_upload_requested_at_ms,
+                   known_files.last_upload_requested_at_s,
                    media_paths.platform, CASE WHEN length(CAST(media_paths.native_path AS BLOB))<=65536 THEN media_paths.native_path END,
                    CASE WHEN length(CAST(known_files.media_artist AS BLOB))<=65536 THEN known_files.media_artist END, CASE WHEN length(CAST(known_files.media_album AS BLOB))<=65536 THEN known_files.media_album END,
                    CASE WHEN length(CAST(known_files.media_title AS BLOB))<=65536 THEN known_files.media_title END, known_files.media_length_seconds,
@@ -549,7 +550,7 @@ impl super::MetadataStore {
                 all_time_uploaded_bytes: crate::sql_value::unsigned::<u64>(row, 9)?,
                 all_time_upload_requests: crate::sql_value::unsigned::<u64>(row, 10)?,
                 all_time_upload_accepts: crate::sql_value::unsigned::<u64>(row, 11)?,
-                last_upload_request_ms: row.get(12)?,
+                last_upload_requested_at_s: row.get(12)?,
                 media_path: optional_path_from_row(row, 13, 14)?,
                 media: MetadataTransferMediaMetadata {
                     artist: row.get(15)?,
@@ -1610,7 +1611,7 @@ fn publish_entries_after(
         CASE WHEN {complete} THEN c.upload_priority ELSE t.upload_priority END priority,
         CASE WHEN {complete} THEN c.auto_upload_priority ELSE t.auto_upload_priority END auto,
         known_files.all_time_uploaded_bytes uploaded,known_files.all_time_upload_requests requests,
-        known_files.all_time_upload_accepts accepts,known_files.last_upload_requested_at_ms last_request,
+        known_files.all_time_upload_accepts accepts,known_files.last_upload_requested_at_s last_request,
         CASE WHEN {complete} THEN c.comment ELSE t.comment END comment,
         CASE WHEN {complete} THEN c.rating ELSE t.rating END rating
         FROM known_files LEFT JOIN verified_local_content c ON c.known_file_id=known_files.id
@@ -1658,7 +1659,7 @@ fn publish_entries_after(
             all_time_uploaded_bytes: crate::sql_value::unsigned(row, 6)?,
             all_time_upload_requests: crate::sql_value::unsigned(row, 7)?,
             all_time_upload_accepts: crate::sql_value::unsigned(row, 8)?,
-            last_upload_request_ms: row.get(9)?,
+            last_upload_requested_at_s: row.get(9)?,
             comment: row.get(10)?,
             rating: row.get(11)?,
         });

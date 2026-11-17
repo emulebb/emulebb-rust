@@ -173,7 +173,7 @@ pub struct MetadataTransferCatalogEntry {
     pub all_time_uploaded_bytes: u64,
     pub all_time_upload_requests: u64,
     pub all_time_upload_accepts: u64,
-    pub last_upload_request_ms: i64,
+    pub last_upload_requested_at_s: Option<i64>,
     /// Best persisted payload path for rebuilding non-durable derived metadata.
     pub media_path: Option<PathBuf>,
     pub media: MetadataTransferMediaMetadata,
@@ -217,7 +217,7 @@ pub struct MetadataTransferPublishEntry {
     pub all_time_uploaded_bytes: u64,
     pub all_time_upload_requests: u64,
     pub all_time_upload_accepts: u64,
-    pub last_upload_request_ms: i64,
+    pub last_upload_requested_at_s: Option<i64>,
     pub comment: String,
     pub rating: u8,
 }
@@ -239,7 +239,7 @@ pub struct MetadataFileImportRecord {
     pub all_time_uploaded_bytes: u64,
     pub all_time_upload_requests: u64,
     pub all_time_upload_accepts: u64,
-    pub last_upload_request_ms: i64,
+    pub last_upload_requested_at_s: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

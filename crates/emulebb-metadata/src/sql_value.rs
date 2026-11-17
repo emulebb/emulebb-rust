@@ -51,6 +51,7 @@ mod tests {
                     file_hash: hash.clone(),
                     uploaded_bytes: u64::MAX,
                     accepted_sessions: 0,
+                    last_uploaded_at_s: None,
                 }],
             )
             .unwrap();
