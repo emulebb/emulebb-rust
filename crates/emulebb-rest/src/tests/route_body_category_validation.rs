@@ -6,14 +6,10 @@ async fn category_selector_uses_name_grammar() {
     let routes = [
         (
             "POST",
-            "/api/v1/transfers",
-            r#"{"link":"ed2k://|file|A.bin|1|00112233445566778899aabbccddeeff|/","category":%s}"#,
+            "/api/v1/downloads",
+            r#"{"source":{"type":"content","hash":"00112233445566778899aabbccddeeff","name":"A.bin","sizeBytes":1},"category":%s}"#,
         ),
-        (
-            "PATCH",
-            "/api/v1/transfers/00112233445566778899aabbccddeeff",
-            r#"{"category":%s}"#,
-        ),
+        ("PATCH", "/api/v1/downloads/1", r#"{"category":%s}"#),
         (
             "POST",
             "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",

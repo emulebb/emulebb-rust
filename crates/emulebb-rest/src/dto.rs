@@ -10,28 +10,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct BulkOperationResult {
-    pub(crate) ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SearchResultDownloadResult {
-    pub(crate) ok: bool,
-    pub(crate) search_id: String,
-    pub(crate) hash: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct SharedFileResponse {
     pub(crate) hash: String,
     pub(crate) name: String,
@@ -108,29 +86,11 @@ pub(crate) struct SharedFilesQuery {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct TransfersQuery {
-    pub(crate) state: Option<String>,
-    pub(crate) category: Option<String>,
-    pub(crate) offset: Option<usize>,
-    pub(crate) limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct UploadQueueQuery {
     pub(crate) offset: Option<usize>,
     pub(crate) limit: Option<usize>,
     #[serde(default)]
     pub(crate) include_score_breakdown: Option<bool>,
-}
-
-impl TransfersQuery {
-    pub(crate) fn page(&self) -> PageQuery {
-        PageQuery {
-            offset: self.offset,
-            limit: self.limit,
-        }
-    }
 }
 
 impl UploadQueueQuery {
@@ -229,12 +189,6 @@ pub(crate) struct DiagnosticBundleCaptureRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DiagnosticCrashTestRequest {
     pub(crate) confirm_crash: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ClearCompletedTransfersRequest {
-    pub(crate) confirm_clear_completed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

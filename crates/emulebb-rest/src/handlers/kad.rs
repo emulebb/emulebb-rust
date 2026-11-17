@@ -92,7 +92,7 @@ pub(crate) async fn kad_bootstrap(
     if address.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             "address must not be empty",
         )
         .into_response();
@@ -100,7 +100,7 @@ pub(crate) async fn kad_bootstrap(
     if request.port == 0 {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             "port must be between 1 and 65535",
         )
         .into_response();

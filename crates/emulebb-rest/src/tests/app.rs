@@ -5,7 +5,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use emulebb_core::{EmulebbCore, LocalShareCreate, TransferCreate};
+use emulebb_core::{EmulebbCore, LocalShareCreate};
 use emulebb_index::FileIndex;
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -124,9 +124,9 @@ async fn app_returns_evelope_with_capabilities() {
     );
     assert_eq!(value["data"]["platform"], emulebb_core::BUILD_ARCHITECTURE);
     assert_eq!(value["data"]["build"], emulebb_core::BUILD_FLAVOR);
-    assert_eq!(value["data"]["capabilities"]["transfers"], true);
-    assert_eq!(value["data"]["capabilities"]["transfers.sse"], true);
-    assert_eq!(value["data"]["capabilities"]["transfers.sse.status"], true);
+    assert_eq!(value["data"]["capabilities"]["downloads"], true);
+    assert_eq!(value["data"]["capabilities"]["downloads.sse"], true);
+    assert_eq!(value["data"]["capabilities"]["downloads.sse.status"], true);
     assert_eq!(value["data"]["capabilities"]["sharedDirectories"], true);
     assert_eq!(value["data"]["capabilities"]["peerControls"], true);
     assert!(
@@ -158,21 +158,21 @@ async fn capabilities_returns_contract_version_and_capability_list() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|capability| capability == "transfers")
+            .any(|capability| capability == "downloads")
     );
     assert!(
         value["data"]["capabilities"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|capability| capability == "transfers.sse")
+            .any(|capability| capability == "downloads.sse")
     );
     assert!(
         value["data"]["capabilities"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|capability| capability == "transfers.sse.status")
+            .any(|capability| capability == "downloads.sse.status")
     );
     assert!(
         !value["data"]["capabilities"]
@@ -396,7 +396,7 @@ async fn events_endpoint_signals_rebaseline_for_last_event_id() {
             Request::builder()
                 .uri("/api/v1/events")
                 .header("X-API-Key", "secret")
-                .header("Last-Event-ID", "17")
+                .header("Last-Event-ID", "f2db31c4-4225-408f-9dda-4799869e7b2b:17")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -412,18 +412,25 @@ async fn events_endpoint_signals_rebaseline_for_last_event_id() {
         .expect("valid body chunk");
     let text = String::from_utf8(chunk.to_vec()).unwrap();
     assert!(text.contains("event: sync.reset"), "{text}");
-    assert!(text.contains("id: 1"), "{text}");
-    assert!(text.contains(r#""id":1"#), "{text}");
+    let payload: Value = serde_json::from_str(
+        text.lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap(),
+    )
+    .unwrap();
+    let epoch = payload["epoch"].as_str().unwrap();
+    assert!(text.contains(&format!("id: {epoch}:0")), "{text}");
+    assert_eq!(payload["id"], 0);
     assert!(text.contains(r#""type":"sync.reset""#), "{text}");
-    assert!(text.contains(r#""reason":"last-event-id""#), "{text}");
-    assert!(text.contains(r#""lastEventId":"17""#), "{text}");
+    assert_eq!(payload["reason"], "reconnect");
 }
 
 #[tokio::test]
-async fn event_status_returns_transfer_event_diagnostics() {
+async fn event_status_returns_download_event_diagnostics() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let _events = core.subscribe_transfer_events();
+    let _events =
+        core.subscribe_download_events(emulebb_core::DownloadEventResetReason::Initial, None);
     let router = router(
         core,
         RestServerSettings {
@@ -454,59 +461,6 @@ async fn event_status_returns_transfer_event_diagnostics() {
     assert_eq!(value["data"]["latestEventId"], 0);
     assert_eq!(value["data"]["nextEventId"], 1);
     assert_eq!(value["data"]["resumeBehavior"], "reset");
-}
-
-#[tokio::test]
-async fn events_endpoint_streams_transfer_add_events() {
-    let core =
-        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let router = router(
-        core.clone(),
-        RestServerSettings {
-            api_key: "secret".to_string(),
-            web_root_dir: None,
-        },
-    );
-    let response = router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/events")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let mut body = response.into_body().into_data_stream();
-
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Route.Event.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-
-    let chunk = tokio::time::timeout(Duration::from_secs(1), body.next())
-        .await
-        .expect("transfer add event")
-        .expect("SSE data frame")
-        .expect("valid body chunk");
-    let text = String::from_utf8(chunk.to_vec()).unwrap();
-    assert!(text.contains("event: transfer.added"), "{text}");
-    assert!(text.contains("id: 1"), "{text}");
-    assert!(text.contains(r#""type":"transfer.added""#), "{text}");
-    assert!(
-        text.contains(&format!(r#""hash":"{}""#, transfer.hash)),
-        "{text}"
-    );
 }
 
 #[tokio::test]
@@ -553,34 +507,34 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"links":["ed2k://|file|Active.bin|1|00112233445566778899aabbccddeeff|/"],"paused":false}"#,
+                    r#"{"source":{"type":"ed2k-link","link":"ed2k://|file|Active.bin|1|00112233445566778899aabbccddeeff|/"},"intent":"started"}"#,
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
+    assert_eq!(create.status(), StatusCode::CREATED);
 
-    let create_paused = router
+    let create_stopped = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"links":["ed2k://|file|Paused.bin|2|ffeeddccbbaa99887766554433221100|/"],"paused":true}"#,
+                    r#"{"source":{"type":"ed2k-link","link":"ed2k://|file|Stopped.bin|2|ffeeddccbbaa99887766554433221100|/"},"intent":"stopped"}"#,
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(create_paused.status(), StatusCode::OK);
+    assert_eq!(create_stopped.status(), StatusCode::CREATED);
 
     let stats = router
         .clone()
@@ -729,17 +683,17 @@ async fn diagnostics_returns_runtime_diagnostics_directly() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/transfers")
+                .uri("/api/v1/downloads")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"links":["ed2k://|file|Diagnostic.Active.bin|1|00112233445566778899aabbccddeeff|/"],"paused":false}"#,
+                    r#"{"source":{"type":"ed2k-link","link":"ed2k://|file|Diagnostic.Active.bin|1|00112233445566778899aabbccddeeff|/"},"intent":"started"}"#,
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(create_active.status(), StatusCode::OK);
+    assert_eq!(create_active.status(), StatusCode::CREATED);
 
     let response = router
         .oneshot(
@@ -767,19 +721,19 @@ async fn diagnostics_returns_runtime_diagnostics_directly() {
         value["data"]["diagnosticWriter"]["processId"],
         std::process::id()
     );
-    assert_eq!(value["data"]["transferEvents"]["enabled"], true);
-    assert_eq!(value["data"]["transferEvents"]["stream"], "sse");
-    assert_eq!(value["data"]["transferEvents"]["channelCapacity"], 1024);
-    assert_eq!(value["data"]["transferEvents"]["subscriberCount"], 0);
-    let latest_event_id = value["data"]["transferEvents"]["latestEventId"]
+    assert_eq!(value["data"]["downloadEvents"]["enabled"], true);
+    assert_eq!(value["data"]["downloadEvents"]["stream"], "sse");
+    assert_eq!(value["data"]["downloadEvents"]["channelCapacity"], 1024);
+    assert_eq!(value["data"]["downloadEvents"]["subscriberCount"], 0);
+    let latest_event_id = value["data"]["downloadEvents"]["latestEventId"]
         .as_u64()
         .expect("latest event id should be numeric");
     assert!(latest_event_id >= 1);
     assert_eq!(
-        value["data"]["transferEvents"]["nextEventId"].as_u64(),
+        value["data"]["downloadEvents"]["nextEventId"].as_u64(),
         Some(latest_event_id + 1)
     );
-    assert_eq!(value["data"]["transferEvents"]["resumeBehavior"], "reset");
+    assert_eq!(value["data"]["downloadEvents"]["resumeBehavior"], "reset");
     assert_eq!(value["data"]["geolocation"], Value::Null);
 }
 
@@ -820,10 +774,11 @@ async fn process_resources_are_exposed_on_every_runtime_diagnostics_surface() {
 }
 
 #[tokio::test]
-async fn diagnostics_reports_transfer_event_subscribers() {
+async fn diagnostics_reports_download_event_subscribers() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let _events = core.subscribe_transfer_events();
+    let _events =
+        core.subscribe_download_events(emulebb_core::DownloadEventResetReason::Initial, None);
     let router = router(
         core,
         RestServerSettings {
@@ -845,7 +800,7 @@ async fn diagnostics_reports_transfer_event_subscribers() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["transferEvents"]["subscriberCount"], 1);
+    assert_eq!(value["data"]["downloadEvents"]["subscriberCount"], 1);
 }
 
 #[tokio::test]

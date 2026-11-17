@@ -32,7 +32,7 @@ pub(crate) async fn shared_files(
         Err(response) => return *response,
     };
     if let Err(message) = validate_shared_file_query(&query) {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message).into_response();
+        return api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message).into_response();
     }
     let cursor = match query
         .cursor
@@ -42,7 +42,7 @@ pub(crate) async fn shared_files(
     {
         Ok(cursor) => cursor,
         Err(message) => {
-            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message).into_response();
+            return api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message).into_response();
         }
     };
     match state
@@ -201,9 +201,12 @@ pub(crate) async fn add_shared_file_ignore_pattern(
         .await
     {
         Ok(exclusions) => api_ok(exclusions).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -225,9 +228,12 @@ pub(crate) async fn remove_shared_file_ignore_pattern(
     };
     match state.core.remove_shared_file_ignore_pattern(&pattern).await {
         Ok(exclusions) => api_ok(exclusions).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -246,9 +252,12 @@ pub(crate) async fn update_shared_file_ignore_rule(
         .await
     {
         Ok(exclusions) => api_ok(exclusions).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -263,9 +272,12 @@ pub(crate) async fn reload_shared_directories(State(state): State<RestState>) ->
         Ok(queued) => {
             api_ok(json!({ "ok": true, "started": true, "queued": queued })).into_response()
         }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -295,9 +307,12 @@ pub(crate) async fn update_shared_file(
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
         }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 

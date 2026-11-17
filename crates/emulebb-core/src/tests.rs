@@ -730,7 +730,9 @@ pub(crate) async fn admit_scheduler_test_job(
     drop(started);
     drop(
         runtime
-            .ensure_job(&new_transfer_job(token, file_hash, name, size))
+            .ensure_job(&emulebb_ed2k::ed2k_transfer::new_transfer_job(
+                token, file_hash, name, size,
+            ))
             .await
             .unwrap(),
     );

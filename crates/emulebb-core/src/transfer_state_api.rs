@@ -89,19 +89,6 @@ impl EmulebbCore {
         Ok(Some(transfer))
     }
 
-    async fn refresh_transfer_from_manifest_default(
-        &self,
-        token: emulebb_metadata::JobToken,
-    ) -> Result<Option<Transfer>> {
-        let Some(manifest) = self.ed2k_transfers.manifest_optional(token).await? else {
-            return Ok(None);
-        };
-        let state = manifest_default_state_name(&manifest).to_owned();
-        drop(manifest);
-        self.refresh_transfer_from_manifest_silent(token, &state)
-            .await
-    }
-
     pub(crate) fn transfer_from_manifest(
         &self,
         manifest: &Ed2kResumeManifest,
@@ -137,19 +124,5 @@ impl EmulebbCore {
             || manifest.delivered_path.is_some()
             || path_is_within(&transfer.path, &self.incoming_dir);
         Ok(transfer)
-    }
-
-    pub(crate) async fn set_transfer_state(
-        &self,
-        hash: &str,
-        state_name: &str,
-    ) -> Option<Transfer> {
-        let mut state = self.state.lock().await;
-        let transfer = state.transfers.get_mut(hash)?;
-        transfer.state = state_name.to_string();
-        let transfer = transfer.clone();
-        drop(state);
-        self.download_events.changed(transfer.job_token().job_id);
-        Some(transfer)
     }
 }

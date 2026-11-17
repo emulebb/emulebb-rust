@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { downloadConflicts, RestClient, RestError } from "../../src/api";
+import { RestClient, RestError } from "../../src/api";
 
 describe("RestClient", () => {
   it("captures the exact raw diagnostic bundle with its required bounded request", async () => {
@@ -58,51 +58,28 @@ describe("RestClient", () => {
     await expect(client.patch("shared-directories", {})).rejects.toThrow("Path is required");
   });
 
-  it("preserves structured download conflicts for deliberate retries", async () => {
-    const conflict = {
-      hash: "00112233445566778899aabbccddeeff",
-      kind: "previouslyCompleted",
-      requestedName: "Sample.bin",
-      requestedSizeBytes: 1,
-      recordedName: "Sample.bin",
-      recordedSizeBytes: 1,
-      transferState: null,
-      currentPaths: [],
-      firstCompletedAtMs: 1,
-      lastCompletedAtMs: 2,
-      redownloadAllowed: true
-    };
-    const fetchMock = vi.fn(async () =>
-      jsonResponse(
-        {
-          error: {
-            code: "DOWNLOAD_CONFLICT",
-            message: "download already completed",
-            details: { conflicts: [conflict] }
-          }
-        },
-        { status: 409 }
-      )
-    ) as unknown as typeof fetch;
+  it("surfaces a failed item in a successful HTTP 207 batch without retrying accepted work", async () => {
+    const data = [{ id: "1", status: "accepted", httpStatus: 202 },
+      { id: "2", status: "failed", httpStatus: 409, error: { code: "OUTPUT_MISSING", message: "Output is missing", details: {} } }];
+    const fetchMock = vi.fn(async () => jsonResponse({ data }, { status: 207 })) as unknown as typeof fetch;
     const client = new RestClient({ fetch: fetchMock });
-
-    const error = await client.post("transfers", {}).catch((caught: unknown) => caught);
-
-    expect(error).toBeInstanceOf(RestError);
-    expect(error).toMatchObject({
-      message: "download already completed",
-      status: 409,
-      code: "DOWNLOAD_CONFLICT",
-      details: { conflicts: [conflict] }
+    await expect(client.controlDownloads("verify", ["1", "2"])).rejects.toMatchObject({
+      status: 409, code: "OUTPUT_MISSING", details: data,
     });
-    expect(downloadConflicts(error)).toEqual([conflict]);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("retains cursor page metadata without accumulating rows", async () => {
+    const page = { data: [{ id: "1" }], meta: { apiVersion: "2.0.0", nextCursor: "opaque", hasMore: true } };
+    const client = new RestClient({ fetch: vi.fn(async () => jsonResponse(page)) as unknown as typeof fetch });
+    expect(await client.getPage("downloads?limit=100")).toEqual(page);
   });
 
   it("falls back to a method and path error when no envelope message exists", async () => {
     const fetchMock = vi.fn(async () => new Response("", { status: 500 })) as unknown as typeof fetch;
     const client = new RestClient({ fetch: fetchMock });
 
-    await expect(client.delete("transfers/hash")).rejects.toThrow("DELETE /api/v1/transfers/hash failed");
+    await expect(client.get("downloads/1")).rejects.toThrow("GET /api/v1/downloads/1 failed");
   });
 
   it("reports HTML fallback responses as a REST routing problem", async () => {
@@ -132,7 +109,7 @@ describe("RestClient", () => {
     await expect(client.get("snapshot")).rejects.toThrow("GET /api/v1/snapshot returned invalid JSON");
   });
 
-  it("streams transfer events with API key and resume headers", async () => {
+  it("streams download identity events with API key and resume headers", async () => {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(
@@ -140,9 +117,9 @@ describe("RestClient", () => {
             [
               ": heartbeat",
               "",
-              "event: transfer.added",
-              "id: 7",
-              'data: {"id":7,"type":"transfer.added","transfer":{"hash":"00112233445566778899aabbccddeeff"}}',
+              "event: download.changed",
+              "id: 00000000-0000-4000-8000-000000000001:18446744073709551615",
+              'data: {"id":18446744073709551615,"epoch":"00000000-0000-4000-8000-000000000001","type":"download.changed","downloadId":"1"}',
               "",
               ""
             ].join("\n")
@@ -161,24 +138,30 @@ describe("RestClient", () => {
     client.setApiKey("secret-key");
     const events: unknown[] = [];
 
-    await client.streamTransferEvents((event) => events.push(event), { lastEventId: "6" });
+    const cursors: Array<string | undefined> = [];
+    await client.streamDownloadEvents((event, cursor) => {
+      events.push(event);
+      cursors.push(cursor);
+    }, { lastEventId: "00000000-0000-4000-8000-000000000001:6" });
 
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/events", {
       method: "GET",
       headers: {
         Accept: "text/event-stream",
-        "Last-Event-ID": "6",
+        "Last-Event-ID": "00000000-0000-4000-8000-000000000001:6",
         "X-API-Key": "secret-key"
       },
       signal: undefined
     });
     expect(events).toEqual([
       {
-        id: 7,
-        type: "transfer.added",
-        transfer: { hash: "00112233445566778899aabbccddeeff" }
+        id: Number("18446744073709551615"),
+        epoch: "00000000-0000-4000-8000-000000000001",
+        type: "download.changed",
+        downloadId: "1"
       }
     ]);
+    expect(cursors).toEqual(["00000000-0000-4000-8000-000000000001:18446744073709551615"]);
   });
 
   it("surfaces event stream error envelopes", async () => {
@@ -190,7 +173,7 @@ describe("RestClient", () => {
     ) as unknown as typeof fetch;
     const client = new RestClient({ fetch: fetchMock });
 
-    await expect(client.streamTransferEvents(() => undefined)).rejects.toThrow("missing API key");
+    await expect(client.streamDownloadEvents(() => undefined)).rejects.toThrow("missing API key");
   });
 });
 

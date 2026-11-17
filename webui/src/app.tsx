@@ -41,8 +41,9 @@ import {
   SharedFile,
   SettingsSurface,
   Snapshot,
-  TransferEvent,
-  TransferEventRuntimeDiagnostics,
+  DownloadSummary,
+  DownloadEvent,
+  DownloadEventRuntimeDiagnostics,
   Upload,
   VpnGuardStatus
 } from "./api";
@@ -169,6 +170,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [storageWarning, setStorageWarning] = useState("");
   const [route, setRoute] = useState<AppRoute>(currentRoute);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [downloadPreview, setDownloadPreview] = useState<DownloadSummary[]>([]);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
@@ -201,6 +203,7 @@ export function App({ appearance }: { appearance: Appearance }) {
 
   const resetProtectedState = useCallback(() => {
     setSnapshot(null);
+    setDownloadPreview([]);
     setAppInfo(null);
     setCapabilities(null);
     setRuntimeDiagnostics(null);
@@ -300,7 +303,11 @@ export function App({ appearance }: { appearance: Appearance }) {
     setRefreshing(true);
     setError("");
     try {
-      const nextSnapshot = await client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`);
+      const [nextSnapshot, recentDownloads] = await Promise.all([
+        client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`),
+        client.getPage<DownloadSummary>("downloads?view=all&limit=12"),
+      ]);
+      setDownloadPreview(recentDownloads.data);
       setSnapshot(nextSnapshot);
       setAppInfo((current) => current ?? nextSnapshot.app ?? null);
       setLogs(nextSnapshot.logs ?? []);
@@ -469,14 +476,14 @@ export function App({ appearance }: { appearance: Appearance }) {
     let cancelled = false;
     const loadDiagnostics = async () => {
       try {
-        const [nextRuntimeDiagnostics, nextTransferEventDiagnostics] = await Promise.all([
+        const [nextRuntimeDiagnostics, nextDownloadEventDiagnostics] = await Promise.all([
           client.get<RuntimeDiagnostics>("diagnostics"),
-          client.get<TransferEventRuntimeDiagnostics>("events/status")
+          client.get<DownloadEventRuntimeDiagnostics>("events/status")
         ]);
         if (!cancelled) {
           setRuntimeDiagnostics({
             ...nextRuntimeDiagnostics,
-            transferEvents: nextTransferEventDiagnostics
+            downloadEvents: nextDownloadEventDiagnostics
           });
         }
       } catch (caught) {
@@ -556,10 +563,10 @@ export function App({ appearance }: { appearance: Appearance }) {
     };
   }, [tab, route.searchId, selectedSearchOffset, searchSort, searchOrder, refreshGeneration, authState, navigateToSearch]);
 
-  const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
+  const downloadSseEnabled = supportsDownloadSse(appInfo) || supportsDownloadSse(capabilities);
 
   useEffect(() => {
-    if (authState !== "authenticated" || !transferSseEnabled) {
+    if (authState !== "authenticated" || !downloadSseEnabled) {
       setEventStreamStatus(pollingEventStreamStatus);
       return;
     }
@@ -618,8 +625,8 @@ export function App({ appearance }: { appearance: Appearance }) {
             pollIntervalMs: REFRESH_INTERVAL_MS,
             retryIntervalMs: EVENT_STREAM_RETRY_MS
           }));
-          await client.streamTransferEvents((event: TransferEvent) => {
-            lastEventId = String(event.id);
+          await client.streamDownloadEvents((event: DownloadEvent, cursor?: string) => {
+            lastEventId = cursor;
             setEventStreamStatus({
               mode: "streaming",
               enabled: true,
@@ -672,7 +679,7 @@ export function App({ appearance }: { appearance: Appearance }) {
         window.clearTimeout(refreshTimer);
       }
     };
-  }, [apiKey, authState, refresh, transferSseEnabled]);
+  }, [apiKey, authState, refresh, downloadSseEnabled]);
 
   const saveApiKey = () => {
     const next = apiKeyInput.trim();
@@ -714,7 +721,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   };
 
   const stats = snapshot?.stats ?? snapshot?.status?.stats ?? {};
-  const transfers = snapshot?.transfers ?? [];
+  const transfers = downloadPreview;
   const servers = snapshot?.servers ?? [];
   const kad: KadStatus = snapshot?.kad ?? {};
   const serverStatus = snapshot?.status?.servers;
@@ -737,7 +744,7 @@ export function App({ appearance }: { appearance: Appearance }) {
       : serverConnected
         ? undefined
         : "disconnected";
-  const activeTransfers = transfers.filter((transfer) => transfer.state !== "completed" && transfer.stopped !== true).length;
+  const activeTransfers = snapshot?.downloads?.unfinished ?? 0;
   const downloadRate = formatRate(
     numberField(stats, "downloadRateBytesPerSec") ?? (numberField(stats, "downloadSpeedKiBps") ?? 0) * 1024
   );
@@ -795,7 +802,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                   />
                   <ToolbarButton
                     label="Transfers"
-                    value={`${activeTransfers} active`}
+                    value={`${activeTransfers} unfinished`}
                     icon={<Activity size={17} />}
                     onClick={() => navigateToTab("transfers")}
                   />
@@ -909,7 +916,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 kad={kad}
               />
             )}
-            {tab === "transfers" && <TransfersView transfers={transfers} categories={categories} client={client} run={run} />}
+            {tab === "transfers" && <TransfersView categories={categories} client={client} run={run} refreshGeneration={refreshGeneration} />}
             {tab === "search" && (
               <SearchView
                 searches={searches}
@@ -1057,16 +1064,16 @@ function removeLegacyApiKey(): void {
   }
 }
 
-function supportsTransferSse(value: unknown): boolean {
+function supportsDownloadSse(value: unknown): boolean {
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const capabilities = (value as Record<string, unknown>).capabilities;
   if (Array.isArray(capabilities)) {
-    return capabilities.includes("transfers.sse");
+    return capabilities.includes("downloads.sse");
   }
   if (typeof capabilities === "object" && capabilities !== null) {
-    return (capabilities as Record<string, unknown>)["transfers.sse"] === true;
+    return (capabilities as Record<string, unknown>)["downloads.sse"] === true;
   }
   return false;
 }

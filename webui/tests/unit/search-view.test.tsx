@@ -9,7 +9,7 @@ describe("SearchView", () => {
     const hash = "00112233445566778899aabbccddeeff";
     const client = new RestClient();
     const post = vi.spyOn(client, "post")
-      .mockRejectedValueOnce(downloadConflict(hash, "previouslyCompleted", true))
+      .mockRejectedValueOnce(new RestError("Choose whether to download again", 409, "LOCAL_CONTENT_CHOICE_REQUIRED", { availability: "unavailable" }))
       .mockResolvedValueOnce({});
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const search: SearchItem = {
@@ -46,17 +46,17 @@ describe("SearchView", () => {
 
     await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
     expect(post).toHaveBeenNthCalledWith(1, `searches/7/results/${hash}/operations/download`, {
-      paused: false,
+      intent: "started",
       category: null,
-      knownFilePolicy: "reject"
+      redownload: false
     });
     expect(post).toHaveBeenNthCalledWith(2, `searches/7/results/${hash}/operations/download`, {
-      paused: false,
+      intent: "started",
       category: null,
-      knownFilePolicy: "redownload"
+      redownload: true
     });
     expect(confirm).toHaveBeenCalledWith(
-      '"Sample.bin" already exists locally or was downloaded before. Download again? Existing shared files are preserved, but managed partial-download state will be replaced.'
+      "This content is already recorded locally. Download again? Existing library files will be preserved."
     );
     confirm.mockRestore();
   });
@@ -250,26 +250,3 @@ describe("SearchView", () => {
     confirm.mockRestore();
   });
 });
-
-function downloadConflict(hash: string, kind: "previouslyCompleted" | "activeTransfer", redownloadAllowed: boolean): RestError {
-  return new RestError(
-    "download conflict",
-    409,
-    "DOWNLOAD_CONFLICT",
-    {
-      conflicts: [{
-        hash,
-        kind,
-        requestedName: "Sample.bin",
-        requestedSizeBytes: 1,
-        recordedName: "Sample.bin",
-        recordedSizeBytes: 1,
-        transferState: kind === "activeTransfer" ? "downloading" : null,
-        currentPaths: [],
-        firstCompletedAtMs: kind === "previouslyCompleted" ? 1 : null,
-        lastCompletedAtMs: kind === "previouslyCompleted" ? 2 : null,
-        redownloadAllowed
-      }]
-    }
-  );
-}

@@ -75,11 +75,6 @@ async fn hash_path_parameters_use_canonical_lowercase_hex_validation() {
     let cases = [
         (
             "GET",
-            "/api/v1/transfers/00112233445566778899AABBCCDDEEFF",
-            "hash must be a 32-character lowercase hex string",
-        ),
-        (
-            "GET",
             "/api/v1/shared-files/abc",
             "hash must be a 32-character lowercase hex string",
         ),
@@ -142,7 +137,7 @@ async fn valid_path_parameters_still_reach_handlers() {
         ),
         ("GET", "/api/v1/uploads/192.0.2.1:4662"),
         ("GET", "/api/v1/uploads/192.0.2.1%3A4662"),
-        ("GET", "/api/v1/transfers/00112233445566778899aabbccddeeff"),
+        ("GET", "/api/v1/downloads/1"),
     ];
     for (method, uri) in accepted_routes {
         let (status, value) = path_error_value(method, uri).await;

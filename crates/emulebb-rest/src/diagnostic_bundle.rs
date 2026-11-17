@@ -32,7 +32,7 @@ const MAX_SERVER_SNAPSHOTS: usize = 512;
 const MAX_SHARED_FILE_SNAPSHOTS: usize = 512;
 const MAX_SEARCH_SNAPSHOTS: usize = 64;
 const MAX_SEARCH_RESULTS_PER_SNAPSHOT: usize = 128;
-const MAX_TRANSFER_SNAPSHOTS: usize = 512;
+const MAX_DOWNLOAD_SNAPSHOTS: usize = 200;
 const MAX_UPLOAD_SNAPSHOTS: usize = 512;
 const MAX_UPLOAD_QUEUE_SNAPSHOTS: usize = 512;
 
@@ -144,7 +144,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
             "sharedFileSnapshots": MAX_SHARED_FILE_SNAPSHOTS,
             "searchSnapshots": MAX_SEARCH_SNAPSHOTS,
             "searchResultsPerSnapshot": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
-            "transferSnapshots": MAX_TRANSFER_SNAPSHOTS,
+            "downloadSnapshots": MAX_DOWNLOAD_SNAPSHOTS,
             "uploadSnapshots": MAX_UPLOAD_SNAPSHOTS,
             "uploadQueueSnapshots": MAX_UPLOAD_QUEUE_SNAPSHOTS,
         },
@@ -175,12 +175,16 @@ async fn operational_snapshots(state: &RestState) -> Result<Value> {
             .cmp(&right.created_at)
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut transfers = state.core.transfers().await?;
-    transfers.sort_by(|left, right| {
-        left.added_at
-            .cmp(&right.added_at)
-            .then_with(|| left.hash.cmp(&right.hash))
-    });
+    let downloads = state
+        .core
+        .download_page(emulebb_core::DownloadJobQuery {
+            view: emulebb_core::DownloadJobView::All,
+            limit: MAX_DOWNLOAD_SNAPSHOTS,
+            ..Default::default()
+        })
+        .await?;
+    let counts = state.core.download_counts().await?;
+    let download_count = usize::try_from(counts.unfinished.saturating_add(counts.completed))?;
     let uploads = state.core.uploads().await;
     let upload_queue = state.core.upload_queue().await;
     Ok(json!({
@@ -197,7 +201,7 @@ async fn operational_snapshots(state: &RestState) -> Result<Value> {
             |share| json!(shared_file_response(share)),
         ),
         "searches": bounded_tail_collection(&searches, MAX_SEARCH_SNAPSHOTS, search_snapshot),
-        "transfers": bounded_tail_collection(&transfers, MAX_TRANSFER_SNAPSHOTS, |transfer| json!(transfer)),
+        "downloads": bounded_prefix_collection(&downloads.downloads,download_count,MAX_DOWNLOAD_SNAPSHOTS,|download|json!(download)),
         "uploads": bounded_prefix_collection(
             &uploads,
             uploads.len(),
@@ -622,7 +626,7 @@ fn encode_bounded_bundle(mut payload: Value, max_bytes: usize) -> Result<Vec<u8>
         "operationalSnapshots.searches.results",
         "operationalSnapshots.uploadQueue",
         "operationalSnapshots.uploads",
-        "operationalSnapshots.transfers",
+        "operationalSnapshots.downloads",
         "operationalSnapshots.sharedFiles",
         "operationalSnapshots.servers",
         "operationalSnapshots.searches",
@@ -691,8 +695,8 @@ fn shrink_budget_section(payload: &mut Value, section: &str) -> bool {
         "operationalSnapshots.uploads" => {
             shrink_path_collection(payload, &["operationalSnapshots", "uploads"], false)
         }
-        "operationalSnapshots.transfers" => {
-            shrink_path_collection(payload, &["operationalSnapshots", "transfers"], true)
+        "operationalSnapshots.downloads" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "downloads"], false)
         }
         "operationalSnapshots.sharedFiles" => {
             shrink_path_collection(payload, &["operationalSnapshots", "sharedFiles"], false)
@@ -876,7 +880,7 @@ mod tests {
                         }
                     }],
                 },
-                "transfers": empty_collection(),
+                "downloads": empty_collection(),
                 "uploads": empty_collection(),
                 "uploadQueue": empty_collection(),
             },
