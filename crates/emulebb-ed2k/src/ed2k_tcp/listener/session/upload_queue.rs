@@ -566,13 +566,20 @@ impl ListenerUploadQueue {
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,
         requested: &Ed2kHash,
-    ) -> Result<Option<Ed2kVerifiedRangeReader>> {
-        if let Some((cached_hash, reader)) = self.verified_reader.take()
-            && cached_hash == *requested
-        {
-            return Ok(Some(reader));
-        }
-        transfer_runtime.open_verified_range_reader(requested).await
+    ) -> Result<
+        Option<(
+            crate::ed2k_transfer::Ed2kSharedEntry,
+            Ed2kVerifiedRangeReader,
+        )>,
+    > {
+        let cached = self
+            .verified_reader
+            .take()
+            .filter(|(hash, _)| hash == requested)
+            .map(|(_, reader)| reader);
+        transfer_runtime
+            .admit_upload_reader(requested, cached)
+            .await
     }
 
     pub(in crate::ed2k_tcp) fn store_verified_reader(

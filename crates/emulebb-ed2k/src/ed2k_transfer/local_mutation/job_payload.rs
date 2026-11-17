@@ -124,7 +124,10 @@ impl LocalMutationRegistry {
                         let page = metadata.download_payloads_after(after, limit)?;
                         let mut entries = Vec::with_capacity(page.entries.len());
                         for candidate in page.entries {
-                            if probe(&metadata, &candidate)? {
+                            if metadata.library_sharing_enabled(&candidate.catalog.file_hash)?
+                                == Some(true)
+                                && probe(&metadata, &candidate)?
+                            {
                                 entries.push(
                                     transfer::transfer_sql::shared_entry_from_catalog_entry(
                                         candidate.catalog,
@@ -144,6 +147,9 @@ impl LocalMutationRegistry {
                         };
                         for (hash, (complete, _)) in hashes.iter().zip(rows.iter_mut()) {
                             if !*complete
+                                // Complete internal payloads obey the same hash policy
+                                // as root copies; partial offers remain independent.
+                                && metadata.library_sharing_enabled(&hex::encode(hash))? == Some(true)
                                 && let Some(candidate) =
                                     metadata.download_payload_candidate(&hex::encode(hash))?
                             {

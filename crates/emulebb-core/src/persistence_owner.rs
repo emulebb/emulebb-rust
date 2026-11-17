@@ -21,6 +21,8 @@ mod download_create;
 pub(crate) use download_create::DownloadCreateCommand;
 mod download_patch;
 mod kad;
+mod library_sharing;
+mod library_tags;
 
 #[cfg(test)]
 mod download_tests;
@@ -75,6 +77,20 @@ impl std::fmt::Display for PersistenceError {
 }
 impl std::error::Error for PersistenceError {}
 
+impl From<&emulebb_ed2k::ed2k_transfer::LocalMutationError> for PersistenceError {
+    fn from(error: &emulebb_ed2k::ed2k_transfer::LocalMutationError) -> Self {
+        use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+        match error {
+            LocalMutationError::Busy => Self::Busy,
+            LocalMutationError::Closing => Self::Closing,
+            LocalMutationError::TooLarge => Self::TooLarge,
+            LocalMutationError::Storage => Self::Storage("database operation failed".into()),
+            LocalMutationError::Committed => Self::CommittedPublicationFailed,
+            LocalMutationError::Unknown => Self::CommitUnknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CategoryNameConflict;
 impl std::fmt::Display for CategoryNameConflict {
@@ -88,6 +104,8 @@ enum Command {
     Add { hash: String, name: String },
     Delete { hash: String },
     Category(category::CategoryCommand),
+    LibraryTags(crate::LibraryTagRequest),
+    LibrarySharing(library_sharing::SharingCommand),
     Downloads(download::DownloadCommand),
     KadLoad,
     KadIdentity,
@@ -99,6 +117,10 @@ enum Command {
 enum Response {
     Friend(Option<Friend>),
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
+    LibraryTags(
+        Result<crate::LibraryReply<crate::LibraryTagValue>, emulebb_metadata::LibraryTagError>,
+    ),
+    LibrarySharing(crate::LibraryReply<Vec<crate::LibrarySharingOutcome>>),
     Downloads(crate::DownloadControlBatch),
     DownloadPatched(Result<crate::DownloadChange, emulebb_metadata::DownloadPatchError>),
     DownloadCreated(
@@ -272,6 +294,7 @@ enum DbCommand {
     Add(Friend),
     Delete(Friend),
     Category(category::CategoryDbCommand),
+    LibraryTags(crate::LibraryTagRequest),
     KadLoad,
     KadIdentity,
     KadReplace {
@@ -301,6 +324,7 @@ enum KadMergeOutcome {
 enum DbResponse {
     Friend(Friend, bool),
     Category(category::CategoryWrite),
+    LibraryTags(library_tags::Outcome),
     KadLoaded(KadRoutingSnapshot),
     KadIdentity(KadNodeId),
     KadReplaced(Option<i64>),
@@ -447,6 +471,19 @@ impl PersistenceOwner {
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
+                    if matches!(&request.command, DbCommand::LibraryTags(_)) {
+                        let DbRequest { command, response } = request;
+                        let DbCommand::LibraryTags(command) = command else { unreachable!() };
+                        let writing = command.writes();
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| library_tags::execute(&store, command)));
+                        let result = match outcome {
+                            Ok(value) => value.map(DbResponse::LibraryTags),
+                            Err(_) if writing => Err(PersistenceError::CommitUnknown),
+                            Err(_) => Err(PersistenceError::Worker),
+                        };
+                        let _ = response.send(result);
+                        continue;
+                    }
                     if matches!(&request.command, DbCommand::Category(_)) {
                         let DbRequest { command, response } = request;
                         let DbCommand::Category(command) = command else {
@@ -566,7 +603,8 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::Category(_)
+                            DbCommand::LibraryTags(_)
+                            | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
                             | DbCommand::KadReplace { .. }
@@ -611,7 +649,8 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::Category(_)
+                                DbCommand::LibraryTags(_)
+                            | DbCommand::Category(_)
                                 | DbCommand::KadLoad
                                 | DbCommand::KadIdentity
                                 | DbCommand::KadReplace { .. }
@@ -637,7 +676,8 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::Category(_)
+                            DbCommand::LibraryTags(_)
+                            | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
                             | DbCommand::KadReplace { .. }
@@ -884,7 +924,9 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::Category(_)
+            Command::LibraryTags(_)
+            | Command::LibrarySharing(_)
+            | Command::Category(_)
             | Command::Downloads(_)
             | Command::KadLoad
             | Command::KadIdentity
@@ -1024,6 +1066,23 @@ async fn process(
         )
         .await;
     }
+    if matches!(&request.command, Command::LibrarySharing(_)) {
+        return library_sharing::process(
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
+    if matches!(&request.command, Command::LibraryTags(_)) {
+        return library_tags::process(
+            db,
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::Category(_)) {
         return category::process(
             state,
@@ -1069,7 +1128,9 @@ async fn process(
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
-            DbResponse::Friend(..) | DbResponse::Category(..) => Err(PersistenceError::Worker),
+            DbResponse::Friend(..) | DbResponse::Category(..) | DbResponse::LibraryTags(..) => {
+                Err(PersistenceError::Worker)
+            }
         };
     }
     let prepared = {
@@ -1095,7 +1156,9 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::Category(_)
+            Command::LibraryTags(_)
+            | Command::LibrarySharing(_)
+            | Command::Category(_)
             | Command::Downloads(_)
             | Command::KadLoad
             | Command::KadIdentity

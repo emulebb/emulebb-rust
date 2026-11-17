@@ -810,6 +810,15 @@ fn partial_offer_batch_returns_a_bounded_prefix_and_can_resume() {
         store.upsert_transfer_manifest(&manifest).unwrap();
         hashes.push([index; 16]);
     }
+    // Disabling complete-library sharing does not suppress verified partials.
+    for hash in &hashes {
+        assert_eq!(
+            store
+                .set_library_sharing_enabled(&hex::encode(hash), false)
+                .unwrap(),
+            Some(true)
+        );
+    }
     let first = store.try_verified_share_batch(&hashes).unwrap().unwrap();
     assert_eq!(first.len(), 3);
     assert!(first.iter().all(|(_, partial)| partial.is_some()));

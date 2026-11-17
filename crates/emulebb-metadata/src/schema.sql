@@ -72,6 +72,7 @@ CREATE TABLE known_files (
     latest_download_job_id INTEGER REFERENCES download_jobs(id) ON DELETE SET NULL,
     display_name TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
+    sharing_enabled INTEGER NOT NULL DEFAULT 1 CHECK(sharing_enabled IN (0, 1)),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     aich_root_origin TEXT CHECK(aich_root_origin IN
         ('local_computed', 'operator_link', 'stock_import')),
@@ -95,6 +96,26 @@ CREATE TABLE known_files (
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     CHECK((aich_root IS NULL) = (aich_root_origin IS NULL))
 ) STRICT;
+
+-- Names are immutable public identities; numeric keys remain internal.
+CREATE TABLE library_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(instr(name, char(0)) = 0 AND length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[A-Za-z0-9]' AND name NOT GLOB '*[^A-Za-z0-9-]*')
+) STRICT;
+
+CREATE TRIGGER library_tags_name_immutable
+BEFORE UPDATE OF name ON library_tags
+WHEN old.name COLLATE BINARY IS NOT new.name COLLATE BINARY
+BEGIN
+    SELECT RAISE(ABORT, 'tag name is immutable');
+END;
+
+CREATE TABLE known_file_tags (
+    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    tag_id INTEGER NOT NULL REFERENCES library_tags(id) ON DELETE CASCADE,
+    PRIMARY KEY(known_file_id, tag_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX known_file_tags_tag_idx ON known_file_tags(tag_id, known_file_id);
 
 CREATE TABLE known_file_origins (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
@@ -1037,8 +1058,25 @@ BEGIN
 END;
 
 CREATE TRIGGER library_catalog_known_files_update
-AFTER UPDATE OF ed2k_hash ON known_files
-WHEN old.ed2k_hash IS NOT new.ed2k_hash
+AFTER UPDATE OF ed2k_hash, sharing_enabled ON known_files
+WHEN old.ed2k_hash IS NOT new.ed2k_hash OR old.sharing_enabled IS NOT new.sharing_enabled
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+
+CREATE TRIGGER library_catalog_tags_insert AFTER INSERT ON library_tags
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+CREATE TRIGGER library_catalog_tags_delete AFTER DELETE ON library_tags
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+CREATE TRIGGER library_catalog_file_tags_insert AFTER INSERT ON known_file_tags
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+END;
+CREATE TRIGGER library_catalog_file_tags_delete AFTER DELETE ON known_file_tags
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
 END;

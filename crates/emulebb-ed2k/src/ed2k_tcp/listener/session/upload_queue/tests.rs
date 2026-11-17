@@ -358,7 +358,7 @@ async fn verified_reader_cache_survives_repeated_parts_requests_for_slot_file() 
     let mut queue = ListenerUploadQueue::new();
     let _reply = queue.start_upload_reply(&runtime, identity, &hash).await;
 
-    let mut reader = queue
+    let (_, mut reader) = queue
         .take_verified_reader(&runtime, &hash)
         .await
         .unwrap()
@@ -372,7 +372,7 @@ async fn verified_reader_cache_survives_repeated_parts_requests_for_slot_file() 
     assert_eq!(reader.disk_read_count(), 1);
     queue.store_verified_reader(&hash, reader);
 
-    let mut reader = queue
+    let (_, mut reader) = queue
         .take_verified_reader(&runtime, &hash)
         .await
         .unwrap()

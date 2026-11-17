@@ -175,6 +175,25 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         Some(vec![(true, None), (false, None)])
     );
     assert!(store.try_verified_share_batch(&[[0; 16]; 201]).is_err());
+    // Policy applies to the hash, including every otherwise eligible copy.
+    assert_eq!(
+        store.set_library_sharing_enabled(&hash, false).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        store.try_verified_share_batch(&[root_page[0].1]).unwrap(),
+        Some(vec![(false, None)])
+    );
+    assert!(store.active_local_catalog_entry(&hash).unwrap().is_some());
+    assert!(store.next_shared_copy(&hash, 0, 65_536).unwrap().is_some());
+    assert_eq!(
+        store.set_library_sharing_enabled(&hash, true).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        store.try_verified_share_batch(&[root_page[0].1]).unwrap(),
+        Some(vec![(true, None)])
+    );
     let second_copy = store
         .next_shared_copy(&hash, first_copy.path_id, 65_536)
         .unwrap()
