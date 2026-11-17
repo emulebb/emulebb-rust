@@ -978,34 +978,6 @@ impl EmulebbCore {
         let _ = self.transfer_events.send(event);
     }
 
-    async fn resolve_transfer_category(
-        &self,
-        category_id: Option<i64>,
-        category_name: Option<&str>,
-    ) -> Result<Option<(i64, String)>> {
-        let state = self.state.lock().await;
-        if let Some(id) = category_id {
-            let category = state
-                .categories
-                .get(&id)
-                .context("category does not exist")?;
-            return Ok(Some((category.id, category.name.clone())));
-        }
-        let Some(name) = category_name else {
-            return Ok(None);
-        };
-        ensure!(
-            valid_category_name(name),
-            "category does not match a configured category"
-        );
-        let category = state
-            .categories
-            .values()
-            .find(|category| category.name.eq_ignore_ascii_case(name))
-            .context("category does not match a configured category")?;
-        Ok(Some((category.id, category.name.clone())))
-    }
-
     async fn search_ed2k_servers(
         &self,
         search_id: &str,

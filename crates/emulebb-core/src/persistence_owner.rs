@@ -17,6 +17,8 @@ use emulebb_metadata::{
 
 pub(crate) mod category;
 mod download;
+mod download_create;
+pub(crate) use download_create::DownloadCreateCommand;
 mod download_patch;
 mod kad;
 
@@ -99,6 +101,12 @@ enum Response {
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
     Downloads(crate::DownloadControlBatch),
     DownloadPatched(Result<crate::DownloadChange, emulebb_metadata::DownloadPatchError>),
+    DownloadCreated(
+        anyhow::Result<(
+            bool,
+            emulebb_ed2k::ed2k_transfer::RetainedRead<crate::DownloadSummary>,
+        )>,
+    ),
     Roots(bool),
     KadLoaded(LeasedKadSnapshot),
     KadIdentity(KadNodeId),

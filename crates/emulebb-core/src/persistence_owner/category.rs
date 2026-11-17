@@ -54,6 +54,7 @@ pub(crate) struct CategorySharingContext {
 }
 
 pub(crate) enum CategoryCommand {
+    CreateDownload(super::download_create::DownloadCreateCommand),
     PatchDownload(super::download_patch::DownloadPatchCommand),
     Create {
         value: Category,
@@ -236,6 +237,7 @@ fn category_bytes(value: &Category) -> usize {
 impl CategoryCommand {
     fn bytes(&self) -> usize {
         match self {
+            Self::CreateDownload(command) => command.bytes(),
             Self::PatchDownload(command) => command.bytes(),
             Self::Create { value, sharing } => {
                 category_bytes(value).saturating_add(sharing.incoming.as_os_str().len())
@@ -479,6 +481,17 @@ pub(super) async fn process(
         unreachable!()
     };
     let command = match command {
+        CategoryCommand::CreateDownload(command) => {
+            return Ok(Response::DownloadCreated(
+                super::download_create::process(
+                    state,
+                    command,
+                    #[cfg(test)]
+                    publication_gate,
+                )
+                .await,
+            ));
+        }
         CategoryCommand::PatchDownload(command) => {
             return super::download_patch::process(
                 state,
@@ -518,7 +531,9 @@ pub(super) async fn process(
         | CategoryCommand::Update { sharing, .. }
         | CategoryCommand::Delete { sharing, .. } => Some(sharing.clone()),
         CategoryCommand::ReplaceRoots { .. } => unreachable!(),
-        CategoryCommand::Assign { .. } | CategoryCommand::PatchDownload(_) => None,
+        CategoryCommand::Assign { .. }
+        | CategoryCommand::PatchDownload(_)
+        | CategoryCommand::CreateDownload(_) => None,
     };
     let mut publication = match &command {
         CategoryCommand::Assign {
@@ -616,7 +631,9 @@ pub(super) async fn process(
                 (value, false, false)
             }
             CategoryCommand::Assign { .. } => unreachable!(),
-            CategoryCommand::PatchDownload(_) => unreachable!(),
+            CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => {
+                unreachable!()
+            }
             CategoryCommand::ReplaceRoots { .. } => unreachable!(),
             CategoryCommand::Delete { id, .. } => {
                 let Some(existing) = state.categories.get(&id) else {
