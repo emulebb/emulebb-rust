@@ -125,6 +125,11 @@ mod discovery_fetch;
 mod disk_guard;
 mod download_attempts;
 mod download_controls;
+mod library_tags;
+pub use library_tags::{
+    LibraryTag, LibraryTagAssignment, LibraryTagChange, LibraryTagPage, LibraryTagReply,
+    LibraryTagRequest, LibraryTagValue,
+};
 mod download_events;
 pub use download_events::{
     DownloadEvent, DownloadEventDiagnostics, DownloadEventResetReason, DownloadEventSubscription,
