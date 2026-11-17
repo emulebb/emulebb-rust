@@ -44,7 +44,7 @@ impl EmulebbCore {
             .refresh_transfer_from_manifest_silent(token, state_name)
             .await?;
         if let Some(transfer) = &transfer {
-            self.publish_transfer_updated(transfer.clone());
+            self.download_events.changed(transfer.job_token().job_id);
         }
         Ok(transfer)
     }
@@ -149,7 +149,7 @@ impl EmulebbCore {
         transfer.state = state_name.to_string();
         let transfer = transfer.clone();
         drop(state);
-        self.publish_transfer_updated(transfer.clone());
+        self.download_events.changed(transfer.job_token().job_id);
         Some(transfer)
     }
 }

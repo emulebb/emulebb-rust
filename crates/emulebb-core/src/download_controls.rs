@@ -70,6 +70,7 @@ pub(crate) struct DownloadControlContext {
     pub state: Arc<Mutex<CoreState>>,
     pub category_gate: Arc<Mutex<()>>,
     pub transfer_root: PathBuf,
+    pub events: Arc<crate::download_events::DownloadEvents>,
 }
 
 impl EmulebbCore {
@@ -147,6 +148,7 @@ impl EmulebbCore {
                     state: Arc::clone(&self.state),
                     category_gate: Arc::clone(&self.category_mutation_gate),
                     transfer_root: self.transfer_root.clone(),
+                    events: Arc::clone(&self.download_events),
                 }
             })
             .await?)
@@ -161,6 +163,15 @@ impl DownloadControlContext {
             DownloadAction::Verify => self.verify(id).await,
             DownloadAction::Remove { delete_data } => self.remove(id, delete_data).await,
         };
+        if matches!(result, Ok(DownloadChange::Changed))
+            && !matches!(action, DownloadAction::Verify)
+        {
+            if matches!(action, DownloadAction::Remove { .. }) {
+                self.events.removed(id);
+            } else {
+                self.events.changed(id);
+            }
+        }
         let outcome = result.map_err(|error| {
             let kind = if let Some(error) = error.downcast_ref::<DownloadControlError>() {
                 *error
@@ -265,6 +276,7 @@ impl DownloadControlContext {
             return Ok(DownloadChange::Unchanged);
         }
         drop(job);
+        self.events.changed(id);
         let checked = async {
             self.runtime
                 .reopen_download_job_storage_for_verification(token)
@@ -275,6 +287,8 @@ impl DownloadControlContext {
         // Both success and failure retire this quiesced view. Otherwise a large
         // explicit selection would leave stopped/faulted jobs resident forever.
         let released = self.runtime.release_download_job_execution(token).await;
+        drop(guard);
+        self.events.changed(id);
         checked?;
         released?;
         Ok(DownloadChange::Changed)

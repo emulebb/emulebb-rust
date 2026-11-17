@@ -310,6 +310,7 @@ async fn verification_batch_larger_than_resident_cohort_releases_each_stopped_vi
 #[tokio::test]
 async fn admitted_batch_finishes_later_jobs_and_execution_cancellation_after_abort() {
     let (core, owner) = setup();
+    let mut events = core.subscribe_download_events(crate::DownloadEventResetReason::Initial, None);
     let first = job(&core, 1, None);
     let last = job(&core, 2, None);
     let first_execution = core
@@ -358,6 +359,16 @@ async fn admitted_batch_finishes_later_jobs_and_execution_cancellation_after_abo
         DownloadIntent::Stopped
     );
     assert!(last_execution.cancellation().is_cancelled());
+    let changed = [
+        events.receiver.try_recv().unwrap(),
+        events.receiver.try_recv().unwrap(),
+    ];
+    assert!(
+        matches!(changed[0],crate::DownloadEvent::Changed{download_id,..} if download_id==first.job_id)
+    );
+    assert!(
+        matches!(changed[1],crate::DownloadEvent::Changed{download_id,..} if download_id==last.job_id)
+    );
     assert_eq!(tests::usage(&owner), (0, 0));
 }
 

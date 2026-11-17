@@ -159,6 +159,7 @@ impl EmulebbCore {
                 peers,
                 runtime: Arc::clone(&self.ed2k_transfers),
                 attempts: Arc::clone(&self.download_attempts),
+                events: Arc::clone(&self.download_events),
             })
             .await
     }

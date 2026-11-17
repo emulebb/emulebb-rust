@@ -23,7 +23,13 @@ impl EmulebbCore {
             .persistence_owner
             .owner(&self.metadata_store, &self.state)?;
         Ok(owner
-            .patch_download(id, &update, &self.ed2k_transfers, &self.download_attempts)
+            .patch_download(
+                id,
+                &update,
+                &self.ed2k_transfers,
+                &self.download_attempts,
+                &self.download_events,
+            )
             .await??)
     }
 }

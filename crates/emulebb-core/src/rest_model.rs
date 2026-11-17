@@ -1196,70 +1196,6 @@ pub struct DownloadFileNameObservation {
     pub observed_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TransferEventType {
-    #[serde(rename = "transfer.added")]
-    Added,
-    #[serde(rename = "transfer.updated")]
-    Updated,
-    #[serde(rename = "transfer.removed")]
-    Removed,
-    #[serde(rename = "sync.reset")]
-    SyncReset,
-}
-
-impl TransferEventType {
-    pub fn as_sse_name(self) -> &'static str {
-        match self {
-            Self::Added => "transfer.added",
-            Self::Updated => "transfer.updated",
-            Self::Removed => "transfer.removed",
-            Self::SyncReset => "sync.reset",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TransferEventResetReason {
-    #[serde(rename = "lagged")]
-    Lagged,
-    #[serde(rename = "last-event-id")]
-    LastEventId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum TransferEvent {
-    #[serde(rename = "transfer.added")]
-    Added { id: u64, transfer: Transfer },
-    #[serde(rename = "transfer.updated")]
-    Updated { id: u64, transfer: Transfer },
-    #[serde(rename = "transfer.removed")]
-    Removed { id: u64, hash: String },
-    #[serde(rename = "sync.reset")]
-    SyncReset {
-        id: u64,
-        reason: TransferEventResetReason,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        missed: Option<u64>,
-        #[serde(rename = "lastEventId", skip_serializing_if = "Option::is_none")]
-        last_event_id: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferEventDiagnostics {
-    pub enabled: bool,
-    pub stream: String,
-    pub channel_capacity: usize,
-    pub queued_event_count: usize,
-    pub subscriber_count: usize,
-    pub latest_event_id: u64,
-    pub next_event_id: u64,
-    pub resume_behavior: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IpFilterStatus {
@@ -1271,59 +1207,6 @@ pub struct IpFilterStatus {
     pub range_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loaded_sha256: Option<String>,
-}
-
-impl TransferEvent {
-    pub fn added(id: u64, transfer: Transfer) -> Self {
-        Self::Added { id, transfer }
-    }
-
-    pub fn updated(id: u64, transfer: Transfer) -> Self {
-        Self::Updated { id, transfer }
-    }
-
-    pub fn removed(id: u64, hash: impl Into<String>) -> Self {
-        Self::Removed {
-            id,
-            hash: hash.into(),
-        }
-    }
-
-    pub fn reset_lagged(id: u64, missed: u64) -> Self {
-        Self::SyncReset {
-            id,
-            reason: TransferEventResetReason::Lagged,
-            missed: Some(missed),
-            last_event_id: None,
-        }
-    }
-
-    pub fn reset_last_event_id(id: u64, last_event_id: impl Into<String>) -> Self {
-        Self::SyncReset {
-            id,
-            reason: TransferEventResetReason::LastEventId,
-            missed: None,
-            last_event_id: Some(last_event_id.into()),
-        }
-    }
-
-    pub fn id(&self) -> u64 {
-        match self {
-            Self::Added { id, .. }
-            | Self::Updated { id, .. }
-            | Self::Removed { id, .. }
-            | Self::SyncReset { id, .. } => *id,
-        }
-    }
-
-    pub fn event_type(&self) -> TransferEventType {
-        match self {
-            Self::Added { .. } => TransferEventType::Added,
-            Self::Updated { .. } => TransferEventType::Updated,
-            Self::Removed { .. } => TransferEventType::Removed,
-            Self::SyncReset { .. } => TransferEventType::SyncReset,
-        }
-    }
 }
 
 /// One remembered ED2K peer source for a transfer.

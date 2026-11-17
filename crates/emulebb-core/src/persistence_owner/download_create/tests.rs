@@ -28,6 +28,7 @@ fn request() -> DownloadCreate {
 #[tokio::test]
 async fn caller_abort_after_sql_cannot_skip_scheduler_publication() {
     let (core, owner) = setup();
+    let mut events = core.subscribe_download_events(crate::DownloadEventResetReason::Initial, None);
     let gate = Arc::new(PublicationGate::default());
     *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
     let caller = {
@@ -52,6 +53,9 @@ async fn caller_abort_after_sql_cannot_skip_scheduler_publication() {
     .await
     .unwrap();
     owner.close_and_drain().await.unwrap();
+    assert!(
+        matches!(events.receiver.try_recv().unwrap(),crate::DownloadEvent::Changed{download_id,..} if download_id.get()==1)
+    );
     assert_eq!(super::super::tests::usage(&owner), (0, 0));
 }
 

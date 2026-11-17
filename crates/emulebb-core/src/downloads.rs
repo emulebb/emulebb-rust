@@ -50,6 +50,12 @@ pub struct DownloadPage {
     pub next_before: Option<JobId>,
     pub has_more: bool,
 }
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DownloadCounts {
+    pub unfinished: u64,
+    pub completed: u64,
+}
 fn serialize_intent<S: serde::Serializer>(
     intent: &DownloadIntent,
     serializer: S,
@@ -118,6 +124,18 @@ pub(crate) fn observed_state(
     }
 }
 impl EmulebbCore {
+    /// Fixed-size persisted counters; a dashboard read never walks job rows.
+    pub async fn download_counts(&self) -> Result<RetainedRead<DownloadCounts>> {
+        self.persistence_owner.check_coherent_state()?;
+        let counts = self.ed2k_transfers.download_job_counts().await?;
+        self.persistence_owner.check_coherent_state()?;
+        counts.try_project(4096, |counts| {
+            Ok(DownloadCounts {
+                unfinished: counts.unfinished,
+                completed: counts.completed,
+            })
+        })
+    }
     /// Read a byte-bounded newest-ID page directly from the canonical provider.
     /// Only the bounded live cohort is consulted for execution overlays.
     pub async fn download_page(

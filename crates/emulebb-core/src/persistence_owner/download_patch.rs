@@ -10,6 +10,7 @@ pub(crate) struct DownloadPatchCommand {
     update: DownloadUpdate,
     runtime: Arc<Ed2kTransferRuntime>,
     attempts: Arc<DownloadAttemptControl>,
+    events: Arc<crate::download_events::DownloadEvents>,
 }
 
 impl DownloadPatchCommand {
@@ -39,6 +40,7 @@ impl PersistenceOwner {
         update: &DownloadUpdate,
         runtime: &Arc<Ed2kTransferRuntime>,
         attempts: &Arc<DownloadAttemptControl>,
+        events: &Arc<crate::download_events::DownloadEvents>,
     ) -> Result<Result<DownloadChange, DownloadPatchError>, PersistenceError> {
         let charge = update_bytes(update)
             .checked_mul(4)
@@ -52,6 +54,7 @@ impl PersistenceOwner {
                         update: update.clone(),
                         runtime: Arc::clone(runtime),
                         attempts: Arc::clone(attempts),
+                        events: Arc::clone(events),
                     },
                 )))
             })
@@ -172,6 +175,7 @@ pub(super) async fn process(
     }
     if value.changed {
         command.attempts.changed.notify_one();
+        command.events.changed(command.id);
     }
     Ok(Response::DownloadPatched(Ok(if value.changed {
         DownloadChange::Changed

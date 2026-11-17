@@ -13,6 +13,7 @@ pub(crate) struct DownloadCreateCommand {
     pub peers: MetadataDownloadInitialPeers,
     pub runtime: Arc<Ed2kTransferRuntime>,
     pub attempts: Arc<DownloadAttemptControl>,
+    pub events: Arc<crate::download_events::DownloadEvents>,
 }
 
 impl DownloadCreateCommand {
@@ -97,6 +98,7 @@ pub(super) async fn process(
     // can fail or the requesting connection can discard its reply.
     if admitted.created {
         command.attempts.changed.notify_one();
+        command.events.changed(admitted.job.token.job_id);
     }
     let _fence = command.runtime.lock_category_publication().await;
     let running = command.attempts.snapshot();

@@ -157,6 +157,7 @@ async fn admitted_patch_finishes_core_publication_after_disconnect() {
         .await
         .transfers
         .insert(job.token.job_id.to_string(), transfer);
+    let mut events = core.subscribe_download_events(crate::DownloadEventResetReason::Initial, None);
     let gate = Arc::new(PublicationGate::default());
     *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
     let caller = {
@@ -189,6 +190,9 @@ async fn admitted_patch_finishes_core_publication_after_disconnect() {
     assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
     gate.release.notify_one();
     owner.close_and_drain().await.unwrap();
+    assert!(
+        matches!(events.receiver.try_recv().unwrap(),crate::DownloadEvent::Changed{download_id,..} if download_id==job.token.job_id)
+    );
     assert_eq!(
         core.state.lock().await.transfers[&job.token.job_id.to_string()].name,
         "Renamed.bin"
