@@ -21,6 +21,14 @@ use crate::{
     },
 };
 
+// WHY: without statistics SQLite can prefer the broader runnable-job index,
+// walking arbitrarily many unfinished jobs to find one delivery candidate.
+const PENDING_DELIVERY_PAGE_SQL: &str = "SELECT id FROM download_jobs
+    INDEXED BY download_jobs_pending_delivery_page_idx WHERE id>?1
+    AND completed=1 AND final_rehash_pending=0 AND terminal_completed_at_s IS NULL
+    AND removed_at_s IS NULL AND delete_requested_at_s IS NULL
+    AND intent='started' AND storage_failure_code IS NULL ORDER BY id LIMIT ?2";
+
 impl super::MetadataStore {
     pub fn upsert_transfer_manifest(&self, manifest: &MetadataTransferManifest) -> Result<()> {
         self.upsert_transfer_manifest_reconciled(manifest)
@@ -758,12 +766,7 @@ impl super::MetadataStore {
     ) -> Result<Vec<JobId>> {
         ensure!((1..=256).contains(&limit), "invalid delivery job page size");
         let conn = self.connection()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT id FROM download_jobs WHERE id>?1
-            AND completed=1 AND final_rehash_pending=0 AND terminal_completed_at_s IS NULL
-            AND removed_at_s IS NULL AND delete_requested_at_s IS NULL
-            AND storage_failure_code IS NULL ORDER BY id LIMIT ?2",
-        )?;
+        let mut stmt = conn.prepare_cached(PENDING_DELIVERY_PAGE_SQL)?;
         Ok(stmt
             .query_map(
                 params![after.map_or(0, JobId::get), i64::try_from(limit)?],

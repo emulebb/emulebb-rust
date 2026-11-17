@@ -12,6 +12,10 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Execution(emulebb_metadata::JobToken),
     SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
+    Source(
+        emulebb_metadata::JobToken,
+        emulebb_metadata::MetadataDownloadSourceSelector,
+    ),
     Endpoints(emulebb_metadata::JobToken, i64, usize),
     Names(emulebb_metadata::JobToken, i64, usize),
     Latest([u8; 16]),
@@ -28,6 +32,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
+    Source(RetainedRead<Option<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
     Names(RetainedRead<Vec<emulebb_metadata::MetadataDownloadNameEntry>>),
     Page(RetainedRead<Vec<DownloadJobRecord>>),
@@ -54,6 +59,7 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts => 4096,
+            JobRead::Source(..) => 1024 * 1024 + 4096,
             JobRead::Endpoints(_, after, limit) => {
                 ensure!(
                     after >= 0 && (1..=256).contains(&limit),
@@ -133,6 +139,11 @@ impl LocalMutationRegistry {
                     .map(|value| {
                         JobReadResult::Sources(RetainedRead::new(value, capacity.take_result()))
                     }),
+                JobRead::Source(token, selector) => {
+                    metadata.download_job_source(token, selector).map(|value| {
+                        JobReadResult::Source(RetainedRead::new(value, capacity.take_result()))
+                    })
+                }
                 JobRead::Names(token, after, limit) => metadata
                     .download_job_names_after(token, after, limit)
                     .map(|value| {
@@ -317,6 +328,19 @@ impl transfer::Ed2kTransferRuntime {
             unreachable!()
         };
         Ok(page)
+    }
+    pub async fn download_source(
+        &self,
+        token: emulebb_metadata::JobToken,
+        selector: emulebb_metadata::MetadataDownloadSourceSelector,
+    ) -> Result<RetainedRead<Option<emulebb_metadata::MetadataDownloadSourceEntry>>> {
+        let JobReadResult::Source(source) = self
+            .read_job_metadata(JobRead::Source(token, selector))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(source)
     }
     pub async fn download_names_after(
         &self,

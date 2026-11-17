@@ -93,8 +93,8 @@ pub use catalog::{
 };
 pub(crate) use completion_rehash::mark_final_rehash_pending;
 pub use deliver::Ed2kDeliveryOutcome;
-pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
+pub use download_activity::{Ed2kLiveSource, Ed2kLiveSourceStats};
 use download_coordinator::{
     DEFAULT_CONNECTION_WINDOW, DEFAULT_REASK_PACING_INTERVAL, Ed2kDownloadCoordinator,
 };
