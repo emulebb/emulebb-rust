@@ -121,7 +121,7 @@ impl LocalMutationRegistry {
         let (sender, receipt) = oneshot::channel();
         #[cfg(test)]
         let gate = state.publication_gate.take();
-        Self::spawn_unit(&mut state, lease, move |lease| {
+        Self::spawn_unit_reply(&mut state, lease, sender, move |lease| {
             let mut committed = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let (hash, old_token) = match &change {
@@ -331,8 +331,7 @@ impl LocalMutationRegistry {
                 dirty.store(true, Ordering::Release);
                 failed.store(true, Ordering::Release);
             }
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }

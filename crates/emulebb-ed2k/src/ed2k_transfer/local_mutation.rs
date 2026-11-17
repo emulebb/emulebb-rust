@@ -168,6 +168,22 @@ impl LocalMutationRegistry {
     ) {
         Self::spawn_unit_with(state, lease, (), move |lease, _| work(lease));
     }
+    /// A successful receipt must not race the prior command's workspace release.
+    /// Consume the work closure (and its input captures), release its temporary
+    /// lease, then expose the independently charged result to the next caller.
+    fn spawn_unit_reply<T: Send + 'static>(
+        state: &mut State,
+        mut lease: CapacityLease,
+        sender: oneshot::Sender<T>,
+        work: impl FnOnce(&mut CapacityLease) -> (T, u8) + Send + 'static,
+    ) {
+        state.tasks.spawn_blocking(move || {
+            let (result, outcome) = work(&mut lease);
+            drop(lease);
+            let _ = sender.send(result);
+            outcome
+        });
+    }
     /// An additional pure control lease (prepared hashing) also outlives every
     /// captured input. Neither control contains the runtime or this task set.
     fn spawn_unit_with<C: Send + 'static>(
@@ -945,6 +961,58 @@ mod tests {
             });
         }
         assert_eq!(ready.await.unwrap(), (true, 4096));
+        registry.seal_and_drain().await.unwrap();
+        assert_eq!(registry.state.lock().unwrap().capacity.usage().bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn command_receipt_follows_capture_and_workspace_release_but_keeps_result_charged() {
+        struct Captured {
+            bytes: Vec<u8>,
+            capacity: Arc<CapacityControl>,
+            observed: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Captured {
+            fn len(&self) -> usize {
+                self.bytes.len()
+            }
+        }
+        impl Drop for Captured {
+            fn drop(&mut self) {
+                self.observed
+                    .store(self.capacity.usage().bytes, Ordering::Release);
+            }
+        }
+        let registry = LocalMutationRegistry::default();
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (sender, receipt) = oneshot::channel();
+        {
+            let mut state = registry.state.lock().unwrap();
+            let lease =
+                LocalMutationRegistry::reserve_unit(&mut state, 4096, false, false).unwrap();
+            let captured = Captured {
+                bytes: vec![0; 1024],
+                capacity: Arc::clone(&state.capacity),
+                observed: Arc::clone(&observed),
+            };
+            LocalMutationRegistry::spawn_unit_reply(&mut state, lease, sender, move |lease| {
+                assert_eq!(captured.len(), 1024);
+                (lease.split_retained_bytes(512).unwrap(), 0)
+            });
+        }
+        let result_lease = receipt.await.unwrap();
+        assert_eq!(observed.load(Ordering::Acquire), 4096);
+        assert_eq!(registry.state.lock().unwrap().capacity.usage().bytes, 512);
+        // The very next command can use all temporary capacity that the prior
+        // receipt promises is no longer needed, without a retry or sleep.
+        {
+            let mut state = registry.state.lock().unwrap();
+            let next =
+                LocalMutationRegistry::reserve_unit(&mut state, MAX_BYTES - 512, false, false)
+                    .unwrap();
+            drop(next);
+        }
+        drop(result_lease);
         registry.seal_and_drain().await.unwrap();
         assert_eq!(registry.state.lock().unwrap().capacity.usage().bytes, 0);
     }
