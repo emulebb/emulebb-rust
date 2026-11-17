@@ -5,6 +5,12 @@ use emulebb_ed2k::ed2k_transfer::RetainedRead;
 use emulebb_metadata::{DownloadIntent, DownloadJobQuery, DownloadJobRecord, JobId, JobToken};
 use serde::Serialize;
 
+mod browse;
+pub use browse::{
+    DownloadDelivery, DownloadDeliveryOwnership, DownloadDeliveryState, DownloadDetail,
+    DownloadFailure, DownloadPart, DownloadPartPage,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DownloadState {
@@ -44,12 +50,41 @@ pub struct DownloadPage {
     pub next_before: Option<JobId>,
     pub has_more: bool,
 }
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DownloadCounts {
+    pub unfinished: u64,
+    pub completed: u64,
+}
 fn serialize_intent<S: serde::Serializer>(
     intent: &DownloadIntent,
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
     serializer.serialize_str(intent.as_str())
 }
+pub(crate) fn summary_from_job(
+    job: DownloadJobRecord,
+    category: Option<&str>,
+    running: &[(JobToken, bool)],
+    verifying: &[JobToken],
+) -> DownloadSummary {
+    let state = observed_state(&job, running, verifying);
+    let progress = job.progress();
+    DownloadSummary {
+        id: job.token.job_id,
+        hash: job.file_hash,
+        name: job.display_name,
+        size_bytes: job.expected_size_bytes,
+        progress,
+        intent: job.intent,
+        state,
+        category: category.map(str::to_owned),
+        created_at: job.created_at_s,
+        updated_at: job.updated_at_s,
+        completed_at: job.completed_at_s,
+    }
+}
+
 pub(crate) fn observed_state(
     job: &DownloadJobRecord,
     running: &[(JobToken, bool)],
@@ -70,14 +105,14 @@ pub(crate) fn observed_state(
     if attempt.is_some_and(|(token, cancelled)| *cancelled || *token != job.token) {
         return DownloadState::Stopping;
     }
+    if verifying.contains(&job.token) {
+        return DownloadState::Verifying;
+    }
     if job.intent == DownloadIntent::Stopped {
         return DownloadState::Stopped;
     }
     if job.expected_size_bytes.is_none() {
         return DownloadState::WaitingMetadata;
-    }
-    if verifying.contains(&job.token) {
-        return DownloadState::Verifying;
     }
     if job.payload_verified {
         return DownloadState::Delivering;
@@ -89,6 +124,18 @@ pub(crate) fn observed_state(
     }
 }
 impl EmulebbCore {
+    /// Fixed-size persisted counters; a dashboard read never walks job rows.
+    pub async fn download_counts(&self) -> Result<RetainedRead<DownloadCounts>> {
+        self.persistence_owner.check_coherent_state()?;
+        let counts = self.ed2k_transfers.download_job_counts().await?;
+        self.persistence_owner.check_coherent_state()?;
+        counts.try_project(4096, |counts| {
+            Ok(DownloadCounts {
+                unfinished: counts.unfinished,
+                completed: counts.completed,
+            })
+        })
+    }
     /// Read a byte-bounded newest-ID page directly from the canonical provider.
     /// Only the bounded live cohort is consulted for execution overlays.
     pub async fn download_page(
@@ -98,7 +145,8 @@ impl EmulebbCore {
         self.persistence_owner.check_coherent_state()?;
         let _fence = self.ed2k_transfers.lock_category_publication().await;
         let page = self.ed2k_transfers.query_download_jobs(query).await?;
-        let verifying = self.ed2k_transfers.verifying_downloads().await;
+        let mut verifying = self.ed2k_transfers.verifying_downloads().await;
+        verifying.extend(self.download_attempts.verifications());
         let running = self.download_attempts.snapshot();
         let state = self.state.lock().await;
         self.persistence_owner.check_coherent_state()?;
@@ -137,24 +185,11 @@ impl EmulebbCore {
         page.try_project(bytes, |page| {
             let mut downloads = Vec::with_capacity(page.jobs.len());
             for job in page.jobs {
-                let observed = observed_state(&job, &running, &verifying);
-                let progress = job.progress();
-                downloads.push(DownloadSummary {
-                    id: job.token.job_id,
-                    hash: job.file_hash,
-                    name: job.display_name,
-                    size_bytes: job.expected_size_bytes,
-                    progress,
-                    intent: job.intent,
-                    state: observed,
-                    category: job
-                        .category_id
-                        .and_then(|id| state.categories.get(&id))
-                        .map(|category| category.name.clone()),
-                    created_at: job.created_at_s,
-                    updated_at: job.updated_at_s,
-                    completed_at: job.completed_at_s,
-                });
+                let category = job
+                    .category_id
+                    .and_then(|id| state.categories.get(&id))
+                    .map(|value| value.name.as_str());
+                downloads.push(summary_from_job(job, category, &running, &verifying));
             }
             Ok(DownloadPage {
                 downloads,
@@ -316,8 +351,8 @@ pub struct DownloadCommentPage {
 }
 
 impl EmulebbCore {
-    /// Comments remain separate from source/header detail. A short or empty
-    /// filtered page advances its source frontier and explicitly reports more.
+    /// Seek the comment-only index and preserve its bounded continuation.
+    /// Neither source-name windows nor execution geometry are loaded.
     pub async fn download_comments_page(
         &self,
         id: JobId,
@@ -338,55 +373,37 @@ impl EmulebbCore {
         let token = job.token;
         let page = self
             .ed2k_transfers
-            .download_sources_after(token, after, limit)
+            .download_comments_after(token, after, limit)
             .await?;
-        let mut bytes = 4096usize + page.len() * std::mem::size_of::<crate::TransferComment>();
+        let mut bytes =
+            4096usize + page.comments.len() * std::mem::size_of::<crate::TransferComment>();
         let mut frontier = None;
         let mut consumed = 0;
-        for row in page.iter() {
-            let source = &row.source;
-            if !source.file_comment.is_empty() || source.file_rating > 0 {
-                let charge = source.file_comment.capacity()
-                    + source.ip.capacity() * 2
-                    + 64
-                    + job.display_name.len();
-                if bytes + charge > 1024 * 1024 {
-                    break;
-                }
-                bytes += charge;
+        for row in &page.comments {
+            let charge =
+                row.comment.capacity() + row.ip.capacity() * 2 + 64 + job.display_name.len();
+            if bytes + charge > 1024 * 1024 {
+                break;
             }
+            bytes += charge;
             frontier = Some(row.id);
             consumed += 1;
         }
         ensure!(
-            page.is_empty() || consumed > 0,
+            page.comments.is_empty() || consumed > 0,
             "comment exceeds projection allowance"
         );
-        let has_more = if consumed < page.len() {
-            true
-        } else if let Some(last) = frontier {
-            !self
-                .ed2k_transfers
-                .download_source_endpoints_after(token, last, 1)
-                .await?
-                .is_empty()
-        } else {
-            false
-        };
-        let projected = page.try_project(bytes, |rows| {
+        let has_more = consumed < page.comments.len() || page.has_more;
+        let projected = page.try_project(bytes, |page| {
             let mut comments = Vec::with_capacity(consumed);
-            for row in rows.into_iter().take(consumed) {
-                let source = row.source;
-                if source.file_comment.is_empty() && source.file_rating == 0 {
-                    continue;
-                }
-                let endpoint = format!("{}:{}", source.ip, source.tcp_port);
+            for row in page.comments.into_iter().take(consumed) {
+                let endpoint = format!("{}:{}", row.ip, row.tcp_port);
                 comments.push(crate::TransferComment {
-                    source: source.user_hash.unwrap_or_else(|| endpoint.clone()),
+                    source: row.user_hash.unwrap_or_else(|| endpoint.clone()),
                     user_name: Some(endpoint),
                     file_name: job.display_name.clone(),
-                    comment: source.file_comment,
-                    rating: source.file_rating,
+                    comment: row.comment,
+                    rating: row.rating,
                 });
             }
             Ok(DownloadCommentPage {

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -104,7 +104,7 @@ pub use http_client::http_client_builder;
 pub use persistence_owner::PersistenceError;
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, RwLock, broadcast},
+    sync::{Mutex, RwLock},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -127,14 +127,28 @@ mod discovery_fetch;
 mod disk_guard;
 mod download_attempts;
 mod download_controls;
+mod download_events;
+pub use download_events::{
+    DownloadEvent, DownloadEventDiagnostics, DownloadEventResetReason, DownloadEventSubscription,
+};
+mod download_patch_api;
+pub use emulebb_metadata::{
+    DownloadJobQuery, DownloadJobView, DownloadPatchError, JobId, LocalContentAvailability,
+    MetadataContentConflict, MetadataLocalContentChoiceRequired,
+};
 mod download_maintenance;
 mod download_scheduler;
 mod download_selection;
-pub use download_controls::DownloadChange;
+pub use download_controls::{
+    DownloadAction, DownloadChange, DownloadControlBatch, DownloadControlError,
+    DownloadControlResult,
+};
 mod downloads;
 use download_attempts::DownloadAttemptControl;
 pub use downloads::{
-    DownloadCommentPage, DownloadPage, DownloadSourcePage, DownloadState, DownloadSummary,
+    DownloadCommentPage, DownloadCounts, DownloadDelivery, DownloadDeliveryOwnership,
+    DownloadDeliveryState, DownloadDetail, DownloadFailure, DownloadPage, DownloadPart,
+    DownloadPartPage, DownloadSourcePage, DownloadState, DownloadSummary,
 };
 mod download_source_registry;
 mod download_task_supervisor;
@@ -320,14 +334,13 @@ pub use emulebb_settings::{
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadCreate,
     DownloadCreateSource, DownloadFileNameObservation, DownloadSource, DownloadSourceMetrics,
-    Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus, IpFilterStatus,
-    KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField, Search,
-    SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate, SearchResultMedia,
-    SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
+    DownloadUpdate, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus,
+    IpFilterStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
+    Search, SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate,
+    SearchResultMedia, SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
     SharedFileKadKeywordPublish, SharedFileListCursor, SharedFileListItem, SharedFileListPage,
     SharedFileListQuery, SharedFilePublicationStatus, SharedFilePublishLane,
     SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferDetails,
-    TransferEvent, TransferEventDiagnostics, TransferEventResetReason, TransferEventType,
     TransferPart, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
     UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
@@ -362,7 +375,6 @@ const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 /// or absent.
 const ED2K_NAT_INITIAL_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
 const ED2K_SERVER_RETIRE_TIMEOUT: Duration = Duration::from_secs(2);
-const TRANSFER_EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
@@ -578,8 +590,7 @@ pub struct EmulebbCore {
     /// `.await` and never while acquiring the `state` lock — so the create
     /// path (state → queue) cannot deadlock against the drain path.
     search_queue: Arc<parking_lot::Mutex<SearchQueue>>,
-    transfer_events: broadcast::Sender<TransferEvent>,
-    next_transfer_event_id: Arc<AtomicU64>,
+    download_events: Arc<download_events::DownloadEvents>,
     /// Orders settings commit and runtime publication, including canceled waiters.
     settings_update_order: Arc<Mutex<()>>,
     persistence_owner: Arc<persistence_owner::PersistenceSlot>,
@@ -731,7 +742,6 @@ impl EmulebbCore {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| transfer_root.clone());
-        let (transfer_events, _) = broadcast::channel(TRANSFER_EVENT_CHANNEL_CAPACITY);
         let ed2k_reachability_authority = Arc::new(ReachabilityRuntimeAuthority::new());
         let ed2k_reachability = ed2k_reachability_authority.reader();
         Ok(Self {
@@ -803,8 +813,7 @@ impl EmulebbCore {
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
             hostname_lookup_cache: Arc::new(hostname_lookup::HostNameLookupCache::default()),
             search_queue: Arc::new(parking_lot::Mutex::new(SearchQueue::new())),
-            transfer_events,
-            next_transfer_event_id: Arc::new(AtomicU64::new(1)),
+            download_events: Arc::new(download_events::DownloadEvents::default()),
             settings_update_order: Arc::new(Mutex::new(())),
             persistence_owner: Arc::new(persistence_owner::PersistenceSlot::default()),
             #[cfg(test)]
@@ -857,28 +866,6 @@ impl EmulebbCore {
             .lock()
             .await
             .upsert_file(&file, emulebb_index::IndexedFileOrigin::Transfer)
-    }
-
-    pub fn subscribe_transfer_events(&self) -> broadcast::Receiver<TransferEvent> {
-        self.transfer_events.subscribe()
-    }
-
-    pub fn reserve_transfer_event_id(&self) -> u64 {
-        self.next_transfer_event_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    pub fn transfer_event_diagnostics(&self) -> TransferEventDiagnostics {
-        let next_event_id = self.next_transfer_event_id.load(Ordering::Relaxed);
-        TransferEventDiagnostics {
-            enabled: true,
-            stream: "sse".to_string(),
-            channel_capacity: TRANSFER_EVENT_CHANNEL_CAPACITY,
-            queued_event_count: self.transfer_events.len(),
-            subscriber_count: self.transfer_events.receiver_count(),
-            latest_event_id: next_event_id.saturating_sub(1),
-            next_event_id,
-            resume_behavior: "reset".to_string(),
-        }
     }
 
     pub fn ip_filter_status(&self) -> IpFilterStatus {
@@ -934,69 +921,6 @@ impl EmulebbCore {
             return runtime.nat.refresh_now().await.snapshot();
         }
         self.nat_status().await
-    }
-
-    pub(crate) fn publish_transfer_updated(&self, transfer: Transfer) {
-        self.publish_transfer_event(TransferEventType::Updated, Some(transfer), None);
-    }
-
-    pub(crate) fn publish_transfer_removed(&self, hash: impl Into<String>) {
-        self.publish_transfer_event(TransferEventType::Removed, None, Some(hash.into()));
-    }
-
-    fn publish_transfer_event(
-        &self,
-        event_type: TransferEventType,
-        transfer: Option<Transfer>,
-        hash: Option<String>,
-    ) {
-        let id = self.reserve_transfer_event_id();
-        let event = match event_type {
-            TransferEventType::Added => TransferEvent::added(
-                id,
-                transfer.expect("transfer.added events require a transfer payload"),
-            ),
-            TransferEventType::Updated => TransferEvent::updated(
-                id,
-                transfer.expect("transfer.updated events require a transfer payload"),
-            ),
-            TransferEventType::Removed => TransferEvent::removed(
-                id,
-                hash.expect("transfer.removed events require a transfer hash"),
-            ),
-            TransferEventType::SyncReset => {
-                unreachable!("sync.reset events are generated by the REST SSE handler")
-            }
-        };
-        let _ = self.transfer_events.send(event);
-    }
-
-    async fn resolve_transfer_category(
-        &self,
-        category_id: Option<i64>,
-        category_name: Option<&str>,
-    ) -> Result<Option<(i64, String)>> {
-        let state = self.state.lock().await;
-        if let Some(id) = category_id {
-            let category = state
-                .categories
-                .get(&id)
-                .context("category does not exist")?;
-            return Ok(Some((category.id, category.name.clone())));
-        }
-        let Some(name) = category_name else {
-            return Ok(None);
-        };
-        ensure!(
-            valid_category_name(name),
-            "category does not match a configured category"
-        );
-        let category = state
-            .categories
-            .values()
-            .find(|category| category.name.eq_ignore_ascii_case(name))
-            .context("category does not match a configured category")?;
-        Ok(Some((category.id, category.name.clone())))
     }
 
     async fn search_ed2k_servers(

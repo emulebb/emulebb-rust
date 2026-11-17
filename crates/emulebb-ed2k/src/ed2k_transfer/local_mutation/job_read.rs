@@ -7,11 +7,14 @@ use emulebb_metadata::{DownloadJobRecord, JobId};
 #[derive(Clone, Copy)]
 pub(in crate::ed2k_transfer) enum JobRead {
     Exact(JobId),
+    Detail(JobId),
+    Parts(JobId, Option<u32>, usize),
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
     Execution(emulebb_metadata::JobToken),
     SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
+    Comments(emulebb_metadata::JobToken, i64, usize),
     Source(
         emulebb_metadata::JobToken,
         emulebb_metadata::MetadataDownloadSourceSelector,
@@ -28,10 +31,13 @@ pub(in crate::ed2k_transfer) enum JobRead {
 }
 pub(in crate::ed2k_transfer) enum JobReadResult {
     Exact(Option<RetainedRead<DownloadJobRecord>>),
+    Detail(Option<RetainedRead<emulebb_metadata::MetadataDownloadDetail>>),
+    Parts(Option<RetainedRead<emulebb_metadata::MetadataDownloadPartPage>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
+    Comments(RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>),
     Source(RetainedRead<Option<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
     Names(RetainedRead<Vec<emulebb_metadata::MetadataDownloadNameEntry>>),
@@ -59,6 +65,10 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts => 4096,
+            JobRead::Parts(_, _, limit) => {
+                ensure!((1..=256).contains(&limit), "invalid part page size");
+                32 * 1024
+            }
             JobRead::Source(..) => 1024 * 1024 + 4096,
             JobRead::Endpoints(_, after, limit) => {
                 ensure!(
@@ -67,7 +77,9 @@ impl LocalMutationRegistry {
                 );
                 32 * 1024
             }
-            JobRead::Sources(_, after, limit) | JobRead::Names(_, after, limit) => {
+            JobRead::Sources(_, after, limit)
+            | JobRead::Names(_, after, limit)
+            | JobRead::Comments(_, after, limit) => {
                 ensure!(
                     after >= 0 && (1..=256).contains(&limit),
                     "invalid peer diagnostic page"
@@ -91,7 +103,7 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Latest(_) => 1024 * 1024,
-            JobRead::Exact(_) => 1024 * 1024,
+            JobRead::Exact(_) | JobRead::Detail(_) => 1024 * 1024,
             JobRead::Execution(_) | JobRead::SelectExecution(_) => 6 * 1024 * 1024,
         };
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
@@ -129,6 +141,18 @@ impl LocalMutationRegistry {
                 JobRead::Counts => metadata.download_job_counts().map(|value| {
                     JobReadResult::Counts(RetainedRead::new(value, capacity.take_result()))
                 }),
+                JobRead::Detail(id) => metadata.download_job_detail(id).map(|value| {
+                    JobReadResult::Detail(
+                        value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                    )
+                }),
+                JobRead::Parts(id, after, limit) => metadata
+                    .download_job_parts_after(id, after, limit)
+                    .map(|value| {
+                        JobReadResult::Parts(
+                            value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                        )
+                    }),
                 JobRead::Endpoints(token, after, limit) => metadata
                     .download_job_source_endpoints_after(token, after, limit)
                     .map(|value| {
@@ -138,6 +162,11 @@ impl LocalMutationRegistry {
                     .download_job_sources_after(token, after, limit)
                     .map(|value| {
                         JobReadResult::Sources(RetainedRead::new(value, capacity.take_result()))
+                    }),
+                JobRead::Comments(token, after, limit) => metadata
+                    .download_job_comments_after(token, after, limit)
+                    .map(|value| {
+                        JobReadResult::Comments(RetainedRead::new(value, capacity.take_result()))
                     }),
                 JobRead::Source(token, selector) => {
                     metadata.download_job_source(token, selector).map(|value| {
@@ -329,6 +358,21 @@ impl transfer::Ed2kTransferRuntime {
         };
         Ok(page)
     }
+    pub async fn download_comments_after(
+        &self,
+        token: emulebb_metadata::JobToken,
+        after: i64,
+        limit: usize,
+    ) -> Result<RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>> {
+        let JobReadResult::Comments(page) = self
+            .read_job_metadata(JobRead::Comments(token, after, limit))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+
     pub async fn download_source(
         &self,
         token: emulebb_metadata::JobToken,
@@ -356,6 +400,32 @@ impl transfer::Ed2kTransferRuntime {
         };
         Ok(page)
     }
+    pub async fn download_detail(
+        &self,
+        id: JobId,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataDownloadDetail>>> {
+        let JobReadResult::Detail(detail) = self.read_job_metadata(JobRead::Detail(id)).await?
+        else {
+            unreachable!()
+        };
+        Ok(detail)
+    }
+
+    pub async fn download_parts_after(
+        &self,
+        id: JobId,
+        after: Option<u32>,
+        limit: usize,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataDownloadPartPage>>> {
+        let JobReadResult::Parts(page) = self
+            .read_job_metadata(JobRead::Parts(id, after, limit))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+
     pub async fn download_job(&self, id: JobId) -> Result<Option<RetainedRead<DownloadJobRecord>>> {
         let JobReadResult::Exact(job) = self.read_job_metadata(JobRead::Exact(id)).await? else {
             unreachable!()

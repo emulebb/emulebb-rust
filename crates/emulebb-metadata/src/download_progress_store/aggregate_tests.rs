@@ -4,6 +4,69 @@ use crate::{
 };
 use rusqlite::params;
 
+#[test]
+fn sparse_presence_updates_the_scalar_total_without_double_counting_prefixes_or_rollback() {
+    let store = MetadataStore::in_memory().unwrap();
+    let size = 3 * 184_320 + 13;
+    let job = job(&store, 0x48, Some(size), 9_728_000);
+    let mut manifest = store
+        .download_job_manifest(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    manifest.pieces = vec![piece(0, 0)];
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    let mut sparse = piece(0, 0);
+    sparse.block_bitmap = Some("02".into());
+    sparse.present_bytes = 184_320;
+    assert!(
+        store
+            .checkpoint_download_progress(job.token, &[sparse.clone()])
+            .unwrap()
+    );
+    assert_eq!(record(&store, job.token).checkpointed_bytes, 184_320);
+    sparse.block_bitmap = Some("04".into());
+    assert!(
+        store
+            .checkpoint_download_progress(job.token, &[sparse.clone()])
+            .unwrap()
+    );
+    assert_eq!(record(&store, job.token).checkpointed_bytes, 184_320);
+    let mut invalid = sparse.clone();
+    invalid.present_bytes = size + 1;
+    assert!(
+        store
+            .checkpoint_download_progress(job.token, &[invalid])
+            .is_err()
+    );
+    assert_eq!(record(&store, job.token).checkpointed_bytes, 184_320);
+    assert_eq!(
+        store
+            .download_job_manifest(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .pieces[0],
+        sparse
+    );
+    assert!(
+        store
+            .checkpoint_download_progress(job.token, &[piece(0, 184_320)])
+            .unwrap()
+    );
+    assert_eq!(record(&store, job.token).checkpointed_bytes, 184_320);
+    let tail = MetadataTransferPiece {
+        prefix_bytes: 0,
+        present_bytes: 13,
+        block_bitmap: Some("08".into()),
+        ..piece(0, 0)
+    };
+    assert!(
+        store
+            .checkpoint_download_progress(job.token, &[tail])
+            .unwrap()
+    );
+    assert_eq!(record(&store, job.token).checkpointed_bytes, 13);
+}
+
 fn job(store: &MetadataStore, hash: u8, size: Option<u64>, piece_size: u64) -> DownloadJobRecord {
     store
         .admit_download_job(&DownloadJobRequest {
@@ -21,7 +84,8 @@ fn piece(index: u32, bytes: u64) -> MetadataTransferPiece {
     MetadataTransferPiece {
         piece_index: index,
         state: "Missing".into(),
-        bytes_written: bytes,
+        prefix_bytes: bytes,
+        present_bytes: bytes,
         block_bitmap: None,
         ich_corrupted: false,
     }
@@ -81,7 +145,8 @@ fn checkpoint_counter_is_atomic_for_batches_and_stale_generations() {
         .unwrap()
         .unwrap();
     stale.token = job.token;
-    stale.pieces[0].bytes_written = 16;
+    stale.pieces[0].prefix_bytes = 16;
+    stale.pieces[0].present_bytes = 16;
     assert!(store.upsert_transfer_manifest(&stale).is_err());
     assert_eq!(record(&store, job.token), stopped);
 }
@@ -97,11 +162,13 @@ fn snapshot_verification_corruption_salvage_and_repartition_maintain_counter() {
     assert_eq!(record(&store, job.token).checkpointed_bytes, 32);
     // A corrupt part loses its byte claim; salvaged unverified bytes count again.
     manifest.pieces[0].state = "Missing".into();
-    manifest.pieces[0].bytes_written = 0;
+    manifest.pieces[0].prefix_bytes = 0;
+    manifest.pieces[0].present_bytes = 0;
     manifest.pieces[0].ich_corrupted = true;
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(record(&store, job.token).checkpointed_bytes, 16);
-    manifest.pieces[0].bytes_written = 4;
+    manifest.pieces[0].prefix_bytes = 4;
+    manifest.pieces[0].present_bytes = 4;
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(record(&store, job.token).checkpointed_bytes, 20);
     // Changing full geometry must apply decreases/deletions before increases.
@@ -185,7 +252,7 @@ fn counter_arithmetic_rejects_negative_overflow_real_promotion_and_known_size_ex
     {
         let conn = store.connection().unwrap();
         for bytes in [-1, 1] {
-            assert!(conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,bytes_written,updated_at_s) VALUES(?1,1,'Missing',?2,0)", params![bounded.token.job_id,bytes]).is_err());
+            assert!(conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,prefix_bytes,present_bytes,updated_at_s) VALUES(?1,1,'Missing',?2,?2,0)", params![bounded.token.job_id,bytes]).is_err());
         }
         assert!(
             conn.execute(
@@ -196,12 +263,12 @@ fn counter_arithmetic_rejects_negative_overflow_real_promotion_and_known_size_ex
         );
         // Raw current-schema numeric limits exercise the SQL arithmetic boundary
         // beyond the smaller executable ED2K geometry, without allocating payloads.
-        conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,bytes_written,updated_at_s) VALUES(?1,0,'Missing',9223372036854775807,0)", [unknown.token.job_id]).unwrap();
-        assert!(conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,bytes_written,updated_at_s) VALUES(?1,1,'Missing',1,0)", [unknown.token.job_id]).is_err());
-        conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,bytes_written,updated_at_s) VALUES(?1,1,'Missing',0,0)", [unknown.token.job_id]).unwrap();
+        conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,prefix_bytes,present_bytes,updated_at_s) VALUES(?1,0,'Missing',9223372036854775807,9223372036854775807,0)", [unknown.token.job_id]).unwrap();
+        assert!(conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,prefix_bytes,present_bytes,updated_at_s) VALUES(?1,1,'Missing',1,1,0)", [unknown.token.job_id]).is_err());
+        conn.execute("INSERT INTO download_job_pieces(job_id,piece_index,state,prefix_bytes,present_bytes,updated_at_s) VALUES(?1,1,'Missing',0,0,0)", [unknown.token.job_id]).unwrap();
         assert!(
             conn.execute(
-                "UPDATE download_job_pieces SET bytes_written=1 WHERE job_id=?1 AND piece_index=1",
+                "UPDATE download_job_pieces SET prefix_bytes=1,present_bytes=1 WHERE job_id=?1 AND piece_index=1",
                 [unknown.token.job_id]
             )
             .is_err()

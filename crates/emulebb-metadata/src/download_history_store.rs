@@ -245,7 +245,8 @@ mod tests {
             pieces: vec![MetadataTransferPiece {
                 piece_index: 0,
                 state: "Verified".to_string(),
-                bytes_written: 1024,
+                prefix_bytes: 1024,
+                present_bytes: 1024,
                 block_bitmap: None,
                 ich_corrupted: false,
             }],
@@ -431,7 +432,8 @@ mod tests {
         manifest.completed = false;
         manifest.verified_ranges.clear();
         manifest.pieces[0].state = "Missing".into();
-        manifest.pieces[0].bytes_written = 0;
+        manifest.pieces[0].prefix_bytes = 0;
+        manifest.pieces[0].present_bytes = 0;
         store.upsert_transfer_manifest(&manifest).unwrap();
         assert_eq!(transfer_completed_at_s(&store, second.token.job_id), None);
         assert_eq!(
@@ -462,7 +464,8 @@ mod tests {
             end: 1024,
         }];
         manifest.pieces[0].state = "Verified".into();
-        manifest.pieces[0].bytes_written = 1024;
+        manifest.pieces[0].prefix_bytes = 1024;
+        manifest.pieces[0].present_bytes = 1024;
         manifest.delivery_state = MetadataTransferDeliveryState::Delivered;
         manifest.delivery_ownership = MetadataTransferDeliveryOwnership::Unowned;
         manifest.delivered_path = Some(std::env::temp_dir().join("completed-again.bin"));

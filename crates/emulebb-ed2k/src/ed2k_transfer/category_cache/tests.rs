@@ -1,6 +1,131 @@
 use super::super::{ED2K_PART_SIZE, test_support::admit_download_job};
 use super::*;
 
+#[tokio::test]
+async fn combined_patch_uses_preadmitted_credit_and_old_progress_cannot_replay_scalars() {
+    let (root, runtime) = runtime("download-scalar-patch");
+    let category = runtime
+        .metadata
+        .create_category("Media", None, None, "", &root)
+        .unwrap();
+    let job = admit_download_job(
+        &runtime,
+        "73".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        ED2K_PART_SIZE,
+    );
+    let old = runtime.ensure_job(&job).await.unwrap();
+    let patch = emulebb_metadata::MetadataDownloadPatch {
+        name: Some("Renamed.bin".into()),
+        category_id: Some(Some(category.id)),
+        ..Default::default()
+    };
+    let plan = runtime
+        .prepare_download_patch(job.token.job_id, &patch)
+        .await
+        .unwrap()
+        .unwrap();
+    let core_fence = plan.retain_fence();
+    let worker_runtime = Arc::clone(&runtime);
+    let (committed, ready) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let value = worker_runtime
+            .metadata
+            .patch_download_job(plan.token(), &patch)
+            .unwrap()
+            .unwrap();
+        committed.send(()).unwrap();
+        resume.recv().unwrap();
+        worker_runtime.publish_download_patch(plan, &value).unwrap();
+        done.send(()).unwrap();
+    });
+    ready.await.unwrap();
+    let mut held = Vec::new();
+    while let Ok(credit) = runtime.local_mutations.residents.reserve(job.token.job_id) {
+        held.push(credit);
+    }
+    worker.abort();
+    drop(worker);
+    release.send(()).unwrap();
+    finished.await.unwrap();
+    {
+        let cache = runtime.manifest_cache.lock().await;
+        assert_eq!(cache[&job.token.job_id].display_name, "Renamed.bin");
+        assert_eq!(cache[&job.token.job_id].category_id, Some(category.id));
+    }
+    assert_eq!(old.display_name, "Sample.bin");
+    assert_eq!(old.category_id, None);
+    assert!(runtime.category_assignment_gate.try_read().is_err());
+    drop(core_fence);
+    drop(held);
+    let refreshed = runtime.cache_manifest_unlocked(&old).await.unwrap();
+    assert_eq!(refreshed.display_name, "Renamed.bin");
+    assert_eq!(refreshed.category_id, Some(category.id));
+}
+
+#[tokio::test]
+async fn scalar_patch_capacity_refusal_precedes_sql_and_noop_needs_no_replacement() {
+    let (_, runtime) = runtime("download-scalar-patch-pressure");
+    let job = admit_download_job(
+        &runtime,
+        "74".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        ED2K_PART_SIZE,
+    );
+    drop(runtime.ensure_job(&job).await.unwrap());
+    let mut held = Vec::new();
+    while let Ok(credit) = runtime.local_mutations.residents.reserve(job.token.job_id) {
+        held.push(credit);
+    }
+    let patch = emulebb_metadata::MetadataDownloadPatch {
+        name: Some("Renamed.bin".into()),
+        ..Default::default()
+    };
+    let error = runtime
+        .prepare_download_patch(job.token.job_id, &patch)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error.downcast_ref::<LocalMutationError>(),
+        Some(LocalMutationError::Busy)
+    ));
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "Sample.bin"
+    );
+    assert!(runtime.category_assignment_gate.try_read().is_ok());
+    let noop = emulebb_metadata::MetadataDownloadPatch {
+        name: Some("Sample.bin".into()),
+        ..Default::default()
+    };
+    let plan = runtime
+        .prepare_download_patch(job.token.job_id, &noop)
+        .await
+        .unwrap()
+        .unwrap();
+    let worker_runtime = Arc::clone(&runtime);
+    tokio::task::spawn_blocking(move || {
+        let value = worker_runtime
+            .metadata
+            .patch_download_job(plan.token(), &noop)
+            .unwrap()
+            .unwrap();
+        assert!(!value.changed);
+        worker_runtime.publish_download_patch(plan, &value).unwrap();
+    })
+    .await
+    .unwrap();
+    drop(held);
+}
+
 fn runtime(label: &str) -> (std::path::PathBuf, Arc<Ed2kTransferRuntime>) {
     let root = crate::paths::unique_test_dir(label);
     let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());

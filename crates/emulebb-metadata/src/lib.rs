@@ -21,7 +21,15 @@ mod download_job_query;
 pub use download_job_query::{
     DownloadJobCounts, DownloadJobPage, DownloadJobQuery, DownloadJobView,
 };
+mod download_browse_store;
 mod download_job_store;
+mod download_patch_store;
+pub use download_browse_store::{
+    MetadataDownloadDetail, MetadataDownloadPart, MetadataDownloadPartPage,
+};
+pub use download_patch_store::{
+    DownloadPatchError, MetadataDownloadPatch, MetadataDownloadPatched,
+};
 mod download_payload_store;
 mod download_peer_store;
 pub use download_payload_store::{MetadataDownloadPayload, MetadataDownloadPayloadPage};
@@ -35,9 +43,9 @@ pub use download_job_model::{
     JobToken,
 };
 pub use download_peer_store::{
-    MetadataDownloadInitialPeers, MetadataDownloadNameEntry, MetadataDownloadPeerChange,
-    MetadataDownloadPeerDelta, MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry,
-    MetadataDownloadSourceSelector,
+    MetadataDownloadCommentEntry, MetadataDownloadCommentPage, MetadataDownloadInitialPeers,
+    MetadataDownloadNameEntry, MetadataDownloadPeerChange, MetadataDownloadPeerDelta,
+    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry, MetadataDownloadSourceSelector,
 };
 mod identity_model;
 mod identity_store;

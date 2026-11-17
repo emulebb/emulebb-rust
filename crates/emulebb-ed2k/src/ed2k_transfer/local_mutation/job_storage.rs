@@ -10,13 +10,20 @@ use std::io::{Read, Write};
 // Shared long-FS admission leaves a slot and >=6 MiB for ordinary publication.
 const STORAGE_WORKSPACE: usize = 1024 * 1024;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StorageAccess {
+    Allocate,
+    Verify,
+}
+
 impl LocalMutationRegistry {
-    pub(super) fn submit_prepare_storage(
+    fn submit_prepare_storage(
         &self,
         runtime: &transfer::Ed2kTransferRuntime,
         token: JobToken,
         lifecycle: transfer::store::ScopedLockGuard<emulebb_metadata::JobId>,
         manifest_guard: transfer::store::ScopedLockGuard<emulebb_metadata::JobId>,
+        access: StorageAccess,
     ) -> Result<oneshot::Receiver<Result<DownloadJobStorage>>> {
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
@@ -27,7 +34,7 @@ impl LocalMutationRegistry {
         let (sender, receive) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
-        Self::spawn_unit(&mut state, capacity_lease, move |_capacity| {
+        Self::spawn_unit_reply(&mut state, capacity_lease, sender, move |_capacity| {
             let _lifecycle = lifecycle;
             let _manifest = manifest_guard;
             let mut committed = false;
@@ -37,7 +44,8 @@ impl LocalMutationRegistry {
                     .context("missing allocated job")?;
                 ensure!(
                     job.token == token
-                        && job.intent == DownloadIntent::Started
+                        && (access == StorageAccess::Verify
+                            || job.intent == DownloadIntent::Started)
                         && job.removed_at_s.is_none()
                         && job.completed_at_s.is_none(),
                     "stale or inactive job storage request"
@@ -47,6 +55,10 @@ impl LocalMutationRegistry {
                     .context("job temp storage was not persisted before allocation")?;
                 let native = crate::long_path::long_path(&storage.path);
                 let establish = storage.identity.is_none();
+                ensure!(
+                    access == StorageAccess::Allocate || !establish,
+                    "verification requires already established job storage"
+                );
                 if establish {
                     // create_dir, never create_dir_all: even empty crash residue
                     // without established authority remains untouched.
@@ -96,7 +108,8 @@ impl LocalMutationRegistry {
                         .context("allocated job disappeared")?;
                     ensure!(
                         current.token == token
-                            && current.intent == DownloadIntent::Started
+                            && (access == StorageAccess::Verify
+                                || current.intent == DownloadIntent::Started)
                             && current.removed_at_s.is_none()
                             && current.completed_at_s.is_none(),
                         "job generation changed during allocation validation"
@@ -128,8 +141,7 @@ impl LocalMutationRegistry {
                 Ok(Err(error)) => (Err(error), 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receive)
     }
@@ -173,8 +185,13 @@ impl transfer::Ed2kTransferRuntime {
             let submitted = {
                 let lifecycle = self.lock_lifecycle(token.job_id).await;
                 let manifest = self.lock_manifest(token).await;
-                self.local_mutations
-                    .submit_prepare_storage(self, token, lifecycle, manifest)
+                self.local_mutations.submit_prepare_storage(
+                    self,
+                    token,
+                    lifecycle,
+                    manifest,
+                    StorageAccess::Allocate,
+                )
             };
             match submitted {
                 Err(error)
@@ -192,11 +209,68 @@ impl transfer::Ed2kTransferRuntime {
             }
         }
     }
+
+    /// Reopen only proven existing backing for explicit verification. This path
+    /// neither creates storage nor changes intent/failure/generation. Capacity
+    /// refusal is visible to the control owner rather than retried internally.
+    pub async fn reopen_download_job_storage_for_verification(
+        &self,
+        token: JobToken,
+    ) -> Result<DownloadJobStorage> {
+        let lifecycle = self.lock_lifecycle(token.job_id).await;
+        let manifest = self.lock_manifest(token).await;
+        self.local_mutations
+            .submit_prepare_storage(self, token, lifecycle, manifest, StorageAccess::Verify)?
+            .await
+            .map_err(|_| LocalMutationError::Unknown)?
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn verification_reopen_never_allocates_or_adopts_unestablished_storage() {
+        let root = crate::paths::unique_test_dir("verify-storage-no-allocation");
+        std::fs::create_dir_all(&root).unwrap();
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
+        let runtime =
+            transfer::Ed2kTransferRuntime::load_or_create_with_metadata(&root, metadata.clone())
+                .unwrap();
+        let job = allocate(&metadata, &root);
+        let storage = job.storage.as_ref().unwrap();
+        assert!(!storage.path.exists());
+        assert!(
+            runtime
+                .reopen_download_job_storage_for_verification(job.token)
+                .await
+                .is_err()
+        );
+        assert!(!storage.path.exists());
+        std::fs::create_dir(&storage.path).unwrap();
+        let foreign = storage.path.join("foreign.bin");
+        std::fs::write(&foreign, b"keep").unwrap();
+        assert!(
+            runtime
+                .reopen_download_job_storage_for_verification(job.token)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(foreign).unwrap(), b"keep");
+        assert_eq!(
+            metadata.download_job(job.token.job_id).unwrap().unwrap(),
+            job
+        );
+        assert!(runtime.job_storage.lock().unwrap().is_empty());
+        assert!(
+            !transfer::metadata::transfer_directory_authority_marker_path(
+                &storage.path,
+                storage.marker_id
+            )
+            .exists()
+        );
+        runtime.local_mutations.seal_and_drain().await.unwrap();
+    }
     fn allocate(
         metadata: &emulebb_metadata::MetadataStore,
         root: &std::path::Path,

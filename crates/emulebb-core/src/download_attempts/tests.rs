@@ -9,6 +9,53 @@ fn hash(byte: u8) -> Ed2kHash {
     Ed2kHash::from_bytes([byte; 16])
 }
 
+#[tokio::test]
+async fn verification_excludes_selection_until_actual_execution_retirement() {
+    let control = Arc::new(DownloadAttemptControl::default());
+    let active = control.try_enter(token(1, 1), hash(1)).unwrap();
+    let verification = control.try_verify(token(1, 1), hash(1)).unwrap();
+    assert!(active.cancellation().is_cancelled());
+    assert!(matches!(
+        control.try_prepare(token(1, 2), hash(1)),
+        Err(AdmissionDenied::Busy)
+    ));
+    assert!(matches!(
+        control.try_enter(token(2, 1), hash(1)),
+        Err(AdmissionDenied::Busy)
+    ));
+    assert!(matches!(
+        control.try_verify(token(1, 1), hash(1)),
+        Err(AdmissionDenied::Duplicate)
+    ));
+    {
+        let wait = verification.wait_for_execution();
+        tokio::pin!(wait);
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        drop(active);
+        wait.await;
+    }
+    verification.rebind(token(1, 2));
+    assert_eq!(control.verifications(), vec![token(1, 2)]);
+    drop(verification);
+    assert!(control.try_enter(token(1, 3), hash(1)).is_ok());
+}
+
+#[test]
+fn verification_capacity_refusal_does_not_cancel_another_execution() {
+    let control = Arc::new(DownloadAttemptControl::default());
+    let first = control.try_verify(token(1, 1), hash(1)).unwrap();
+    let second = control.try_verify(token(2, 1), hash(2)).unwrap();
+    let active = control.try_enter(token(3, 1), hash(3)).unwrap();
+    assert!(matches!(
+        control.try_verify(token(3, 1), hash(3)),
+        Err(AdmissionDenied::Busy)
+    ));
+    assert!(!active.cancellation().is_cancelled());
+    drop(first);
+    drop(second);
+    assert!(control.verifications().is_empty());
+}
+
 #[test]
 fn sixteen_active_and_two_preparations_have_separate_caps_and_share_content_ownership() {
     let control = Arc::new(DownloadAttemptControl::default());

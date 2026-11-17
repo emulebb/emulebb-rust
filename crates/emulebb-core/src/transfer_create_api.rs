@@ -137,69 +137,31 @@ impl EmulebbCore {
             aich,
             peers,
         } = input;
-        // Keep category resolution and the durable admission on one coherent
-        // category cut. The native owner retains the admitted command on abort.
-        let _category_guard = self.category_mutation_gate.lock().await;
         self.persistence_owner.check_coherent_state()?;
-        let category = self
-            .resolve_transfer_category(None, category.as_deref())
-            .await?;
         let hash = hash.parse::<Ed2kHash>()?.to_string();
         let request = DownloadJobRequest {
             file_hash: hash,
             display_name: emulebb_ed2k::normalize_ed2k_file_name(&name),
             expected_size_bytes: size,
             piece_size: ED2K_PART_SIZE,
-            category_id: category.as_ref().map(|v| v.0),
+            category_id: None,
             intent,
         };
-        let admitted = self
-            .ed2k_transfers
-            .admit_download_job(&request, redownload, aich.as_deref(), &peers)
-            .await?;
-        if admitted.created {
-            self.download_attempts.changed.notify_one();
-        }
-        // Duplicates project the actual stored category, name, and intent.
-        let _fence = self.ed2k_transfers.lock_category_publication().await;
-        let running = self.download_attempts.snapshot();
-        let verifying = self.ed2k_transfers.verifying_downloads().await;
-        let state = self.state.lock().await;
-        self.persistence_owner.check_coherent_state()?;
-        let category = admitted
-            .job
-            .category_id
-            .map(|id| {
-                state
-                    .categories
-                    .get(&id)
-                    .context("job category is missing from coherent Core state")
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        owner
+            .create_download(crate::persistence_owner::DownloadCreateCommand {
+                request,
+                category,
+                redownload,
+                aich,
+                peers,
+                runtime: Arc::clone(&self.ed2k_transfers),
+                attempts: Arc::clone(&self.download_attempts),
+                events: Arc::clone(&self.download_events),
             })
-            .transpose()?;
-        let created = admitted.created;
-        let bytes = 4096
-            + admitted.job.display_name.capacity()
-            + admitted.job.file_hash.capacity()
-            + category.map_or(0, |category| category.name.len());
-        let projected = admitted.try_project(bytes, |admitted| {
-            let job = admitted.job;
-            let observed = crate::downloads::observed_state(&job, &running, &verifying);
-            let progress = job.progress();
-            Ok(DownloadSummary {
-                id: job.token.job_id,
-                hash: job.file_hash,
-                name: job.display_name,
-                size_bytes: job.expected_size_bytes,
-                progress,
-                intent: job.intent,
-                state: observed,
-                category: category.map(|category| category.name.clone()),
-                created_at: job.created_at_s,
-                updated_at: job.updated_at_s,
-                completed_at: job.completed_at_s,
-            })
-        })?;
-        Ok((created, projected))
+            .await
     }
 
     /// Overlay live in-flight download state onto a (possibly stale) cached

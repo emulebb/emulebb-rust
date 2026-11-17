@@ -256,10 +256,13 @@ pub struct MetadataSharedSourceFailure {
 pub struct MetadataTransferPiece {
     pub piece_index: u32,
     pub state: String,
-    pub bytes_written: u64,
+    pub prefix_bytes: u64,
+    /// Unique bytes present, including noncontiguous bitmap blocks. Derived by
+    /// the protocol owner and persisted for constant-cost job aggregation.
+    pub present_bytes: u64,
     /// Lowercase-hex packed per-part block presence bitmap, or `None` when the
     /// part's present blocks are simply the contiguous prefix up to
-    /// `bytes_written` (contiguous fast path).
+    /// `prefix_bytes` (contiguous fast path).
     pub block_bitmap: Option<String>,
     /// Whether the part previously failed its MD4 flush check and is pending
     /// MD4-only ICH salvage: the stale on-disk bytes are retained so the part

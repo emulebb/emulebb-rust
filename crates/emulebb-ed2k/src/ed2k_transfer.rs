@@ -40,8 +40,12 @@ mod block_lease;
 mod callback;
 mod catalog;
 mod category_cache;
-pub use category_cache::{CategoryCacheFence, CategoryCacheMutation};
+pub use category_cache::{
+    CategoryCacheFence, CategoryCacheMutation, DownloadPatchFence, PreparedDownloadPatch,
+};
+mod completed_verification;
 mod completion_rehash;
+pub use completed_verification::CompletedOutputVerification;
 mod corruption_blackbox;
 mod credit_ledger;
 mod deliver;
