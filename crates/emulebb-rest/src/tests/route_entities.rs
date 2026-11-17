@@ -1,14 +1,15 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
-async fn transfer_source_friend_routes_report_closed_persistence() {
+async fn download_source_friend_routes_report_closed_persistence() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let transfer = core.create_transfer(emulebb_core::TransferCreate {
-        known_file_policy: Default::default(),
-        link: Some("ed2k://|file|Sample.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/".into()),
-        links: None, category_id: None, category_name: None, paused: Some(true),
-    }).await.unwrap();
+    let (_, download) = core.create_download(serde_json::from_value(json!({
+        "source":{"type":"ed2k-link","link":"ed2k://|file|Sample.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/"},
+        "intent":"stopped"
+    })).unwrap()).await.unwrap();
+    let id = download.id;
+    drop(download);
     core.drain_persistence().await.unwrap();
     let app = router(
         core,
@@ -24,8 +25,8 @@ async fn transfer_source_friend_routes_report_closed_persistence() {
                 Request::builder()
                     .method("POST")
                     .uri(format!(
-                        "/api/v1/transfers/{}/sources/{}/operations/{action}",
-                        transfer.hash,
+                        "/api/v1/downloads/{}/sources/{}/operations/{action}",
+                        id,
                         "aa".repeat(16)
                     ))
                     .header("X-API-Key", "secret")
@@ -669,14 +670,14 @@ async fn search_to_download_flow_uses_passive_cache_observation() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CREATED);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["searchId"], search_id);
+    assert!(value["data"]["id"].is_string());
+    let admitted_id = value["data"]["id"].clone();
     assert_eq!(value["data"]["hash"], "00112233445566778899aabbccddeeff");
 
-    let conflict = app
+    let duplicate = app
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -685,26 +686,22 @@ async fn search_to_download_flow_uses_passive_cache_observation() {
                 ))
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"knownFilePolicy":"reject"}"#))
+                .body(Body::from(r#"{"redownload":true}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    let body = to_bytes(conflict.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let body = to_bytes(duplicate.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"]["code"], "DOWNLOAD_CONFLICT");
-    assert_eq!(
-        value["error"]["details"]["conflicts"][0]["kind"],
-        "activeTransfer"
-    );
+    assert_eq!(value["data"]["id"], admitted_id);
 }
 
 #[tokio::test]
-async fn search_result_download_accepts_paused_request_body() {
+async fn search_result_download_accepts_stopped_intent() {
     let core = test_search_core(&[IndexedFile {
         ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-        name: "Paused.Indexed.Result.iso".to_string(),
+        name: "Stopped.Indexed.Result.iso".to_string(),
         size_bytes: 42,
         content_type: "iso".to_string(),
         availability_score: 2,
@@ -725,7 +722,7 @@ async fn search_result_download_accepts_paused_request_body() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"query":"paused indexed","method":"automatic","type":""}"#,
+                    r#"{"query":"stopped indexed","method":"automatic","type":""}"#,
                 ))
                 .unwrap(),
         )
@@ -746,16 +743,16 @@ async fn search_result_download_accepts_paused_request_body() {
                 .uri(download_uri)
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"paused":true}"#))
+                .body(Body::from(r#"{"intent":"stopped"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CREATED);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["searchId"], search_id);
+    assert!(value["data"]["id"].is_string());
+    assert_eq!(value["data"]["intent"], "stopped");
     assert_eq!(value["data"]["hash"], "00112233445566778899aabbccddeeff");
 }
 

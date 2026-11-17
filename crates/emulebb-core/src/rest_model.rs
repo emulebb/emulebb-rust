@@ -910,22 +910,6 @@ pub struct DownloadUpdate {
     pub size_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TransferUpdate {
-    #[serde(default)]
-    #[serde(rename = "displayName")]
-    pub name: Option<String>,
-    #[serde(skip)]
-    pub category_id: Option<Option<i64>>,
-    #[serde(
-        default,
-        rename = "category",
-        deserialize_with = "crate::rest_model_serde::deserialize_nullable_category"
-    )]
-    pub category_name: Option<Option<String>>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchResultDownloadCreate {
@@ -1263,31 +1247,6 @@ pub struct TransferComment {
     pub file_name: String,
     pub comment: String,
     pub rating: u8,
-}
-
-/// One ED2K part's live download geometry/progress for the transfer details view.
-/// Mirrors the master `BuildTransferPartsJson` `TransferPart` shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferPart {
-    pub index: u32,
-    pub start: u64,
-    pub end: u64,
-    pub size: u64,
-    pub completed_bytes: u64,
-    pub gap_bytes: u64,
-    pub complete: bool,
-    pub requested: bool,
-    pub corrupted: bool,
-    pub available_sources: u32,
-}
-
-/// Selected header and part diagnostics; source collections are independent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferDetails {
-    pub transfer: Transfer,
-    pub parts: Vec<TransferPart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

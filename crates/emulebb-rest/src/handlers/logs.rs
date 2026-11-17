@@ -40,7 +40,7 @@ pub(crate) async fn clear_logs(body: Bytes) -> impl IntoResponse {
     if !request.confirm_clear_logs {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             "confirmClearLogs must be true",
         )
         .into_response();

@@ -850,6 +850,7 @@ dependencies = [
  "emulebb-ed2k",
  "emulebb-index",
  "futures-util",
+ "hex",
  "http-body-util",
  "libc",
  "percent-encoding",

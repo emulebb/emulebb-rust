@@ -102,23 +102,4 @@ impl EmulebbCore {
             probe_sender: Arc::downgrade(&self.category_probe_sender),
         }
     }
-
-    pub(crate) async fn assign_transfer_category(
-        &self,
-        job_id: emulebb_metadata::JobId,
-        id: Option<i64>,
-    ) -> Result<Option<Category>> {
-        let owner = self
-            .persistence_owner
-            .owner(&self.metadata_store, &self.state)?;
-        let result = owner
-            .category(CategoryCommand::Assign {
-                job_id,
-                id,
-                runtime: Arc::clone(&self.ed2k_transfers),
-            })
-            .await??;
-        ensure!(id.is_none() || result.is_some(), "category does not exist");
-        Ok(result)
-    }
 }

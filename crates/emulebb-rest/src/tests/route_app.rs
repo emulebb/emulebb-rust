@@ -618,7 +618,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(bundle["operationalSnapshots"]["servers"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["sharedFiles"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["searches"]["items"].is_array());
-    assert!(bundle["operationalSnapshots"]["transfers"]["items"].is_array());
+    assert!(bundle["operationalSnapshots"]["downloads"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["uploads"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["uploadQueue"]["items"].is_array());
     assert!(bundle["diagnosticArtifacts"]["families"].is_array());
@@ -627,7 +627,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert_eq!(bundle["limits"]["sharedFileSnapshots"], 512);
     assert_eq!(bundle["limits"]["searchSnapshots"], 64);
     assert_eq!(bundle["limits"]["searchResultsPerSnapshot"], 128);
-    assert_eq!(bundle["limits"]["transferSnapshots"], 512);
+    assert_eq!(bundle["limits"]["downloadSnapshots"], 200);
     assert_eq!(bundle["limits"]["uploadSnapshots"], 512);
     assert_eq!(bundle["limits"]["uploadQueueSnapshots"], 512);
     assert!(serde_json::to_string(&bundle).unwrap().contains("secret"));
@@ -966,7 +966,7 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let data = &value["data"];
     assert_eq!(data["app"]["name"], "eMuleBB");
     assert_eq!(data["status"]["lifecycle"]["state"], "running");
-    assert_eq!(data["transfers"].as_array().unwrap().len(), 0);
+    assert_eq!(data["downloads"], json!({"unfinished":0,"completed":0}));
     assert_eq!(data["sharedFiles"].as_array().unwrap().len(), 1);
     assert_eq!(data["servers"].as_array().unwrap().len(), 1);
     assert_eq!(data["uploads"].as_array().unwrap().len(), 0);

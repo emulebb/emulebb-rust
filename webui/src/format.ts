@@ -1,16 +1,6 @@
-import { Transfer } from "./api";
-
-export function formatProgress(transfer: Transfer): string {
-  if (typeof transfer.progress === "number") {
-    const percent = transfer.progress <= 1 ? transfer.progress * 100 : transfer.progress;
-    return `${Math.min(100, Math.max(0, percent)).toFixed(1)}%`;
-  }
-  const size = transfer.sizeBytes ?? 0;
-  if (!size) {
-    return "0%";
-  }
-  const completed = transfer.completedBytes ?? 0;
-  return `${Math.min(100, Math.round((completed / size) * 100))}%`;
+export function formatProgress(download: { progress: number | null }): string {
+  if (download.progress === null) return "Unknown";
+  return `${(Math.min(1, Math.max(0, download.progress)) * 100).toFixed(1)}%`;
 }
 
 export function formatRate(value?: number): string {

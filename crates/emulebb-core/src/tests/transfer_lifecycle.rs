@@ -313,10 +313,13 @@ async fn download_headers_and_part_projection_observe_verified_data() {
         Some(part.len() as f64 / (part.len() + tail.len()) as f64)
     );
     drop(page);
-    let manifest = core.ed2k_transfers.manifest(token).await.unwrap();
-    let parts = crate::views::transfer_parts_from_manifest(&manifest, &[], &Default::default());
-    assert!(parts[0].complete);
-    assert!(!parts[1].complete);
+    let parts = core
+        .download_parts_page(id, None, 200)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(parts.parts[0].complete);
+    assert!(!parts.parts[1].complete);
 }
 
 #[test]

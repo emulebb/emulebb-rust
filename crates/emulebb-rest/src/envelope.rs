@@ -13,11 +13,7 @@ use axum::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::{
-    BulkOperationResult, PageQuery, SearchResultSort, SearchResultsPage, SearchResultsQuery,
-    SearchSortOrder,
-};
-use emulebb_core::DownloadConflictError;
+use crate::{PageQuery, SearchResultSort, SearchResultsPage, SearchResultsQuery, SearchSortOrder};
 use emulebb_core::Search;
 
 pub(crate) fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
@@ -142,22 +138,6 @@ fn estimated_total(exact_count: usize, offset: usize, limit: usize) -> usize {
     }
 }
 
-pub(crate) fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Value>) {
-    let total = items.len();
-    (
-        StatusCode::OK,
-        Json(json!({
-            "data": {
-                "items": items,
-                "total": total,
-                "offset": 0,
-                "limit": total
-            },
-            "meta": api_meta()
-        })),
-    )
-}
-
 pub(crate) fn api_meta() -> Value {
     json!({ "apiVersion": "v1" })
 }
@@ -184,11 +164,6 @@ pub(crate) fn api_error_with_details(
     message: impl Into<String>,
     details: Value,
 ) -> (StatusCode, Json<Value>) {
-    let code = if status == StatusCode::BAD_REQUEST && code == "BAD_REQUEST" {
-        "INVALID_ARGUMENT"
-    } else {
-        code
-    };
     (
         status,
         Json(json!({
@@ -202,16 +177,25 @@ pub(crate) fn api_error_with_details(
 }
 
 pub(crate) fn download_creation_error(error: anyhow::Error) -> Response {
-    if let Some(conflict) = error.downcast_ref::<DownloadConflictError>() {
+    if error.is::<emulebb_core::MetadataContentConflict>() {
+        return api_error(StatusCode::CONFLICT, "DOWNLOAD_CONFLICT", error.to_string())
+            .into_response();
+    }
+    if let Some(choice) = error.downcast_ref::<emulebb_core::MetadataLocalContentChoiceRequired>() {
+        let availability = match choice.0 {
+            emulebb_core::LocalContentAvailability::Present => "present",
+            emulebb_core::LocalContentAvailability::Unavailable => "unavailable",
+            emulebb_core::LocalContentAvailability::ConfirmedAbsent => "absent",
+        };
         return api_error_with_details(
             StatusCode::CONFLICT,
-            "DOWNLOAD_CONFLICT",
-            conflict.to_string(),
-            json!({ "conflicts": conflict.conflicts }),
+            "LOCAL_CONTENT_CHOICE_REQUIRED",
+            error.to_string(),
+            json!({"availability":availability}),
         )
         .into_response();
     }
-    api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+    crate::handlers::persistence::persistence_error(error)
 }
 
 /// Builds the canonical out-of-range error for a bounded scalar query field.
@@ -269,7 +253,7 @@ where
     serde_json::from_slice(body).map_err(|error| {
         api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             json_error_message(&error),
         )
         .into_response()
@@ -285,7 +269,7 @@ where
         Some(query) if !query.is_empty() => serde_urlencoded::from_str(query).map_err(|error| {
             api_error(
                 StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
+                "INVALID_ARGUMENT",
                 structured_error_message(error.to_string()),
             )
             .into_response()

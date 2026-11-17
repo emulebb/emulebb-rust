@@ -25,15 +25,15 @@ test("preserves an eD2K handoff through sign-in and requires explicit confirmati
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   const input = page.getByRole("textbox", { name: "eD2K links" });
   await expect(input).toHaveValue(link);
-  expect(requests.some((request) => request.method === "POST" && request.path === "transfers")).toBe(false);
+  expect(requests.some((request) => request.method === "POST" && request.path === "downloads")).toBe(false);
   await page.getByRole("button", { name: "Cancel links" }).click();
   await expect(input).toHaveValue("");
   await expect(page).toHaveURL(/\/transfers$/);
   await page.evaluate((raw) => { window.location.hash = `ed2k=${encodeURIComponent(raw)}`; }, link);
   await expect(input).toHaveValue(link);
-  expect(requests.some((request) => request.method === "POST" && request.path === "transfers")).toBe(false);
+  expect(requests.some((request) => request.method === "POST" && request.path === "downloads")).toBe(false);
   await page.getByRole("button", { name: "Add links" }).click();
-  await expect.poll(() => requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(1);
+  await expect.poll(() => requests.filter((request) => request.method === "POST" && request.path === "downloads").length).toBe(1);
   await expect(page).toHaveURL(/\/transfers$/);
   await expect(input).toHaveValue("");
 });
@@ -55,7 +55,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(statusToolbar.getByRole("button", { name: "Kad: Connected", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
   await expect(statusToolbar.getByRole("button", { name: "Upload: 1.0 KiB/s", exact: true })).toBeVisible();
-  await expect(statusToolbar.getByRole("button", { name: "Transfers: 1 active", exact: true })).toBeVisible();
+  await expect(statusToolbar.getByRole("button", { name: "Transfers: 1 unfinished", exact: true })).toBeVisible();
   await expect(page.locator(".page-header")).toHaveCount(0);
   await expect(primaryViews.getByRole("link")).toHaveCount(14);
   await expect(primaryViews.locator("a svg")).toHaveCount(14);
@@ -74,7 +74,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   expect(requests.some((request) => request.method === "GET" && request.path === "app/settings")).toBe(false);
   expect(requests.some((request) => request.method === "GET" && request.path.startsWith("upload-queue"))).toBe(false);
 
-  await statusToolbar.getByRole("button", { name: "Transfers: 1 active", exact: true }).click();
+  await statusToolbar.getByRole("button", { name: "Transfers: 1 unfinished", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
   await expect(page).toHaveURL(/\/transfers$/);
   await expect(page.locator("tr", { hasText: "Sample Transfer.bin" }).locator("select")).toHaveValue("Sample-Category");
@@ -227,14 +227,14 @@ test("submits a synthetic transfer operation", async ({ page }) => {
   await page.getByRole("link", { name: "Transfers", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
 
-  await page.getByTitle("Pause").click();
-  await expect(page.getByText("Transfer paused")).toBeVisible();
+  await page.getByTitle("Stop").click();
+  await expect(page.getByText("Download stopped")).toBeVisible();
 
   expect(
     requests.some(
       (request) =>
         request.method === "POST" &&
-        request.path === "transfers/00112233445566778899AABBCCDDEEFF/operations/pause"
+        request.path === "downloads/stop"
     )
   ).toBe(true);
 });
@@ -379,7 +379,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     status: "completed",
     resultCount: 1
   }];
-  state.transfers = [];
+  let downloadRows: any[] = [];
   const resultHash = "AABBCCDDEEFF00112233445566778899";
   const fallback = installMockApi(requests);
 
@@ -513,42 +513,41 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await fulfill({ ok: true });
       return;
     }
+    if (method === "GET" && path === "downloads") {
+      record();
+      await route.fulfill({ json: { data: downloadRows, meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } } });
+      return;
+    }
     if (method === "POST" && path === `searches/2/results/${resultHash}/operations/download`) {
       record();
-      state.transfers = [{
-        hash: resultHash,
-        displayName: "Linux Guide.pdf",
-        state: "downloading",
-        sizeBytes: 1_048_576,
-        completedBytes: 4096,
-        sources: 2,
-        sourcesTransferring: 1,
-        stopped: false
-      }];
-      await fulfill(state.transfers[0]);
+      downloadRows = [{ id: "2", hash: resultHash.toLowerCase(), name: "Linux Guide.pdf", state: "downloading",
+        sizeBytes: 1_048_576, progress: 4096 / 1_048_576, intent: "started", category: null, createdAt: 1, updatedAt: 1, completedAt: null }];
+      state.downloads = { unfinished: 1, completed: 0 };
+      await fulfill(downloadRows[0]);
       return;
     }
-    if (method === "POST" && path === `transfers/${resultHash}/operations/stop`) {
+    if (method === "POST" && path === "downloads/stop") {
       record();
-      state.transfers[0] = { ...state.transfers[0], state: "paused", stopped: true, downloadRateBytesPerSec: 0 };
-      await fulfill(state.transfers[0]);
+      downloadRows[0] = { ...downloadRows[0], state: "stopped", intent: "stopped" };
+      await route.fulfill({ status: 207, json: { data: [{ id: "2", status: "accepted", httpStatus: 202 }] } });
       return;
     }
-    if (method === "DELETE" && path === `transfers/${resultHash}/files` && url.searchParams.get("confirm") === "true") {
+    if (method === "POST" && path === "downloads/remove") {
       record();
-      const [deleted] = state.transfers;
-      state.transfers = [];
-      await fulfill({ items: [{ hash: deleted.hash, name: deleted.displayName, ok: true }] });
+      expect(request.postDataJSON()).toEqual({ ids: ["2"], deleteData: true });
+      downloadRows = [];
+      state.downloads = { unfinished: 0, completed: 0 };
+      await route.fulfill({ status: 207, json: { data: [{ id: "2", status: "accepted", httpStatus: 202 }] } });
       return;
     }
-    if (method === "GET" && path === `transfers/${resultHash}/details`) {
+    if (method === "GET" && path === "downloads/2") {
       record();
-      await fulfill(state.transfers[0]);
+      await fulfill({ ...downloadRows[0], payloadVerified: false, delivery: { path: null, state: "pending", ownership: "none" }, failure: null });
       return;
     }
-    if (method === "GET" && path === `transfers/${resultHash}/sources`) {
+    if (method === "GET" && /^downloads\/2\/(sources|parts|comments)$/.test(path)) {
       record();
-      await fulfill({ items: [{ clientId: "safe-pdf-source", state: "downloading" }] });
+      await route.fulfill({ json: { data: [], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } } });
       return;
     }
     await fallback(route);
@@ -646,11 +645,11 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(transferRow.getByRole("button", { name: "Stop", exact: true })).toBeDisabled();
 
   page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toContain("partial download data");
+    expect(dialog.message()).toContain("owned download data");
     await dialog.accept();
   });
   await transferRow.getByRole("button", { name: "Delete", exact: true }).click();
-  await expect(page.getByText("Transfer deleted", { exact: true })).toBeVisible();
+  await expect(page.getByText("Download removed", { exact: true })).toBeVisible();
   await expect(transferRow).toHaveCount(0);
   await expect(page.getByText("No transfers.", { exact: true })).toBeVisible();
 
@@ -673,20 +672,19 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   )).toBe(true);
   const searchDownload = requests.find((request) => request.path === `searches/2/results/${resultHash}/operations/download`);
   expect(searchDownload).toBeDefined();
-  expect(JSON.parse(searchDownload?.body ?? "{}")).toMatchObject({ knownFilePolicy: "reject" });
+  expect(JSON.parse(searchDownload?.body ?? "{}")).toMatchObject({ intent: "started", redownload: false });
   expect(requests.some((request) => request.method === "DELETE" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) =>
     request.method === "DELETE" &&
     request.path === "searches" &&
     new URLSearchParams(request.query).get("confirm") === "true"
   )).toBe(true);
-  expect(requests.some((request) => request.path === `transfers/${resultHash}/operations/stop`)).toBe(true);
+  expect(requests.some((request) => request.path === "downloads/stop")).toBe(true);
   expect(requests.some((request) =>
-    request.method === "DELETE" &&
-    request.path === `transfers/${resultHash}/files` &&
-    new URLSearchParams(request.query).get("confirm") === "true"
+    request.method === "POST" && request.path === "downloads/remove" &&
+    JSON.parse(request.body ?? "{}").deleteData === true
   )).toBe(true);
-  expect(state.transfers).toEqual([]);
+  expect(downloadRows).toEqual([]);
 });
 
 test("shared folder add form validates root paths", async ({ page }) => {
@@ -753,36 +751,36 @@ test("transfer add form validates eD2K link batches", async ({ page }) => {
   const transfersPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Transfers" }) });
   const linkInput = transfersPanel.getByPlaceholder("One eD2K link per line");
   const addLinks = transfersPanel.getByRole("button", { name: "Add links" });
-  const initialTransferPosts = requests.filter((request) => request.method === "POST" && request.path === "transfers").length;
+  const initialTransferPosts = requests.filter((request) => request.method === "POST" && request.path === "downloads").length;
   const invalidLinkError = "Each transfer link must start with ed2k://, contain no whitespace or control characters, and be at most 2048 characters.";
 
   await linkInput.fill("http://example.invalid/file");
   await expect(transfersPanel.getByText(invalidLinkError)).toBeVisible();
   await expect(addLinks).toBeDisabled();
-  expect(requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(initialTransferPosts);
+  expect(requests.filter((request) => request.method === "POST" && request.path === "downloads").length).toBe(initialTransferPosts);
 
   await linkInput.fill(`ed2k://|file|Sample${String.fromCharCode(0x85)}.bin|1|00112233445566778899aabbccddeeff|/`);
   await expect(transfersPanel.getByText(invalidLinkError)).toBeVisible();
   await expect(addLinks).toBeDisabled();
-  expect(requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(initialTransferPosts);
+  expect(requests.filter((request) => request.method === "POST" && request.path === "downloads").length).toBe(initialTransferPosts);
 
   const validLink = "ed2k://|file|Sample.bin|1|00112233445566778899aabbccddeeff|/";
   await linkInput.fill(Array.from({ length: 101 }, () => validLink).join("\n"));
   await expect(transfersPanel.getByText("Add links accepts at most 100 eD2K links.")).toBeVisible();
   await expect(addLinks).toBeDisabled();
-  expect(requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(initialTransferPosts);
+  expect(requests.filter((request) => request.method === "POST" && request.path === "downloads").length).toBe(initialTransferPosts);
 
   await linkInput.fill(validLink);
   await expect(transfersPanel.getByText(invalidLinkError)).toHaveCount(0);
   await expect(transfersPanel.getByText("Add links accepts at most 100 eD2K links.")).toHaveCount(0);
   await addLinks.click();
-  await expect(page.getByText("Transfers queued")).toBeVisible();
-  const transferPost = requests.find((request) => request.method === "POST" && request.path === "transfers");
+  await expect(page.getByText("Downloads queued")).toBeVisible();
+  const transferPost = requests.find((request) => request.method === "POST" && request.path === "downloads");
   expect(transferPost).toBeDefined();
   expect(JSON.parse(transferPost?.body ?? "{}")).toEqual({
-    links: [validLink],
-    paused: false,
-    knownFilePolicy: "reject"
+    source: { type: "ed2k-link", link: validLink },
+    intent: "started",
+    redownload: false
   });
 });
 
@@ -1225,10 +1223,10 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(metricValue("Kad Publish")).toHaveText("waiting");
   await expect(metricValue("Event Stream")).toHaveText(/Connecting|Streaming|Reconnecting/);
   await expect(metricValue("Last Event")).toHaveText("sync.reset");
-  await expect(metricValue("Last Event ID")).toHaveText("1");
+  await expect(metricValue("Last Event ID")).toHaveText("00000000-0000-4000-8000-000000000001:0");
   await expect(metricValue("SSE Subscribers")).toHaveText("1");
-  await expect(metricValue("Event Queue")).toHaveText("1/1024");
-  await expect(metricValue("Latest Bus Event")).toHaveText("1");
+  await expect(metricValue("Event Queue")).toHaveText("0/1024");
+  await expect(metricValue("Latest Bus Event")).toHaveText("0");
   await expect(metricValue("Resume")).toHaveText("reset");
 
   await page.getByRole("link", { name: "Settings" }).click();

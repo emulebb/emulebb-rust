@@ -16,7 +16,7 @@ use serde_json::json;
 use std::convert::Infallible;
 
 use emulebb_core::{
-    AppSettingsUpdate, TransferEvent, app_settings_surface_inventory,
+    AppSettingsUpdate, DownloadEvent, DownloadEventResetReason, app_settings_surface_inventory,
     bootstrap_settings_surface_inventory, settings_section_resource_inventory,
 };
 use tokio::sync::broadcast;
@@ -39,12 +39,16 @@ pub(crate) async fn events(
     headers: HeaderMap,
     State(state): State<RestState>,
 ) -> impl IntoResponse {
-    let receiver = state.core.subscribe_transfer_events();
+    let reason = if headers.contains_key("Last-Event-ID") {
+        DownloadEventResetReason::Reconnect
+    } else {
+        DownloadEventResetReason::Initial
+    };
+    let subscription = state.core.subscribe_download_events(reason, None);
+    let receiver = subscription.receiver;
     let shutdown = state.shutdown.as_ref().map(|request| request.subscribe());
     let core = state.core.clone();
-    let pending_reset = last_event_id(&headers).map(|last_event_id| {
-        TransferEvent::reset_last_event_id(core.reserve_transfer_event_id(), last_event_id)
-    });
+    let pending_reset = Some(subscription.reset);
     let stream = stream::unfold(
         (receiver, core, pending_reset, shutdown),
         |(mut receiver, core, pending_reset, mut shutdown)| async move {
@@ -77,11 +81,12 @@ pub(crate) async fn events(
                     (receiver, core, None, shutdown),
                 )),
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    let event =
-                        TransferEvent::reset_lagged(core.reserve_transfer_event_id(), missed);
+                    let subscription = core
+                        .subscribe_download_events(DownloadEventResetReason::Lagged, Some(missed));
+                    let event = subscription.reset;
                     Some((
                         Ok::<_, Infallible>(sse_event(event)),
-                        (receiver, core, None, shutdown),
+                        (subscription.receiver, core, None, shutdown),
                     ))
                 }
                 Err(broadcast::error::RecvError::Closed) => None,
@@ -104,25 +109,14 @@ pub(crate) async fn events(
 }
 
 pub(crate) async fn event_status(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(transfer_event_diagnostics_response(
-        &state.core.transfer_event_diagnostics(),
-    ))
+    api_ok(state.core.download_event_diagnostics())
 }
 
-fn last_event_id(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("Last-Event-ID")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn sse_event(event: TransferEvent) -> Event {
-    let id = event.id().to_string();
-    let event_type = event.event_type().as_sse_name();
-    let data =
-        serde_json::to_string(&event).expect("transfer events contain only serializable REST DTOs");
+fn sse_event(event: DownloadEvent) -> Event {
+    let id = event.cursor();
+    let event_type = event.sse_name();
+    let data = serde_json::to_string(&event)
+        .expect("download events contain only serializable scalar identities");
     Event::default().id(id).event(event_type).data(data)
 }
 
@@ -134,7 +128,7 @@ pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) ->
     if !request.confirm_shutdown {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             "confirmShutdown must be true",
         )
         .into_response();
@@ -156,7 +150,7 @@ pub(crate) async fn capture_diagnostic_bundle(
     if !request.confirm_capture {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             "confirmCapture must be true",
         )
         .into_response();
@@ -164,7 +158,7 @@ pub(crate) async fn capture_diagnostic_bundle(
     if !(MIN_DIAGNOSTIC_BUNDLE_BYTES..=MAX_DIAGNOSTIC_BUNDLE_BYTES).contains(&request.max_bytes) {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             format!(
                 "maxBytes must be in the range {MIN_DIAGNOSTIC_BUNDLE_BYTES}..={MAX_DIAGNOSTIC_BUNDLE_BYTES}"
             ),
@@ -190,7 +184,7 @@ pub(crate) async fn trigger_diagnostic_crash_test(body: Bytes) -> impl IntoRespo
     if !request.confirm_crash {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             "confirmCrash must be true",
         )
         .into_response();
@@ -205,9 +199,12 @@ pub(crate) async fn trigger_diagnostic_crash_test(body: Bytes) -> impl IntoRespo
 pub(crate) async fn settings(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.app_settings().await {
         Ok(settings) => api_ok(settings).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -237,9 +234,12 @@ pub(crate) async fn update_settings(
             )
             .into_response()
         }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -312,14 +312,14 @@ pub(crate) async fn snapshot(
         .iter()
         .map(shared_file_response)
         .collect::<Vec<_>>();
-    let transfers = match state.core.transfers().await {
-        Ok(transfers) => transfers,
+    let downloads = match state.core.download_counts().await {
+        Ok(downloads) => downloads,
         Err(error) => return super::persistence::persistence_error(error),
     };
     api_ok(json!({
         "app": app_info_response(state.core.app_info()),
         "status": status,
-        "transfers": bounded(transfers, limit),
+        "downloads": &*downloads,
         "sharedFiles": shared_files,
         "uploads": bounded(without_score_breakdown(state.core.uploads().await), limit),
         "uploadQueue": bounded(without_score_breakdown(state.core.upload_queue().await), limit),

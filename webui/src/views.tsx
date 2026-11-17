@@ -25,7 +25,9 @@ import {
   CoreSettingsUpdate,
   Category,
   DaemonSettingsUpdate,
-  DownloadConflictEvidence,
+  DownloadDetail,
+  DownloadSummary,
+  CursorPage,
   Ed2kSettingsUpdate,
   Ed2kUploadQueueSettingsUpdate,
   Friend,
@@ -35,7 +37,6 @@ import {
   KadSettingsUpdate,
   KadNode,
   KadStatus,
-  KnownFilePolicy,
   LogRecord,
   NatSettingsUpdate,
   NatStatus,
@@ -55,13 +56,12 @@ import {
   SettingsSurface,
   Snapshot,
   Status,
-  Transfer,
-  TransferSource,
+  DownloadSource,
   Upload,
   VpnGuardMode,
   VpnGuardSettingsUpdate,
   VpnGuardStatus,
-  downloadConflicts,
+  RestError,
   encodeSegment
 } from "./api";
 import { Action, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll } from "./components";
@@ -95,34 +95,22 @@ export class OperationCancelledError extends Error {
   }
 }
 
-async function createDownloadWithPolicy<T>(
-  create: (policy: KnownFilePolicy) => Promise<T>
-): Promise<T> {
+async function createDownloadWithChoice<T>(create: (redownload: boolean) => Promise<T>): Promise<T> {
   try {
-    return await create("reject");
+    return await create(false);
   } catch (caught) {
-    const conflicts = downloadConflicts(caught);
-    if (!conflicts || conflicts.some((conflict) => !conflict.redownloadAllowed)) {
-      throw caught;
-    }
-    if (!window.confirm(redownloadConfirmation(conflicts))) {
+    if (!(caught instanceof RestError) || caught.code !== "LOCAL_CONTENT_CHOICE_REQUIRED") throw caught;
+    if (!window.confirm("This content is already recorded locally. Download again? Existing library files will be preserved.")) {
       throw new OperationCancelledError();
     }
-    return create("redownload");
+    return create(true);
   }
-}
-
-function redownloadConfirmation(conflicts: DownloadConflictEvidence[]): string {
-  const subject = conflicts.length === 1
-    ? `"${conflicts[0].recordedName}" already exists locally or was downloaded before.`
-    : `${conflicts.length} requested files already exist locally or were downloaded before.`;
-  return `${subject} Download again? Existing shared files are preserved, but managed partial-download state will be replaced.`;
 }
 
 export function Overview(props: {
   snapshot: Snapshot | null;
   stats: Record<string, unknown>;
-  transfers: Transfer[];
+  transfers: DownloadSummary[];
   servers: ServerItem[];
   uploads: Upload[];
   uploadQueue: Upload[];
@@ -130,7 +118,6 @@ export function Overview(props: {
   sharedDirectories: SharedDirectories | null;
   kad: KadStatus;
 }) {
-  const activeTransfers = props.transfers.filter((item) => item.state !== "completed").length;
   const connectedServers = props.servers.filter((item) => item.connected).length;
   const reload = props.sharedDirectories?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? props.snapshot?.status?.sharedStartupCache?.reloadProgress ?? {};
   const startupStages = startupStageRows(props.snapshot, props.sharedDirectories, props.kad, connectedServers);
@@ -144,7 +131,7 @@ export function Overview(props: {
         label="Upload"
         value={formatRate(numberField(props.stats, "uploadRateBytesPerSec") ?? kibToBytes(numberField(props.stats, "uploadSpeedKiBps")))}
       />
-      <Metric label="Transfers" value={`${activeTransfers}/${props.transfers.length}`} />
+      <Metric label="Transfers" value={props.snapshot?.downloads ? `${props.snapshot.downloads.unfinished} unfinished / ${props.snapshot.downloads.completed} completed` : "n/a"} />
       <Metric label="Uploads" value={`${props.uploads.length}/${props.uploadQueue.length}`} />
       <Metric label="Shared" value={String(props.snapshot?.status?.runtimeDiagnostics?.sharedFileCount ?? "n/a")} />
       <Metric label="Kad" value={props.kad.connected ? "Connected" : "Idle"} />
@@ -239,29 +226,66 @@ function ProgressLine(props: { label: string; completed?: number; total?: number
   );
 }
 
-export function TransfersView(props: {
-  transfers: Transfer[];
-  categories: Category[];
-  client: RestClient;
-  run: RunFunction;
-}) {
-  const [stateFilter, setStateFilter] = useState("");
+function CursorControls(props: { cursor: string | null; nextCursor: string | null; loading: boolean; change: (cursor: string | null) => void }) {
+  return <div class="row-actions">
+    <button class="btn" type="button" disabled={props.loading || props.cursor === null} onClick={() => props.change(null)}>First page</button>
+    <button class="btn" type="button" disabled={props.loading || !props.nextCursor} onClick={() => props.change(props.nextCursor)}>Next page</button>
+  </div>;
+}
+
+/** One independently paged evidence resource; refresh replaces its current page. */
+function DownloadEvidence<T>(props: { path: string; label: string; client: RestClient; refreshGeneration: number; render: (items: T[]) => ComponentChildren }) {
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [page, setPage] = useState<CursorPage<T> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    const query = new URLSearchParams({ limit: "100" });
+    if (cursor) query.set("cursor", cursor);
+    void props.client.getPage<T>(`${props.path}?${query}`).then((value) => {
+      if (!cancelled) setPage(value);
+    }).catch((caught) => { if (!cancelled) setError(errorMessage(caught)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [props.client, props.path, cursor, props.refreshGeneration]);
+  const change = (value: string | null) => { setPage(null); setCursor(value); };
+  return <section class="panel card">
+    <div class="section-title"><h2>{props.label}</h2><CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading} change={change} /></div>
+    {error && <div class="notice alert alert-danger">{error}</div>}
+    {props.render(page?.data ?? [])}
+  </section>;
+}
+
+export function TransfersView(props: { categories: Category[]; client: RestClient; run: RunFunction; refreshGeneration: number }) {
+  const [view, setView] = useState("unfinished");
+  const [category, setCategory] = useState("");
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [page, setPage] = useState<CursorPage<DownloadSummary> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [listError, setListError] = useState("");
   const [handoff, setHandoff] = useState(() => readEd2kHandoff(window.location.hash));
   const [ed2kLinks, setEd2kLinks] = useState(handoff?.link ?? "");
-  const [pausedCreate, setPausedCreate] = useState(false);
-  const [selectedHash, setSelectedHash] = useState("");
-  const [details, setDetails] = useState<unknown>(null);
-  const [sources, setSources] = useState<TransferSource[]>([]);
+  const [stoppedCreate, setStoppedCreate] = useState(false);
+  const [selectedId, setSelectedId] = useState("");
+  const [details, setDetails] = useState<DownloadDetail | null>(null);
   const [detailError, setDetailError] = useState("");
-  const transferLinksError = transferLinksValidationError(ed2kLinks);
-
-  const filtered = useMemo(
-    () => props.transfers.filter((transfer) => !stateFilter || transfer.state === stateFilter),
-    [props.transfers, stateFilter]
-  );
-  const selected = props.transfers.find((transfer) => transfer.hash === selectedHash);
-  const selectedId = selected?.hash ?? "";
-
+  const linksError = transferLinksValidationError(ed2kLinks);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setListError("");
+    const query = new URLSearchParams({ view, limit: "100" });
+    if (category) query.set("category", category);
+    if (cursor) query.set("cursor", cursor);
+    void props.client.getPage<DownloadSummary>(`downloads?${query}`).then((value) => {
+      if (!cancelled) setPage(value);
+    }).catch((caught) => { if (!cancelled) setListError(errorMessage(caught)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [props.client, view, category, cursor, props.refreshGeneration]);
   useEffect(() => {
     const receive = () => {
       const next = readEd2kHandoff(window.location.hash);
@@ -271,279 +295,94 @@ export function TransfersView(props: {
     window.addEventListener("hashchange", receive);
     return () => window.removeEventListener("hashchange", receive);
   }, []);
-
-  const consumeHandoff = () => {
-    if (handoff) clearEd2kHandoff();
-    setHandoff(null);
-  };
-
+  const consumeHandoff = () => { if (handoff) clearEd2kHandoff(); setHandoff(null); };
   useEffect(() => {
-    if (!selectedId) {
-      setDetails(null);
-      setSources([]);
-      return;
-    }
     let cancelled = false;
-    const load = async () => {
-      setDetailError("");
-      try {
-        const [nextDetails, nextSources] = await Promise.all([
-          props.client.get<unknown>(`transfers/${selectedId}/details`),
-          props.client.get<Page<TransferSource>>(`transfers/${selectedId}/sources`)
-        ]);
-        if (!cancelled) {
-          setDetails(nextDetails);
-          setSources(nextSources.items ?? []);
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setDetailError(caught instanceof Error ? caught.message : String(caught));
-        }
-      }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [props.client, selectedId]);
-
-  const createTransfers = async () => {
+    setDetails(null);
+    setDetailError("");
+    if (selectedId) void props.client.get<DownloadDetail>(`downloads/${selectedId}`).then((value) => {
+      if (!cancelled) setDetails(value);
+    }).catch((caught) => { if (!cancelled) setDetailError(errorMessage(caught)); });
+    return () => { cancelled = true; };
+  }, [props.client, selectedId, props.refreshGeneration]);
+  const changePage = (value: string | null) => { setPage(null); setCursor(value); setSelectedId(""); };
+  const createDownloads = async () => {
     const links = transferLinksFromText(ed2kLinks);
-    if (links.length === 0) {
-      throw new Error("At least one eD2K link is required");
-    }
-    const error = transferLinksValidationError(ed2kLinks);
-    if (error) {
-      throw new Error(error);
-    }
-    // Explicit submission consumes the external handoff even if the operation
-    // needs a retry. The editable form remains available on failure.
+    if (!links.length) throw new Error("At least one eD2K link is required");
+    if (linksError) throw new Error(linksError);
     consumeHandoff();
-    await createDownloadWithPolicy((knownFilePolicy) =>
-      props.client.post("transfers", { links, paused: pausedCreate, knownFilePolicy })
-    );
+    // Separate creations preserve admitted results if a later input fails.
+    // Retrying the form returns unchanged duplicates for already-created jobs.
+    for (const link of links) await createDownloadWithChoice((redownload) => props.client.post("downloads", {
+      source: { type: "ed2k-link", link }, intent: stoppedCreate ? "stopped" : "started", redownload,
+    }));
     setEd2kLinks("");
   };
-
-  const patchCategory = (transfer: Transfer, category: string) =>
-    props.client.patch(`transfers/${transfer.hash}`, { category: category || null });
-
-  const removeCompletedTransfer = (transfer: Transfer) => {
-    const name = transfer.displayName?.trim() || transfer.hash;
-    if (window.confirm(`Remove "${name}" from the transfer list? The downloaded file will be preserved.`)) {
-      void props.run(() => props.client.delete(`transfers/${transfer.hash}`), "Transfer removed from list");
-    }
+  const remove = (job: DownloadSummary, deleteData: boolean) => {
+    if (!window.confirm(deleteData
+      ? `Delete "${job.name}" and its owned download data? This cannot be undone.`
+      : `Remove "${job.name}"? Completed outputs are preserved; internal temporary pieces are retired.`)) return;
+    void props.run(async () => {
+      await props.client.controlDownloads("remove", [job.id], deleteData);
+      if (selectedId === job.id) setSelectedId("");
+    }, "Download removed");
   };
-
-  const deleteTransfer = (transfer: Transfer) => {
-    const name = transfer.displayName?.trim() || transfer.hash;
-    const localData = transfer.state === "completed" ? "downloaded file" : "partial download data";
-    if (window.confirm(`Delete "${name}" and its ${localData}? This cannot be undone.`)) {
-      void props.run(
-        () => props.client.delete(`transfers/${transfer.hash}/files?confirm=true`),
-        "Transfer deleted"
-      );
-    }
-  };
-
-  return (
-    <section class="view-stack">
-      <section class="panel card">
-        <div class="section-title">
-          <h2>Transfers</h2>
-          <div class="row-actions">
-            <select class="form-select" value={stateFilter} onInput={(event) => setStateFilter(event.currentTarget.value)}>
-              <option value="">All states</option>
-              <option value="downloading">Downloading</option>
-              <option value="paused">Paused</option>
-              <option value="insufficient">Insufficient space</option>
-              <option value="completed">Completed</option>
-              <option value="error">Error</option>
-            </select>
-            <button class="btn"
-              type="button"
-              onClick={() => {
-                if (window.confirm("Clear completed transfer rows and preserve files?")) {
-                  void props.run(
-                    () => props.client.post("transfers/operations/clear-completed", { confirmClearCompleted: true }),
-                    "Completed transfer rows cleared"
-                  );
-                }
-              }}
-            >
-              <Trash2 size={15} />
-              Clear completed
-            </button>
-          </div>
-        </div>
-        {handoff && <p class={handoff.error ? "field-error" : "text-secondary"}>
-          {handoff.error ?? "Review the linked file and press Add links to queue it."}
-        </p>}
-        <form
-          class="form-row"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void props.run(createTransfers, "Transfers queued");
-          }}
-        >
-          <textarea class="form-control"
-            aria-label="eD2K links"
-            value={ed2kLinks}
-            placeholder="One eD2K link per line"
-            aria-invalid={transferLinksError ? "true" : "false"}
-            onInput={(event) => setEd2kLinks(event.currentTarget.value)}
-          />
-          <label class="check">
-            <input class="form-check-input" type="checkbox" checked={pausedCreate} onInput={(event) => setPausedCreate(event.currentTarget.checked)} />
-            Paused
-          </label>
-          <button class="btn" type="submit" disabled={Boolean(transferLinksError)}>
-            <Download size={16} />
-            Add links
-          </button>
-          {handoff && <button class="btn" type="button" onClick={() => {
-            consumeHandoff();
-            setEd2kLinks("");
-          }}>Cancel links</button>}
-        </form>
-        {transferLinksError && <p class="field-error">{transferLinksError}</p>}
-        <TableScroll label="Transfers">
-          <table class="table table-vcenter card-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>State</th>
-                <th>Progress</th>
-                <th>Down</th>
-                <th>Category</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((transfer) => (
-                <tr key={transfer.hash} class={selectedId === transfer.hash ? "selected-row" : ""}>
-                  <td>
-                    <button type="button" class="link-button" onClick={() => setSelectedHash(transfer.hash)}>
-                      {transfer.displayName ?? transfer.hash}
-                    </button>
-                    {transfer.deliveryError && (
-                      <small class="text-danger" title={transfer.deliveryError}>Delivery failed; retrying</small>
-                    )}
-                  </td>
-                  <td><StatusPill value={transfer.stopped ? "stopped" : transfer.state ?? "unknown"} /></td>
-                  <td>{formatProgress(transfer)}</td>
-                  <td>{formatKiBRate(transfer.downloadSpeedKiBps) || formatRate(transfer.downloadRateBytesPerSec)}</td>
-                  <td>
-                    <select class="form-select"
-                      value={transfer.category ?? ""}
-                      onInput={(event) => void props.run(() => patchCategory(transfer, event.currentTarget.value), "Category updated")}
-                    >
-                      <option value="">Uncategorized</option>
-                      {props.categories.map((category) => (
-                        <option key={category.name} value={category.name}>{category.name}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <div class="row-actions">
-                      <button
-                        type="button"
-                        class="btn btn-outline-secondary transfer-action"
-                        disabled={transfer.state === "completed" || transfer.stopped === true}
-                        onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/stop`), "Transfer stopped")}
-                      >
-                        <Ban size={15} />
-                        Stop
-                      </button>
-                      <Action
-                        title="Pause"
-                        icon={<Pause size={15} />}
-                        disabled={transfer.state === "completed" || transfer.state === "paused" || transfer.stopped === true}
-                        onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/pause`), "Transfer paused")}
-                      />
-                      <Action
-                        title="Resume"
-                        icon={<Play size={15} />}
-                        disabled={(transfer.state !== "paused" && transfer.state !== "insufficient") || transfer.stopped === true}
-                        onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/resume`), "Transfer resumed")}
-                      />
-                      <Action title="Recheck" icon={<RefreshCw size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${transfer.hash}/operations/recheck`), "Recheck queued")} />
-                      {transfer.state === "completed" && (
-                        <button
-                          type="button"
-                          class="btn btn-outline-secondary transfer-action"
-                          onClick={() => removeCompletedTransfer(transfer)}
-                        >
-                          <FileText size={15} />
-                          Remove from list
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        class="btn btn-outline-danger transfer-action"
-                        onClick={() => deleteTransfer(transfer)}
-                      >
-                        <Trash2 size={15} />
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {filtered.length === 0 && <EmptyRow colSpan={6} text="No transfers." />}
-            </tbody>
-          </table>
-        </TableScroll>
-      </section>
-
-      <section class="panel card">
-        <div class="section-title">
-          <h2>Transfer Details</h2>
-          <span>{selected?.displayName ?? (selectedId || "No selection")}</span>
-        </div>
-        {detailError && <div class="notice alert alert-danger">{detailError}</div>}
-        <div class="split">
-          <JsonPanel value={details} />
-          <TableScroll label="Transfer sources">
-            <table class="table table-vcenter card-table">
-              <thead>
-                <tr>
-                  <th>Source</th>
-                  <th>State</th>
-                  <th>Rate</th>
-                  <th>Reported names</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sources.map((source) => {
-                  const clientId = source.clientId ?? "";
-                  const encodedClient = encodeSegment(clientId);
-                  return (
-                    <tr key={clientId}>
-                      <td>{source.userName ?? clientId}</td>
-                      <td><StatusPill value={source.state ?? "unknown"} /></td>
-                      <td>{formatKiBRate(source.downloadSpeedKiBps) || formatRate(source.downloadRateBytesPerSec)}</td>
-                      <td>{(source.reportedFileNames ?? []).map((name) => name.normalizedName).join(", ")}</td>
-                      <td>
-                        <div class="row-actions">
-                          <Action title="Browse" icon={<Search size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${selectedId}/sources/${encodedClient}/operations/browse`), "Browse requested")} />
-                          <Action title="Add friend" icon={<UserPlus size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${selectedId}/sources/${encodedClient}/operations/add-friend`), "Friend added")} />
-                          <Action title="Remove source" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${selectedId}/sources/${encodedClient}/operations/remove`), "Source removed")} />
-                          <Action title="Ban" icon={<Ban size={15} />} onClick={() => void props.run(() => props.client.post(`transfers/${selectedId}/sources/${encodedClient}/operations/ban`), "Source banned")} />
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {sources.length === 0 && <EmptyRow colSpan={5} text="No sources for this transfer." />}
-              </tbody>
-            </table>
-          </TableScroll>
-        </div>
-      </section>
+  return <section class="view-stack">
+    <section class="panel card">
+      <div class="section-title"><h2>Transfers</h2><div class="row-actions">
+        <select class="form-select" aria-label="Download view" value={view} onInput={(event) => { setView(event.currentTarget.value); changePage(null); }}>
+          <option value="unfinished">Unfinished</option><option value="completed">Completed</option><option value="all">All downloads</option>
+        </select>
+        <select class="form-select" aria-label="Download category" value={category} onInput={(event) => { setCategory(event.currentTarget.value); changePage(null); }}>
+          <option value="">All categories</option>{props.categories.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+        </select>
+        <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading} change={changePage} />
+      </div></div>
+      {listError && <div class="notice alert alert-danger">{listError}</div>}
+      {handoff && <p class={handoff.error ? "field-error" : "text-secondary"}>{handoff.error ?? "Review the linked file and press Add links to queue it."}</p>}
+      <form class="form-row" onSubmit={(event) => { event.preventDefault(); void props.run(createDownloads, "Downloads queued"); }}>
+        <textarea class="form-control" aria-label="eD2K links" value={ed2kLinks} placeholder="One eD2K link per line" aria-invalid={linksError ? "true" : "false"} onInput={(event) => setEd2kLinks(event.currentTarget.value)} />
+        <label class="check"><input class="form-check-input" type="checkbox" checked={stoppedCreate} onInput={(event) => setStoppedCreate(event.currentTarget.checked)} />Stopped</label>
+        <button class="btn" type="submit" disabled={Boolean(linksError)}><Download size={16} />Add links</button>
+        {handoff && <button class="btn" type="button" onClick={() => { consumeHandoff(); setEd2kLinks(""); }}>Cancel links</button>}
+      </form>
+      {linksError && <p class="field-error">{linksError}</p>}
+      <TableScroll label="Transfers"><table class="table table-vcenter card-table"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
+        {(page?.data ?? []).map((job) => <tr key={job.id} class={selectedId === job.id ? "selected-row" : ""}>
+          <td><button type="button" class="link-button" onClick={() => setSelectedId(job.id)}>{job.name}</button></td>
+          <td><StatusPill value={job.state} /></td><td>{formatProgress(job)}</td>
+          <td><select class="form-select" aria-label={`Category for ${job.name}`} value={job.category ?? ""} onInput={(event) => void props.run(() => props.client.patch(`downloads/${job.id}`, { category: event.currentTarget.value || null }), "Category updated")}>
+            <option value="">Uncategorized</option>{props.categories.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+          </select></td>
+          <td><div class="row-actions">
+            <Action title="Start" icon={<Play size={15} />} disabled={job.state === "completed"} onClick={() => void props.run(() => props.client.controlDownloads("start", [job.id]), "Download started")} />
+            <Action title="Stop" icon={<Ban size={15} />} disabled={job.state === "completed" || job.intent === "stopped"} onClick={() => void props.run(() => props.client.controlDownloads("stop", [job.id]), "Download stopped")} />
+            <Action title="Verify" icon={<RefreshCw size={15} />} onClick={() => void props.run(() => props.client.controlDownloads("verify", [job.id]), "Download verified")} />
+            <Action title="Remove from list" icon={<FileText size={15} />} onClick={() => remove(job, false)} />
+            <Action title="Delete" icon={<Trash2 size={15} />} onClick={() => remove(job, true)} />
+          </div></td>
+        </tr>)}
+        {page?.data.length === 0 && <EmptyRow colSpan={5} text="No transfers." />}
+      </tbody></table></TableScroll>
     </section>
-  );
+    <section class="panel card"><div class="section-title"><h2>Transfer Details</h2><span>{details?.name ?? (selectedId || "No selection")}</span></div>
+      {detailError && <div class="notice alert alert-danger">{detailError}</div>}<JsonPanel value={details} />
+    </section>
+    {selectedId && <>
+      <DownloadEvidence<DownloadSource> key={`${selectedId}:sources`} path={`downloads/${selectedId}/sources`} label="Download sources" client={props.client} refreshGeneration={props.refreshGeneration} render={(sources) => <TableScroll label="Transfer sources"><table class="table table-vcenter card-table"><thead><tr><th>Source</th><th>State</th><th>Rate</th><th>Reported names</th><th>Actions</th></tr></thead><tbody>
+        {sources.map((source) => { const peer = source.clientId ?? ""; const path = `downloads/${selectedId}/sources/${encodeSegment(peer)}/operations`; return <tr key={peer}>
+          <td>{source.userName ?? peer}</td><td><StatusPill value={source.downloadState ?? "unknown"} /></td><td>{formatRate(source.downloadRateBytesPerSecond)}</td>
+          <td>{(source.reportedFileNames ?? []).map((name) => name.normalizedName).join(", ")}{source.reportedFileNamesHasMore ? " …" : ""}</td>
+          <td><div class="row-actions"><Action title="Browse" icon={<Search size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/browse`), "Browse requested")} />
+            <Action title="Add friend" icon={<UserPlus size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/add-friend`), "Friend added")} />
+            <Action title="Remove source" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/remove`), "Source removed")} />
+            <Action title="Ban" icon={<Ban size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/ban`), "Source banned")} /></div></td>
+        </tr>; })}{sources.length === 0 && <EmptyRow colSpan={5} text="No sources for this download." />}
+      </tbody></table></TableScroll>} />
+      <DownloadEvidence<unknown> key={`${selectedId}:parts`} path={`downloads/${selectedId}/parts`} label="Download parts" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
+      <DownloadEvidence<unknown> key={`${selectedId}:comments`} path={`downloads/${selectedId}/comments`} label="Download comments" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
+    </>}
+  </section>;
 }
 
 export function SearchView(props: {
@@ -900,11 +739,11 @@ export function SearchView(props: {
                     disabled={!downloadable}
                     title={downloadable ? "Download this result" : "Download unavailable: file size was not reported"}
                     onClick={() => void props.run(
-                      () => createDownloadWithPolicy((knownFilePolicy) =>
+                      () => createDownloadWithChoice((redownload) =>
                         props.client.post(`searches/${props.selectedSearch?.id}/results/${result.hash}/operations/download`, {
-                          paused,
+                          intent: paused ? "stopped" : "started",
                           category: category || null,
-                          knownFilePolicy
+                          redownload
                         })
                       ),
                       "Download queued"
@@ -1911,14 +1750,14 @@ type NetworkEndpointRow = {
   bindPolicy: string;
 };
 
-type NetworkTransferSource = TransferSource & {
+type NetworkDownloadSource = DownloadSource & {
   transferHash?: string;
   transferName?: string;
 };
 
 export function NetworkHealthView(props: {
   servers: ServerItem[];
-  transfers: Transfer[];
+  transfers: DownloadSummary[];
   uploads: Upload[];
   uploadQueue: Upload[];
   kad: KadStatus;
@@ -1926,7 +1765,7 @@ export function NetworkHealthView(props: {
   client: RestClient;
 }) {
   const [nodes, setNodes] = useState<KadNode[]>([]);
-  const [sources, setSources] = useState<NetworkTransferSource[]>([]);
+  const [sources, setSources] = useState<NetworkDownloadSource[]>([]);
   const [filter, setFilter] = useState("");
   const [selectedKey, setSelectedKey] = useState("");
   const [loadError, setLoadError] = useState("");
@@ -1935,12 +1774,13 @@ export function NetworkHealthView(props: {
       .filter((transfer) => transfer.state !== "completed")
       .slice(0, 12)
       .map((transfer) => ({
+        id: transfer.id,
         hash: transfer.hash,
-        name: transfer.displayName
+        name: transfer.name
       })),
     [props.transfers]
   );
-  const sourceTargetSignature = sourceTargets.map((transfer) => transfer.hash).join("|");
+  const sourceTargetSignature = sourceTargets.map((transfer) => `${transfer.id}:${transfer.name}`).join("|");
 
   useEffect(() => {
     let cancelled = false;
@@ -1952,14 +1792,14 @@ export function NetworkHealthView(props: {
           Promise.all(
             sourceTargets.map(async (transfer) => {
               try {
-                const page = await props.client.get<Page<TransferSource>>(`transfers/${transfer.hash}/sources`);
-                return (page.items ?? []).map((source) => ({
+                const page = await props.client.getPage<DownloadSource>(`downloads/${transfer.id}/sources?limit=100`);
+                return page.data.map((source) => ({
                   ...source,
                   transferHash: transfer.hash,
                   transferName: transfer.name
                 }));
               } catch {
-                return [] as NetworkTransferSource[];
+                return [] as NetworkDownloadSource[];
               }
             })
           )
@@ -2499,7 +2339,7 @@ function KadGraph(props: { nodes: KadNode[]; selectedNodeId?: string; onSelect: 
 function networkEndpointRows(
   servers: ServerItem[],
   nodes: KadNode[],
-  sources: NetworkTransferSource[],
+  sources: NetworkDownloadSource[],
   uploads: Upload[],
   uploadQueue: Upload[],
   bindPolicy: { label: string; detail: string }
@@ -2547,7 +2387,7 @@ function networkEndpointRows(
   return rows;
 }
 
-function peerEndpointRow(kind: string, key: string, peer: TransferSource | Upload, bindPolicy: { label: string; detail: string }, detail: string): NetworkEndpointRow {
+function peerEndpointRow(kind: string, key: string, peer: DownloadSource | Upload, bindPolicy: { label: string; detail: string }, detail: string): NetworkEndpointRow {
   const address = stringField(peer, "address");
   const port = numberField(peer, "port");
   return {
@@ -4069,7 +3909,7 @@ export function DiagnosticsView(props: {
   const diagnostics = props.runtimeDiagnostics ?? {};
   const resources = diagnostics.processResources;
   const eventStream = props.eventStreamStatus;
-  const transferEvents = diagnostics.transferEvents ?? {};
+  const downloadEvents = diagnostics.downloadEvents ?? {};
   const reload = diagnostics.sharedDirectoryReloadProgress ?? {};
   const ed2kPublishPhase = stringField(recordField(diagnostics, "ed2kPublish"), "phase") || "unknown";
   const kadPublishPhase = stringField(recordField(diagnostics, "kadPublish"), "phase") || "unknown";
@@ -4160,10 +4000,10 @@ export function DiagnosticsView(props: {
         <Metric label="Reconnects" value={String(eventStream.reconnectAttempts)} />
         <Metric label="Poll Interval" value={`${eventStream.pollIntervalMs} ms`} />
         <Metric label="Stream Error" value={eventStream.lastError ?? "n/a"} />
-        <Metric label="SSE Subscribers" value={String(transferEvents.subscriberCount ?? 0)} />
-        <Metric label="Event Queue" value={`${transferEvents.queuedEventCount ?? 0}/${transferEvents.channelCapacity ?? 0}`} />
-        <Metric label="Latest Bus Event" value={String(transferEvents.latestEventId ?? 0)} />
-        <Metric label="Resume" value={transferEvents.resumeBehavior ?? "n/a"} />
+        <Metric label="SSE Subscribers" value={String(downloadEvents.subscriberCount ?? 0)} />
+        <Metric label="Event Queue" value={`${downloadEvents.queuedEventCount ?? 0}/${downloadEvents.channelCapacity ?? 0}`} />
+        <Metric label="Latest Bus Event" value={String(downloadEvents.latestEventId ?? 0)} />
+        <Metric label="Resume" value={downloadEvents.resumeBehavior ?? "n/a"} />
       </section>
       <section class="panel card">
         <div class="section-title">
@@ -4208,15 +4048,15 @@ export function LogsView(props: { logs: LogRecord[]; client: RestClient; run: Ru
   );
 }
 
-function CompactTransferList(props: { transfers: Transfer[] }) {
+function CompactTransferList(props: { transfers: DownloadSummary[] }) {
   if (props.transfers.length === 0) {
     return <p class="empty">No transfers.</p>;
   }
   return (
     <div class="compact-list">
       {props.transfers.map((transfer) => (
-        <div class="compact-row" key={transfer.hash}>
-          <span>{transfer.displayName ?? transfer.hash}</span>
+        <div class="compact-row" key={transfer.id}>
+          <span>{transfer.name ?? transfer.hash}</span>
           <StatusPill value={transfer.state ?? "unknown"} />
           <strong>{formatProgress(transfer)}</strong>
         </div>

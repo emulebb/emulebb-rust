@@ -73,9 +73,12 @@ pub(crate) async fn servers_import_met_url(
             "failed to update server.met from URL",
         )
         .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -103,9 +106,12 @@ pub(crate) async fn update_server(
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
         }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -118,9 +124,12 @@ pub(crate) async fn delete_server(
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
         }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 

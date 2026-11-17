@@ -11,12 +11,12 @@ fn category_create(name: &str) -> CategoryCreate {
 
 #[test]
 fn public_category_is_nullable_and_patch_preserves_omission() {
-    let missing: TransferUpdate = serde_json::from_str("{}").unwrap();
-    let cleared: TransferUpdate = serde_json::from_str(r#"{"category":null}"#).unwrap();
-    let assigned: TransferUpdate = serde_json::from_str(r#"{"category":"Media"}"#).unwrap();
-    assert_eq!(missing.category_name, None);
-    assert_eq!(cleared.category_name, Some(None));
-    assert_eq!(assigned.category_name, Some(Some("Media".into())));
+    let missing: DownloadUpdate = serde_json::from_str("{}").unwrap();
+    let cleared: DownloadUpdate = serde_json::from_str(r#"{"category":null}"#).unwrap();
+    let assigned: DownloadUpdate = serde_json::from_str(r#"{"category":"Media"}"#).unwrap();
+    assert_eq!(missing.category, None);
+    assert_eq!(cleared.category, Some(None));
+    assert_eq!(assigned.category, Some(Some("Media".into())));
     let category = Category {
         id: 42,
         name: "Media".into(),

@@ -37,9 +37,12 @@ pub(crate) async fn create_search(
     };
     match state.core.create_search(request).await {
         Ok(search) => api_ok(search_response(&search)).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Err(error) => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -90,7 +93,7 @@ pub(crate) async fn delete_searches(
     if query.confirm != Some(true) {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
+            "INVALID_ARGUMENT",
             "confirm must be true",
         )
         .into_response();
@@ -116,7 +119,7 @@ pub(crate) async fn download_search_result(
         Err(error) => {
             return api_error(
                 StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
+                "INVALID_ARGUMENT",
                 json_error_message(&error),
             )
             .into_response();
@@ -127,12 +130,14 @@ pub(crate) async fn download_search_result(
         .download_search_result(&search_id, &hash, request)
         .await
     {
-        Ok(Some(_transfer)) => api_ok(SearchResultDownloadResult {
-            ok: true,
-            search_id,
-            hash,
-        })
-        .into_response(),
+        Ok(Some((created, download))) => super::downloads::item(
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            &*download,
+        ),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",

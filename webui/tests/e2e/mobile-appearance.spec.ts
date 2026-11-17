@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { installMockApi, mockSnapshotFixture, type RecordedApiRequest } from "../fixtures/mockApi";
+import { installMockApi, mockSnapshotFixture, mockDownloadFixture, type RecordedApiRequest } from "../fixtures/mockApi";
 import { pathForRoute, type Tab } from "../../src/routes";
 
 const views: Tab[] = ["overview", "transfers", "search", "sharing", "shared-files", "uploads", "network", "servers", "kad", "categories", "friends", "settings", "diagnostics", "logs"];
@@ -29,8 +29,11 @@ for (const width of [320, 390, 768, 1280]) {
       } else if (path === "/api/v1/snapshot") {
         const state = mockSnapshotFixture();
         state.app.version = nightlyVersion;
-        state.transfers[0].displayName = "Sample-" + "long-filename-segment-".repeat(18) + ".bin";
         await route.fulfill({ json: { data: state } });
+      } else if (path === "/api/v1/downloads") {
+        const data = mockDownloadFixture();
+        data[0].name = "Sample-" + "long-filename-segment-".repeat(18) + ".bin";
+        await route.fulfill({ json: { data, meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } } });
       } else await mock(route);
     });
     for (const view of views) {
@@ -153,8 +156,8 @@ test("mobile forms, row actions and direct diagnostic buttons preserve request m
   await table.focus();
   await page.keyboard.press("ArrowRight");
   await expect.poll(() => table.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
-  await page.getByTitle("Pause", { exact: true }).click();
-  expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/operations/pause"))).toBe(true);
+  await page.getByTitle("Stop", { exact: true }).click();
+  expect(requests.some((request) => request.method === "POST" && request.path === "downloads/stop")).toBe(true);
   await page.goto(pathForRoute({ tab: "search" }));
   await page.getByPlaceholder("Search query", { exact: true }).fill("Sample phone query");
   await page.getByRole("button", { name: "Start", exact: true }).click();
