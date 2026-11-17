@@ -565,7 +565,8 @@ fn old_generation_cannot_checkpoint_or_begin_delivery_after_stop() {
     manifest.pieces = vec![MetadataTransferPiece {
         piece_index: 0,
         state: "Verified".into(),
-        bytes_written: 16,
+        prefix_bytes: 16,
+        present_bytes: 16,
         block_bitmap: None,
         ich_corrupted: false,
     }];
@@ -622,7 +623,8 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
     manifest.pieces = vec![MetadataTransferPiece {
         piece_index: 0,
         state: "Verified".into(),
-        bytes_written: 16,
+        prefix_bytes: 16,
+        present_bytes: 16,
         block_bitmap: None,
         ich_corrupted: false,
     }];
@@ -683,7 +685,8 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
     new_manifest.pieces = vec![MetadataTransferPiece {
         piece_index: 0,
         state: "Missing".into(),
-        bytes_written: 0,
+        prefix_bytes: 0,
+        present_bytes: 0,
         block_bitmap: None,
         ich_corrupted: false,
     }];
@@ -699,7 +702,7 @@ fn terminal_job_survives_retirement_and_old_callbacks_cannot_touch_redownload() 
             .unwrap()
             .unwrap()
             .pieces[0]
-            .bytes_written,
+            .prefix_bytes,
         0
     );
     assert_eq!(
@@ -880,7 +883,8 @@ fn accepted_local_identity_and_stale_checkpoint_preserve_md4_verified_progress()
     stale.pieces = vec![MetadataTransferPiece {
         piece_index: 0,
         state: "Verified".to_owned(),
-        bytes_written: 16,
+        prefix_bytes: 16,
+        present_bytes: 16,
         block_bitmap: None,
         ich_corrupted: false,
     }];
@@ -1089,12 +1093,14 @@ fn invalid_payload_geometry_cannot_replace_a_valid_transfer() {
     invalid.pieces.push(MetadataTransferPiece {
         piece_index: 0,
         state: "Missing".into(),
-        bytes_written: manifest.expected_size_bytes.unwrap() + 1,
+        prefix_bytes: manifest.expected_size_bytes.unwrap() + 1,
+        present_bytes: manifest.expected_size_bytes.unwrap() + 1,
         block_bitmap: None,
         ich_corrupted: false,
     });
     assert!(store.upsert_transfer_manifest(&invalid).is_err());
-    invalid.pieces[0].bytes_written = 0;
+    invalid.pieces[0].prefix_bytes = 0;
+    invalid.pieces[0].present_bytes = 0;
     invalid.pieces[0].piece_index = 1;
     assert!(store.upsert_transfer_manifest(&invalid).is_err());
     assert_eq!(
@@ -1208,7 +1214,8 @@ fn transfer_snapshots_keep_unchanged_children_and_source_first_seen() {
     manifest.pieces.push(MetadataTransferPiece {
         piece_index: 0,
         state: "Missing".into(),
-        bytes_written: 0,
+        prefix_bytes: 0,
+        present_bytes: 0,
         block_bitmap: None,
         ich_corrupted: false,
     });
@@ -1256,7 +1263,8 @@ fn transfer_snapshots_keep_unchanged_children_and_source_first_seen() {
         .unwrap()
         .execute_batch("DROP TRIGGER no_piece_update;")
         .unwrap();
-    manifest.pieces[0].bytes_written = 8;
+    manifest.pieces[0].prefix_bytes = 8;
+    manifest.pieces[0].present_bytes = 8;
     store.upsert_transfer_manifest(&manifest).unwrap();
     let expected = manifest.clone();
     manifest.pieces.push(manifest.pieces[0].clone());
@@ -1337,7 +1345,8 @@ fn transfer_manifest_roundtrips_sql_tables() {
     manifest.pieces = vec![MetadataTransferPiece {
         piece_index: 0,
         state: "Verified".to_string(),
-        bytes_written: manifest.expected_size_bytes.unwrap(),
+        prefix_bytes: manifest.expected_size_bytes.unwrap(),
+        present_bytes: manifest.expected_size_bytes.unwrap(),
         block_bitmap: None,
         ich_corrupted: false,
     }];
@@ -1427,7 +1436,8 @@ fn current_schema_rejects_persisted_network_claim_states() {
     manifest.pieces = vec![MetadataTransferPiece {
         piece_index: 0,
         state: "Missing".to_string(),
-        bytes_written: 0,
+        prefix_bytes: 0,
+        present_bytes: 0,
         block_bitmap: None,
         ich_corrupted: false,
     }];
@@ -1484,7 +1494,8 @@ fn upload_demand_counters_persist_on_known_files() {
         pieces: vec![MetadataTransferPiece {
             piece_index: 0,
             state: "Verified".to_string(),
-            bytes_written: 1024,
+            prefix_bytes: 1024,
+            present_bytes: 1024,
             block_bitmap: None,
             ich_corrupted: false,
         }],
@@ -1747,7 +1758,8 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         pieces: vec![MetadataTransferPiece {
             piece_index: 0,
             state: "Missing".to_string(),
-            bytes_written: 0,
+            prefix_bytes: 0,
+            present_bytes: 0,
             block_bitmap: None,
             ich_corrupted: false,
         }],
@@ -2140,7 +2152,8 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
         pieces: vec![MetadataTransferPiece {
             piece_index: 0,
             state: "Verified".to_string(),
-            bytes_written: 1,
+            prefix_bytes: 1,
+            present_bytes: 1,
             block_bitmap: None,
             ich_corrupted: false,
         }],
@@ -2780,7 +2793,8 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
         pieces: vec![MetadataTransferPiece {
             piece_index: 0,
             state: "Missing".to_string(),
-            bytes_written: 0,
+            prefix_bytes: 0,
+            present_bytes: 0,
             block_bitmap: None,
             ich_corrupted: false,
         }],

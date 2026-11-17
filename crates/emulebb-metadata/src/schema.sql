@@ -642,11 +642,13 @@ CREATE TABLE download_job_pieces (
     job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     piece_index INTEGER NOT NULL CHECK(piece_index BETWEEN 0 AND 4294967295),
     state TEXT NOT NULL CHECK(state IN ('Missing', 'Verified')),
-    bytes_written INTEGER NOT NULL DEFAULT 0 CHECK(bytes_written >= 0),
+    prefix_bytes INTEGER NOT NULL DEFAULT 0 CHECK(prefix_bytes >= 0),
+    present_bytes INTEGER NOT NULL DEFAULT 0 CHECK(present_bytes >= prefix_bytes),
     block_bitmap TEXT,
     ich_corrupted INTEGER NOT NULL DEFAULT 0 CHECK(ich_corrupted IN (0, 1)),
     updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
-    PRIMARY KEY(job_id, piece_index)
+    PRIMARY KEY(job_id, piece_index),
+    CHECK(block_bitmap IS NOT NULL OR present_bytes=prefix_bytes)
 ) STRICT, WITHOUT ROWID;
 
 -- One persistence owner maintains the counter for deltas, snapshot reconciliation,
@@ -654,23 +656,23 @@ CREATE TABLE download_job_pieces (
 -- Check capacity before addition so SQLite never promotes integer overflow to REAL.
 CREATE TRIGGER download_job_pieces_progress_insert AFTER INSERT ON download_job_pieces
 BEGIN
-    SELECT CASE WHEN new.bytes_written > 9223372036854775807 -
+    SELECT CASE WHEN new.present_bytes > 9223372036854775807 -
         (SELECT checkpointed_bytes FROM download_jobs WHERE id=new.job_id)
         THEN RAISE(ABORT, 'download checkpointed bytes overflow') END;
-    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes+new.bytes_written WHERE id=new.job_id;
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes+new.present_bytes WHERE id=new.job_id;
 END;
-CREATE TRIGGER download_job_pieces_progress_update AFTER UPDATE OF job_id, bytes_written ON download_job_pieces
-WHEN new.job_id != old.job_id OR new.bytes_written != old.bytes_written
+CREATE TRIGGER download_job_pieces_progress_update AFTER UPDATE OF job_id, present_bytes ON download_job_pieces
+WHEN new.job_id != old.job_id OR new.present_bytes != old.present_bytes
 BEGIN
-    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes-old.bytes_written WHERE id=old.job_id;
-    SELECT CASE WHEN new.bytes_written > 9223372036854775807 -
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes-old.present_bytes WHERE id=old.job_id;
+    SELECT CASE WHEN new.present_bytes > 9223372036854775807 -
         (SELECT checkpointed_bytes FROM download_jobs WHERE id=new.job_id)
         THEN RAISE(ABORT, 'download checkpointed bytes overflow') END;
-    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes+new.bytes_written WHERE id=new.job_id;
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes+new.present_bytes WHERE id=new.job_id;
 END;
 CREATE TRIGGER download_job_pieces_progress_delete AFTER DELETE ON download_job_pieces
 BEGIN
-    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes-old.bytes_written WHERE id=old.job_id;
+    UPDATE download_jobs SET checkpointed_bytes=checkpointed_bytes-old.present_bytes WHERE id=old.job_id;
 END;
 
 CREATE TABLE servers (

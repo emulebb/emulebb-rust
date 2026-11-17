@@ -61,7 +61,14 @@ impl LocalMutationRegistry {
             .iter()
             .filter(|piece| selected(piece.piece_index))
         {
-            pieces.push(transfer::transfer_sql::piece_to_metadata(piece));
+            pieces.push(transfer::transfer_sql::piece_to_metadata(
+                piece,
+                transfer::expected_piece_length(
+                    manifest.file_size,
+                    manifest.piece_size,
+                    u64::from(piece.piece_index),
+                ),
+            ));
         }
         let token = manifest.token;
         let hash = manifest.file_hash.clone();
@@ -94,7 +101,7 @@ impl LocalMutationRegistry {
                                 .pieces
                                 .get(piece.piece_index as usize)
                                 .is_some_and(|p| p.piece_index == piece.piece_index
-                                    && p.bytes_written == piece.bytes_written
+                                    && p.bytes_written == piece.prefix_bytes
                                     && p.block_bitmap == piece.block_bitmap
                                     && p.ich_corrupted == piece.ich_corrupted
                                     && matches!(
@@ -144,7 +151,7 @@ impl LocalMutationRegistry {
                             | (transfer::Ed2kTransferState::Verified, "Verified")
                     );
                     if state_matches
-                        && target.bytes_written == piece.bytes_written
+                        && target.bytes_written == piece.prefix_bytes
                         && target.block_bitmap == piece.block_bitmap
                         && target.ich_corrupted == piece.ich_corrupted
                     {
@@ -263,7 +270,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .pieces[0]
-                .bytes_written,
+                .prefix_bytes,
             8
         );
         assert_eq!(
@@ -406,7 +413,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .pieces[0]
-                .bytes_written,
+                .prefix_bytes,
             8
         );
         // The preserved dirty entry is durably acknowledged only by a fresh batch.
@@ -432,7 +439,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .pieces[0]
-                .bytes_written,
+                .prefix_bytes,
             12
         );
         runtime.local_mutations.seal_and_drain().await.unwrap();
@@ -520,8 +527,8 @@ mod tests {
             .download_job_manifest(job.token.job_id)
             .unwrap()
             .unwrap();
-        assert_eq!(durable.pieces[0].bytes_written, 8);
-        assert_eq!(durable.pieces[1].bytes_written, 0);
+        assert_eq!(durable.pieces[0].prefix_bytes, 8);
+        assert_eq!(durable.pieces[1].prefix_bytes, 0);
         let receipt = runtime
             .local_mutations
             .submit_piece_checkpoint(
@@ -544,7 +551,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .pieces[1]
-                .bytes_written,
+                .prefix_bytes,
             12
         );
         runtime.local_mutations.seal_and_drain().await.unwrap();
@@ -560,7 +567,8 @@ mod tests {
             rows.push(emulebb_metadata::MetadataTransferPiece {
                 piece_index,
                 state: "Verified".into(),
-                bytes_written: transfer::ED2K_PART_SIZE,
+                prefix_bytes: transfer::ED2K_PART_SIZE,
+                present_bytes: transfer::ED2K_PART_SIZE,
                 block_bitmap: Some("7fffffffffffff".into()),
                 ich_corrupted: false,
             });

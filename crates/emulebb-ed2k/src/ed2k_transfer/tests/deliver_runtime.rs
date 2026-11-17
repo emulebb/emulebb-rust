@@ -1203,7 +1203,7 @@ async fn stop_preserves_selected_storage_and_resumable_progress() {
         .download_job_manifest(job.token.job_id)
         .unwrap()
         .unwrap();
-    assert_eq!(persisted.pieces[0].bytes_written, 8192);
+    assert_eq!(persisted.pieces[0].prefix_bytes, 8192);
 }
 
 #[tokio::test]

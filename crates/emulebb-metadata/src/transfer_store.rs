@@ -2201,8 +2201,8 @@ fn replace_transfer_children(
 
     let mut insert_piece = tx.prepare_cached(
         r#"
-        INSERT INTO temp.incoming_download_job_pieces(job_id, piece_index, state, bytes_written, block_bitmap, ich_corrupted, updated_at_s)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        INSERT INTO temp.incoming_download_job_pieces(job_id, piece_index, state, prefix_bytes, block_bitmap, ich_corrupted, updated_at_s,present_bytes)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,?8)
         "#,
     )?;
     for piece in &manifest.pieces {
@@ -2210,10 +2210,11 @@ fn replace_transfer_children(
             job_id,
             i64::from(piece.piece_index),
             piece.state,
-            i64::try_from(piece.bytes_written)?,
+            i64::try_from(piece.prefix_bytes)?,
             piece.block_bitmap,
             piece.ich_corrupted,
             now,
+            i64::try_from(piece.present_bytes)?,
         ])?;
     }
     drop(insert_piece);
@@ -2267,10 +2268,10 @@ fn replace_transfer_children(
         SELECT 1 FROM temp.incoming_download_job_pieces p
         WHERE p.job_id=download_job_pieces.job_id AND p.piece_index=download_job_pieces.piece_index)", [job_id])?;
     tx.execute(
-        "UPDATE download_job_pieces SET bytes_written=(SELECT p.bytes_written
+        "UPDATE download_job_pieces SET (prefix_bytes,present_bytes,block_bitmap,state,ich_corrupted)=(SELECT p.prefix_bytes,p.present_bytes,p.block_bitmap,p.state,p.ich_corrupted
         FROM temp.incoming_download_job_pieces p WHERE p.job_id=download_job_pieces.job_id
         AND p.piece_index=download_job_pieces.piece_index),updated_at_s=?2
-        WHERE job_id=?1 AND bytes_written>(SELECT p.bytes_written
+        WHERE job_id=?1 AND present_bytes>(SELECT p.present_bytes
         FROM temp.incoming_download_job_pieces p WHERE p.job_id=download_job_pieces.job_id
         AND p.piece_index=download_job_pieces.piece_index)",
         params![job_id, now],
@@ -2366,7 +2367,7 @@ fn read_hex_list(conn: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<
 fn read_pieces(conn: &rusqlite::Connection, job_id: i64) -> Result<Vec<MetadataTransferPiece>> {
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT piece_index, state, bytes_written, block_bitmap, ich_corrupted
+        SELECT piece_index, state, prefix_bytes, block_bitmap, ich_corrupted,present_bytes
         FROM download_job_pieces
         WHERE job_id = ?1
         ORDER BY piece_index
@@ -2376,7 +2377,8 @@ fn read_pieces(conn: &rusqlite::Connection, job_id: i64) -> Result<Vec<MetadataT
         Ok(MetadataTransferPiece {
             piece_index: row.get::<_, u32>(0)?,
             state: row.get(1)?,
-            bytes_written: crate::sql_value::unsigned::<u64>(row, 2)?,
+            prefix_bytes: crate::sql_value::unsigned::<u64>(row, 2)?,
+            present_bytes: crate::sql_value::unsigned::<u64>(row, 5)?,
             block_bitmap: row.get::<_, Option<String>>(3)?,
             ich_corrupted: row.get::<_, bool>(4)?,
         })
@@ -2555,7 +2557,7 @@ fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {
         "completed"
     } else if manifest.final_rehash_pending {
         "completing"
-    } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
+    } else if manifest.pieces.iter().any(|piece| piece.prefix_bytes != 0) {
         "downloading"
     } else {
         "queued"

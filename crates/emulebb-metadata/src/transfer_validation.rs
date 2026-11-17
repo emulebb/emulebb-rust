@@ -49,7 +49,9 @@ pub(crate) fn validate_manifest(manifest: &MetadataTransferManifest) -> Result<(
         );
         let extent = manifest.piece_size.min(size.unwrap_or(0) - start);
         ensure!(
-            piece.bytes_written <= extent,
+            piece.prefix_bytes <= piece.present_bytes
+                && piece.present_bytes <= extent
+                && (piece.block_bitmap.is_some() || piece.present_bytes == piece.prefix_bytes),
             "transfer piece progress exceeds its payload extent"
         );
     }
