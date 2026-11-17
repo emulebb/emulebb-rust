@@ -144,6 +144,9 @@ impl LocalMutationRegistry {
                         };
                         for (hash, (complete, _)) in hashes.iter().zip(rows.iter_mut()) {
                             if !*complete
+                                // Complete internal payloads obey the same hash policy
+                                // as root copies; partial offers remain independent.
+                                && metadata.library_sharing_enabled(&hex::encode(hash))? == Some(true)
                                 && let Some(candidate) =
                                     metadata.download_payload_candidate(&hex::encode(hash))?
                             {

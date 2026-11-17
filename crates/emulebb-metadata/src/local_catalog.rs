@@ -156,11 +156,18 @@ impl MetadataStore {
         };
         let tx = conn.transaction()?;
         let mut stmt = tx.prepare_cached(VERIFIED_SHARE_EXISTS_SQL)?;
+        // WHY: sharing policy gates new protocol admissions, while the physical
+        // copy projection remains valid for library browsing and accepted reads.
+        // Both decisions use this same bounded batch's SQLite snapshot.
+        let mut sharing = tx.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM known_files WHERE ed2k_hash=?1 AND sharing_enabled=1)",
+        )?;
         let mut partial = tx.prepare_cached(PARTIAL_SHARE_OFFER_SQL)?;
         let mut result = Vec::with_capacity(hashes.len());
         let mut text_bytes = 0usize;
         for hash in hashes {
-            let complete = stmt.query_row([hash.as_slice()], |row| row.get::<_, bool>(0))?;
+            let complete = stmt.query_row([hash.as_slice()], |row| row.get::<_, bool>(0))?
+                && sharing.query_row([hash.as_slice()], |row| row.get::<_, bool>(0))?;
             let mut rows = partial.query([hash.as_slice()])?;
             let incomplete = if let Some(row) = rows.next()? {
                 let name_len: i64 = row.get(0)?;
@@ -195,6 +202,7 @@ impl MetadataStore {
             result.push((complete, incomplete));
         }
         drop(partial);
+        drop(sharing);
         drop(stmt);
         tx.commit()?;
         Ok(Some(result))
