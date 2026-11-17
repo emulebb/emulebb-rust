@@ -130,7 +130,7 @@ pub(crate) async fn download_search_result(
         .download_search_result(&search_id, &hash, request)
         .await
     {
-        Ok(Some((created, download))) => super::downloads::item(
+        Ok(Some((created, download))) => super::resource::item(
             if created {
                 StatusCode::CREATED
             } else {

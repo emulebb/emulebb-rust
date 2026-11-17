@@ -236,3 +236,36 @@ fn rust_test_tmp_root() -> std::path::PathBuf {
         .map(|root| root.join("tmp").join("emulebb-rust-tests"))
         .unwrap_or_else(|| std::env::temp_dir().join("emulebb-rust-tests"))
 }
+
+pub(crate) async fn request(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        },
+    )
+}

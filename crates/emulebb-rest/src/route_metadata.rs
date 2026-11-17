@@ -50,7 +50,10 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             && let Err(error) = parse_bounded_query_value(
                 value,
                 1,
-                if path == "/api/v1/downloads" || path.starts_with("/api/v1/downloads/") {
+                if path == "/api/v1/downloads"
+                    || path.starts_with("/api/v1/downloads/")
+                    || path.starts_with("/api/v1/library/")
+                {
                     200
                 } else {
                     1000
@@ -307,6 +310,20 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         .map(|path| path.split('/').collect::<Vec<_>>())
         .unwrap_or_default();
     match (method, segments.as_slice()) {
+        ("GET" | "DELETE", ["library", "tags", name]) => {
+            let name = decode_path_parameter(name, "tagName")?;
+            if !emulebb_core::valid_category_name(&name) {
+                return Err(Box::new(
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_ARGUMENT",
+                        "tagName must be a valid tag name",
+                    )
+                    .into_response(),
+                ));
+            }
+        }
+        ("GET", ["library", "files", hash, "tags"]) => validate_lowercase_md4_hex(hash, "hash")?,
         ("GET" | "PATCH" | "DELETE", ["categories", category]) => {
             let category = decode_path_parameter(category, "categoryName")?;
             if !emulebb_core::valid_category_name(&category) {
@@ -522,12 +539,19 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const SNAPSHOT: &[&str] = &["limit"];
     const PAGE: &[&str] = &["offset", "limit"];
     const SHARED_FILES: &[&str] = &["limit", "cursor", "q", "priority"];
+    const LIBRARY_TAGS: &[&str] = &["limit", "cursor"];
     const DOWNLOADS: &[&str] = &["view", "category", "cursor", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
     const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
     const UPLOAD_QUEUE: &[&str] = &["offset", "limit", "includeScoreBreakdown"];
 
+    if matches!(
+        path,
+        "/api/v1/library/files/tags/add" | "/api/v1/library/files/tags/remove"
+    ) {
+        return (method == "POST").then_some(NONE);
+    }
     if matches!(
         path,
         "/api/v1/downloads/start"
@@ -605,6 +629,8 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
         ("GET", "/api/v1/shared-files") => Some(SHARED_FILES),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
+        ("GET", "/api/v1/library/tags") => Some(LIBRARY_TAGS),
+        ("POST", "/api/v1/library/tags") => Some(NONE),
         ("GET", "/api/v1/downloads") => Some(DOWNLOADS),
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),
@@ -619,6 +645,7 @@ fn route_query_fields_for_parameterized(
     path: &str,
 ) -> Option<&'static [&'static str]> {
     const NONE: &[&str] = &[];
+    const LIBRARY_TAGS: &[&str] = &["limit", "cursor"];
     const SEARCH: &[&str] = &[
         "offset",
         "limit",
@@ -633,6 +660,8 @@ fn route_query_fields_for_parameterized(
         .split('/')
         .collect::<Vec<_>>();
     match (method, segments.as_slice()) {
+        ("GET" | "DELETE", ["library", "tags", _]) => Some(NONE),
+        ("GET", ["library", "files", _, "tags"]) => Some(LIBRARY_TAGS),
         ("GET", ["categories", _])
         | ("PATCH", ["categories", _])
         | ("DELETE", ["categories", _])

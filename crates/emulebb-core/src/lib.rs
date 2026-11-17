@@ -185,7 +185,7 @@ mod local_search_response;
 mod network_api;
 mod network_binding;
 mod persistence_owner;
-pub use emulebb_metadata::valid_category_name;
+pub use emulebb_metadata::{LibraryTagError, valid_category_name};
 pub use persistence_owner::CategoryNameConflict;
 mod physical_disk;
 mod profile_state;

@@ -83,38 +83,6 @@ async fn stream_baseline_precedes_identity_only_create_and_remove_notifications(
     );
 }
 
-async fn request(
-    app: &Router,
-    method: &str,
-    path: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(path)
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
-        .await
-        .unwrap();
-    (
-        status,
-        if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap()
-        },
-    )
-}
 async fn create(app: &Router, hash: u8, size: Option<u64>, intent: &str) -> Value {
     let (status,value)=request(app,"POST","/api/v1/downloads",Some(json!({
         "source":{"type":"content","hash":format!("{hash:02x}").repeat(16),"name":"Sample.bin","sizeBytes":size},"intent":intent

@@ -22,9 +22,15 @@ pub(crate) mod downloads;
 pub(crate) mod friends;
 pub(crate) mod ip_filter;
 pub(crate) mod kad;
+mod library_tags;
 pub(crate) mod logs;
 pub(crate) mod persistence;
+mod resource;
 pub(crate) mod searches;
+pub(crate) use library_tags::{
+    add_library_file_tags, create_library_tag, delete_library_tag, library_file_tags, library_tag,
+    library_tags, remove_library_file_tags,
+};
 pub(crate) mod servers;
 pub(crate) mod shared_files;
 pub(crate) mod uploads;
