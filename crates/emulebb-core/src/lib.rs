@@ -130,7 +130,10 @@ mod download_controls;
 mod download_maintenance;
 mod download_scheduler;
 mod download_selection;
-pub use download_controls::DownloadChange;
+pub use download_controls::{
+    DownloadAction, DownloadChange, DownloadControlBatch, DownloadControlError,
+    DownloadControlResult,
+};
 mod downloads;
 use download_attempts::DownloadAttemptControl;
 pub use downloads::{
