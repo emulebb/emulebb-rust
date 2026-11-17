@@ -21,6 +21,7 @@ enum Control<'a> {
         &'a MetadataDownloadInitialPeers,
     ),
     Start(JobToken, &'a Path),
+    Begin(JobToken, Option<&'a Path>),
     Learn(JobToken, u64),
     Fail(JobToken, &'a DownloadJobStorageFailure),
 }
@@ -32,6 +33,7 @@ enum OwnedControl {
         MetadataDownloadInitialPeers,
     ),
     Start(JobToken, PathBuf),
+    Begin(JobToken, Option<PathBuf>),
     Learn(JobToken, u64),
     Fail(JobToken, DownloadJobStorageFailure),
 }
@@ -69,6 +71,11 @@ impl LocalMutationRegistry {
             Control::Start(_, path) => {
                 withdrawal_path_charge(path)?;
             }
+            Control::Begin(_, path) => {
+                if let Some(path) = path {
+                    withdrawal_path_charge(path)?;
+                }
+            }
             Control::Learn(_, _) | Control::Fail(_, _) => {}
         }
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
@@ -82,6 +89,7 @@ impl LocalMutationRegistry {
                 initial_peers.clone(),
             ),
             Control::Start(token, path) => OwnedControl::Start(token, path.to_owned()),
+            Control::Begin(token, path) => OwnedControl::Begin(token, path.map(Path::to_owned)),
             Control::Learn(token, size) => OwnedControl::Learn(token, size),
             Control::Fail(token, failure) => OwnedControl::Fail(token, failure.clone()),
         };
@@ -110,6 +118,7 @@ impl LocalMutationRegistry {
                 let (hash, old_token) = match &change {
                     OwnedControl::Admit(request, _, _, _) => (request.file_hash.clone(), None),
                     OwnedControl::Start(token, _)
+                    | OwnedControl::Begin(token, _)
                     | OwnedControl::Learn(token, _)
                     | OwnedControl::Fail(token, _) => {
                         let Some(job) = metadata.download_job(token.job_id)? else {
@@ -199,6 +208,12 @@ impl LocalMutationRegistry {
                     OwnedControl::Start(token, path) => {
                         let value = metadata.start_download_job(*token, path)?;
                         committed = value.as_ref().is_some_and(|job| job.token != *token);
+                        ControlResult::Job(value)
+                    }
+                    OwnedControl::Begin(token, path) => {
+                        let value =
+                            metadata.begin_download_job_execution(*token, path.as_deref())?;
+                        committed = value.is_some();
                         ControlResult::Job(value)
                     }
                     OwnedControl::Learn(token, size) => {
@@ -320,7 +335,7 @@ impl transfer::Ed2kTransferRuntime {
             _ => unreachable!(),
         }))
     }
-    /// Persist a fresh execution token and fixed temp selection. This receipt
+    /// Explicit start/retry with idempotent healthy-start semantics. This receipt
     /// does not claim physical storage exists; prepare_download_job_storage owns it.
     pub async fn start_download_job(
         &self,
@@ -330,6 +345,23 @@ impl transfer::Ed2kTransferRuntime {
         let result = self
             .local_mutations
             .submit_control(self, Control::Start(token, selected_temp))?
+            .await
+            .map_err(|_| LocalMutationError::Unknown)??;
+        Ok(result.map(|result| match result {
+            ControlResult::Job(value) => value,
+            _ => unreachable!(),
+        }))
+    }
+    /// Select healthy started work with a fresh callback fence. A missing path
+    /// selects discovery only; it creates no logical or physical backing.
+    pub async fn begin_download_job_execution(
+        &self,
+        token: JobToken,
+        selected_temp: Option<&Path>,
+    ) -> Result<RetainedRead<Option<DownloadJobRecord>>> {
+        let result = self
+            .local_mutations
+            .submit_control(self, Control::Begin(token, selected_temp))?
             .await
             .map_err(|_| LocalMutationError::Unknown)??;
         Ok(result.map(|result| match result {
@@ -388,6 +420,67 @@ mod tests {
             intent: emulebb_metadata::DownloadIntent::Started,
             piece_size: transfer::ED2K_PART_SIZE,
         }
+    }
+    #[tokio::test]
+    async fn selection_fences_old_callbacks_and_discovery_does_not_create_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = transfer::Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let admitted = runtime
+            .admit_download_job(&request(), false, None, &Default::default())
+            .await
+            .unwrap();
+        let token = admitted.job.token;
+        drop(admitted);
+        let preparation = runtime
+            .begin_download_job_execution(token, None)
+            .await
+            .unwrap();
+        let job = preparation.as_ref().unwrap();
+        assert!(job.storage.is_none());
+        assert!(job.selected_temp.is_none());
+        let prepared_token = job.token;
+        drop(preparation);
+        let sized = runtime
+            .learn_download_job_size(prepared_token, 16)
+            .await
+            .unwrap();
+        drop(sized);
+        let selected = runtime
+            .begin_download_job_execution(prepared_token, Some(root.path()))
+            .await
+            .unwrap();
+        let selected_token = selected.as_ref().unwrap().token;
+        assert_ne!(selected_token, prepared_token);
+        drop(selected);
+        let manifest = runtime
+            .ensure_job(&transfer::new_transfer_job(
+                selected_token,
+                request().file_hash.parse().unwrap(),
+                request().display_name,
+                16,
+            ))
+            .await
+            .unwrap();
+        drop(manifest);
+        let next = runtime
+            .begin_download_job_execution(selected_token, Some(root.path()))
+            .await
+            .unwrap();
+        let next_token = next.as_ref().unwrap().token;
+        drop(next);
+        assert_ne!(next_token, selected_token);
+        let failure =
+            DownloadJobStorageFailure::new("TEMP_UNAVAILABLE", "Sample storage offline", 1)
+                .unwrap();
+        let stale = runtime
+            .fail_download_job_storage(selected_token, &failure)
+            .await
+            .unwrap();
+        assert!(!stale.applied);
+        assert_eq!(stale.job.as_ref().unwrap().token, next_token);
+        assert!(stale.job.as_ref().unwrap().storage_failure.is_none());
+        drop(stale);
+        runtime.local_mutations.seal_and_drain().await.unwrap();
     }
     #[tokio::test]
     async fn control_returns_actual_tokens_preserves_duplicates_and_fences_late_faults() {

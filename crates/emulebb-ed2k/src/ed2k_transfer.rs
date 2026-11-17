@@ -60,6 +60,7 @@ mod ich_salvage;
 mod inbound_admission;
 mod ingest;
 mod local_mutation;
+pub use local_mutation::StorageSpaceReservation;
 pub use local_mutation::{LocalMutationError, read_result::RetainedRead};
 mod manifest;
 mod media_metadata;

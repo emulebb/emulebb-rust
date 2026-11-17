@@ -417,20 +417,44 @@ impl MetadataStore {
         token: JobToken,
         selected_temp: &std::path::Path,
     ) -> Result<Option<DownloadJobRecord>> {
-        validate_job_path(selected_temp)?;
-        ensure!(
-            selected_temp.is_absolute(),
-            "download temp path must be absolute"
-        );
+        self.activate_download_job(token, Some(selected_temp), false)
+    }
+
+    /// Begin a distinct selected execution without retrying a storage fault or
+    /// restarting stopped work. Discovery-only selection passes no temp path
+    /// and allocates no backing; every successful selection gets a fresh fence.
+    pub fn begin_download_job_execution(
+        &self,
+        token: JobToken,
+        selected_temp: Option<&std::path::Path>,
+    ) -> Result<Option<DownloadJobRecord>> {
+        self.activate_download_job(token, selected_temp, true)
+    }
+
+    fn activate_download_job(
+        &self,
+        token: JobToken,
+        selected_temp: Option<&std::path::Path>,
+        selecting: bool,
+    ) -> Result<Option<DownloadJobRecord>> {
+        if let Some(path) = selected_temp {
+            validate_job_path(path)?;
+            ensure!(path.is_absolute(), "download temp path must be absolute");
+        }
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current = read_job(&tx, token.job_id)?;
         let Some(current) = current.filter(|job| {
-            job.token == token && job.removed_at_s.is_none() && job.completed_at_s.is_none()
+            job.token == token
+                && job.removed_at_s.is_none()
+                && job.completed_at_s.is_none()
+                && (!selecting
+                    || (job.intent == DownloadIntent::Started && job.storage_failure.is_none()))
         }) else {
             return Ok(None);
         };
-        if current.intent == DownloadIntent::Started
+        if !selecting
+            && current.intent == DownloadIntent::Started
             && current.storage.is_some()
             && current.storage_failure.is_none()
         {
@@ -439,17 +463,31 @@ impl MetadataStore {
             tx.commit()?;
             return Ok(Some(current));
         }
-        let selected = current.selected_temp.as_deref().unwrap_or(selected_temp);
-        let path_id = upsert_local_path(&tx, selected)?;
-        let (storage_path, marker) = match &current.storage {
-            Some(storage) => (storage.path.clone(), storage.marker_id),
-            None => {
+        let selected = current.selected_temp.as_deref().or(selected_temp);
+        let path_id = selected
+            .map(|path| upsert_local_path(&tx, path))
+            .transpose()?;
+        let storage = match (&current.storage, selected_temp) {
+            (Some(storage), _) => Some((storage.path.clone(), storage.marker_id)),
+            (None, Some(_)) => {
                 let marker = uuid::Uuid::new_v4();
-                (selected.join(format!("{}-{marker}", token.job_id)), marker)
+                Some((
+                    selected
+                        .expect("selected temp")
+                        .join(format!("{}-{marker}", token.job_id)),
+                    marker,
+                ))
             }
+            (None, None) => None,
         };
-        validate_job_path(&storage_path)?;
-        let storage_path_id = upsert_local_path(&tx, &storage_path)?;
+        let storage_path_id = storage
+            .as_ref()
+            .map(|(path, _)| {
+                validate_job_path(path)?;
+                upsert_local_path(&tx, path)
+            })
+            .transpose()?;
+        let marker = storage.as_ref().map(|(_, marker)| marker.to_string());
         let generation = i64::try_from(token.generation)?
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("job generation exhausted"))?;
@@ -458,7 +496,7 @@ impl MetadataStore {
             execution_generation=?3,intent='started',updated_at_s=?4,
             storage_failure_code=NULL,storage_failure_message=NULL,storage_failed_at_s=NULL,
             storage_path_id=coalesce(storage_path_id,?5),storage_directory_marker_id=coalesce(storage_directory_marker_id,?6) WHERE id=?1",
-            params![token.job_id, path_id, generation, unix_s(),storage_path_id,marker.to_string()],
+            params![token.job_id, path_id, generation, unix_s(),storage_path_id,marker],
         )?;
         let result = read_job(&tx, token.job_id)?;
         tx.commit()?;

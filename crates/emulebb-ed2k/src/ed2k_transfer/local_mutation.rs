@@ -15,6 +15,8 @@ mod content_metadata;
 mod ingest;
 mod job_aich;
 mod job_control;
+mod storage_inspection;
+pub use storage_inspection::StorageSpaceReservation;
 mod job_delivery;
 mod job_hash;
 mod job_lifecycle;

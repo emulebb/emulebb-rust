@@ -25,6 +25,23 @@ pub(crate) struct ReaskSourceSet {
 }
 
 impl ReaskSourceSet {
+    /// Remove one execution's sources and reply gates without collecting an
+    /// additional source snapshot. The callback receives each held TCP lease.
+    pub(crate) fn retire_execution(
+        &mut self,
+        token: emulebb_metadata::JobToken,
+        mut release: impl FnMut((Ipv4Addr, u16), (Ipv4Addr, u16)),
+    ) {
+        self.sources.retain(|endpoint, source| {
+            if source.job_token != token {
+                return true;
+            }
+            self.pending.take_reply(endpoint.0, endpoint.1);
+            release(*endpoint, source.lease_endpoint);
+            false
+        });
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             sources: HashMap::new(),
