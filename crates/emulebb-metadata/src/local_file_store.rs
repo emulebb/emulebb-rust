@@ -335,12 +335,14 @@ impl MetadataStore {
             return Ok(false);
         }
         let changed = conn.execute(
-            "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
+            "INSERT INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
              SELECT local_file_instances.path_id, local_file_instances.verified_fingerprint
              FROM local_file_instances
              JOIN local_paths ON local_paths.id = local_file_instances.path_id
              WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
-               AND local_file_instances.verified_fingerprint = ?3",
+               AND local_file_instances.verified_fingerprint = ?3
+             ON CONFLICT(path_id) DO UPDATE
+             SET verified_fingerprint = excluded.verified_fingerprint",
             params![
                 NativePath::platform(),
                 native.storage_bytes(),

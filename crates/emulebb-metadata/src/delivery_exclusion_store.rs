@@ -466,6 +466,13 @@ mod tests {
                 .unwrap()[0]
                 .0
         );
+        let retained = store
+            .library_locations(&content.file_hash, 0, 2, crate::LIBRARY_READ_MAX_BYTES)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.locations.len(), 1);
+        assert_eq!(retained.locations[0].path, alias);
+        assert!(retained.locations[0].identity_excluded);
         let page = store.query_active_local_share_entries(&query).unwrap();
         assert_eq!(page.total, 0);
         assert!(page.entries.is_empty());
