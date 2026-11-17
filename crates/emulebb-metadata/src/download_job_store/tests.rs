@@ -78,6 +78,61 @@ fn compact_pages_bound_bytes_and_resume_without_skipping_rows() {
 }
 
 #[test]
+fn repeated_start_and_stop_preserve_tokens_and_do_not_write_unchanged_jobs() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store
+        .admit_download_job(&request(42, Some(4096)))
+        .unwrap()
+        .job;
+    let root = std::env::temp_dir();
+    let running = store
+        .start_download_job(first.token, &root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(running.token, first.token);
+    let before = store.connection().unwrap().total_changes();
+    let unchanged = store
+        .start_download_job(running.token, &root.join("other"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged, running);
+    assert_eq!(store.connection().unwrap().total_changes(), before);
+
+    assert!(store.stop_download_job(running.token).unwrap());
+    let stopped = store.download_job(running.token.job_id).unwrap().unwrap();
+    let before = store.connection().unwrap().total_changes();
+    assert!(!store.stop_download_job(stopped.token).unwrap());
+    assert_eq!(
+        store.download_job(stopped.token.job_id).unwrap().unwrap(),
+        stopped
+    );
+    assert_eq!(store.connection().unwrap().total_changes(), before);
+
+    let resumed = store
+        .start_download_job(stopped.token, &root.join("other"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(resumed.token, stopped.token);
+    assert_eq!(resumed.selected_temp, running.selected_temp);
+    assert_eq!(resumed.storage, running.storage);
+    let fault =
+        crate::DownloadJobStorageFailure::new("TEMP_UNAVAILABLE", "Sample storage offline", 1)
+            .unwrap();
+    let failed = store
+        .fail_download_job_storage(resumed.token, &fault)
+        .unwrap()
+        .job
+        .unwrap();
+    let retried = store
+        .start_download_job(failed.token, &root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(retried.token, failed.token);
+    assert!(retried.storage_failure.is_none());
+    assert_eq!(retried.storage, running.storage);
+}
+
+#[test]
 fn job_ids_are_positive_canonical_decimal_strings() {
     for invalid in [
         "",

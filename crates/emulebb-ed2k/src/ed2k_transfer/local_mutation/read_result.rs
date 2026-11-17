@@ -20,6 +20,21 @@ impl<T> RetainedRead<T> {
             lease: self.lease,
         }
     }
+    /// Admit a consumer projection before constructing it. `bytes` must cover
+    /// all retained output and simultaneous conversion scratch; moved source
+    /// backing remains charged by both allowances until conversion finishes.
+    /// Errors and unwinding release both allowances with their actual backing.
+    pub fn try_project<U>(
+        self,
+        bytes: usize,
+        convert: impl FnOnce(T) -> anyhow::Result<U>,
+    ) -> anyhow::Result<RetainedRead<U>> {
+        let output_lease = self.lease.reserve_result(bytes)?;
+        let output = convert(self.value)?;
+        drop(self.lease);
+        Ok(RetainedRead::new(output, output_lease))
+    }
+
     /// Encode JSON into separately admitted exact-size backing. Input and output
     /// share the existing registry budget while both are live. Saturation and
     /// serialization errors release all backing owned by this call.

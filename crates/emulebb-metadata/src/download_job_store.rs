@@ -405,7 +405,9 @@ impl MetadataStore {
     }
 
     /// The caller chooses category/global temp before first filesystem work.
-    /// Later starts retain that exact path and issue a new callback generation.
+    /// Starting an already healthy allocated job is unchanged. A first start,
+    /// restart after stop, or explicit storage retry issues a new generation;
+    /// the job's first selected path remains fixed.
     pub fn start_download_job(
         &self,
         token: JobToken,
@@ -424,6 +426,15 @@ impl MetadataStore {
         }) else {
             return Ok(None);
         };
+        if current.intent == DownloadIntent::Started
+            && current.storage.is_some()
+            && current.storage_failure.is_none()
+        {
+            // WHY: an idempotent start must not fence healthy writers, reset
+            // their progress, or allocate a new path for an existing job.
+            tx.commit()?;
+            return Ok(Some(current));
+        }
         let selected = current.selected_temp.as_deref().unwrap_or(selected_temp);
         let path_id = upsert_local_path(&tx, selected)?;
         let (storage_path, marker) = match &current.storage {
@@ -491,7 +502,7 @@ impl MetadataStore {
         let generation = i64::try_from(token.generation)?;
         ensure!(generation < i64::MAX, "job generation exhausted");
         Ok(self.connection()?.execute("UPDATE download_jobs SET intent='stopped',execution_generation=execution_generation+1,
-            updated_at_s=?3 WHERE id=?1 AND execution_generation=?2 AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL",
+            updated_at_s=?3 WHERE id=?1 AND execution_generation=?2 AND intent='started' AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL",
             params![token.job_id,generation,unix_s()])? != 0)
     }
 

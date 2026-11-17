@@ -98,6 +98,17 @@ impl Ed2kTransferRuntime {
         Ok((entries, total, has_more))
     }
 
+    /// Compact live verification overlay; no geometry is copied or hydrated.
+    pub async fn verifying_downloads(&self) -> Vec<JobToken> {
+        self.manifest_cache
+            .lock()
+            .await
+            .values()
+            .filter(|manifest| manifest.final_rehash_pending)
+            .map(|manifest| manifest.token)
+            .collect()
+    }
+
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<super::ResidentManifest> {
         self.prepare_download_job_storage(job.token).await?;

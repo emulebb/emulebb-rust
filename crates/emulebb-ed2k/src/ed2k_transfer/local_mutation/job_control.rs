@@ -177,7 +177,7 @@ impl LocalMutationRegistry {
                     }
                     OwnedControl::Start(token, path) => {
                         let value = metadata.start_download_job(*token, path)?;
-                        committed = value.is_some();
+                        committed = value.as_ref().is_some_and(|job| job.token != *token);
                         ControlResult::Job(value)
                     }
                     OwnedControl::Learn(token, size) => {
@@ -466,6 +466,71 @@ mod tests {
         drop(next);
         runtime.local_mutations.seal_and_drain().await.unwrap();
     }
+    #[tokio::test]
+    async fn repeated_start_retains_selected_backing_and_repeated_stop_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = transfer::Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let mut input = request();
+        input.expected_size_bytes = Some(16);
+        let admitted = runtime
+            .admit_download_job(&input, false, None)
+            .await
+            .unwrap();
+        let token = admitted.job.token;
+        drop(admitted);
+        let start_result = runtime
+            .start_download_job(token, root.path())
+            .await
+            .unwrap();
+        let started = start_result.as_ref().unwrap().clone();
+        drop(start_result);
+        let manifest = runtime
+            .ensure_job(&transfer::new_transfer_job(
+                started.token,
+                input.file_hash.parse().unwrap(),
+                input.display_name,
+                16,
+            ))
+            .await
+            .unwrap();
+        // Storage preparation establishes native directory identity. Compare
+        // the repeated control with that settled record, not its allocation.
+        let prepared = runtime
+            .download_job(started.token.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared_record = (*prepared).clone();
+        drop(prepared);
+        let repeated = runtime
+            .start_download_job(started.token, &root.path().join("other"))
+            .await
+            .unwrap();
+        assert_eq!(repeated.as_ref().unwrap(), &prepared_record);
+        let current = runtime.manifest(started.token).await.unwrap();
+        assert!(std::ptr::eq(&*manifest, &*current));
+        drop(current);
+        drop(repeated);
+        drop(manifest);
+
+        assert!(runtime.stop_download_job(started.token).await.unwrap());
+        let stopped = runtime
+            .download_job(started.token.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!runtime.stop_download_job(stopped.token).await.unwrap());
+        let current = runtime
+            .download_job(stopped.token.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*current, *stopped);
+        drop(current);
+        drop(stopped);
+        runtime.local_mutations.seal_and_drain().await.unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_control_caller_does_not_abandon_publication() {
         let root = tempfile::tempdir().unwrap();
