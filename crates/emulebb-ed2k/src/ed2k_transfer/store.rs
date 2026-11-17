@@ -610,16 +610,21 @@ impl Ed2kTransferRuntime {
             .await?
             .context("missing job while publishing progress")?;
         anyhow::ensure!(
-            job.token == token
-                && job.intent == emulebb_metadata::DownloadIntent::Started
-                && job.removed_at_s.is_none()
-                && job.completed_at_s.is_none(),
+            job.token == token && job.removed_at_s.is_none() && job.completed_at_s.is_none(),
             "stale execution cannot publish a manifest"
         );
         let mut cache = self.manifest_cache.lock().await;
         let mut current = self.local_mutations.residents.copy_manifest(manifest)?;
         let current_value = current.try_mut()?;
+        // Explicit verification can publish a stopped job's current generation.
+        // Network callbacks retain the earlier generation and remain fenced.
+        current_value.intent = job.intent;
         current_value.category_id = job.category_id;
+        current_value.display_name = job.display_name.clone();
+        anyhow::ensure!(
+            job.expected_size_bytes == Some(current_value.file_size),
+            super::LocalMutationError::Unknown
+        );
         if let Some(persisted) = cache
             .get(&token.job_id)
             .filter(|value| value.token == token)

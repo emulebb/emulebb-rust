@@ -16,8 +16,14 @@ use emulebb_metadata::{
 };
 
 pub(crate) mod category;
+mod download;
+mod download_create;
+pub(crate) use download_create::DownloadCreateCommand;
+mod download_patch;
 mod kad;
 
+#[cfg(test)]
+mod download_tests;
 #[cfg(test)]
 #[path = "persistence_owner/kad_tests.rs"]
 mod kad_tests;
@@ -82,6 +88,7 @@ enum Command {
     Add { hash: String, name: String },
     Delete { hash: String },
     Category(category::CategoryCommand),
+    Downloads(download::DownloadCommand),
     KadLoad,
     KadIdentity,
     KadAttach(DhtNode),
@@ -92,6 +99,14 @@ enum Command {
 enum Response {
     Friend(Option<Friend>),
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
+    Downloads(crate::DownloadControlBatch),
+    DownloadPatched(Result<crate::DownloadChange, emulebb_metadata::DownloadPatchError>),
+    DownloadCreated(
+        anyhow::Result<(
+            bool,
+            emulebb_ed2k::ed2k_transfer::RetainedRead<crate::DownloadSummary>,
+        )>,
+    ),
     Roots(bool),
     KadLoaded(LeasedKadSnapshot),
     KadIdentity(KadNodeId),
@@ -660,6 +675,7 @@ impl PersistenceOwner {
             let mut active_category: Option<ActiveCategory> = None;
             let mut parked_categories = VecDeque::new();
             let mut receiver_closed = false;
+            let mut download_work = tokio::task::JoinSet::new();
             loop {
                 let mut request = if active_category.is_none() && !parked_categories.is_empty() {
                     parked_categories
@@ -667,6 +683,13 @@ impl PersistenceOwner {
                         .expect("nonempty category queue")
                 } else if let Some(active) = active_category.as_mut() {
                     tokio::select! {
+                        Some(outcome) = download_work.join_next(), if !download_work.is_empty() => {
+                            if download::finish(outcome).is_err() {
+                                failures = true;
+                                quota.lock().map_err(|_| PersistenceError::Worker)?.faulted = true;
+                            }
+                            continue;
+                        }
                         outcome = &mut active.completion => {
                             let active = active_category.take().expect("active category");
                             let result = match outcome {
@@ -694,14 +717,22 @@ impl PersistenceOwner {
                             }
                         }
                     }
-                } else if receiver_closed {
+                } else if receiver_closed && download_work.is_empty() {
                     break;
                 } else {
-                    match receiver.recv().await {
-                        Some(request) => request,
-                        None => {
-                            receiver_closed = true;
+                    tokio::select! {
+                        Some(outcome) = download_work.join_next(), if !download_work.is_empty() => {
+                            if download::finish(outcome).is_err() {
+                                failures = true;
+                                quota.lock().map_err(|_| PersistenceError::Worker)?.faulted = true;
+                            }
                             continue;
+                        }
+                        next = receiver.recv(), if !receiver_closed => {
+                            match next {
+                                Some(request) => request,
+                                None => { receiver_closed = true; continue; }
+                            }
                         }
                     }
                 };
@@ -711,6 +742,22 @@ impl PersistenceOwner {
                     "persistence request admitted to worker"
                 );
                 let faulted = quota.lock().map_err(|_| PersistenceError::Worker)?.faulted;
+                if !faulted
+                    && matches!(&request.command, Command::Downloads(command) if command.is_verification())
+                {
+                    #[cfg(test)]
+                    let gate = Arc::clone(&coordinator_gate);
+                    download_work.spawn(async move {
+                        let result = download::process(
+                            &mut request,
+                            #[cfg(test)]
+                            &gate,
+                        )
+                        .await;
+                        (request, result)
+                    });
+                    continue;
+                }
                 let mut category_continuation = None;
                 let result = if faulted {
                     Err(PersistenceError::CommitUnknown)
@@ -838,6 +885,7 @@ impl PersistenceOwner {
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
             Command::Category(_)
+            | Command::Downloads(_)
             | Command::KadLoad
             | Command::KadIdentity
             | Command::KadAttach(_)
@@ -968,6 +1016,14 @@ async fn process(
     category_continuation: &mut Option<category::CategoryContinuation>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    if matches!(&request.command, Command::Downloads(_)) {
+        return download::process(
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::Category(_)) {
         return category::process(
             state,
@@ -1040,6 +1096,7 @@ async fn process(
                 DbCommand::Delete(existing.clone())
             }
             Command::Category(_)
+            | Command::Downloads(_)
             | Command::KadLoad
             | Command::KadIdentity
             | Command::KadAttach(_)

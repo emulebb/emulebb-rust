@@ -33,7 +33,8 @@ fn payload(store: &MetadataStore, marker: u8) -> MetadataDownloadPayload {
     manifest.pieces = vec![crate::MetadataTransferPiece {
         piece_index: 0,
         state: "Verified".into(),
-        bytes_written: 16,
+        prefix_bytes: 16,
+        present_bytes: 16,
         block_bitmap: None,
         ich_corrupted: false,
     }];

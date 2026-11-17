@@ -203,7 +203,7 @@ impl MetadataStore {
         let mut verified_pieces = 0usize;
         {
             let mut statement = tx.prepare_cached(
-                "SELECT piece_index,state,bytes_written,block_bitmap,ich_corrupted
+                "SELECT piece_index,state,prefix_bytes,block_bitmap,ich_corrupted,present_bytes
                 FROM download_job_pieces WHERE job_id=?1 ORDER BY piece_index",
             )?;
             let mut rows = statement.query([token.job_id])?;
@@ -226,8 +226,10 @@ impl MetadataStore {
                     );
                 }
                 let written: u64 = crate::sql_value::unsigned(row, 2)?;
+                let present: u64 = crate::sql_value::unsigned(row, 5)?;
                 ensure!(
-                    written <= part_size.min(size - u64::from(index) * part_size),
+                    written <= present
+                        && present <= part_size.min(size - u64::from(index) * part_size),
                     "piece exceeds payload extent"
                 );
                 if state == "Verified" {
@@ -240,7 +242,8 @@ impl MetadataStore {
                 consume(MetadataDownloadExecutionRow::Piece(MetadataTransferPiece {
                     piece_index: index,
                     state: state.to_owned(),
-                    bytes_written: written,
+                    prefix_bytes: written,
+                    present_bytes: present,
                     block_bitmap: row.get(3)?,
                     ich_corrupted: row.get(4)?,
                 }))?;
@@ -482,7 +485,8 @@ mod tests {
             .map(|index| MetadataTransferPiece {
                 piece_index: index,
                 state: if index == 1 { "Missing" } else { "Verified" }.into(),
-                bytes_written: if index == 1 { 0 } else { 16 },
+                prefix_bytes: if index == 1 { 0 } else { 16 },
+                present_bytes: if index == 1 { 0 } else { 16 },
                 block_bitmap: None,
                 ich_corrupted: false,
             })

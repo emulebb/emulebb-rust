@@ -78,6 +78,139 @@ struct DeletionTombstoneFixture {
     tombstone_id: Uuid,
 }
 
+#[tokio::test]
+async fn explicit_completed_verify_hashes_only_recorded_output_after_piece_retirement() {
+    use super::super::CompletedOutputVerification;
+    let root = unique_test_dir("ed2k-explicit-completed-verify");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = ingest_completed(&runtime, &root, "Verify.bin").await;
+    let transfer_dir = runtime.transfer_dir_path(job.token.job_id).unwrap();
+    runtime
+        .materialize_completed_payload(job.token, &root.join("incoming"))
+        .await
+        .unwrap();
+    let (output, _) = runtime
+        .register_delivered_local_content(job.token)
+        .await
+        .unwrap();
+    assert!(runtime.complete_download_job(job.token).await.unwrap());
+    assert!(
+        runtime
+            .retire_download_storage(job.token.job_id)
+            .await
+            .unwrap()
+    );
+    let before = runtime
+        .metadata
+        .download_job(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    let detail = runtime
+        .metadata
+        .download_job_detail(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    let unrelated = root.join("other-copy.bin");
+    fs::copy(&output, &unrelated).unwrap();
+    let original = fs::read(&output).unwrap();
+    let modified = fs::metadata(&output).unwrap().modified().unwrap();
+    assert_eq!(
+        runtime.verify_completed_output(job.token).await.unwrap(),
+        Some(CompletedOutputVerification::Verified)
+    );
+    fs::write(&output, vec![b'x'; original.len()]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&output)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(
+        runtime.verify_completed_output(job.token).await.unwrap(),
+        Some(CompletedOutputVerification::Damaged)
+    );
+    fs::remove_file(&output).unwrap();
+    assert_eq!(
+        runtime.verify_completed_output(job.token).await.unwrap(),
+        Some(CompletedOutputVerification::Missing)
+    );
+    assert_eq!(fs::read(&unrelated).unwrap(), original);
+    assert!(!output.exists());
+    assert!(!transfer_dir.exists());
+    assert!(
+        !runtime
+            .manifest_cache
+            .lock()
+            .await
+            .contains_key(&job.token.job_id)
+    );
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    let after = runtime
+        .metadata
+        .download_job_detail(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.delivered_path, detail.delivered_path);
+    assert_eq!(after.ownership, detail.ownership);
+    // A read-only verification result also survives an ordinary daemon reload
+    // without treating a missing output as permission to download it again.
+    drop(runtime);
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    assert_eq!(
+        runtime.verify_completed_output(job.token).await.unwrap(),
+        Some(CompletedOutputVerification::Missing)
+    );
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn completed_verify_refuses_unfinished_and_stale_jobs_without_hydration() {
+    let root = unique_test_dir("ed2k-completed-verify-authority");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = runtime
+        .metadata
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: "91".repeat(16),
+            display_name: "Queued.bin".into(),
+            expected_size_bytes: Some(16),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            piece_size: ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    assert!(runtime.verify_completed_output(job.token).await.is_err());
+    let stale = emulebb_metadata::JobToken {
+        generation: job.token.generation + 1,
+        ..job.token
+    };
+    assert!(runtime.verify_completed_output(stale).await.is_err());
+    assert!(runtime.manifest_cache.lock().await.is_empty());
+    assert!(
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .storage
+            .is_none()
+    );
+}
+
 fn persist_deletion_intent(
     runtime: &Ed2kTransferRuntime,
     job: &Ed2kTransferJob,
@@ -1203,7 +1336,7 @@ async fn stop_preserves_selected_storage_and_resumable_progress() {
         .download_job_manifest(job.token.job_id)
         .unwrap()
         .unwrap();
-    assert_eq!(persisted.pieces[0].bytes_written, 8192);
+    assert_eq!(persisted.pieces[0].prefix_bytes, 8192);
 }
 
 #[tokio::test]

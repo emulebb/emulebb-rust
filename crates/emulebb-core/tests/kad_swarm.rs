@@ -373,15 +373,36 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
     wait_for_kad_connected(&download_core).await;
 
     for link in [&share.ed2k_link, &second_share.ed2k_link] {
-        let (created, _) = download_core
-            .create_download(DownloadCreate {
-                source: DownloadCreateSource::Ed2kLink { link: link.clone() },
-                category: None,
-                intent: emulebb_metadata::DownloadIntent::Started,
-                redownload: false,
-            })
-            .await
-            .expect("queue one Kad-discovered download");
+        // WHY: execution preparation for the prior started job shares the
+        // bounded mutation workspace with creation. This test caller retries
+        // only explicit transient capacity refusal; other errors fail at once.
+        // The deadline and new-job assertion preserve the admission contract.
+        let (created, _) = tokio::time::timeout(SEARCH_TIMEOUT, async {
+            loop {
+                let result = download_core
+                    .create_download(DownloadCreate {
+                        source: DownloadCreateSource::Ed2kLink { link: link.clone() },
+                        category: None,
+                        intent: emulebb_metadata::DownloadIntent::Started,
+                        redownload: false,
+                    })
+                    .await;
+                match result {
+                    Ok(value) => break value,
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>(),
+                            Some(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy)
+                        ) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("queue one Kad-discovered download: {error:#}"),
+                }
+            }
+        })
+        .await
+        .expect("download admission capacity becomes available");
         assert!(created);
     }
     let completed = wait_for_completed_download(&download_core, &share.hash).await;

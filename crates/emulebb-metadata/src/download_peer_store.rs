@@ -31,6 +31,29 @@ pub struct MetadataDownloadSourceEntry {
     pub reported_file_names: Vec<MetadataTransferFileNameObservation>,
     pub reported_file_names_has_more: bool,
 }
+
+/// Comment evidence without source-name windows or execution geometry.
+#[derive(Debug)]
+pub struct MetadataDownloadCommentEntry {
+    pub id: i64,
+    pub ip: String,
+    pub tcp_port: u16,
+    pub user_hash: Option<String>,
+    pub comment: String,
+    pub rating: u8,
+}
+
+#[derive(Debug)]
+pub struct MetadataDownloadCommentPage {
+    pub comments: Vec<MetadataDownloadCommentEntry>,
+    pub has_more: bool,
+}
+
+const COMMENTS_SQL: &str = "SELECT s.id,s.ip,s.tcp_port,s.user_hash,s.file_comment,s.file_rating
+    FROM download_job_sources s INDEXED BY download_job_sources_comments_idx
+    JOIN download_jobs j ON j.id=s.job_id
+    WHERE s.job_id=?1 AND s.id>?2 AND j.execution_generation=?3 AND j.removed_at_s IS NULL
+    AND (s.file_comment<>'' OR s.file_rating>0) ORDER BY s.id LIMIT ?4";
 #[derive(Debug, Clone, Copy)]
 pub enum MetadataDownloadSourceSelector {
     UserHash([u8; 16]),
@@ -457,6 +480,59 @@ impl MetadataStore {
             });
         }
         Ok(result)
+    }
+
+    /// Seek only comment/rating rows. The extra row establishes continuation
+    /// without copying another page or fetching reported filenames.
+    pub fn download_job_comments_after(
+        &self,
+        token: JobToken,
+        after: i64,
+        limit: usize,
+    ) -> Result<MetadataDownloadCommentPage> {
+        ensure!(
+            after >= 0 && (1..=256).contains(&limit),
+            "invalid comment page"
+        );
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare_cached(COMMENTS_SQL)?;
+        let mut rows = stmt.query(params![
+            token.job_id,
+            after,
+            i64::try_from(token.generation)?,
+            i64::try_from(limit + 1)?
+        ])?;
+        let mut comments = Vec::with_capacity(limit);
+        let mut bytes = comments.capacity() * std::mem::size_of::<MetadataDownloadCommentEntry>();
+        let mut has_more = false;
+        while let Some(row) = rows.next()? {
+            if comments.len() == limit {
+                has_more = true;
+                break;
+            }
+            let ip = row.get_ref(1)?.as_str()?;
+            let comment = row.get_ref(4)?.as_str()?;
+            ensure!(
+                ip.len() <= 45 && comment.len() <= 65_536,
+                "comment row exceeds field allowance"
+            );
+            let charge = ip.len() + comment.len() + 32;
+            if bytes + charge > PAGE_BYTES {
+                ensure!(!comments.is_empty(), "comment exceeds page allowance");
+                has_more = true;
+                break;
+            }
+            bytes += charge;
+            comments.push(MetadataDownloadCommentEntry {
+                id: row.get(0)?,
+                ip: ip.to_owned(),
+                tcp_port: row.get(2)?,
+                user_hash: row.get::<_, Option<Vec<u8>>>(3)?.map(hex::encode),
+                comment: comment.to_owned(),
+                rating: row.get(5)?,
+            });
+        }
+        Ok(MetadataDownloadCommentPage { comments, has_more })
     }
 
     /// Byte-capped keyset source page. The last returned row is the next cursor.

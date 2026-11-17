@@ -121,7 +121,7 @@ impl LocalMutationRegistry {
         let (sender, receipt) = oneshot::channel();
         #[cfg(test)]
         let gate = state.publication_gate.take();
-        Self::spawn_unit(&mut state, lease, move |lease| {
+        Self::spawn_unit_reply(&mut state, lease, sender, move |lease| {
             let mut committed = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let (hash, old_token) = match &change {
@@ -262,10 +262,12 @@ impl LocalMutationRegistry {
                     let _ = reached.send(());
                     let _ = release.recv();
                 }
-                if committed
-                    && let Some(old) = old_token
-                    && result.job().is_some_and(|job| job.token != old)
-                {
+                // A quiesced verification view must also release resident
+                // backing when stopped/faulted intent prevents a generation
+                // advance. Every eviction below still matches its exact token.
+                let retire_view = matches!(&change, OwnedControl::End(..))
+                    || (committed && result.job().is_some_and(|job| Some(job.token) != old_token));
+                if retire_view && let Some(old) = old_token {
                     // Token-invalidated workers retain their own capabilities;
                     // neither their late cache publication nor later cleanup can
                     // acquire this new generation through a hash lookup.
@@ -331,8 +333,7 @@ impl LocalMutationRegistry {
                 dirty.store(true, Ordering::Release);
                 failed.store(true, Ordering::Release);
             }
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }
@@ -475,6 +476,82 @@ mod tests {
             category_id: None,
             intent: emulebb_metadata::DownloadIntent::Started,
             piece_size: transfer::ED2K_PART_SIZE,
+        }
+    }
+    #[tokio::test]
+    async fn releasing_quiesced_stopped_or_failed_view_evicts_backing_without_state_change() {
+        for failed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = transfer::Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+            let mut input = request();
+            input.expected_size_bytes = Some(16);
+            let initial = runtime.metadata.admit_download_job(&input).unwrap().job;
+            let selected = runtime
+                .metadata
+                .start_download_job(initial.token, root.path())
+                .unwrap()
+                .unwrap();
+            drop(
+                runtime
+                    .ensure_job(&transfer::new_transfer_job(
+                        selected.token,
+                        input.file_hash.parse().unwrap(),
+                        input.display_name,
+                        16,
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            if failed {
+                drop(
+                    runtime
+                        .fail_download_job_storage(
+                            selected.token,
+                            &DownloadJobStorageFailure::new(
+                                "STORAGE_WRITE_FAILED",
+                                "full disk",
+                                123,
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap(),
+                );
+            } else {
+                assert!(runtime.stop_download_job(selected.token).await.unwrap());
+            }
+            let before = runtime
+                .metadata
+                .download_job(selected.token.job_id)
+                .unwrap()
+                .unwrap();
+            runtime
+                .reopen_download_job_storage_for_verification(before.token)
+                .await
+                .unwrap();
+            let manifest = runtime.manifest(before.token).await.unwrap();
+            // Stopped reads remain private. Explicit recheck publication can
+            // cache this same current-generation view before releasing it.
+            drop(runtime.cache_manifest_unlocked(&manifest).await.unwrap());
+            drop(manifest);
+            assert_eq!(runtime.manifest_cache.lock().await.len(), 1);
+            assert_eq!(runtime.job_storage.lock().unwrap().len(), 1);
+            runtime
+                .release_download_job_execution(before.token)
+                .await
+                .unwrap();
+            assert!(runtime.manifest_cache.lock().await.is_empty());
+            assert!(runtime.job_storage.lock().unwrap().is_empty());
+            assert!(runtime.manifest_checkpoint_state.lock().await.is_empty());
+            assert_eq!(
+                runtime
+                    .metadata
+                    .download_job(before.token.job_id)
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            runtime.local_mutations.seal_and_drain().await.unwrap();
         }
     }
     #[tokio::test]

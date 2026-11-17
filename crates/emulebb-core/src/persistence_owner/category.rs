@@ -54,6 +54,8 @@ pub(crate) struct CategorySharingContext {
 }
 
 pub(crate) enum CategoryCommand {
+    CreateDownload(super::download_create::DownloadCreateCommand),
+    PatchDownload(super::download_patch::DownloadPatchCommand),
     Create {
         value: Category,
         sharing: CategorySharingContext,
@@ -84,6 +86,11 @@ pub(crate) enum CategoryCommand {
 }
 
 pub(super) enum CategoryDbCommand {
+    PatchDownload {
+        patch: emulebb_metadata::MetadataDownloadPatch,
+        publication: emulebb_ed2k::ed2k_transfer::PreparedDownloadPatch,
+        runtime: Arc<emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime>,
+    },
     Create(Category, Arc<std::path::PathBuf>),
     Update(Category, Arc<std::path::PathBuf>),
     Delete(Category, Arc<std::path::PathBuf>, CategoryCacheMutation),
@@ -109,6 +116,12 @@ pub(super) enum CategoryDbCommand {
 }
 
 pub(super) enum CategoryWrite {
+    DownloadPatched(
+        Result<
+            Option<emulebb_metadata::MetadataDownloadPatched>,
+            emulebb_metadata::DownloadPatchError,
+        >,
+    ),
     Category(Option<MetadataCategory>),
     Assigned(bool),
     Roots(bool),
@@ -133,6 +146,27 @@ pub(super) fn execute(
     command: CategoryDbCommand,
 ) -> anyhow::Result<CategoryWrite> {
     match command {
+        CategoryDbCommand::PatchDownload {
+            patch,
+            publication,
+            runtime,
+        } => {
+            let outcome = match store.patch_download_job(publication.token(), &patch) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return match error.downcast::<emulebb_metadata::DownloadPatchError>() {
+                        Ok(error) => Ok(CategoryWrite::DownloadPatched(Err(error))),
+                        Err(error) => Err(error),
+                    };
+                }
+            };
+            if let Some(value) = &outcome {
+                runtime
+                    .publish_download_patch(publication, value)
+                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+            }
+            Ok(CategoryWrite::DownloadPatched(Ok(outcome)))
+        }
         CategoryDbCommand::Create(value, incoming) => store
             .create_category(
                 &value.name,
@@ -203,6 +237,8 @@ fn category_bytes(value: &Category) -> usize {
 impl CategoryCommand {
     fn bytes(&self) -> usize {
         match self {
+            Self::CreateDownload(command) => command.bytes(),
+            Self::PatchDownload(command) => command.bytes(),
             Self::Create { value, sharing } => {
                 category_bytes(value).saturating_add(sharing.incoming.as_os_str().len())
             }
@@ -445,6 +481,27 @@ pub(super) async fn process(
         unreachable!()
     };
     let command = match command {
+        CategoryCommand::CreateDownload(command) => {
+            return Ok(Response::DownloadCreated(
+                super::download_create::process(
+                    state,
+                    command,
+                    #[cfg(test)]
+                    publication_gate,
+                )
+                .await,
+            ));
+        }
+        CategoryCommand::PatchDownload(command) => {
+            return super::download_patch::process(
+                state,
+                db,
+                command,
+                #[cfg(test)]
+                publication_gate,
+            )
+            .await;
+        }
         CategoryCommand::ReplaceRoots {
             expected,
             implicit,
@@ -474,7 +531,9 @@ pub(super) async fn process(
         | CategoryCommand::Update { sharing, .. }
         | CategoryCommand::Delete { sharing, .. } => Some(sharing.clone()),
         CategoryCommand::ReplaceRoots { .. } => unreachable!(),
-        CategoryCommand::Assign { .. } => None,
+        CategoryCommand::Assign { .. }
+        | CategoryCommand::PatchDownload(_)
+        | CategoryCommand::CreateDownload(_) => None,
     };
     let mut publication = match &command {
         CategoryCommand::Assign {
@@ -572,6 +631,9 @@ pub(super) async fn process(
                 (value, false, false)
             }
             CategoryCommand::Assign { .. } => unreachable!(),
+            CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => {
+                unreachable!()
+            }
             CategoryCommand::ReplaceRoots { .. } => unreachable!(),
             CategoryCommand::Delete { id, .. } => {
                 let Some(existing) = state.categories.get(&id) else {

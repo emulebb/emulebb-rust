@@ -29,6 +29,21 @@ pub(crate) struct DownloadAttemptControl {
 struct State {
     nonce: u64,
     entries: HashMap<JobId, Entry>,
+    verifications: HashMap<JobId, VerificationEntry>,
+}
+struct VerificationEntry {
+    token: JobToken,
+    hash: Ed2kHash,
+    nonce: u64,
+}
+
+/// At most two operator rechecks exclude scheduler selection, including while
+/// an older network execution drains. No queued job owns a waiter or task.
+pub(crate) struct DownloadVerificationGuard {
+    control: Arc<DownloadAttemptControl>,
+    id: JobId,
+    hash: Ed2kHash,
+    nonce: u64,
 }
 struct Entry {
     kind: Kind,
@@ -82,6 +97,13 @@ impl DownloadAttemptControl {
         kind: Kind,
     ) -> Result<DownloadAttemptGuard, AdmissionDenied> {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state
+            .verifications
+            .values()
+            .any(|entry| entry.token.job_id == token.job_id || entry.hash == hash)
+        {
+            return Err(AdmissionDenied::Busy);
+        }
         if state.entries.contains_key(&token.job_id) {
             return Err(AdmissionDenied::Duplicate);
         }
@@ -215,6 +237,101 @@ impl DownloadAttemptControl {
         for entry in state.entries.values() {
             entry.cancel.cancel();
         }
+    }
+
+    pub(crate) fn try_verify(
+        self: &Arc<Self>,
+        token: JobToken,
+        hash: Ed2kHash,
+    ) -> Result<DownloadVerificationGuard, AdmissionDenied> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.verifications.contains_key(&token.job_id) {
+            return Err(AdmissionDenied::Duplicate);
+        }
+        if state.verifications.len() >= MAX_PREPARING
+            || state.verifications.values().any(|entry| entry.hash == hash)
+        {
+            return Err(AdmissionDenied::Busy);
+        }
+        let nonce = state
+            .nonce
+            .checked_add(1)
+            .ok_or(AdmissionDenied::Exhausted)?;
+        state.nonce = nonce;
+        state
+            .verifications
+            .insert(token.job_id, VerificationEntry { token, hash, nonce });
+        for entry in state
+            .entries
+            .values()
+            .filter(|entry| entry.token.job_id == token.job_id || entry.hash == hash)
+        {
+            entry.cancel.cancel();
+        }
+        Ok(DownloadVerificationGuard {
+            control: Arc::clone(self),
+            id: token.job_id,
+            hash,
+            nonce,
+        })
+    }
+
+    pub(crate) fn verifications(&self) -> Vec<JobToken> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .verifications
+            .values()
+            .map(|entry| entry.token)
+            .collect()
+    }
+}
+
+impl DownloadVerificationGuard {
+    pub(crate) async fn wait_for_execution(&self) {
+        loop {
+            let changed = self.control.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let draining = self
+                .control
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entries
+                .values()
+                .any(|entry| entry.token.job_id == self.id || entry.hash == self.hash);
+            if !draining {
+                return;
+            }
+            changed.await;
+        }
+    }
+    pub(crate) fn rebind(&self, token: JobToken) {
+        let mut state = self.control.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = state
+            .verifications
+            .get_mut(&self.id)
+            .filter(|entry| entry.nonce == self.nonce)
+        {
+            entry.token = token;
+        }
+    }
+}
+
+impl Drop for DownloadVerificationGuard {
+    fn drop(&mut self) {
+        let mut state = self.control.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state
+            .verifications
+            .get(&self.id)
+            .is_some_and(|entry| entry.nonce == self.nonce)
+        {
+            state.verifications.remove(&self.id);
+        }
+        drop(state);
+        self.control.changed.notify_waiters();
+        self.control.changed.notify_one();
     }
 }
 impl DownloadAttemptGuard {

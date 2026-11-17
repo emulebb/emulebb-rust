@@ -148,7 +148,7 @@ pub struct DownloadJobRecord {
     pub display_name: String,
     pub accepted_size_bytes: Option<u64>,
     pub expected_size_bytes: Option<u64>,
-    /// Sum of current persisted piece byte counts, including unverified bytes.
+    /// Total persisted bytes present, including unverified and sparse blocks.
     /// Internal retirement removes those pieces and resets this count to zero.
     pub checkpointed_bytes: u64,
     pub category_id: Option<i64>,

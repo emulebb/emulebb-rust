@@ -105,7 +105,15 @@ impl LocalMutationRegistry {
                                         .is_none_or(|bitmap| bitmap.len() <= 14),
                                     LocalMutationError::TooLarge
                                 );
-                                pieces.push(transfer::transfer_sql::piece_to_metadata(piece));
+                                let manifest = manifest.expect("dirty piece has a manifest");
+                                pieces.push(transfer::transfer_sql::piece_to_metadata(
+                                    piece,
+                                    transfer::expected_piece_length(
+                                        manifest.file_size,
+                                        manifest.piece_size,
+                                        u64::from(piece.piece_index),
+                                    ),
+                                ));
                             }
                         }
                         drop(states);
@@ -330,9 +338,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(stopped.intent, emulebb_metadata::DownloadIntent::Stopped);
-            // The current header aggregates prefix counters; the exact bitmap
-            // and complete byte-presence assertion below cover sparse blocks.
-            assert_eq!(stopped.checkpointed_bytes, piece.bytes_written);
+            assert_eq!(stopped.checkpointed_bytes, data.len() as u64);
             let token = stopped.token;
             drop(stopped);
             let restarted = runtime.start_download_job(token, &root).await.unwrap();

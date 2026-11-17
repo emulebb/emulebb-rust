@@ -43,7 +43,20 @@ pub(super) fn manifest_to_metadata(
                 end: range.end,
             })
             .collect(),
-        pieces: manifest.pieces.iter().map(piece_to_metadata).collect(),
+        pieces: manifest
+            .pieces
+            .iter()
+            .map(|piece| {
+                piece_to_metadata(
+                    piece,
+                    expected_piece_length(
+                        manifest.file_size,
+                        manifest.piece_size,
+                        u64::from(piece.piece_index),
+                    ),
+                )
+            })
+            .collect(),
         upload_priority: manifest.upload_priority.clone(),
         auto_upload_priority: manifest.auto_upload_priority,
         comment: manifest.comment.clone(),
@@ -68,11 +81,16 @@ pub(super) fn manifest_to_metadata(
 
 /// SQL form of one runtime piece state, shared by the full manifest upsert and
 /// the per-block single-piece progress checkpoint.
-pub(super) fn piece_to_metadata(piece: &Ed2kPieceState) -> MetadataTransferPiece {
+pub(super) fn piece_to_metadata(piece: &Ed2kPieceState, extent: u64) -> MetadataTransferPiece {
     MetadataTransferPiece {
         piece_index: piece.piece_index,
         state: transfer_state_to_sql(piece.state).to_string(),
-        bytes_written: piece.bytes_written,
+        prefix_bytes: piece.bytes_written,
+        present_bytes: if piece.block_bitmap.is_some() {
+            piece.resolve_block_bitmap(extent).present_bytes()
+        } else {
+            piece.bytes_written
+        },
         block_bitmap: piece.block_bitmap.clone(),
         ich_corrupted: piece.ich_corrupted,
     }
@@ -137,7 +155,7 @@ pub(super) fn manifest_from_metadata(
                 Ok(Ed2kPieceState {
                     piece_index: piece.piece_index,
                     state: transfer_state_from_sql(&piece.state)?,
-                    bytes_written: piece.bytes_written,
+                    bytes_written: piece.prefix_bytes,
                     block_bitmap: piece.block_bitmap,
                     ich_corrupted: piece.ich_corrupted,
                 })
@@ -242,7 +260,7 @@ pub(super) fn stream_execution_from_metadata(
                 manifest.pieces.push(Ed2kPieceState {
                     piece_index: piece.piece_index,
                     state: transfer_state_from_sql(&piece.state)?,
-                    bytes_written: piece.bytes_written,
+                    bytes_written: piece.prefix_bytes,
                     block_bitmap: piece.block_bitmap,
                     ich_corrupted: piece.ich_corrupted,
                 });
@@ -579,7 +597,8 @@ mod tests {
         row.pieces = vec![MetadataTransferPiece {
             piece_index: 0,
             state: "Missing".to_string(),
-            bytes_written: 0,
+            prefix_bytes: 0,
+            present_bytes: 0,
             block_bitmap: Some("01".to_string()),
             ich_corrupted: false,
         }];

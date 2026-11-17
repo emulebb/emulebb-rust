@@ -326,19 +326,16 @@ impl ExchangeMerge<'_> {
             let mut found = false;
             for row in query.query_map([id], |r| r.get::<_, String>(0))? {
                 found = true;
-                let path = PathBuf::from(row?);
-                if !path.is_file() {
-                    *unmatched += 1;
-                    continue;
-                }
-                let Some((path, size, Some(fingerprint))) =
-                    emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::scanned_source_identity(
-                        &path,
-                    )
-                else {
+                let path = emulebb_ed2k::long_path::long_path(&PathBuf::from(row?));
+                let identity = std::fs::File::open(&path).ok().and_then(|file| {
+                    emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::opened_source_identity(&file)
+                        .ok()
+                });
+                let Some((fingerprint, evidence)) = identity else {
                     *unmatched += 1;
                     continue;
                 };
+                let size = fingerprint.size_bytes;
                 if size != entry.file_size
                     || fingerprint.modified.seconds != entry.modified_s
                     || path.file_name().and_then(|n| n.to_str())
@@ -348,7 +345,7 @@ impl ExchangeMerge<'_> {
                     continue;
                 }
                 bytes += entry.md4_hashset.len() * 16 + entry.aich_hashset.len() * 20;
-                files.push((entry.clone(), path, fingerprint));
+                files.push((entry.clone(), path, fingerprint, evidence));
                 if files.len() >= 128 || bytes >= 4 * 1024 * 1024 {
                     accept_live_batch(metadata, &mut files, total, conflicts)?;
                     bytes = 0;
@@ -381,6 +378,7 @@ fn accept_live_batch(
         MetadataFileImportRecord,
         PathBuf,
         emulebb_metadata::NativeFileFingerprint,
+        emulebb_metadata::NativeFileIdentityEvidence,
     )>,
     total: &mut ImportCounts,
     conflicts: &mut usize,
@@ -792,7 +790,9 @@ mod tests {
             modified: emulebb_metadata::NativeFileTimestamp::new(file.modified_s, 0).unwrap(),
             changed: None,
         };
-        let mut files = vec![(file, temp.path().join("sample.bin"), fingerprint)];
+        let evidence =
+            emulebb_metadata::NativeFileIdentityEvidence::new(fingerprint.identity, None).unwrap();
+        let mut files = vec![(file, temp.path().join("sample.bin"), fingerprint, evidence)];
         let mut counts = ImportCounts {
             imported_known_files: 0,
             skipped_native_known_files: 0,

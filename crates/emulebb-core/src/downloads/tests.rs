@@ -1,6 +1,98 @@
 use super::*;
 use crate::FileIndex;
 use emulebb_metadata::DownloadJobRequest;
+
+#[tokio::test]
+async fn comment_pages_skip_plain_sources_and_preserve_byte_bounded_continuation() {
+    use emulebb_metadata::{MetadataDownloadPeerDelta, MetadataTransferSource};
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let name = "n".repeat(65_536);
+    let job = core
+        .metadata_store
+        .admit_download_job(&DownloadJobRequest {
+            file_hash: "28".repeat(16),
+            display_name: name.clone(),
+            expected_size_bytes: None,
+            category_id: None,
+            intent: DownloadIntent::Started,
+            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    let mut expected = Vec::new();
+    for value in 1..=300 {
+        let comment = if value % 8 == 0 {
+            format!("note-{value}")
+        } else {
+            String::new()
+        };
+        let rating = if value == 300 { 4 } else { 0 };
+        if !comment.is_empty() || rating > 0 {
+            expected.push((comment.clone(), rating));
+        }
+        core.metadata_store
+            .apply_download_peer_delta(
+                job.token,
+                &MetadataDownloadPeerDelta::Source {
+                    source: MetadataTransferSource {
+                        ip: "192.0.2.28".into(),
+                        tcp_port: value,
+                        user_hash: None,
+                        connect_options: None,
+                        file_comment: comment,
+                        file_rating: rating,
+                    },
+                    description_only: false,
+                },
+            )
+            .unwrap();
+    }
+    assert!(core.metadata_store.stop_download_job(job.token).unwrap());
+    let mut actual = Vec::new();
+    let mut after = 0;
+    let mut pages = 0;
+    loop {
+        let page = core
+            .download_comments_page(job.token.job_id, after, 200)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!page.comments.is_empty());
+        assert!(page.comments.iter().all(|row| row.file_name == name));
+        assert!(
+            page.comments
+                .iter()
+                .map(|row| row.file_name.len() + row.comment.len())
+                .sum::<usize>()
+                < 1024 * 1024
+        );
+        actual.extend(
+            page.comments
+                .iter()
+                .map(|row| (row.comment.clone(), row.rating)),
+        );
+        pages += 1;
+        assert!(pages < 6);
+        if !page.has_more {
+            assert!(page.next_after.is_none());
+            break;
+        }
+        let next = page.next_after.unwrap();
+        assert!(next > after);
+        after = next;
+    }
+    assert!(pages > 1);
+    assert_eq!(actual, expected);
+    assert!(
+        core.ed2k_transfers
+            .download_job(job.token.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .storage
+            .is_none()
+    );
+}
 fn admit(
     core: &EmulebbCore,
     byte: u32,

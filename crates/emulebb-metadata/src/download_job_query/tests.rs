@@ -72,7 +72,8 @@ fn prepare_completion(store: &MetadataStore, job: &DownloadJobRecord) {
     manifest.pieces = vec![MetadataTransferPiece {
         piece_index: 0,
         state: "Verified".into(),
-        bytes_written: 16,
+        prefix_bytes: 16,
+        present_bytes: 16,
         block_bitmap: None,
         ich_corrupted: false,
     }];

@@ -76,26 +76,31 @@ pub(crate) fn checkpoint_download_progress_in(
     let now = crate::download_job_store::unix_s();
     {
         let mut statement = tx.prepare_cached(
-            "UPDATE download_job_pieces SET bytes_written=?3,block_bitmap=?4,updated_at_s=?5
+            "UPDATE download_job_pieces SET prefix_bytes=?3,block_bitmap=?4,updated_at_s=?5,present_bytes=?8
                  WHERE job_id=?1 AND piece_index=?2 AND state=?6 AND ich_corrupted=?7
-                   AND (state<>'Verified' OR bytes_written=?3)",
+                   AND (state<>'Verified' OR prefix_bytes=?3)",
         )?;
         for piece in pieces {
             let start = u64::from(piece.piece_index)
                 .checked_mul(part_size)
                 .ok_or_else(|| anyhow::anyhow!("checkpoint offset overflow"))?;
             ensure!(
-                part_size > 0 && start < size && piece.bytes_written <= part_size.min(size - start),
+                part_size > 0
+                    && start < size
+                    && piece.prefix_bytes <= piece.present_bytes
+                    && piece.present_bytes <= part_size.min(size - start)
+                    && (piece.block_bitmap.is_some() || piece.present_bytes == piece.prefix_bytes),
                 "checkpoint progress lies outside the payload"
             );
             if statement.execute(params![
                 token.job_id,
                 i64::from(piece.piece_index),
-                i64::try_from(piece.bytes_written)?,
+                i64::try_from(piece.prefix_bytes)?,
                 piece.block_bitmap,
                 now,
                 piece.state,
-                piece.ich_corrupted
+                piece.ich_corrupted,
+                i64::try_from(piece.present_bytes)?
             ])? != 1
             {
                 // Dropping the transaction rolls back earlier rows too.
@@ -131,15 +136,18 @@ mod tests {
             .map(|piece_index| MetadataTransferPiece {
                 piece_index,
                 state: "Missing".into(),
-                bytes_written: 0,
+                prefix_bytes: 0,
+                present_bytes: 0,
                 block_bitmap: None,
                 ich_corrupted: false,
             })
             .collect();
         store.upsert_transfer_manifest(&manifest).unwrap();
         let mut delta = manifest.pieces.clone();
-        delta[0].bytes_written = 4;
-        delta[1].bytes_written = 8;
+        delta[0].prefix_bytes = 4;
+        delta[0].present_bytes = 4;
+        delta[1].prefix_bytes = 8;
+        delta[1].present_bytes = 8;
         store
             .connection()
             .unwrap()
@@ -215,15 +223,18 @@ mod tests {
             .map(|piece_index| MetadataTransferPiece {
                 piece_index,
                 state: "Missing".into(),
-                bytes_written: 0,
+                prefix_bytes: 0,
+                present_bytes: 0,
                 block_bitmap: None,
                 ich_corrupted: false,
             })
             .collect();
         store.upsert_transfer_manifest(&manifest).unwrap();
         let mut delta = manifest.pieces.clone();
-        delta[0].bytes_written = 4;
-        delta[1].bytes_written = 8;
+        delta[0].prefix_bytes = 4;
+        delta[0].present_bytes = 4;
+        delta[1].prefix_bytes = 8;
+        delta[1].present_bytes = 8;
         store
             .connection()
             .unwrap()
@@ -243,7 +254,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .pieces[0]
-                .bytes_written,
+                .prefix_bytes,
             0
         );
         store.upsert_transfer_manifest(&manifest).unwrap();
@@ -261,7 +272,8 @@ mod tests {
             delta
         );
         assert!(store.stop_download_job(job.token).unwrap());
-        delta[0].bytes_written = 9;
+        delta[0].prefix_bytes = 9;
+        delta[0].present_bytes = 9;
         assert!(
             !store
                 .checkpoint_download_progress(job.token, &delta)
@@ -273,7 +285,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .pieces[0]
-                .bytes_written,
+                .prefix_bytes,
             4
         );
     }
