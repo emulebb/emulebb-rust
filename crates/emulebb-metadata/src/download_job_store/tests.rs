@@ -12,6 +12,51 @@ fn request(hash: u8, size: Option<u64>) -> DownloadJobRequest {
 }
 
 #[test]
+fn ending_selection_preserves_started_intent_backing_and_manual_faults() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store
+        .admit_download_job(&request(90, Some(16)))
+        .unwrap()
+        .job;
+    let selected = store
+        .begin_download_job_execution(first.token, Some(&std::env::temp_dir()))
+        .unwrap()
+        .unwrap();
+    let ended = store
+        .end_download_job_execution(selected.token)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.intent, DownloadIntent::Started);
+    assert_eq!(ended.storage, selected.storage);
+    assert_eq!(ended.selected_temp, selected.selected_temp);
+    assert!(ended.token.generation > selected.token.generation);
+    assert!(
+        store
+            .end_download_job_execution(selected.token)
+            .unwrap()
+            .is_none()
+    );
+    let fault =
+        crate::DownloadJobStorageFailure::new("TEMP_UNAVAILABLE", "Sample storage offline", 1)
+            .unwrap();
+    let failed = store
+        .fail_download_job_storage(ended.token, &fault)
+        .unwrap()
+        .job
+        .unwrap();
+    assert!(
+        store
+            .end_download_job_execution(failed.token)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.download_job(failed.token.job_id).unwrap().unwrap(),
+        failed
+    );
+}
+
+#[test]
 fn selections_issue_distinct_fences_without_allocating_discovery_backing_or_retrying_faults() {
     let store = MetadataStore::in_memory().unwrap();
     let first = store.admit_download_job(&request(89, None)).unwrap().job;

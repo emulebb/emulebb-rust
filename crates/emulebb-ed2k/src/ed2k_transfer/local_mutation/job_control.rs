@@ -22,6 +22,10 @@ enum Control<'a> {
     ),
     Start(JobToken, &'a Path),
     Begin(JobToken, Option<&'a Path>),
+    End(
+        JobToken,
+        transfer::store::ScopedLockGuard<emulebb_metadata::JobId>,
+    ),
     Learn(JobToken, u64),
     Fail(JobToken, &'a DownloadJobStorageFailure),
 }
@@ -34,6 +38,10 @@ enum OwnedControl {
     ),
     Start(JobToken, PathBuf),
     Begin(JobToken, Option<PathBuf>),
+    End(
+        JobToken,
+        transfer::store::ScopedLockGuard<emulebb_metadata::JobId>,
+    ),
     Learn(JobToken, u64),
     Fail(JobToken, DownloadJobStorageFailure),
 }
@@ -76,7 +84,7 @@ impl LocalMutationRegistry {
                     withdrawal_path_charge(path)?;
                 }
             }
-            Control::Learn(_, _) | Control::Fail(_, _) => {}
+            Control::End(..) | Control::Learn(_, _) | Control::Fail(_, _) => {}
         }
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
@@ -90,6 +98,7 @@ impl LocalMutationRegistry {
             ),
             Control::Start(token, path) => OwnedControl::Start(token, path.to_owned()),
             Control::Begin(token, path) => OwnedControl::Begin(token, path.map(Path::to_owned)),
+            Control::End(token, guard) => OwnedControl::End(token, guard),
             Control::Learn(token, size) => OwnedControl::Learn(token, size),
             Control::Fail(token, failure) => OwnedControl::Fail(token, failure.clone()),
         };
@@ -119,6 +128,7 @@ impl LocalMutationRegistry {
                     OwnedControl::Admit(request, _, _, _) => (request.file_hash.clone(), None),
                     OwnedControl::Start(token, _)
                     | OwnedControl::Begin(token, _)
+                    | OwnedControl::End(token, _)
                     | OwnedControl::Learn(token, _)
                     | OwnedControl::Fail(token, _) => {
                         let Some(job) = metadata.download_job(token.job_id)? else {
@@ -213,6 +223,21 @@ impl LocalMutationRegistry {
                     OwnedControl::Begin(token, path) => {
                         let value =
                             metadata.begin_download_job_execution(*token, path.as_deref())?;
+                        committed = value.is_some();
+                        ControlResult::Job(value)
+                    }
+                    OwnedControl::End(token, _guard) => {
+                        // The transferred job I/O guard drains earlier native
+                        // work. Refuse dirty backing rather than evicting
+                        // acknowledged but uncheckpointed partial progress.
+                        ensure!(
+                            checkpoints
+                                .blocking_lock()
+                                .get(token)
+                                .is_none_or(|state| state.dirty_piece_indexes.is_empty()),
+                            LocalMutationError::Busy
+                        );
+                        let value = metadata.end_download_job_execution(*token)?;
                         committed = value.is_some();
                         ControlResult::Job(value)
                     }
@@ -369,6 +394,37 @@ impl transfer::Ed2kTransferRuntime {
             _ => unreachable!(),
         }))
     }
+
+    /// Release one quiesced selected execution without stopping its job. Drain
+    /// all protocol producers before calling. Dirty progress is checkpointed
+    /// first; admitted fencing/cache publication survives caller cancellation.
+    pub async fn release_download_job_execution(&self, token: JobToken) -> Result<()> {
+        let _lifecycle = self.lock_lifecycle(token.job_id).await;
+        loop {
+            self.checkpoint_download_progress(token).await?;
+            let revision = self.local_mutations.capacity_revision();
+            let guard = self.lock_manifest(token).await;
+            let submitted = self
+                .local_mutations
+                .submit_control(self, Control::End(token, guard));
+            let result = match submitted {
+                Ok(receipt) => receipt.await.map_err(|_| LocalMutationError::Unknown)?,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(_) => return Ok(()),
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<LocalMutationError>(),
+                        Some(LocalMutationError::Busy)
+                    ) =>
+                {
+                    self.local_mutations.wait_for_completion(revision).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
     /// Fill an unknown size before selecting/hydrating network execution.
     pub async fn learn_download_job_size(
         &self,
@@ -420,6 +476,182 @@ mod tests {
             intent: emulebb_metadata::DownloadIntent::Started,
             piece_size: transfer::ED2K_PART_SIZE,
         }
+    }
+    #[tokio::test]
+    async fn releasing_selection_checkpoints_partial_data_and_reselection_reuses_backing() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = transfer::Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let mut input = request();
+        input.expected_size_bytes = Some(32_768);
+        let admitted = runtime
+            .admit_download_job(&input, false, None, &Default::default())
+            .await
+            .unwrap();
+        let token = admitted.job.token;
+        drop(admitted);
+        let selection = runtime
+            .begin_download_job_execution(token, Some(root.path()))
+            .await
+            .unwrap();
+        let job = selection.as_ref().unwrap().clone();
+        drop(selection);
+        let descriptor = transfer::new_transfer_job(
+            job.token,
+            input.file_hash.parse().unwrap(),
+            input.display_name,
+            32_768,
+        );
+        drop(runtime.ensure_job(&descriptor).await.unwrap());
+        assert!(
+            !runtime
+                .append_piece_block(job.token, 0, 0, 8192, &[0x5a; 8192])
+                .await
+                .unwrap()
+                .is_completed()
+        );
+        assert_eq!(
+            runtime.manifest(job.token).await.unwrap().pieces[0].bytes_written,
+            8192
+        );
+        runtime
+            .release_download_job_execution(job.token)
+            .await
+            .unwrap();
+        assert!(
+            !runtime
+                .manifest_cache
+                .lock()
+                .await
+                .contains_key(&job.token.job_id)
+        );
+        assert!(
+            !runtime
+                .job_storage
+                .lock()
+                .unwrap()
+                .contains_key(&job.token.job_id)
+        );
+        assert!(
+            !runtime
+                .manifest_checkpoint_state
+                .lock()
+                .await
+                .contains_key(&job.token)
+        );
+        assert!(job.storage.as_ref().unwrap().path.is_dir());
+        let ended = runtime
+            .download_job(job.token.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ended.intent, emulebb_metadata::DownloadIntent::Started);
+        assert_eq!(ended.checkpointed_bytes, 8192);
+        assert!(ended.token.generation > job.token.generation);
+        let token = ended.token;
+        drop(ended);
+        let reselected = runtime
+            .begin_download_job_execution(token, Some(root.path()))
+            .await
+            .unwrap();
+        let token = reselected.as_ref().unwrap().token;
+        assert_eq!(
+            reselected.as_ref().unwrap().storage.as_ref().unwrap().path,
+            job.storage.as_ref().unwrap().path
+        );
+        drop(reselected);
+        let resumed = runtime
+            .ensure_job(&transfer::new_transfer_job(
+                token,
+                descriptor.file_hash.parse().unwrap(),
+                descriptor.display_name,
+                32_768,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resumed.pieces[0].bytes_written, 8192);
+        drop(resumed);
+        runtime.local_mutations.seal_and_drain().await.unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_release_keeps_its_io_guard_until_fenced_cache_publication_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(transfer::Ed2kTransferRuntime::load_or_create(root.path()).unwrap());
+        let mut input = request();
+        input.expected_size_bytes = Some(16);
+        let admitted = runtime
+            .admit_download_job(&input, false, None, &Default::default())
+            .await
+            .unwrap();
+        let token = admitted.job.token;
+        drop(admitted);
+        let selected = runtime
+            .begin_download_job_execution(token, Some(root.path()))
+            .await
+            .unwrap();
+        let token = selected.as_ref().unwrap().token;
+        drop(selected);
+        drop(
+            runtime
+                .ensure_job(&transfer::new_transfer_job(
+                    token,
+                    input.file_hash.parse().unwrap(),
+                    input.display_name,
+                    16,
+                ))
+                .await
+                .unwrap(),
+        );
+        let (reached, ready) = oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        runtime
+            .local_mutations
+            .install_publication_gate(reached, gate);
+        let owner = Arc::clone(&runtime);
+        let caller = tokio::spawn(async move { owner.release_download_job_execution(token).await });
+        ready.await.unwrap();
+        caller.abort();
+        let _ = caller.await;
+        let waiter = runtime.lock_manifest(token);
+        tokio::pin!(waiter);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .manifest_cache
+                .lock()
+                .await
+                .contains_key(&token.job_id)
+        );
+        release.send(()).unwrap();
+        runtime.local_mutations.seal_and_drain().await.unwrap();
+        let _guard = waiter.await;
+        assert!(
+            !runtime
+                .manifest_cache
+                .lock()
+                .await
+                .contains_key(&token.job_id)
+        );
+        assert!(
+            !runtime
+                .job_storage
+                .lock()
+                .unwrap()
+                .contains_key(&token.job_id)
+        );
+        assert!(
+            runtime
+                .metadata
+                .download_job(token.job_id)
+                .unwrap()
+                .unwrap()
+                .token
+                .generation
+                > token.generation
+        );
     }
     #[tokio::test]
     async fn selection_fences_old_callbacks_and_discovery_does_not_create_storage() {

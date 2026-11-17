@@ -48,43 +48,46 @@ impl Ed2kTransferRuntime {
         let mut checkpointed = 0;
 
         for token in dirty_tokens {
-            let manifest_guard = self.lock_manifest(token).await;
-            let Some(current_piece) = self
-                .manifest_checkpoint_state
-                .lock()
-                .await
-                .get(&token)
-                .and_then(|state| state.dirty_piece_indexes.first().copied())
-            else {
-                continue;
-            };
-            let manifest = self
-                .manifest_cache
-                .lock()
-                .await
-                .get(&token.job_id)
-                .filter(|manifest| manifest.token == token)
-                .cloned()
-                .with_context(|| {
-                    format!("dirty ED2K download {token:?} is missing its cached manifest")
-                })?;
-
-            // WHY: acknowledged blocks may still be buffered in the cached file
-            // handle while their manifest rows are cache-only. Flush payload bytes
-            // before committing the final row checkpoint so restart never observes
-            // progress beyond the cleanly written payload.
-            let mut file = self.take_payload_handle(token).await?;
-            file.flush().await?;
-            self.store_payload_handle(token, file);
-            self.store_manifest_piece_progress_unlocked(&manifest, current_piece, manifest_guard)
-                .await
-                .with_context(|| {
-                    format!("failed to checkpoint final ED2K download progress for {token:?}")
-                })?;
-            checkpointed += 1;
+            checkpointed += usize::from(self.checkpoint_download_progress(token).await?);
         }
 
         Ok(checkpointed)
+    }
+
+    /// Checkpoint one quiesced selection without scanning or flushing another
+    /// active job. Both shutdown and ordinary slot retirement use this path.
+    pub(super) async fn checkpoint_download_progress(&self, token: JobToken) -> Result<bool> {
+        let manifest_guard = self.lock_manifest(token).await;
+        let Some(current_piece) = self
+            .manifest_checkpoint_state
+            .lock()
+            .await
+            .get(&token)
+            .and_then(|state| state.dirty_piece_indexes.first().copied())
+        else {
+            return Ok(false);
+        };
+        let manifest = self
+            .manifest_cache
+            .lock()
+            .await
+            .get(&token.job_id)
+            .filter(|manifest| manifest.token == token)
+            .cloned()
+            .with_context(|| {
+                format!("dirty ED2K download {token:?} is missing its cached manifest")
+            })?;
+        // WHY: cached payload writes precede their row checkpoint, so restart
+        // cannot observe progress beyond cleanly written payload bytes.
+        let mut file = self.take_payload_handle(token).await?;
+        file.flush().await?;
+        self.store_payload_handle(token, file);
+        self.store_manifest_piece_progress_unlocked(&manifest, current_piece, manifest_guard)
+            .await
+            .with_context(|| {
+                format!("failed to checkpoint final ED2K download progress for {token:?}")
+            })?;
+        Ok(true)
     }
 
     /// Acquire the lifecycle gate for one transfer. Delivery, row-only

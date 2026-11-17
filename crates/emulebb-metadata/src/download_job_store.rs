@@ -431,6 +431,35 @@ impl MetadataStore {
         self.activate_download_job(token, selected_temp, true)
     }
 
+    /// Fence a quiesced selection while leaving its desired intent, progress
+    /// and fixed storage available for later selection. This is not a stop.
+    pub fn end_download_job_execution(&self, token: JobToken) -> Result<Option<DownloadJobRecord>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let generation = i64::try_from(token.generation)?
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("job generation exhausted"))?;
+        let changed = tx.execute(
+            "UPDATE download_jobs SET execution_generation=?3,updated_at_s=?4
+             WHERE id=?1 AND execution_generation=?2 AND intent='started'
+               AND storage_failure_code IS NULL AND removed_at_s IS NULL
+               AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL",
+            params![
+                token.job_id,
+                i64::try_from(token.generation)?,
+                generation,
+                unix_s()
+            ],
+        )? != 0;
+        let result = if changed {
+            read_job(&tx, token.job_id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(result)
+    }
+
     fn activate_download_job(
         &self,
         token: JobToken,
