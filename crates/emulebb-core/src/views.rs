@@ -1,7 +1,7 @@
 //! REST view builders and request validators.
 //!
 //! Pure (non-async) helpers that build the REST response structs (`Transfer`,
-//! `DownloadSource`, `TransferPart`, `NetworkStatus`, `ServerInfo`) from the
+//! `DownloadSource`, `NetworkStatus`, `ServerInfo`) from the
 //! lower-layer manifest/live-session/server state, and the request-validation
 //! helpers for transfer/source/server/shared-file mutations. Moved verbatim out
 //! of `lib.rs` during the maintainability restructuring; they carry no behavior
@@ -14,7 +14,7 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
     DownloadFileNameObservation, DownloadSource, NetworkStatus, ServerCreate, ServerInfo,
-    ServerUpdate, SharedFileUpdate, Transfer, TransferPart, TransferUpdate,
+    ServerUpdate, SharedFileUpdate, Transfer,
 };
 
 // MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
@@ -168,74 +168,6 @@ pub(crate) fn preserve_transfer_public_metadata(transfer: &mut Transfer, existin
     transfer.category_name = existing.category_name.clone();
 }
 
-pub(crate) fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
-    if manifest.completed && manifest.delivered_path.is_none() {
-        "completing"
-    } else if manifest.completed {
-        "completed"
-    } else if manifest.final_rehash_pending {
-        "completing"
-    } else if manifest.intent == emulebb_metadata::DownloadIntent::Stopped {
-        "stopped"
-    } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
-        "downloading"
-    } else {
-        "queued"
-    }
-}
-
-pub(crate) fn validate_transfer_update_family(request: &TransferUpdate) -> Result<()> {
-    let mut mutation_family_count = 0;
-    if request.category_id.is_some() || request.category_name.is_some() {
-        mutation_family_count += 1;
-    }
-    if request.name.is_some() {
-        mutation_family_count += 1;
-    }
-    ensure!(
-        mutation_family_count != 0,
-        "transfer PATCH requires category or name"
-    );
-    ensure!(
-        mutation_family_count == 1,
-        "transfer PATCH accepts only one mutation family"
-    );
-    Ok(())
-}
-
-pub(crate) fn normalize_transfer_name(name: Option<String>) -> Result<String> {
-    let Some(name) = name else {
-        anyhow::bail!("name must be a string");
-    };
-    let name = name.trim();
-    ensure!(!name.is_empty(), "name must not be empty");
-    ensure!(
-        !name.chars().any(|character| matches!(
-            character,
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
-        ) || character.is_control()),
-        "name must be a valid eD2K filename"
-    );
-    Ok(name.to_string())
-}
-
-pub(crate) fn ensure_category_selector_is_unambiguous(
-    category_id: Option<i64>,
-    category_name: Option<&str>,
-) -> Result<()> {
-    ensure!(
-        category_id.is_none() || category_name.is_none(),
-        "category selectors are mutually exclusive"
-    );
-    ensure!(
-        category_name
-            .map(emulebb_metadata::valid_category_name)
-            .unwrap_or(true),
-        "category must be a valid category name"
-    );
-    Ok(())
-}
-
 /// Project a bounded source row. Observation backing moves into the response;
 /// source history and piece geometry are never materialized by this builder.
 pub(crate) fn download_source_from_record(
@@ -330,52 +262,6 @@ pub(crate) fn apply_download_source_stats(
         source.status = state.to_owned();
         Ok(())
     })
-}
-
-/// Builds the per-part download breakdown from the resume manifest. ED2K parts
-/// map 1:1 to manifest pieces (piece_size == ED2K_PART_SIZE). Geometry and
-/// completion are real (per-piece `bytes_written`/`state`); `availableSources`
-/// and `corrupted` are live-session-only signals the persistent manifest does
-/// not track, so they are honestly reported as 0/false rather than fabricated.
-pub(crate) fn transfer_parts_from_manifest(
-    manifest: &Ed2kResumeManifest,
-    available_sources_per_part: &[u32],
-    requested_parts: &std::collections::HashSet<u32>,
-) -> Vec<TransferPart> {
-    let part_size = manifest.piece_size.max(1);
-    let file_size = manifest.file_size;
-    manifest
-        .pieces
-        .iter()
-        .map(|piece| {
-            let start = u64::from(piece.piece_index) * part_size;
-            let end_exclusive = (start + part_size).min(file_size).max(start);
-            let size = end_exclusive - start;
-            let end = end_exclusive.saturating_sub(1);
-            let verified = matches!(piece.state, Ed2kTransferState::Verified);
-            let completed_bytes = if verified {
-                size
-            } else {
-                piece.bytes_written.min(size)
-            };
-            let gap_bytes = size - completed_bytes;
-            TransferPart {
-                index: piece.piece_index,
-                start,
-                end,
-                size,
-                completed_bytes,
-                gap_bytes,
-                complete: verified,
-                requested: requested_parts.contains(&piece.piece_index),
-                corrupted: false,
-                available_sources: available_sources_per_part
-                    .get(piece.piece_index as usize)
-                    .copied()
-                    .unwrap_or(0),
-            }
-        })
-        .collect()
 }
 
 pub(crate) fn validate_source_client_id(client_id: &str) -> Result<()> {

@@ -1,10 +1,7 @@
 use super::{
     ServerLiveDetails, apply_server_connection_flags, apply_server_live_details,
     format_ed2k_file_link, kad_status_from_running, server_info_from_parts,
-    transfer_parts_from_manifest,
 };
-use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState, new_transfer_job};
-use emulebb_kad_proto::Ed2kHash;
 
 #[test]
 fn ed2k_link_escapes_stock_filename_bytes() {
@@ -25,48 +22,6 @@ fn ed2k_link_emits_valid_aich_root_section() {
         ),
         "ed2k://|file|Aich.bin|123|00112233445566778899aabbccddeeff|h=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/",
     );
-}
-
-#[test]
-fn transfer_part_requested_is_derived_from_live_leases() {
-    let manifest = Ed2kResumeManifest::new(&new_transfer_job(
-        emulebb_metadata::JobToken {
-            job_id: "1".parse().unwrap(),
-            generation: 1,
-        },
-        Ed2kHash::from_bytes([0x11; 16]),
-        "live-request.bin".to_string(),
-        1024,
-    ));
-    let idle = transfer_parts_from_manifest(&manifest, &[1], &Default::default());
-    assert!(!idle[0].requested);
-
-    let requested =
-        transfer_parts_from_manifest(&manifest, &[1], &std::collections::HashSet::from([0]));
-    assert!(requested[0].requested);
-    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
-}
-
-#[test]
-fn part_byte_presence_does_not_claim_successful_verification() {
-    let job = new_transfer_job(
-        emulebb_metadata::JobToken {
-            job_id: "1".parse().unwrap(),
-            generation: 1,
-        },
-        Ed2kHash::from_bytes([0x12; 16]),
-        "Sample.bin".into(),
-        1024,
-    );
-    let mut manifest = Ed2kResumeManifest::new(&job);
-    manifest.pieces[0].bytes_written = 1024;
-    let present = transfer_parts_from_manifest(&manifest, &[], &Default::default());
-    assert_eq!(present[0].completed_bytes, 1024);
-    assert_eq!(present[0].gap_bytes, 0);
-    assert!(!present[0].complete);
-    manifest.pieces[0].state = Ed2kTransferState::Verified;
-    let verified = transfer_parts_from_manifest(&manifest, &[], &Default::default());
-    assert!(verified[0].complete);
 }
 
 #[test]

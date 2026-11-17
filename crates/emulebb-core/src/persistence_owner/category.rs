@@ -2,7 +2,7 @@
 use super::*;
 use crate::Category;
 use emulebb_ed2k::ed2k_transfer::CategoryCacheMutation;
-use emulebb_metadata::{JobId, MetadataCategory};
+use emulebb_metadata::MetadataCategory;
 
 pub(super) const CATEGORY_PROBE_BYTES: usize = 256 * 1024;
 
@@ -78,11 +78,6 @@ pub(crate) enum CategoryCommand {
         sharing: CategorySharingContext,
         reload: Option<crate::shared_directories::ReloadReservation>,
     },
-    Assign {
-        job_id: JobId,
-        id: Option<i64>,
-        runtime: Arc<emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime>,
-    },
 }
 
 pub(super) enum CategoryDbCommand {
@@ -98,11 +93,6 @@ pub(super) enum CategoryDbCommand {
         Vec<emulebb_metadata::MetadataSharedDirectoryRoot>,
         Vec<emulebb_metadata::MetadataSharedDirectoryRoot>,
     ),
-    Assign {
-        job_id: JobId,
-        id: Option<i64>,
-        publication: CategoryCacheMutation,
-    },
     RootPage {
         root: std::path::PathBuf,
         after: i64,
@@ -123,7 +113,6 @@ pub(super) enum CategoryWrite {
         >,
     ),
     Category(Option<MetadataCategory>),
-    Assigned(bool),
     Roots(bool),
     RootPage(Vec<(i64, [u8; 16])>),
     Copy(Option<emulebb_metadata::MetadataSharedCopyCandidate>),
@@ -194,19 +183,6 @@ pub(super) fn execute(
         CategoryDbCommand::ReplaceRoots(implicit, roots) => store
             .replace_explicit_roots_if_implicit_matches(&implicit, &roots)
             .map(CategoryWrite::Roots),
-        CategoryDbCommand::Assign {
-            job_id,
-            id,
-            publication,
-        } => {
-            let changed = store.assign_transfer_category(job_id, id)?;
-            if changed {
-                publication
-                    .publish()
-                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
-            }
-            Ok(CategoryWrite::Assigned(changed))
-        }
         CategoryDbCommand::RootPage { root, after } => store
             .category_root_hash_page(&root, after, 128)
             .map(CategoryWrite::RootPage),
@@ -287,7 +263,6 @@ impl CategoryCommand {
                     |sum, root| sum.saturating_add(root.path.capacity()),
                 )
             }
-            Self::Assign { .. } => 0,
         }
     }
 }
@@ -531,16 +506,9 @@ pub(super) async fn process(
         | CategoryCommand::Update { sharing, .. }
         | CategoryCommand::Delete { sharing, .. } => Some(sharing.clone()),
         CategoryCommand::ReplaceRoots { .. } => unreachable!(),
-        CategoryCommand::Assign { .. }
-        | CategoryCommand::PatchDownload(_)
-        | CategoryCommand::CreateDownload(_) => None,
+        CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => None,
     };
     let mut publication = match &command {
-        CategoryCommand::Assign {
-            job_id,
-            id,
-            runtime,
-        } => Some(runtime.prepare_category_assignment(*job_id, *id).await),
         CategoryCommand::Delete { id, sharing } => {
             Some(sharing.runtime.prepare_category_removal(*id).await)
         }
@@ -556,49 +524,6 @@ pub(super) async fn process(
     let _category_fence = publication
         .as_ref()
         .map(CategoryCacheMutation::retain_fence);
-    if let CategoryCommand::Assign { job_id, id, .. } = &command {
-        let selected = {
-            let state = state.lock().await;
-            if let Some(id) = id {
-                let Some(category) = state.categories.get(id) else {
-                    return Ok(Response::Category(Ok(None)));
-                };
-                request.permit.extend(
-                    category_bytes(category)
-                        .checked_mul(4)
-                        .ok_or(PersistenceError::TooLarge)?,
-                )?;
-                Some(category.clone())
-            } else {
-                None
-            }
-        };
-        let (response, receive) = oneshot::channel();
-        db.send(DbRequest {
-            command: DbCommand::Category(CategoryDbCommand::Assign {
-                job_id: *job_id,
-                id: *id,
-                publication: publication.take().expect("prepared category assignment"),
-            }),
-            response,
-        })
-        .map_err(|_| PersistenceError::Worker)?;
-        let DbResponse::Category(CategoryWrite::Assigned(changed)) = receive
-            .await
-            .map_err(|_| PersistenceError::CommitUnknown)??
-        else {
-            return Err(PersistenceError::Worker);
-        };
-        if !changed {
-            return Ok(Response::Category(Ok(None)));
-        }
-        let mut state = state.lock().await;
-        if let Some(transfer) = state.transfers.get_mut(&job_id.to_string()) {
-            transfer.category_id = *id;
-            transfer.category_name = selected.as_ref().map(|category| category.name.clone());
-        }
-        return Ok(Response::Category(Ok(selected)));
-    }
     let (prepared, deleting, old_root, root_changed) = {
         let state = state.lock().await;
         let (category, deleting, creating) = match command {
@@ -630,7 +555,6 @@ pub(super) async fn process(
                 }
                 (value, false, false)
             }
-            CategoryCommand::Assign { .. } => unreachable!(),
             CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => {
                 unreachable!()
             }

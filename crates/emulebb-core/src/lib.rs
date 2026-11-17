@@ -55,11 +55,9 @@ use emulebb_ed2k::{
     },
     ed2k_transfer::{
         ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
-        Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kDownloadStorageReconciliation,
-        Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal,
-        Ed2kSourceConnectionAdmission, Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport,
-        Ed2kTransferRetirementRecoveryReport, Ed2kTransferRootReconciliation, Ed2kTransferRuntime,
-        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kMediaMetadata, Ed2kResumeManifest,
+        Ed2kSharedEntry, Ed2kSharedPublishDemandSignal, Ed2kSourceConnectionAdmission,
+        Ed2kSourceHint, Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{
@@ -340,19 +338,17 @@ pub use rest_model::{
     SearchResultMedia, SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
     SharedFileKadKeywordPublish, SharedFileListCursor, SharedFileListItem, SharedFileListPage,
     SharedFileListQuery, SharedFilePublicationStatus, SharedFilePublishLane,
-    SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferDetails,
-    TransferPart, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
-    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferStats,
+    TransferThroughputStats, Upload, UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig,
+    VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_download_source_stats, apply_server_update,
-    download_source_from_record, ensure_category_selector_is_unambiguous, format_ed2k_file_link,
-    kad_status_from_running, manifest_default_state_name, normalize_transfer_name,
+    download_source_from_record, format_ed2k_file_link, kad_status_from_running,
     preserve_transfer_public_metadata, server_endpoint_from_create, server_info_from_parts,
-    source_friend_name, transfer_from_manifest, transfer_parts_from_manifest,
-    validate_server_priority, validate_server_update, validate_shared_file_comment_rating,
-    validate_shared_upload_priority, validate_source_client_id, validate_transfer_update_family,
-    validate_url_import,
+    source_friend_name, transfer_from_manifest, validate_server_priority, validate_server_update,
+    validate_shared_file_comment_rating, validate_shared_upload_priority,
+    validate_source_client_id, validate_url_import,
 };
 
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
@@ -426,8 +422,6 @@ pub struct EmulebbCore {
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
     download_attempts: Arc<DownloadAttemptControl>,
     category_mutation_gate: Arc<Mutex<()>>,
-    persisted_transfers_hydrated: Arc<AtomicBool>,
-    persisted_transfer_hydration_gate: Arc<Mutex<()>>,
     transfer_root: PathBuf,
     /// Profile/config directory whose volume must retain the MFC-compatible
     /// config free-space floor. Defaults to the transfer root's parent; the
@@ -751,8 +745,6 @@ impl EmulebbCore {
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
             category_mutation_gate: Arc::new(Mutex::new(())),
-            persisted_transfers_hydrated: Arc::new(AtomicBool::new(false)),
-            persisted_transfer_hydration_gate: Arc::new(Mutex::new(())),
             transfer_root,
             profile_dir,
             category_incoming_dir: Arc::new(incoming_dir.clone()),
@@ -2073,11 +2065,6 @@ impl EmulebbCore {
             state.download_source_registry.release_endpoint(endpoint);
         }
         state.download_source_registry.release_file(hash);
-    }
-
-    /// Signal the selected job's current attempt without releasing ownership.
-    fn cancel_download_attempt(&self, job_id: emulebb_metadata::JobId) -> bool {
-        self.download_attempts.cancel(job_id)
     }
 
     /// Dead-list every FNF-answering source for `file_hash` for the oracle
@@ -7102,8 +7089,6 @@ fn ed2k_download_state_without_sources(file_size: u64) -> &'static str {
 /// each resumed download so a big backlog does not thunder-herd the state lock /
 /// source coordinator and starve REST (a 39-download all-at-once resume wedged the
 /// control plane in a live test).
-const RESUME_DOWNLOADS_INITIAL_DELAY_SECS: u64 = 20;
-const RESUME_DOWNLOADS_STAGGER_MS: u64 = 1500;
 /// Parse a REST-surface IP string (the `Upload.address` / `DownloadSource.ip`
 /// fields) into an `Ipv4Addr` for the ban store. Returns `None` when the value
 /// is empty or not a dialable IPv4 (e.g. a LowID client-id), so the ban falls

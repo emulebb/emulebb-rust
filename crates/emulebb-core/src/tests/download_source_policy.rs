@@ -813,7 +813,12 @@ fn manifest_progress_includes_hashset_and_partial_piece_bytes() {
         job_id: emulebb_metadata::JobId::new(1).unwrap(),
         generation: 0,
     };
-    let job = new_transfer_job(token, file_hash, "partial.bin".to_string(), 4096);
+    let job = emulebb_ed2k::ed2k_transfer::new_transfer_job(
+        token,
+        file_hash,
+        "partial.bin".to_string(),
+        4096,
+    );
     let mut manifest = Ed2kResumeManifest::new(&job);
     assert!(!manifest_has_ed2k_transfer_progress(&manifest));
 
