@@ -620,6 +620,11 @@ impl Ed2kTransferRuntime {
         let mut current = self.local_mutations.residents.copy_manifest(manifest)?;
         let current_value = current.try_mut()?;
         current_value.category_id = job.category_id;
+        current_value.display_name = job.display_name.clone();
+        anyhow::ensure!(
+            job.expected_size_bytes == Some(current_value.file_size),
+            super::LocalMutationError::Unknown
+        );
         if let Some(persisted) = cache
             .get(&token.job_id)
             .filter(|value| value.token == token)

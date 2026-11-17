@@ -2,6 +2,16 @@ use serde::Deserialize;
 
 use crate::rest_model::NullableStringField;
 
+/// Omission is represented by the field default; an explicit value must have
+/// its declared non-null type.
+pub(crate) fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 pub(crate) fn deserialize_nullable_string_field<'de, D>(
     deserializer: D,
 ) -> std::result::Result<NullableStringField, D::Error>

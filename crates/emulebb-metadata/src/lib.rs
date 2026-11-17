@@ -23,8 +23,12 @@ pub use download_job_query::{
 };
 mod download_browse_store;
 mod download_job_store;
+mod download_patch_store;
 pub use download_browse_store::{
     MetadataDownloadDetail, MetadataDownloadPart, MetadataDownloadPartPage,
+};
+pub use download_patch_store::{
+    DownloadPatchError, MetadataDownloadPatch, MetadataDownloadPatched,
 };
 mod download_payload_store;
 mod download_peer_store;

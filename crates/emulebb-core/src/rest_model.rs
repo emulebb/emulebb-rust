@@ -889,6 +889,29 @@ pub enum DownloadCreateSource {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DownloadUpdate {
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub name: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_category",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub category: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransferUpdate {
     #[serde(default)]
     #[serde(rename = "displayName")]

@@ -127,6 +127,8 @@ mod discovery_fetch;
 mod disk_guard;
 mod download_attempts;
 mod download_controls;
+mod download_patch_api;
+pub use emulebb_metadata::DownloadPatchError;
 mod download_maintenance;
 mod download_scheduler;
 mod download_selection;
@@ -325,10 +327,10 @@ pub use emulebb_settings::{
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadCreate,
     DownloadCreateSource, DownloadFileNameObservation, DownloadSource, DownloadSourceMetrics,
-    Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus, IpFilterStatus,
-    KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField, Search,
-    SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate, SearchResultMedia,
-    SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
+    DownloadUpdate, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus,
+    IpFilterStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
+    Search, SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate,
+    SearchResultMedia, SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
     SharedFileKadKeywordPublish, SharedFileListCursor, SharedFileListItem, SharedFileListPage,
     SharedFileListQuery, SharedFilePublicationStatus, SharedFilePublishLane,
     SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferDetails,

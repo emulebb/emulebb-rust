@@ -5,6 +5,9 @@ use emulebb_metadata::{JobId, JobToken};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard};
 
+mod download_patch;
+pub use download_patch::{DownloadPatchFence, PreparedDownloadPatch};
+
 /// Retained by the existing async owner until its Core state publication ends.
 /// The blocking DB command holds a clone across SQL and cache publication.
 #[derive(Clone)]
@@ -55,8 +58,11 @@ impl Ed2kTransferRuntime {
             category_id.is_none_or(|id| id > 0),
             "category ID must be positive"
         );
-        self.prepare_category_cache(|manifest| manifest.token.job_id == job_id, category_id)
-            .await
+        self.prepare_category_cache(
+            |manifest| manifest.token.job_id == job_id && manifest.category_id != category_id,
+            category_id,
+        )
+        .await
     }
 
     /// Prepare every currently resident member before deleting a category.
@@ -78,19 +84,13 @@ impl Ed2kTransferRuntime {
             .write_owned()
             .await;
         let cache = self.manifest_cache.lock().await;
-        let count = cache
-            .values()
-            .filter(|manifest| selected(manifest) && manifest.category_id != category_id)
-            .count();
+        let count = cache.values().filter(|manifest| selected(manifest)).count();
         ensure!(
             count <= super::resident::MAX_JOBS,
             LocalMutationError::TooLarge
         );
         let mut entries = Vec::with_capacity(count);
-        for current in cache
-            .values()
-            .filter(|manifest| selected(manifest) && manifest.category_id != category_id)
-        {
+        for current in cache.values().filter(|manifest| selected(manifest)) {
             entries.push((
                 current.token,
                 self.local_mutations
