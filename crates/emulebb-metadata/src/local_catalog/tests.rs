@@ -316,7 +316,50 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         .unwrap()
         .unwrap();
     assert!(second_copy.path_id > first_copy.path_id);
+    let locations = store
+        .library_locations(&hash, 50_000, 2, crate::LIBRARY_READ_MAX_BYTES)
+        .unwrap()
+        .unwrap();
+    assert_eq!(locations.locations.len(), 2);
+    assert_eq!(locations.locations[0].path_id, 50_001);
+    assert_eq!(locations.next_after, Some(50_002));
+    assert!(
+        locations
+            .locations
+            .iter()
+            .all(|p| p.verified_in_session && p.root_accessible)
+    );
     let conn = store.connection().unwrap();
+    // A one-row root table legitimately favors SCAN. Populate unrelated roots
+    // before qualifying seeks, so this checks growing roots as well as copies.
+    conn.execute_batch(
+        "INSERT INTO shared_directory_roots(id,path_id,created_at_ms)
+        SELECT id+1,id+1,0 FROM known_files WHERE id<=32;
+        ANALYZE shared_directory_roots;",
+    )
+    .unwrap();
+    let sql = format!(
+        "EXPLAIN QUERY PLAN {}",
+        crate::library_read_store::LOCATION_PAGE_SQL
+    );
+    let mut explain = conn.prepare(&sql).unwrap();
+    let plan = explain
+        .query_map(params![1, 50_000, 3], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|p| p.contains("SEARCH i")
+            && p.contains("local_file_instances_content_idx")
+            && p.contains("rowid>")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|p| !p.contains("TEMP B-TREE") && !p.starts_with("SCAN")),
+        "{plan:?}"
+    );
+    drop(explain);
     let query = format!("EXPLAIN QUERY PLAN {}", super::VERIFIED_SHARE_EXISTS_SQL);
     let mut query_plan = conn.prepare(&query).unwrap();
     let eligibility_plan = query_plan
