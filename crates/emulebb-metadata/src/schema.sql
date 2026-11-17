@@ -1004,36 +1004,72 @@ CREATE TABLE library_catalog_revision (
 ) STRICT;
 INSERT INTO library_catalog_revision VALUES(1, 0);
 
+-- One latest physical-catalog change per content identity, not an event log.
+-- Tombstones notify connection-local projections after a content row is deleted.
+CREATE TABLE library_catalog_changes (
+    known_file_id INTEGER PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK(revision >= 0)
+) STRICT;
+CREATE INDEX library_catalog_changes_revision_idx
+    ON library_catalog_changes(revision, known_file_id);
+CREATE TRIGGER library_catalog_revision_rollover AFTER UPDATE ON library_catalog_revision
+WHEN new.revision < old.revision
+BEGIN
+    UPDATE library_catalog_changes SET revision = new.revision;
+END;
+
+
+
 CREATE TRIGGER library_catalog_local_file_instances_insert
 AFTER INSERT ON local_file_instances
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT new.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_local_file_instances_delete
 AFTER DELETE ON local_file_instances
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT old.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_local_file_instances_update
-AFTER UPDATE OF known_file_id, verified_fingerprint, native_identity, secondary_identity ON local_file_instances
-WHEN old.known_file_id IS NOT new.known_file_id OR old.verified_fingerprint IS NOT new.verified_fingerprint
+AFTER UPDATE OF path_id, known_file_id, verified_fingerprint, native_identity, secondary_identity ON local_file_instances
+WHEN old.path_id IS NOT new.path_id OR old.known_file_id IS NOT new.known_file_id OR old.verified_fingerprint IS NOT new.verified_fingerprint
   OR old.native_identity IS NOT new.native_identity OR old.secondary_identity IS NOT new.secondary_identity
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT old.known_file_id AS known_file_id UNION SELECT new.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_shared_file_memberships_insert
 AFTER INSERT ON shared_file_memberships
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT new.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_shared_file_memberships_delete
 AFTER DELETE ON shared_file_memberships
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT old.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_shared_file_memberships_update
@@ -1041,6 +1077,10 @@ AFTER UPDATE OF root_id, path_id, removed_at_ms ON shared_file_memberships
 WHEN old.root_id IS NOT new.root_id OR old.path_id IS NOT new.path_id OR old.removed_at_ms IS NOT new.removed_at_ms
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT old.known_file_id AS known_file_id UNION SELECT new.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_shared_directory_roots_update
@@ -1048,6 +1088,10 @@ AFTER UPDATE OF enabled, accessible, shareable, deleted_at_ms ON shared_director
 WHEN old.enabled IS NOT new.enabled OR old.accessible IS NOT new.accessible OR old.shareable IS NOT new.shareable OR old.deleted_at_ms IS NOT new.deleted_at_ms
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT known_file_id FROM shared_file_memberships WHERE root_id = new.id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_local_paths_update
@@ -1055,6 +1099,10 @@ AFTER UPDATE OF sort_key, file_name_search_key, platform, native_path ON local_p
 WHEN old.sort_key IS NOT new.sort_key OR old.file_name_search_key IS NOT new.file_name_search_key OR old.platform IS NOT new.platform OR old.native_path IS NOT new.native_path
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT known_file_id FROM local_file_instances WHERE path_id IN (old.id, new.id)) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_known_files_update
@@ -1062,6 +1110,10 @@ AFTER UPDATE OF ed2k_hash, sharing_enabled ON known_files
 WHEN old.ed2k_hash IS NOT new.ed2k_hash OR old.sharing_enabled IS NOT new.sharing_enabled
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT new.id AS known_file_id WHERE old.ed2k_hash IS NOT new.ed2k_hash) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_tags_insert AFTER INSERT ON library_tags
@@ -1085,12 +1137,20 @@ CREATE TRIGGER library_catalog_verified_local_content_insert
 AFTER INSERT ON verified_local_content
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT new.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_verified_local_content_delete
 AFTER DELETE ON verified_local_content
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT old.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_verified_local_content_update
@@ -1098,6 +1158,10 @@ AFTER UPDATE OF known_file_id ON verified_local_content
 WHEN old.known_file_id IS NOT new.known_file_id
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT old.known_file_id AS known_file_id UNION SELECT new.known_file_id AS known_file_id) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 -- Reservation identity changes affect eligibility before membership withdrawal.
@@ -1105,12 +1169,20 @@ CREATE TRIGGER library_catalog_delivery_exclusions_insert
 AFTER INSERT ON download_delivery_exclusions
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT known_file_id FROM local_file_instances WHERE native_identity IN (new.output_identity,new.secondary_identity) OR secondary_identity IN (new.output_identity,new.secondary_identity)) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_delivery_exclusions_delete
 AFTER DELETE ON download_delivery_exclusions
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT known_file_id FROM local_file_instances WHERE native_identity IN (old.output_identity,old.secondary_identity) OR secondary_identity IN (old.output_identity,old.secondary_identity)) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
 
 CREATE TRIGGER library_catalog_delivery_exclusions_update
@@ -1119,4 +1191,16 @@ WHEN old.platform IS NOT new.platform OR old.native_path IS NOT new.native_path
   OR old.output_identity IS NOT new.output_identity OR old.secondary_identity IS NOT new.secondary_identity
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT affected.known_file_id, clock.revision FROM (SELECT known_file_id FROM local_file_instances WHERE native_identity IN (old.output_identity,old.secondary_identity) OR secondary_identity IN (old.output_identity,old.secondary_identity) UNION SELECT known_file_id FROM local_file_instances WHERE native_identity IN (new.output_identity,new.secondary_identity) OR secondary_identity IN (new.output_identity,new.secondary_identity)) affected
+    CROSS JOIN library_catalog_revision clock WHERE clock.id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
+END;
+
+CREATE TRIGGER library_catalog_known_files_delete AFTER DELETE ON known_files
+BEGIN
+    UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
+    INSERT INTO library_catalog_changes(known_file_id, revision)
+    SELECT old.id, revision FROM library_catalog_revision WHERE id = 1
+    ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
