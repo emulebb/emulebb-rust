@@ -1,4 +1,13 @@
 use super::*;
+use emulebb_metadata::DownloadIntent;
+fn link_download(link: &str, intent: DownloadIntent) -> DownloadCreate {
+    DownloadCreate {
+        source: DownloadCreateSource::Ed2kLink { link: link.into() },
+        category: None,
+        intent,
+        redownload: false,
+    }
+}
 
 #[tokio::test]
 async fn retained_category_entry_wakes_the_real_server_publish_pump() {
@@ -261,58 +270,53 @@ async fn category_keep_publish_snapshot(core: &EmulebbCore) -> String {
 }
 
 #[tokio::test]
-async fn transfer_details_refresh_verified_parts_without_a_state_change() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-details-verified-parts");
+async fn download_headers_and_part_projection_observe_verified_data() {
+    let root = unique_runtime_dir("core-verified-parts");
     let core = EmulebbCore::new(
         "test",
         FileIndex::in_memory().unwrap(),
-        runtime_dir.join("transfers"),
+        root.join("transfers"),
     )
     .unwrap();
     let part = vec![0x35; emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE as usize];
     let tail = b"tail";
     let hashset: Vec<[u8; 16]> = vec![Md4::digest(&part).into(), Md4::digest(tail).into()];
     let hash = Ed2kHash::from_bytes(Md4::digest(hashset.concat()).into()).to_string();
-    let size = part.len() + tail.len();
-    core.create_transfer(TransferCreate {
-        known_file_policy: KnownFilePolicy::Reject,
-        link: Some(format!("ed2k://|file|Sample.Parts.bin|{size}|{hash}|/")),
-        links: None,
-        category_id: None,
-        category_name: None,
-        paused: Some(true),
-    })
-    .await
-    .unwrap();
-    {
-        let mut state = core.state.lock().await;
-        let cached = state.transfers.get_mut(&hash).unwrap();
-        assert_eq!(cached.parts_obtained, 0);
-        cached.priority = "high".to_string();
-        cached.category_id = Some(7);
-        cached.category_name = Some("Sample-Category".to_string());
-    }
-    core.ed2k_transfers
-        .store_md4_hashset(&hash, hashset)
+    let (_, download) = core
+        .create_download(link_download(
+            &format!(
+                "ed2k://|file|Sample.Parts.bin|{}|{hash}|/",
+                part.len() + tail.len()
+            ),
+            DownloadIntent::Started,
+        ))
         .await
         .unwrap();
-    core.ed2k_transfers
-        .store_piece_data(&hash, 0, &part)
-        .await
-        .unwrap();
-    let details = core.transfer_details(&hash).await.unwrap().unwrap();
-    assert!(details.parts[0].complete);
-    assert!(!details.parts[1].complete);
-    assert_eq!(details.transfer.parts_obtained, 1);
-    assert_eq!(details.transfer.parts_progress_text, "#0");
-    assert_eq!(details.transfer.completed_bytes, part.len() as u64);
-    assert_eq!(details.transfer.state, "paused");
-    assert_eq!(details.transfer.priority, "high");
-    assert_eq!(details.transfer.category_id, Some(7));
-    assert_eq!(
-        details.transfer.category_name.as_deref(),
-        Some("Sample-Category")
+    let id = download.id;
+    drop(download);
+    let (_guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
+    let token = transfer.job_token();
+    drop(
+        core.ed2k_transfers
+            .store_md4_hashset(token, hashset)
+            .await
+            .unwrap(),
     );
+    core.ed2k_transfers
+        .store_piece_data(token, 0, &part)
+        .await
+        .unwrap();
+    let page = core.download_page(Default::default()).await.unwrap();
+    assert_eq!(page.downloads[0].id, id);
+    assert_eq!(
+        page.downloads[0].progress,
+        Some(part.len() as f64 / (part.len() + tail.len()) as f64)
+    );
+    drop(page);
+    let manifest = core.ed2k_transfers.manifest(token).await.unwrap();
+    let parts = crate::views::transfer_parts_from_manifest(&manifest, &[], &Default::default());
+    assert!(parts[0].complete);
+    assert!(!parts[1].complete);
 }
 
 #[test]
@@ -363,10 +367,10 @@ fn exact_ed2k_hash_queries_use_configured_server_budget() {
 }
 
 #[test]
-fn select_ed2k_keyword_metadata_prefers_exact_hash_with_size_and_name() {
+fn select_ed2k_download_size_prefers_exact_hash_with_size() {
     let exact_hash = Ed2kHash::from_bytes([0x44; 16]);
     let other_hash = Ed2kHash::from_bytes([0xAA; 16]);
-    let metadata = select_ed2k_keyword_metadata(
+    let metadata = select_ed2k_download_size(
         &[
             Ed2kSearchFile {
                 file_hash: exact_hash,
@@ -430,14 +434,13 @@ fn select_ed2k_keyword_metadata_prefers_exact_hash_with_size_and_name() {
     )
     .unwrap();
 
-    assert_eq!(metadata.display_name.as_deref(), Some("resolved.bin"));
-    assert_eq!(metadata.file_size, Some(4_294_967_299));
+    assert_eq!(metadata, 4_294_967_299);
 }
 
 #[test]
 fn kad_search_result_exposes_exact_hash_metadata() {
     let exact_hash = Ed2kHash::from_bytes([0x44; 16]);
-    let metadata = select_kad_keyword_metadata(
+    let metadata = select_kad_download_size(
         &KadSearchResult {
             hash: exact_hash,
             names: vec!["resolved.bin".to_string()],
@@ -457,12 +460,11 @@ fn kad_search_result_exposes_exact_hash_metadata() {
     )
     .unwrap();
 
-    assert_eq!(metadata.display_name.as_deref(), Some("resolved.bin"));
-    assert_eq!(metadata.file_size, Some(5_000));
+    assert_eq!(metadata, 5_000);
 }
 
 #[tokio::test]
-async fn download_search_result_creates_transfer() {
+async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
     let runtime_dir = unique_runtime_dir("emulebb-core-download-passive-search-result");
     let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     index
@@ -498,7 +500,15 @@ async fn download_search_result_creates_transfer() {
         .await
         .unwrap();
 
-    let transfer = core
+    core.state
+        .lock()
+        .await
+        .searches
+        .get_mut(&search.id)
+        .unwrap()
+        .results[0]
+        .aich_hash = hex::encode([0xcd; 20]);
+    let (created, download) = core
         .download_search_result(
             &search.id,
             "00112233445566778899aabbccddeeff",
@@ -507,26 +517,39 @@ async fn download_search_result_creates_transfer() {
         .await
         .unwrap()
         .unwrap();
-    // A non-paused download starts immediately (eMule/aMule parity).
-    assert_eq!(transfer.state, "downloading");
-    assert_eq!(transfer.name, "Download.Me.bin");
-    assert_eq!(transfer.name_consensus.observation_count, 1);
-    let manifest = core
+    assert!(created);
+    assert_eq!(download.state, DownloadState::Queued);
+    assert_eq!(download.name, "Download.Me.bin");
+    let id = download.id;
+    drop(download);
+    let job = core.ed2k_transfers.download_job(id).await.unwrap().unwrap();
+    assert!(job.storage.is_none());
+    let token = job.token;
+    drop(job);
+    let observations = core
         .ed2k_transfers
-        .manifest("00112233445566778899aabbccddeeff")
+        .download_names_after(token, 0, 16)
         .await
         .unwrap();
-    assert_eq!(manifest.file_name_observations.len(), 1);
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].observation.raw_name, "Download.Me.bin");
     assert_eq!(
-        manifest.file_name_observations[0].raw_name,
+        observations[0].observation.normalized_name,
         "Download.Me.bin"
     );
-    assert_eq!(
-        manifest.file_name_observations[0].normalized_name,
-        "Download.Me.bin"
+    assert_eq!(observations[0].observation.origin, "passive_cache");
+    assert_eq!(observations[0].observation.source_ip, None);
+    drop(observations);
+    let (_guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
+    assert!(
+        core.ed2k_transfers
+            .manifest(transfer.job_token())
+            .await
+            .unwrap()
+            .aich_root
+            .is_none(),
+        "cached AICH metadata must not become a live trust vote"
     );
-    assert_eq!(manifest.file_name_observations[0].origin, "passive_cache");
-    assert_eq!(manifest.file_name_observations[0].source_ip, None);
 }
 
 #[tokio::test]
@@ -571,7 +594,13 @@ async fn download_search_result_rejects_missing_file_size() {
         .unwrap_err();
 
     assert_eq!(error.to_string(), "search result has no usable file size");
-    assert!(core.transfer(file_hash).await.unwrap().is_none());
+    assert!(
+        core.download_page(Default::default())
+            .await
+            .unwrap()
+            .downloads
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -620,13 +649,21 @@ async fn download_search_result_replays_live_kad_aich_observations() {
         .lock()
         .await
         .kad_aich_search_votes
-        .insert((search.id.clone(), file_hash.to_string()), votes);
+        .insert((file_hash.to_string(), search.id.clone()), votes);
 
-    core.download_search_result(&search.id, file_hash, SearchResultDownloadCreate::default())
+    let (_, download) = core
+        .download_search_result(&search.id, file_hash, SearchResultDownloadCreate::default())
         .await
         .unwrap()
-        .expect("transfer");
-    let manifest = core.ed2k_transfers.manifest(file_hash).await.unwrap();
+        .unwrap();
+    let id = download.id;
+    drop(download);
+    let (_guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
+    let manifest = core
+        .ed2k_transfers
+        .manifest(transfer.job_token())
+        .await
+        .unwrap();
     assert_eq!(
         manifest.aich_root.as_deref(),
         Some(hex::encode(root).as_str())
@@ -634,188 +671,96 @@ async fn download_search_result_replays_live_kad_aich_observations() {
 }
 
 #[tokio::test]
-async fn create_transfer_uses_canonical_link_and_paused_state() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-paused-transfer-create");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
-    let core = EmulebbCore::new(
-        "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
-    )
-    .unwrap();
-
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: KnownFilePolicy::Redownload,
-            link: Some(
-                "ed2k://|file|Paused.Create.bin|4096|00112233445566778899aabbccddeeff|/"
-                    .to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
+async fn creation_decodes_chosen_name_and_preserves_stopped_intent_without_storage() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let (created, download) = core
+        .create_download(link_download(
+            "ed2k://|file|Sample%20Name.bin|4096|00112233445566778899aabbccddeeff|/",
+            DownloadIntent::Stopped,
+        ))
         .await
         .unwrap();
-
-    assert_eq!(transfer.state, "paused");
-    let reloaded = EmulebbCore::new(
-        "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
-    )
-    .unwrap();
-    assert_eq!(
-        reloaded
-            .transfer("00112233445566778899aabbccddeeff")
+    assert!(created);
+    assert_eq!(download.name, "Sample Name.bin");
+    assert_eq!(download.state, DownloadState::Stopped);
+    assert_eq!(download.size_bytes, Some(4096));
+    let id = download.id;
+    drop(download);
+    assert!(
+        core.ed2k_transfers
+            .download_job(id)
             .await
             .unwrap()
             .unwrap()
-            .state,
-        "paused"
+            .storage
+            .is_none()
     );
 }
 
 #[tokio::test]
-async fn create_transfer_persists_and_emits_link_aich_root() {
+async fn operator_link_aich_root_survives_lazy_creation_and_selection() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let hash = "00112233445566778899aabbccddeeff";
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: KnownFilePolicy::Redownload,
-            link: Some(format!(
-                "ed2k://|file|Aich.bin|4096|{hash}|h=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/"
-            )),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
+    let root = hex::encode([0xab; 20]);
+    let link = format_ed2k_file_link(
+        "Sample.bin",
+        4096,
+        "00112233445566778899aabbccddeeff",
+        Some(&root),
+    );
+    let (_, download) = core
+        .create_download(link_download(&link, DownloadIntent::Started))
         .await
         .unwrap();
-
+    let id = download.id;
+    drop(download);
+    let (_guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
     assert_eq!(
         core.ed2k_transfers
-            .manifest(hash)
+            .manifest(transfer.job_token())
             .await
             .unwrap()
             .aich_root
             .as_deref(),
-        Some("0000000000000000000000000000000000000000")
-    );
-    assert!(
-        transfer
-            .ed2k_link
-            .contains("|h=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/")
+        Some(root.as_str())
     );
 }
 
 #[tokio::test]
-async fn transfer_events_publish_add_update_and_remove() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let mut events = core.subscribe_transfer_events();
-
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Event.Stream.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    let added = events.recv().await.unwrap();
-    assert_eq!(added.id(), 1);
-    assert_eq!(added.event_type(), TransferEventType::Added);
-    match added {
-        TransferEvent::Added {
-            transfer: event_transfer,
-            ..
-        } => assert_eq!(event_transfer.hash, transfer.hash),
-        other => panic!("expected transfer.added event, got {other:?}"),
-    }
-
-    let updated = core
-        .update_transfer(
-            &transfer.hash,
-            TransferUpdate {
-                name: None,
-                priority: Some("high".to_string()),
-                category_id: None,
-                category_name: None,
-            },
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let event = events.recv().await.unwrap();
-    assert_eq!(event.id(), 2);
-    assert_eq!(event.event_type(), TransferEventType::Updated);
-    match event {
-        TransferEvent::Updated {
-            transfer: event_transfer,
-            ..
-        } => assert_eq!(event_transfer.priority, updated.priority),
-        other => panic!("expected transfer.updated event, got {other:?}"),
-    }
-
-    let deleted = core
-        .delete_transfer_files(&transfer.hash)
-        .await
-        .unwrap()
-        .unwrap();
-    let event = events.recv().await.unwrap();
-    assert_eq!(event.id(), 3);
-    assert_eq!(event.event_type(), TransferEventType::Removed);
-    match event {
-        TransferEvent::Removed { hash, .. } => assert_eq!(hash, deleted.hash),
-        other => panic!("expected transfer.removed event, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn create_transfer_remembers_ed2k_link_source_hints() {
+async fn creation_retains_initial_hints_and_later_source_comments() {
     let runtime_dir = unique_runtime_dir("emulebb-core-create-transfer-source-hints");
     let transfer_root = runtime_dir.join("transfers");
     let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
 
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Seeded.Link.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bad-source,192.0.2.10:4662,192.0.2.11:0|/"
-                    .to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-
+    let (_,download)=core.create_download(link_download(
+        "ed2k://|file|Seeded.Link.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bad-source,192.0.2.10:4662,192.0.2.11:0|/",
+        DownloadIntent::Stopped)).await.unwrap();
+    let id = download.id;
+    drop(download);
     let sources = core
-        .transfer_sources(&transfer.hash)
+        .download_sources_page(id, 0, 100)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].address, "192.0.2.10");
-    assert_eq!(sources[0].port, 4662);
+    assert_eq!(sources.sources.len(), 1);
+    assert_eq!(sources.sources[0].address, "192.0.2.10");
+    assert_eq!(sources.sources[0].port, 4662);
     assert_eq!(
-        sources[0].user_hash.as_deref(),
+        sources.sources[0].user_hash.as_deref(),
         Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
 
+    drop(sources);
+    core.start_download(id).await.unwrap();
+    let token = core
+        .ed2k_transfers
+        .download_job(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
     core.ed2k_transfers
         .remember_source_file_description(
-            &transfer.hash,
+            token,
             Ed2kSourceHint {
                 ip: "192.0.2.10".to_string(),
                 tcp_port: 4662,
@@ -828,566 +773,372 @@ async fn create_transfer_remembers_ed2k_link_source_hints() {
         .await
         .unwrap();
     let comments = core
-        .transfer_comments(&transfer.hash)
+        .download_comments_page(id, 0, 100)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(comments.len(), 1);
-    assert_eq!(comments[0].source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    assert_eq!(comments[0].file_name, "Seeded.Link.bin");
-    assert_eq!(comments[0].comment, "trusted release");
-    assert_eq!(comments[0].rating, 5);
-}
-
-#[tokio::test]
-async fn active_duplicate_rejects_batch_before_any_new_transfer_is_created() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let active_hash = "00112233445566778899aabbccddeeff";
-    let new_hash = "11112222333344445555666677778888";
-    core.create_transfer(TransferCreate {
-        known_file_policy: KnownFilePolicy::Reject,
-        link: Some(format!("ed2k://|file|Active.bin|4096|{active_hash}|/")),
-        links: None,
-        category_id: None,
-        category_name: None,
-        paused: Some(true),
-    })
-    .await
-    .unwrap();
-
-    let error = core
-        .create_transfers(TransferCreate {
-            known_file_policy: KnownFilePolicy::Reject,
-            link: None,
-            links: Some(vec![
-                format!("ed2k://|file|New.bin|4096|{new_hash}|/"),
-                format!("ed2k://|file|Active.bin|4096|{active_hash}|/"),
-            ]),
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap_err();
-    let conflict = error.downcast_ref::<DownloadConflictError>().unwrap();
-    assert!(conflict.conflicts.iter().any(|item| {
-        item.kind == DownloadConflictKind::ActiveTransfer && !item.redownload_allowed
-    }));
-    assert!(core.transfer(new_hash).await.unwrap().is_none());
-
-    let override_error = core
-        .create_transfer(TransferCreate {
-            known_file_policy: KnownFilePolicy::Redownload,
-            link: Some(format!("ed2k://|file|Active.bin|4096|{active_hash}|/")),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap_err();
+    assert_eq!(comments.comments.len(), 1);
     assert_eq!(
-        override_error
-            .downcast_ref::<DownloadConflictError>()
-            .unwrap()
-            .conflicts[0]
-            .kind,
-        DownloadConflictKind::ActiveTransfer
+        comments.comments[0].source,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     );
+    assert_eq!(comments.comments[0].file_name, "Seeded.Link.bin");
+    assert_eq!(comments.comments[0].comment, "trusted release");
+    assert_eq!(comments.comments[0].rating, 5);
 }
 
 #[tokio::test]
-async fn removed_completed_download_requires_explicit_redownload_without_stale_path() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-historical-redownload");
-    let transfer_root = runtime_dir.join("transfers");
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
-    let payload = b"historical completed payload".repeat(64);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    let link = format!(
-        "ed2k://|file|Historical.bin|{}|{}|/",
-        payload.len(),
-        file_hash
-    );
-    core.create_transfer(TransferCreate {
-        known_file_policy: KnownFilePolicy::Reject,
-        link: Some(link.clone()),
-        links: None,
-        category_id: None,
-        category_name: None,
-        paused: Some(true),
-    })
-    .await
-    .unwrap();
-    core.ed2k_transfers
-        .store_md4_hashset(&file_hash, Vec::new())
-        .await
-        .unwrap();
-    core.ed2k_transfers
-        .store_piece_data(&file_hash, 0, &payload)
-        .await
-        .unwrap();
-    core.refresh_transfer_from_manifest_default(&file_hash)
-        .await
-        .unwrap();
-    assert!(
-        core.ed2k_transfers
-            .manifest(&file_hash)
-            .await
-            .unwrap()
-            .completed
-    );
-    core.delete_transfer_files(&file_hash)
-        .await
-        .unwrap()
-        .unwrap();
-
-    let error = core
-        .create_transfer(TransferCreate {
-            known_file_policy: KnownFilePolicy::Reject,
-            link: Some(link.clone()),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap_err();
-    let conflict = error.downcast_ref::<DownloadConflictError>().unwrap();
-    let history = conflict
-        .conflicts
-        .iter()
-        .find(|item| item.kind == DownloadConflictKind::PreviouslyCompleted)
-        .unwrap();
-    assert!(history.current_paths.is_empty());
-    assert!(history.first_completed_at_ms.is_some());
-    assert!(history.last_completed_at_ms.is_some());
-    assert!(history.redownload_allowed);
-    assert!(core.transfer(&file_hash).await.unwrap().is_none());
-
-    let redownload = core
-        .create_transfer(TransferCreate {
-            known_file_policy: KnownFilePolicy::Redownload,
-            link: Some(link),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    assert_eq!(redownload.hash, file_hash);
-    assert_eq!(redownload.state, "paused");
-    assert_eq!(redownload.completed_bytes, 0);
-}
-
-#[test]
-fn transfer_create_rejects_legacy_ed2k_link_field() {
-    let error = serde_json::from_str::<TransferCreate>(
-        r#"{"ed2kLink":"ed2k://|file|Legacy.bin|1|00112233445566778899aabbccddeeff|/"}"#,
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("unknown field `ed2kLink`"));
-}
-
-#[test]
-fn category_selector_rejects_non_string_name() {
-    let request = serde_json::from_str::<TransferCreate>(
-        r#"{"link":"ed2k://|file|Selector.bin|1|00112233445566778899aabbccddeeff|/","category":1}"#,
-    );
-    assert!(request.is_err());
-}
-
-#[tokio::test]
-async fn delete_transfer_files_removes_manifest_and_transfer_row() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-delete-transfer-files");
-    let transfer_root = runtime_dir.join("transfers");
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Delete.Me.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    let transfer_dir = transfer_root.join(&transfer.hash);
-    assert!(transfer_dir.is_dir());
-
-    let deleted = core
-        .delete_transfer_files(&transfer.hash)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(deleted.hash, transfer.hash);
-    assert!(!transfer_dir.exists());
-    assert!(core.transfer(&transfer.hash).await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn completed_delivery_retires_transfer_without_deleting_local_file() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-delete-delivered-transfer");
-    let transfer_root = runtime_dir.join("transfers");
-    let incoming_dir = runtime_dir.join("incoming");
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
-        .unwrap()
-        .with_incoming_dir(incoming_dir.clone());
-    let payload = b"completed delivered download payload".repeat(64);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    core.create_transfer(TransferCreate {
-        known_file_policy: Default::default(),
-        link: Some(format!(
-            "ed2k://|file|Delivered.Delete.bin|{}|{}|/",
-            payload.len(),
-            file_hash
-        )),
-        links: None,
-        category_id: None,
-        category_name: None,
-        paused: Some(true),
-    })
-    .await
-    .unwrap();
-
-    core.ed2k_transfers
-        .store_md4_hashset(&file_hash, Vec::new())
-        .await
-        .unwrap();
-    core.ed2k_transfers
-        .store_piece_data(&file_hash, 0, &payload)
-        .await
-        .unwrap();
-    let awaiting_delivery = core
-        .refresh_transfer_from_manifest_default(&file_hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(awaiting_delivery.state, "completing");
-    core.deliver_completed_transfer(&file_hash).await;
-    assert!(core.transfer(&file_hash).await.unwrap().is_none());
-    assert!(core.share(&file_hash).await.is_some());
-    let delivered_path = incoming_dir.join("Delivered.Delete.bin");
-    assert_eq!(std::fs::read(&delivered_path).unwrap(), payload);
-    assert!(core.ed2k_transfers.manifest(&file_hash).await.is_err());
-    assert!(!transfer_root.join(&file_hash).exists());
-
-    assert!(
-        core.delete_completed_transfer_row(&file_hash)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        delivered_path.exists(),
-        "row-only completed transfer removal must preserve the delivered file"
-    );
-
-    assert!(
-        core.delete_transfer_files(&file_hash)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        delivered_path.exists(),
-        "retired download actions must not delete local shared content"
-    );
-    assert!(core.transfer(&file_hash).await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn completed_download_is_history_only_after_restart() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-persisted-completed-list");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
-    let incoming_dir = runtime_dir.join("incoming");
-    let payload = b"persisted completed transfer payload".repeat(32);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    {
-        let core = EmulebbCore::new(
-            "test",
-            FileIndex::open(&metadata_path).unwrap(),
-            &transfer_root,
-        )
-        .unwrap()
-        .with_incoming_dir(incoming_dir.clone());
-        core.create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(format!(
-                "ed2k://|file|Persisted.Completed.bin|{}|{}|/",
-                payload.len(),
-                file_hash
-            )),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-        core.ed2k_transfers
-            .store_md4_hashset(&file_hash, Vec::new())
-            .await
-            .unwrap();
-        core.ed2k_transfers
-            .store_piece_data(&file_hash, 0, &payload)
-            .await
-            .unwrap();
-        core.deliver_completed_transfer(&file_hash).await;
-        assert!(core.transfer(&file_hash).await.unwrap().is_none());
-    }
-
-    let reloaded = EmulebbCore::new(
+async fn confirmed_absent_completed_content_can_create_a_new_job_without_resetting_history() {
+    let root = unique_runtime_dir("core-absent-history");
+    let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::in_memory().unwrap(),
+        root.join("transfers"),
     )
-    .unwrap()
-    .with_incoming_dir(incoming_dir.clone());
-    assert!(reloaded.transfers().await.unwrap().is_empty());
-    let evidence = reloaded
-        .ed2k_transfers
-        .download_evidence(&file_hash)
+    .unwrap();
+    let payload = b"completed payload";
+    let token = ready_download_for_delivery(&core, &root, "Historical.bin", payload).await;
+    assert!(core.deliver_completed_download(token).await.unwrap());
+    std::fs::remove_file(root.join("seed-Historical.bin")).unwrap();
+    assert_eq!(
+        core.remove_download(token.job_id, true).await.unwrap(),
+        DownloadChange::Changed
+    );
+    core.maintain_download_cleanup().await.unwrap();
+    let hash = Ed2kHash::from_bytes(Md4::digest(payload).into()).to_string();
+    let (created, download) = core
+        .create_download(link_download(
+            &format!("ed2k://|file|Historical.bin|{}|{hash}|/", payload.len()),
+            DownloadIntent::Stopped,
+        ))
         .await
         .unwrap();
+    assert!(created);
+    assert_ne!(download.id, token.job_id);
+    assert_eq!(download.progress, Some(0.0));
+    let evidence = core.ed2k_transfers.download_evidence(&hash).await.unwrap();
     assert!(evidence.previously_completed.is_some());
-    assert_eq!(evidence.current_local_files.len(), 1);
+}
 
-    let clear_without_prior_lookup = EmulebbCore::new(
-        "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
-    )
-    .unwrap()
-    .with_incoming_dir(incoming_dir.clone());
-    clear_without_prior_lookup
-        .clear_completed_transfer_rows()
-        .await
-        .unwrap();
-
-    assert!(
-        clear_without_prior_lookup
-            .transfers()
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(incoming_dir.join("Persisted.Completed.bin").exists());
-    let final_reload = EmulebbCore::new(
-        "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
-    )
-    .unwrap()
-    .with_incoming_dir(incoming_dir);
-    assert!(final_reload.transfers().await.unwrap().is_empty());
+#[test]
+fn creation_category_requires_a_name_string() {
+    assert!(serde_json::from_value::<DownloadCreate>(serde_json::json!({
+        "source":{"type":"content","hash":"00112233445566778899aabbccddeeff","name":"Sample.bin"},"category":7
+    })).is_err());
 }
 
 #[tokio::test]
-async fn retired_download_does_not_redeliver_replaced_local_output() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-startup-delivery-reconcile");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
-    let incoming_dir = runtime_dir.join("incoming");
-    let payload = b"startup delivery reconciliation payload".repeat(32);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    let recorded_path = incoming_dir.join("Reconcile.Completed.bin");
-    {
-        let core = EmulebbCore::new(
-            "test",
-            FileIndex::open(&metadata_path).unwrap(),
-            &transfer_root,
-        )
-        .unwrap()
-        .with_incoming_dir(incoming_dir.clone());
-        core.create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(format!(
-                "ed2k://|file|Reconcile.Completed.bin|{}|{}|/",
-                payload.len(),
-                file_hash
-            )),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-        core.ed2k_transfers
-            .store_md4_hashset(&file_hash, Vec::new())
-            .await
-            .unwrap();
-        core.ed2k_transfers
-            .store_piece_data(&file_hash, 0, &payload)
-            .await
-            .unwrap();
-        core.deliver_completed_transfer(&file_hash).await;
-        assert_eq!(std::fs::read(&recorded_path).unwrap(), payload);
-    }
-
-    std::fs::remove_file(&recorded_path).unwrap();
-    let unrelated_replacement = vec![0x5A; payload.len()];
-    std::fs::write(&recorded_path, &unrelated_replacement).unwrap();
-
-    let reloaded = EmulebbCore::new(
+async fn removal_retires_internal_storage_before_purging_the_removed_job() {
+    let root = unique_runtime_dir("core-remove-job");
+    let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::in_memory().unwrap(),
+        root.join("transfers"),
     )
-    .unwrap()
-    .with_incoming_dir(incoming_dir.clone());
-    reloaded.hydrate_persisted_transfer_rows().await.unwrap();
-    assert_eq!(
-        reloaded
-            .reconcile_persisted_completed_deliveries()
-            .await
-            .unwrap(),
-        0
-    );
-    reloaded.reload_shared_directories().await.unwrap();
-
-    let redelivered_path = incoming_dir.join("Reconcile.Completed_01.bin");
-    assert_eq!(
-        std::fs::read(&recorded_path).unwrap(),
-        unrelated_replacement
-    );
-    assert!(!redelivered_path.exists());
-    assert!(reloaded.transfer(&file_hash).await.unwrap().is_none());
-    assert!(reloaded.share(&file_hash).await.is_none());
-}
-
-#[tokio::test]
-async fn retired_delivery_is_not_subject_to_transfer_deletion_recovery() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-startup-delete-recovery");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
-    let incoming_dir = runtime_dir.join("incoming");
-    let payload = b"startup destructive deletion recovery payload".repeat(32);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    let delivered_path = incoming_dir.join("Delete.On.Startup.bin");
-    {
-        let core = EmulebbCore::new(
-            "test",
-            FileIndex::open(&metadata_path).unwrap(),
-            &transfer_root,
-        )
-        .unwrap()
-        .with_incoming_dir(incoming_dir.clone());
-        core.create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(format!(
-                "ed2k://|file|Delete.On.Startup.bin|{}|{}|/",
-                payload.len(),
-                file_hash
-            )),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-        core.ed2k_transfers
-            .store_md4_hashset(&file_hash, Vec::new())
-            .await
-            .unwrap();
-        core.ed2k_transfers
-            .store_piece_data(&file_hash, 0, &payload)
-            .await
-            .unwrap();
-        core.deliver_completed_transfer(&file_hash).await;
-        assert!(delivered_path.exists());
-        assert!(
-            !core
-                .ed2k_transfers
-                .delete_transfer_files(&file_hash)
-                .await
-                .unwrap()
-        );
-        assert!(delivered_path.exists());
-    }
-
-    let reloaded = EmulebbCore::new(
-        "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
-    )
-    .unwrap()
-    .with_incoming_dir(incoming_dir);
-    let deletion_recovery = reloaded.recover_pending_transfer_deletions().await.unwrap();
-    assert_eq!(deletion_recovery.recovered, 0);
-    assert!(deletion_recovery.failures.is_empty());
-    assert_eq!(reloaded.hydrate_persisted_transfer_rows().await.unwrap(), 0);
-    assert_eq!(
-        reloaded
-            .reconcile_persisted_completed_deliveries()
-            .await
-            .unwrap(),
-        0
-    );
-    assert!(reloaded.transfers().await.unwrap().is_empty());
-    assert!(delivered_path.exists());
-    assert!(
-        reloaded
-            .metadata_store
-            .pending_transfer_deletion_hashes()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn delivery_failure_stays_completing_and_clears_after_retry() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-delivery-retry-state");
-    let transfer_root = runtime_dir.join("transfers");
-    let blocked_incoming = runtime_dir.join("incoming-blocked");
-    std::fs::create_dir_all(&runtime_dir).unwrap();
-    std::fs::write(&blocked_incoming, b"not a directory").unwrap();
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
-        .unwrap()
-        .with_incoming_dir(blocked_incoming.clone());
-    let payload = b"delivery retry payload".repeat(32);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    core.create_transfer(TransferCreate {
-        known_file_policy: Default::default(),
-        link: Some(format!(
-            "ed2k://|file|Retry.bin|{}|{}|/",
-            payload.len(),
-            file_hash
-        )),
-        links: None,
-        category_id: None,
-        category_name: None,
-        paused: Some(true),
-    })
-    .await
     .unwrap();
-    core.ed2k_transfers
-        .store_md4_hashset(&file_hash, Vec::new())
+    let (_, download) = core
+        .create_download(link_download(
+            "ed2k://|file|Sample.bin|8|00112233445566778899aabbccddeeff|/",
+            DownloadIntent::Started,
+        ))
         .await
         .unwrap();
-    core.ed2k_transfers
-        .store_piece_data(&file_hash, 0, &payload)
+    let id = download.id;
+    drop(download);
+    let (guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
+    let directory = core.ed2k_transfers.transfer_dir_path(id).unwrap();
+    assert!(directory.is_dir());
+    assert_eq!(
+        core.remove_download(id, false).await.unwrap(),
+        DownloadChange::Changed
+    );
+    assert!(guard.cancellation().is_cancelled());
+    drop(transfer);
+    drop(guard);
+    core.maintain_download_cleanup().await.unwrap();
+    assert!(
+        core.ed2k_transfers
+            .download_job(id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!directory.exists());
+}
+
+async fn ready_download_for_delivery(
+    core: &EmulebbCore,
+    root: &std::path::Path,
+    name: &str,
+    payload: &[u8],
+) -> emulebb_metadata::JobToken {
+    let seed = root.join(format!("seed-{name}"));
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(&seed, payload).unwrap();
+    let summary = core
+        .ed2k_transfers
+        .ingest_local_file(&seed, name)
         .await
         .unwrap();
+    let token = admit_scheduler_test_job(
+        &core.ed2k_transfers,
+        &root.join("transfers"),
+        summary.file_hash.parse().unwrap(),
+        name.to_owned(),
+        payload.len() as u64,
+    )
+    .await;
+    drop(
+        core.ed2k_transfers
+            .store_md4_hashset(token, Vec::new())
+            .await
+            .unwrap(),
+    );
+    core.ed2k_transfers
+        .store_piece_data(token, 0, payload)
+        .await
+        .unwrap();
+    assert!(
+        core.ed2k_transfers
+            .download_job(token.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .payload_verified
+    );
+    token
+}
 
-    core.deliver_completed_transfer(&file_hash).await;
-    let failed = core.transfer(&file_hash).await.unwrap().unwrap();
-    assert_eq!(failed.state, "completing");
-    assert!(failed.delivery_error.is_some());
+#[tokio::test]
+async fn delivered_job_retains_history_and_removal_preserves_output() {
+    let root = unique_runtime_dir("core-completed-job-history");
+    let incoming = root.join("incoming");
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        root.join("transfers"),
+    )
+    .unwrap()
+    .with_incoming_dir(incoming.clone());
+    let payload = b"Sample completed job payload".repeat(64);
+    let token = ready_download_for_delivery(&core, &root, "Sample.bin", &payload).await;
+    assert!(core.deliver_completed_download(token).await.unwrap());
+    let path = incoming.join("Sample.bin");
+    assert_eq!(std::fs::read(&path).unwrap(), payload);
+    assert!(
+        core.share(&Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string())
+            .await
+            .is_some()
+    );
+    let completed = core
+        .download_page(emulebb_metadata::DownloadJobQuery {
+            view: emulebb_metadata::DownloadJobView::Completed,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed.downloads.len(), 1);
+    assert_eq!(completed.downloads[0].id, token.job_id);
+    assert_eq!(completed.downloads[0].state, DownloadState::Completed);
+    assert!(completed.downloads[0].completed_at.is_some());
+    drop(completed);
+    assert_eq!(core.maintain_download_delivery().await.unwrap(), 0);
+    assert!(!core.deliver_completed_download(token).await.unwrap());
+    core.ed2k_transfers
+        .retire_download_storage(token.job_id)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), payload);
+    assert!(
+        core.ed2k_transfers
+            .remove_download_job(token.job_id, false)
+            .await
+            .unwrap()
+    );
+    core.ed2k_transfers
+        .cleanup_removed_download_job(token.job_id)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), payload);
+    assert!(
+        core.download_page(emulebb_metadata::DownloadJobQuery {
+            view: emulebb_metadata::DownloadJobView::All,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .downloads
+        .is_empty()
+    );
+    core.drain_persistence().await.unwrap();
+}
 
-    std::fs::remove_file(&blocked_incoming).unwrap();
-    core.deliver_completed_transfer(&file_hash).await;
-    assert!(core.transfer(&file_hash).await.unwrap().is_none());
-    assert!(core.share(&file_hash).await.is_some());
-    assert!(blocked_incoming.join("Retry.bin").exists());
+#[tokio::test]
+async fn completed_history_survives_restart_without_recreating_replaced_output() {
+    let root = unique_runtime_dir("core-persisted-completed-history");
+    let incoming = root.join("incoming");
+    let database = root.join("metadata.sqlite");
+    let payload = b"Sample persisted completed payload".repeat(32);
+    let token;
+    {
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&database).unwrap(),
+            root.join("transfers"),
+        )
+        .unwrap()
+        .with_incoming_dir(incoming.clone());
+        token = ready_download_for_delivery(&core, &root, "Sample.bin", &payload).await;
+        assert!(core.deliver_completed_download(token).await.unwrap());
+        core.drain_persistence().await.unwrap();
+    }
+    let path = incoming.join("Sample.bin");
+    std::fs::remove_file(&path).unwrap();
+    let replacement = vec![0x5a; payload.len()];
+    std::fs::write(&path, &replacement).unwrap();
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::open(&database).unwrap(),
+        root.join("transfers"),
+    )
+    .unwrap()
+    .with_incoming_dir(incoming.clone());
+    assert_eq!(core.maintain_download_delivery().await.unwrap(), 0);
+    assert!(!core.deliver_completed_download(token).await.unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), replacement);
+    assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 1);
+    let completed = core
+        .download_page(emulebb_metadata::DownloadJobQuery {
+            view: emulebb_metadata::DownloadJobView::Completed,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed.downloads.len(), 1);
+    assert_eq!(completed.downloads[0].id, token.job_id);
+    drop(completed);
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn unfinished_delivery_failure_requires_explicit_start_after_restart() {
+    let root = unique_runtime_dir("core-delivery-manual-storage-retry");
+    std::fs::create_dir_all(&root).unwrap();
+    let incoming = root.join("incoming-blocked");
+    std::fs::write(&incoming, b"Sample obstruction").unwrap();
+    let database = root.join("metadata.sqlite");
+    let token;
+    {
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&database).unwrap(),
+            root.join("transfers"),
+        )
+        .unwrap()
+        .with_incoming_dir(incoming.clone());
+        token = ready_download_for_delivery(
+            &core,
+            &root,
+            "Sample.bin",
+            &b"Sample retry payload".repeat(32),
+        )
+        .await;
+        assert!(core.deliver_completed_download(token).await.is_err());
+        let failed = core
+            .ed2k_transfers
+            .download_job(token.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failed.storage_failure.is_some());
+        assert_ne!(failed.token, token);
+        drop(failed);
+        core.drain_persistence().await.unwrap();
+    }
+    std::fs::remove_file(&incoming).unwrap();
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::open(&database).unwrap(),
+        root.join("transfers"),
+    )
+    .unwrap()
+    .with_incoming_dir(incoming.clone());
+    let failed = core
+        .ed2k_transfers
+        .download_job(token.job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(failed.storage_failure.is_some());
+    let failed_token = failed.token;
+    drop(failed);
+    assert_eq!(core.maintain_download_delivery().await.unwrap(), 0);
+    assert!(!core.deliver_completed_download(failed_token).await.unwrap());
+    assert!(!incoming.exists());
+    let started = core
+        .ed2k_transfers
+        .start_download_job(failed_token, &root.join("transfers"))
+        .await
+        .unwrap();
+    let restarted = started.as_ref().unwrap().token;
+    drop(started);
+    assert!(core.deliver_completed_download(restarted).await.unwrap());
+    assert!(incoming.join("Sample.bin").exists());
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn delivery_maintenance_bounds_each_pass_and_respects_stop() {
+    let root = unique_runtime_dir("core-bounded-delivery-maintenance");
+    let incoming = root.join("incoming");
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        root.join("transfers"),
+    )
+    .unwrap()
+    .with_incoming_dir(incoming.clone());
+    let mut tokens = Vec::new();
+    for index in 0..6 {
+        let token = ready_download_for_delivery(
+            &core,
+            &root,
+            &format!("Sample-{index}.bin"),
+            &vec![index as u8 + 1; 1024],
+        )
+        .await;
+        tokens.push(token);
+    }
+    assert!(
+        core.ed2k_transfers
+            .stop_download_job(tokens[0])
+            .await
+            .unwrap()
+    );
+    assert_eq!(core.maintain_download_delivery().await.unwrap(), 4);
+    assert!(!incoming.join("Sample-0.bin").exists());
+    assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 4);
+    assert_eq!(core.maintain_download_delivery().await.unwrap(), 1);
+    assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 5);
+    assert_eq!(core.maintain_download_delivery().await.unwrap(), 0);
+    let stopped = core
+        .ed2k_transfers
+        .download_job(tokens[0].job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let stopped_token = stopped.token;
+    drop(stopped);
+    let restarted = core
+        .ed2k_transfers
+        .start_download_job(stopped_token, &root.join("transfers"))
+        .await
+        .unwrap();
+    let token = restarted.as_ref().unwrap().token;
+    drop(restarted);
+    assert!(core.deliver_completed_download(token).await.unwrap());
+    assert!(incoming.join("Sample-0.bin").exists());
+    core.drain_persistence().await.unwrap();
 }
 
 #[tokio::test]
@@ -1548,8 +1299,8 @@ async fn update_shared_file_not_published_queues_ed2k_reoffer() {
 }
 
 #[tokio::test]
-async fn verified_local_share_survives_restart_without_transfer_row() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-delete-completed-transfer-row");
+async fn verified_local_share_survives_restart_without_creating_a_download_job() {
+    let runtime_dir = unique_runtime_dir("core-library-only-restart");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
     let payload_path = runtime_dir.join("Completed.Row.bin");
@@ -1569,22 +1320,26 @@ async fn verified_local_share_survives_restart_without_transfer_row() {
         .await
         .unwrap();
     assert!(
-        core.metadata_store
-            .transfer_manifest_by_hash(&share.hash)
+        core.download_page(Default::default())
+            .await
             .unwrap()
-            .is_none()
+            .downloads
+            .is_empty()
     );
-    assert!(core.transfer(&share.hash).await.unwrap().is_none());
-    assert!(core.transfers().await.unwrap().is_empty());
-
     let reloaded = EmulebbCore::new(
         "test",
         FileIndex::open(&metadata_path).unwrap(),
         &transfer_root,
     )
     .unwrap();
-    assert!(reloaded.transfer(&share.hash).await.unwrap().is_none());
-    assert!(reloaded.transfers().await.unwrap().is_empty());
+    assert!(
+        reloaded
+            .download_page(Default::default())
+            .await
+            .unwrap()
+            .downloads
+            .is_empty()
+    );
     assert!(
         reloaded
             .shares()
@@ -1594,288 +1349,94 @@ async fn verified_local_share_survives_restart_without_transfer_row() {
     );
     assert!(
         reloaded
-            .metadata_store
-            .transfer_manifest_by_hash(&share.hash)
+            .download_page(Default::default())
+            .await
             .unwrap()
-            .is_none()
+            .downloads
+            .is_empty()
     );
-
-    let restored = reloaded
-        .create_transfer(TransferCreate {
-            known_file_policy: KnownFilePolicy::Redownload,
-            link: Some(share.ed2k_link.clone()),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    assert_eq!(restored.hash, share.hash);
-    assert!(reloaded.transfer(&share.hash).await.unwrap().is_some());
 }
 
 #[tokio::test]
-async fn delete_completed_transfer_row_rejects_incomplete_transfer() {
+async fn a_late_worker_refresh_cannot_overwrite_a_durable_stop() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Incomplete.Row.bin|4096|00112233445566778899aabbccddeeff|/"
-                    .to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: None,
-        })
+    let (_, download) = core
+        .create_download(link_download(
+            "ed2k://|file|Sample.bin|8|00112233445566778899aabbccddeeff|/",
+            DownloadIntent::Started,
+        ))
         .await
         .unwrap();
-
-    let error = core
-        .delete_completed_transfer_row(&transfer.hash)
-        .await
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("only completed transfers can be removed without deleting files")
-    );
-    assert!(core.transfer(&transfer.hash).await.unwrap().is_some());
-}
-
-#[tokio::test]
-async fn delete_completed_transfer_row_rejects_pending_delivery() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-pending-delivery-row");
-    let transfer_root = runtime_dir.join("transfers");
-    let incoming_dir = runtime_dir.join("incoming");
-    let payload = b"completed but not delivered row".repeat(32);
-    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
-        .unwrap()
-        .with_incoming_dir(incoming_dir);
-    core.create_transfer(TransferCreate {
-        known_file_policy: Default::default(),
-        link: Some(format!(
-            "ed2k://|file|Pending.Row.bin|{}|{}|/",
-            payload.len(),
-            file_hash
-        )),
-        links: None,
-        category_id: None,
-        category_name: None,
-        paused: Some(true),
-    })
-    .await
-    .unwrap();
-    core.ed2k_transfers
-        .store_md4_hashset(&file_hash, Vec::new())
-        .await
-        .unwrap();
-    core.ed2k_transfers
-        .store_piece_data(&file_hash, 0, &payload)
-        .await
-        .unwrap();
-    core.refresh_transfer_from_manifest_default(&file_hash)
-        .await
-        .unwrap();
-
-    let error = core
-        .delete_completed_transfer_row(&file_hash)
-        .await
-        .unwrap_err();
-
-    assert!(error.to_string().contains("must be delivered"));
+    let id = download.id;
+    drop(download);
+    let (guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
     assert_eq!(
-        core.transfer(&file_hash).await.unwrap().unwrap().state,
-        "completing"
+        core.stop_download(id).await.unwrap(),
+        DownloadChange::Changed
     );
-    assert!(
-        !core
-            .ed2k_transfers
-            .manifest(&file_hash)
-            .await
-            .unwrap()
-            .transfer_row_removed
-    );
-}
-
-#[tokio::test]
-async fn delayed_background_result_preserves_explicit_pause_and_stop() {
-    for (control, stopped) in [("paused", false), ("stopped", true)] {
-        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-        let transfer = core
-            .create_transfer(TransferCreate {
-                known_file_policy: Default::default(),
-                link: Some(
-                    "ed2k://|file|Control.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-                ),
-                links: None,
-                category_id: None,
-                category_name: None,
-                paused: Some(true),
-            })
-            .await
-            .unwrap();
-        // Capture the background outcome before the operator's control change.
-        // Paused creation keeps the fixture free of detached download attempts.
-        let delayed_state = "queued";
-        core.set_transfer_control_state(&transfer.hash, control)
-            .await
-            .unwrap()
-            .unwrap();
-        let refreshed = core
-            .refresh_transfer_from_manifest(&transfer.hash, delayed_state)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(refreshed.state, "paused");
-        assert_eq!(refreshed.stopped, stopped);
-        let current = core.transfer(&transfer.hash).await.unwrap().unwrap();
-        assert_eq!(current.state, "paused");
-        assert_eq!(current.stopped, stopped);
-        assert_eq!(
-            core.ed2k_transfers
-                .manifest(&transfer.hash)
-                .await
-                .unwrap()
-                .control_state
-                .as_deref(),
-            Some(control)
-        );
-        if !stopped {
-            let resumed = core.resume_transfer(&transfer.hash).await.unwrap().unwrap();
-            assert_eq!(resumed.state, "downloading");
-            assert!(!resumed.stopped);
-        }
-    }
-}
-
-#[tokio::test]
-async fn durable_stop_rejects_resume_even_when_cached_control_is_stale() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Durable.Stop.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    core.stop_transfer(&transfer.hash).await.unwrap().unwrap();
-    // Model the old background publication independently of the cache fix, so
-    // this check must reach the durable guard instead of the cached one.
-    {
-        let mut state = core.state.lock().await;
-        let cached = state.transfers.get_mut(&transfer.hash).unwrap();
-        cached.state = "queued".to_string();
-        cached.stopped = false;
-    }
-    let error = core.resume_transfer(&transfer.hash).await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("stopped transfer cannot be resumed")
-    );
+    assert!(guard.cancellation().is_cancelled());
+    assert!(matches!(
+        core.refresh_transfer_from_manifest(transfer.job_token(), "downloading")
+            .await,
+        Ok(None) | Err(_)
+    ));
+    let page = core.download_page(Default::default()).await.unwrap();
+    assert_eq!(page.downloads[0].intent, DownloadIntent::Stopped);
+    assert_eq!(page.downloads[0].state, DownloadState::Stopping);
+    drop(page);
+    drop(guard);
     assert_eq!(
-        core.ed2k_transfers
-            .manifest(&transfer.hash)
+        core.download_page(Default::default())
             .await
             .unwrap()
-            .control_state
-            .as_deref(),
-        Some("stopped")
+            .downloads[0]
+            .state,
+        DownloadState::Stopped
     );
 }
 
 #[tokio::test]
-async fn stopped_transfer_cannot_be_resumed() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: None,
-        })
-        .await
-        .unwrap();
-    let stopped_transfer = core.stop_transfer(&transfer.hash).await.unwrap().unwrap();
-    // Master parity: stopped is reported as the `paused` state + stopped flag.
-    assert_eq!(stopped_transfer.state, "paused");
-    assert!(stopped_transfer.stopped);
-    let details = core
-        .transfer_details(&transfer.hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(details.transfer.state, "paused");
-    assert!(details.transfer.stopped);
-
-    let error = core.resume_transfer(&transfer.hash).await.unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("stopped transfer cannot be resumed")
-    );
-}
-
-#[tokio::test]
-async fn stopped_transfer_state_survives_restart() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-stopped-transfer");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
+async fn stopped_job_survives_restart_and_an_explicit_start_reuses_its_identity() {
+    let root = unique_runtime_dir("core-stopped-restart");
+    let db = root.join("metadata.sqlite");
     let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::open(&db).unwrap(),
+        root.join("transfers"),
     )
     .unwrap();
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Stopped.Restart.bin|4096|00112233445566778899aabbccddeeff|/"
-                    .to_string(),
-            ),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: None,
-        })
+    let (_, download) = core
+        .create_download(link_download(
+            "ed2k://|file|Sample.bin|8|00112233445566778899aabbccddeeff|/",
+            DownloadIntent::Stopped,
+        ))
         .await
         .unwrap();
-    core.stop_transfer(&transfer.hash).await.unwrap().unwrap();
-
-    let reloaded = EmulebbCore::new(
+    let id = download.id;
+    drop(download);
+    drop(core);
+    let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::open(&db).unwrap(),
+        root.join("transfers"),
     )
     .unwrap();
-    let reloaded_transfer = reloaded.transfer(&transfer.hash).await.unwrap().unwrap();
-
-    // Master parity: a stopped transfer reports the `paused` state plus a
-    // separate `stopped` flag (not a distinct `stopped` state token).
-    assert_eq!(reloaded_transfer.state, "paused");
-    assert!(reloaded_transfer.stopped);
-    let error = reloaded.resume_transfer(&transfer.hash).await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("stopped transfer cannot be resumed")
+    let page = core.download_page(Default::default()).await.unwrap();
+    assert_eq!(page.downloads[0].id, id);
+    assert_eq!(page.downloads[0].state, DownloadState::Stopped);
+    drop(page);
+    assert!(core.select_download_execution(id).await.unwrap().is_none());
+    assert_eq!(
+        core.start_download(id).await.unwrap(),
+        DownloadChange::Changed
+    );
+    assert_eq!(
+        core.download_page(Default::default())
+            .await
+            .unwrap()
+            .downloads[0]
+            .id,
+        id
     );
 }
 
@@ -1908,7 +1469,14 @@ async fn shared_files_require_explicit_redownload_and_remain_shared() {
         &transfer_root,
     )
     .unwrap();
-    assert!(reloaded.transfers().await.unwrap().is_empty());
+    assert!(
+        reloaded
+            .download_page(Default::default())
+            .await
+            .unwrap()
+            .downloads
+            .is_empty()
+    );
     assert!(
         reloaded
             .shares()
@@ -1917,37 +1485,34 @@ async fn shared_files_require_explicit_redownload_and_remain_shared() {
             .any(|entry| entry.hash == share.hash)
     );
 
-    let request = TransferCreate {
-        known_file_policy: KnownFilePolicy::Reject,
-        link: Some(share.ed2k_link.clone()),
-        links: None,
-        category_id: None,
-        category_name: None,
-        paused: Some(true),
-    };
-    let error = reloaded.create_transfer(request.clone()).await.unwrap_err();
-    let conflict = error.downcast_ref::<DownloadConflictError>().unwrap();
-    let present = conflict
-        .conflicts
-        .iter()
-        .find(|item| item.kind == DownloadConflictKind::PresentLocalFile)
-        .unwrap();
-    assert!(present.redownload_allowed);
-    assert_eq!(present.current_paths.len(), 1);
-    assert_eq!(std::fs::read(&present.current_paths[0]).unwrap(), payload);
-    assert!(reloaded.transfers().await.unwrap().is_empty());
-
-    let redownload = reloaded
-        .create_transfer(TransferCreate {
-            known_file_policy: KnownFilePolicy::Redownload,
+    let request = link_download(&share.ed2k_link, DownloadIntent::Stopped);
+    let error = reloaded.create_download(request.clone()).await.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<emulebb_metadata::MetadataLocalContentChoiceRequired>()
+            .unwrap()
+            .0,
+        emulebb_metadata::LocalContentAvailability::Present
+    );
+    assert!(
+        reloaded
+            .download_page(Default::default())
+            .await
+            .unwrap()
+            .downloads
+            .is_empty()
+    );
+    let (created, redownload) = reloaded
+        .create_download(DownloadCreate {
+            redownload: true,
             ..request
         })
         .await
         .unwrap();
+    assert!(created);
     assert_eq!(redownload.hash, share.hash);
-    assert_eq!(redownload.state, "paused");
-    assert_eq!(redownload.completed_bytes, 0);
-    assert_eq!(redownload.progress, 0.0);
+    assert_eq!(redownload.state, DownloadState::Stopped);
+    assert_eq!(redownload.progress, Some(0.0));
     assert!(
         reloaded
             .shares()

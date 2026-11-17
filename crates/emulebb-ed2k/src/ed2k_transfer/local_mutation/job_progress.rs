@@ -77,7 +77,7 @@ impl LocalMutationRegistry {
             let mut committed = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _content = transfer::store::scoped_lock(&locks, hash).blocking_lock_owned();
-                let revision = {
+                {
                     let cache = cache.blocking_lock();
                     let current = cache
                         .get(&token.job_id)
@@ -93,15 +93,19 @@ impl LocalMutationRegistry {
                             current
                                 .pieces
                                 .get(piece.piece_index as usize)
-                                .is_some_and(|p| p.piece_index == piece.piece_index),
-                            "checkpoint cache geometry changed"
+                                .is_some_and(|p| p.piece_index == piece.piece_index
+                                    && p.bytes_written == piece.bytes_written
+                                    && p.block_bitmap == piece.block_bitmap
+                                    && p.ich_corrupted == piece.ich_corrupted
+                                    && matches!(
+                                        (p.state, piece.state.as_str()),
+                                        (transfer::Ed2kTransferState::Missing, "Missing")
+                                            | (transfer::Ed2kTransferState::Verified, "Verified")
+                                    )),
+                            "checkpoint cache no longer matches selected progress"
                         );
                     }
-                    checkpoints
-                        .blocking_lock()
-                        .get(&token)
-                        .map_or(0, |state| state.revision)
-                };
+                }
                 ensure!(
                     metadata.checkpoint_download_progress(token, &pieces)?,
                     "checkpoint rejected stale generation or structural transition"
@@ -112,9 +116,9 @@ impl LocalMutationRegistry {
                     let _ = reached.send(());
                     let _ = release.recv();
                 }
-                let mut cache = cache.blocking_lock();
+                let cache = cache.blocking_lock();
                 let current = cache
-                    .get_mut(&token.job_id)
+                    .get(&token.job_id)
                     .filter(|m| m.token == token)
                     .ok_or_else(|| anyhow!("checkpoint cache disappeared before publication"))?;
                 let mut checkpoints = checkpoints.blocking_lock();
@@ -126,33 +130,25 @@ impl LocalMutationRegistry {
                         dirty_piece_indexes: BTreeSet::new(),
                     }
                 });
-                let unchanged = checkpoint.revision == revision;
                 checkpoint.revision = checkpoint
                     .revision
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("download progress revision exhausted"))?;
+                // The dirty cache was published before submission. Acknowledge
+                // exact selected pieces without rewriting backing held by readers.
                 for piece in pieces {
-                    let target = &mut current.pieces[piece.piece_index as usize];
-                    if unchanged {
-                        target.bytes_written = piece.bytes_written;
-                        target.block_bitmap = piece.block_bitmap;
+                    let target = &current.pieces[piece.piece_index as usize];
+                    let state_matches = matches!(
+                        (target.state, piece.state.as_str()),
+                        (transfer::Ed2kTransferState::Missing, "Missing")
+                            | (transfer::Ed2kTransferState::Verified, "Verified")
+                    );
+                    if state_matches
+                        && target.bytes_written == piece.bytes_written
+                        && target.block_bitmap == piece.block_bitmap
+                        && target.ich_corrupted == piece.ich_corrupted
+                    {
                         checkpoint.dirty_piece_indexes.remove(&piece.piece_index);
-                    } else {
-                        // Keep a newer live publication wholesale. A different
-                        // piece cannot prevent acknowledgment of an unchanged
-                        // selected piece whose exact progress is now durable.
-                        let state_matches = matches!(
-                            (target.state, piece.state.as_str()),
-                            (transfer::Ed2kTransferState::Missing, "Missing")
-                                | (transfer::Ed2kTransferState::Verified, "Verified")
-                        );
-                        if state_matches
-                            && target.bytes_written == piece.bytes_written
-                            && target.block_bitmap == piece.block_bitmap
-                            && target.ich_corrupted == piece.ich_corrupted
-                        {
-                            checkpoint.dirty_piece_indexes.remove(&piece.piece_index);
-                        }
                     }
                 }
                 if checkpoint.dirty_piece_indexes.is_empty() {
@@ -183,7 +179,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn checkpoint_caller_and_first_drain_cancel_after_sql_still_patch_only_progress() {
+    async fn checkpoint_caller_and_first_drain_cancel_after_sql_still_acknowledge_dirty_progress() {
         let root = crate::paths::unique_test_dir("job-progress-owner");
         let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
         let runtime = Arc::new(
@@ -213,12 +209,32 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&manifest).unwrap(),
             )
             .unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(job.token.job_id, manifest.clone());
+        runtime.manifest_cache.lock().await.insert(
+            job.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&manifest)
+                .unwrap(),
+        );
         manifest.pieces[0].bytes_written = 8;
+        let permit = runtime
+            .local_mutations
+            .residents
+            .reserve(job.token.job_id)
+            .unwrap();
+        drop(
+            runtime
+                .publish_piece_progress_unlocked(
+                    job.token,
+                    &job.file_hash,
+                    None,
+                    &manifest.pieces[0],
+                    permit,
+                )
+                .await
+                .unwrap(),
+        );
         // Captured fields outside the delta must not overwrite current metadata.
         manifest.comment = "stale callback comment".into();
         let (reached, ready) = oneshot::channel();
@@ -252,7 +268,12 @@ mod tests {
         );
         assert_eq!(
             runtime.manifest_cache.lock().await[&job.token.job_id].pieces[0].bytes_written,
-            0
+            8
+        );
+        assert!(
+            runtime.manifest_checkpoint_state.lock().await[&job.token]
+                .dirty_piece_indexes
+                .contains(&0)
         );
         caller.abort();
         let _ = caller.await;
@@ -272,6 +293,11 @@ mod tests {
         assert_eq!(cache[&job.token.job_id].pieces[0].bytes_written, 8);
         assert!(cache[&job.token.job_id].comment.is_empty());
         drop(cache);
+        assert!(
+            runtime.manifest_checkpoint_state.lock().await[&job.token]
+                .dirty_piece_indexes
+                .is_empty()
+        );
         drop(runtime);
         drop(metadata);
         std::fs::remove_dir_all(root).unwrap();
@@ -307,12 +333,32 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&captured).unwrap(),
             )
             .unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(job.token.job_id, captured.clone());
+        runtime.manifest_cache.lock().await.insert(
+            job.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&captured)
+                .unwrap(),
+        );
         captured.pieces[0].bytes_written = 8;
+        let permit = runtime
+            .local_mutations
+            .residents
+            .reserve(job.token.job_id)
+            .unwrap();
+        drop(
+            runtime
+                .publish_piece_progress_unlocked(
+                    job.token,
+                    &job.file_hash,
+                    None,
+                    &captured.pieces[0],
+                    permit,
+                )
+                .await
+                .unwrap(),
+        );
         let (reached, ready) = oneshot::channel();
         let (release, resume) = std::sync::mpsc::channel();
         runtime
@@ -338,11 +384,14 @@ mod tests {
         live.pieces[0].bytes_written = 12;
         live.comment = "newer live metadata".into();
         runtime.note_dirty_piece_unlocked(&live, 0).await.unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(job.token.job_id, live.clone());
+        runtime.manifest_cache.lock().await.insert(
+            job.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&live)
+                .unwrap(),
+        );
         release.send(()).unwrap();
         receipt.await.unwrap().unwrap();
         assert_eq!(runtime.manifest_cache.lock().await[&job.token.job_id], live);
@@ -423,11 +472,14 @@ mod tests {
             .unwrap();
         live.pieces[0].bytes_written = 8;
         runtime.note_dirty_piece_unlocked(&live, 0).await.unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(job.token.job_id, live.clone());
+        runtime.manifest_cache.lock().await.insert(
+            job.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&live)
+                .unwrap(),
+        );
         let (reached, ready) = oneshot::channel();
         let (release, resume) = std::sync::mpsc::channel();
         runtime
@@ -449,11 +501,14 @@ mod tests {
             .unwrap();
         live.pieces[1].bytes_written = 12;
         runtime.note_dirty_piece_unlocked(&live, 1).await.unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(job.token.job_id, live.clone());
+        runtime.manifest_cache.lock().await.insert(
+            job.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&live)
+                .unwrap(),
+        );
         release.send(()).unwrap();
         receipt.await.unwrap().unwrap();
         assert_eq!(runtime.manifest_cache.lock().await[&job.token.job_id], live);

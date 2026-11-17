@@ -149,6 +149,10 @@ mod tests {
     #[test]
     fn upload_parts_count_only_verified_ranges() {
         let mut download = Ed2kResumeManifest::new(&Ed2kTransferJob {
+            token: emulebb_metadata::JobToken {
+                job_id: emulebb_metadata::JobId::new(1).unwrap(),
+                generation: 0,
+            },
             file_hash: "11".repeat(16),
             display_name: "file.bin".into(),
             file_size: 12,

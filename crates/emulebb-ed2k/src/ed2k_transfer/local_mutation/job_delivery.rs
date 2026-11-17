@@ -26,7 +26,9 @@ impl LocalMutationRegistry {
             .ok_or(LocalMutationError::TooLarge)?;
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
-        let lease = Self::reserve_unit(&mut state, charge, false, false)?;
+        let (resident_write, lease) = self.residents.reserve_with(token.job_id, || {
+            Self::reserve_unit(&mut state, charge, false, false)
+        })?;
         let path = path.to_path_buf();
         let previous = previous.cloned();
         let verified = verified.clone();
@@ -77,8 +79,11 @@ impl LocalMutationRegistry {
                             && manifest.delivery_ownership == ownership,
                         "delivery cache changed before verification publication"
                     );
-                    manifest.source_fingerprint = Some(verified);
-                    manifest.delivery_ownership = transfer::Ed2kDeliveryOwnership::Unowned;
+                    manifest.write_with(resident_write, |manifest| {
+                        manifest.source_fingerprint = Some(verified);
+                        manifest.delivery_ownership = transfer::Ed2kDeliveryOwnership::Unowned;
+                        Ok(())
+                    })?;
                 }
                 Ok(())
             }));
@@ -151,11 +156,14 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&manifest).unwrap(),
             )
             .unwrap();
-        runtime
-            .manifest_cache
-            .lock()
-            .await
-            .insert(job.token.job_id, manifest.clone());
+        runtime.manifest_cache.lock().await.insert(
+            job.token.job_id,
+            runtime
+                .local_mutations
+                .residents
+                .copy_manifest(&manifest)
+                .unwrap(),
+        );
         let mut verified = original.clone();
         verified.modified = emulebb_metadata::NativeFileTimestamp::new(100, 2).unwrap();
         let (reached, ready) = oneshot::channel();

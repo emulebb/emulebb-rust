@@ -28,7 +28,22 @@ pub(super) fn manifest_progress_bytes(manifest: &Ed2kResumeManifest) -> u64 {
     manifest
         .pieces
         .iter()
-        .map(|piece| piece.bytes_written)
+        .map(|piece| {
+            // A sparse part stores only its contiguous prefix in bytes_written.
+            // Count its authoritative bitmap too; otherwise out-of-order blocks
+            // neither advance progress nor trigger the periodic checkpoint.
+            if piece.block_bitmap.is_some() {
+                piece
+                    .resolve_block_bitmap(expected_piece_length(
+                        manifest.file_size,
+                        manifest.piece_size,
+                        u64::from(piece.piece_index),
+                    ))
+                    .present_bytes()
+            } else {
+                piece.bytes_written
+            }
+        })
         .sum::<u64>()
 }
 

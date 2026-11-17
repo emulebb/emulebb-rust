@@ -259,6 +259,24 @@ impl ReaskService {
             .map(|source| source.job_token)
     }
 
+    /// Retire sources, pending replies and routing entries for exactly one
+    /// execution. Other generations and unrelated jobs retain their state.
+    pub(crate) fn retire_execution(
+        &mut self,
+        token: emulebb_metadata::JobToken,
+        mut release: impl FnMut((Ipv4Addr, u16)),
+    ) {
+        self.per_file.retain(|hash, set| {
+            set.retire_execution(token, |endpoint, lease| {
+                if self.endpoint_index.get(&endpoint) == Some(hash) {
+                    self.endpoint_index.remove(&endpoint);
+                }
+                release(lease);
+            });
+            set.len() != 0
+        });
+    }
+
     /// Drop a source (e.g. the transfer completed or no longer needs it).
     /// Returns the source's lease endpoint (its TCP endpoint, the key core
     /// leased it under) when a source was actually present and removed, so the

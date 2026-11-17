@@ -300,6 +300,23 @@ pub(crate) fn native_file_fingerprint(source_path: &Path) -> Option<NativeFileFi
     native_file_fingerprint_from_handle(&file, &opened_metadata)
 }
 
+impl super::Ed2kTransferRuntime {
+    /// Capture fingerprint and genuine identity observations from one open file.
+    /// Call within the caller's existing filesystem owner; this performs no hashing.
+    pub fn opened_source_identity(
+        file: &File,
+    ) -> Result<(
+        NativeFileFingerprint,
+        emulebb_metadata::NativeFileIdentityEvidence,
+    )> {
+        let metadata = file.metadata()?;
+        let fingerprint = native_file_fingerprint_from_handle(file, &metadata)
+            .context("opened source is not a regular file with stable native identity")?;
+        let evidence = native_file_identity_evidence_from_handle(file, &metadata, &fingerprint)?;
+        Ok((fingerprint, evidence))
+    }
+}
+
 /// Mutation-bearing verification retains the actual common Windows observation.
 /// A failed secondary probe is an error/pending verification, never a fabricated
 /// non-match or an ID conversion. Ordinary fingerprint equality stays unchanged.

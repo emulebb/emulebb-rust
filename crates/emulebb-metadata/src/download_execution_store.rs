@@ -53,6 +53,34 @@ pub enum MetadataDownloadExecutionRow {
 }
 
 impl MetadataStore {
+    /// Publish private execution backing only while its database observation
+    /// still holds. The callback is synchronous and must not reenter the store
+    /// or perform IO; callers acquire their cache/content guards beforehand.
+    pub fn publish_observed_download_execution<T>(
+        &self,
+        token: JobToken,
+        observed: &crate::MetadataAvailabilityCut,
+        publish: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let mut connection = self.connection()?;
+        // WHY: an external writer must not commit between the observation
+        // check and cache insertion. No payload IO occurs under this cut.
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        observed.check(self, &tx)?;
+        let active: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1 AND execution_generation=?2
+             AND intent='started' AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL
+             AND delete_requested_at_s IS NULL AND internal_storage_retired=0
+             AND storage_failure_code IS NULL)",
+            params![token.job_id, i64::try_from(token.generation)?],
+            |row| row.get(0),
+        )?;
+        ensure!(active, crate::MetadataAvailabilityChanged);
+        let result = publish()?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// Stream one selected execution under one coherent read transaction. The
     /// sink may only construct its owned result: no locks, I/O or store reentry.
     /// Each row is checked before emission; later validation can still fail.
@@ -495,5 +523,107 @@ mod tests {
                 .stream_download_execution(job.token, |_| Ok(()))
                 .is_err()
         );
+    }
+    #[test]
+    fn observed_execution_publication_rejects_changes_and_stopped_execution() {
+        let (store, token) = execution_with_hashes(8, 9_728_000, 0, 0);
+        let observed = store.capture_download_availability().unwrap();
+        let mut published = false;
+        store
+            .publish_observed_download_execution(token, &observed, || {
+                published = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(published);
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE download_jobs SET comment='changed' WHERE id=?1",
+                [token.job_id],
+            )
+            .unwrap();
+        published = false;
+        assert!(
+            store
+                .publish_observed_download_execution(token, &observed, || {
+                    published = true;
+                    Ok(())
+                })
+                .unwrap_err()
+                .is::<crate::MetadataAvailabilityChanged>()
+        );
+        assert!(!published);
+        store.stop_download_job(token).unwrap();
+        let stopped = store.download_job(token.job_id).unwrap().unwrap().token;
+        let observed = store.capture_download_availability().unwrap();
+        assert!(
+            store
+                .publish_observed_download_execution(stopped, &observed, || {
+                    published = true;
+                    Ok(())
+                })
+                .unwrap_err()
+                .is::<crate::MetadataAvailabilityChanged>()
+        );
+        assert!(!published);
+    }
+
+    #[test]
+    fn observed_execution_publication_fences_external_commits_through_callback() {
+        let root =
+            std::env::temp_dir().join(format!("execution-publication-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let database = root.join("metadata.sqlite");
+        let store = MetadataStore::open(&database).unwrap();
+        let token = store
+            .admit_download_job(&crate::DownloadJobRequest {
+                file_hash: "73".repeat(16),
+                display_name: "Sample.bin".into(),
+                expected_size_bytes: Some(8),
+                category_id: None,
+                intent: DownloadIntent::Started,
+                piece_size: 9_728_000,
+            })
+            .unwrap()
+            .job
+            .token;
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let observed = store.capture_download_availability().unwrap();
+        store
+            .publish_observed_download_execution(token, &observed, || {
+                assert!(
+                    writer
+                        .execute(
+                            "UPDATE download_jobs SET comment='external' WHERE id=?1",
+                            [token.job_id]
+                        )
+                        .is_err()
+                );
+                Ok(())
+            })
+            .unwrap();
+        writer
+            .execute(
+                "UPDATE download_jobs SET comment='external' WHERE id=?1",
+                [token.job_id],
+            )
+            .unwrap();
+        let mut published = false;
+        assert!(
+            store
+                .publish_observed_download_execution(token, &observed, || {
+                    published = true;
+                    Ok(())
+                })
+                .unwrap_err()
+                .is::<crate::MetadataAvailabilityChanged>()
+        );
+        assert!(!published);
+        drop(writer);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

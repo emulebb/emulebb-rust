@@ -856,21 +856,35 @@ mod search_result_name_tests {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TransferCreate {
-    pub link: Option<String>,
+pub struct DownloadCreate {
+    pub source: DownloadCreateSource,
     #[serde(default)]
-    pub links: Option<Vec<String>>,
-    #[serde(skip)]
-    pub category_id: Option<i64>,
-    #[serde(default, rename = "category")]
-    pub category_name: Option<String>,
+    pub category: Option<String>,
     #[serde(
-        default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_paused_field"
+        default = "crate::rest_model_serde::download_intent::default",
+        with = "crate::rest_model_serde::download_intent"
     )]
-    pub paused: Option<bool>,
+    pub intent: emulebb_metadata::DownloadIntent,
     #[serde(default)]
-    pub known_file_policy: crate::KnownFilePolicy,
+    pub redownload: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum DownloadCreateSource {
+    Ed2kLink {
+        link: String,
+    },
+    Content {
+        hash: String,
+        name: String,
+        size_bytes: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -879,8 +893,6 @@ pub struct TransferUpdate {
     #[serde(default)]
     #[serde(rename = "displayName")]
     pub name: Option<String>,
-    #[serde(default)]
-    pub priority: Option<String>,
     #[serde(skip)]
     pub category_id: Option<Option<i64>>,
     #[serde(
@@ -891,20 +903,18 @@ pub struct TransferUpdate {
     pub category_name: Option<Option<String>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchResultDownloadCreate {
-    #[serde(skip)]
-    pub category_id: Option<i64>,
-    #[serde(default, rename = "category")]
-    pub category_name: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "crate::rest_model_serde::deserialize_optional_paused_field"
-    )]
-    pub paused: Option<bool>,
     #[serde(default)]
-    pub known_file_policy: crate::KnownFilePolicy,
+    pub category: Option<String>,
+    #[serde(
+        default = "crate::rest_model_serde::download_intent::default",
+        with = "crate::rest_model_serde::download_intent"
+    )]
+    pub intent: emulebb_metadata::DownloadIntent,
+    #[serde(default)]
+    pub redownload: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1086,10 +1096,14 @@ pub struct SharedFileUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transfer {
+    #[serde(with = "crate::rest_model_serde::job_id")]
+    pub id: emulebb_metadata::JobId,
+    /// Internal execution authority; response deserialization never queues work.
+    #[serde(skip)]
+    pub(crate) execution_generation: u64,
     pub hash: String,
     #[serde(rename = "displayName")]
     pub name: String,
-    pub name_consensus: TransferNameConsensus,
     pub path: String,
     /// Absolute path the completed payload was delivered to by its canonical
     /// name (under a category path or the global incoming dir), or `None` until
@@ -1114,7 +1128,6 @@ pub struct Transfer {
     /// `paused` state, matching the master contract's separate stopped flag.
     pub stopped: bool,
     pub ed2k_link: String,
-    pub priority: String,
     #[serde(skip)]
     pub category_id: Option<i64>,
     #[serde(rename = "category")]
@@ -1133,8 +1146,6 @@ pub struct Transfer {
     pub parts_progress_text: String,
     /// Parts available from at least one live source (live session count).
     pub parts_available: u32,
-    /// Whether download priority is auto-managed (not modeled yet -> false).
-    pub auto_priority: bool,
     /// Whether this transfer's file lives in an incoming/download directory (so
     /// it is a file WE downloaded), as opposed to a file that is only shared from
     /// a configured shared directory. Lets a UI separate "completed downloads"
@@ -1143,32 +1154,23 @@ pub struct Transfer {
     pub in_incoming: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferNameConsensus {
-    pub selected_name: String,
-    pub pinned: bool,
-    pub follow_majority: bool,
-    pub observation_count: usize,
-    pub candidates: Vec<TransferNameCandidate>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferNameCandidate {
-    pub normalized_name: String,
-    pub votes: usize,
-    pub raw_names: Vec<String>,
+impl Transfer {
+    pub(crate) fn job_token(&self) -> emulebb_metadata::JobToken {
+        emulebb_metadata::JobToken {
+            job_id: self.id,
+            generation: self.execution_generation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TransferFileNameObservation {
+pub struct DownloadFileNameObservation {
     pub raw_name: String,
     pub normalized_name: String,
     pub origin: String,
     pub server_endpoint: Option<String>,
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1304,9 +1306,9 @@ impl TransferEvent {
 /// One remembered ED2K peer source for a transfer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TransferSource {
+pub struct DownloadSource {
     pub client_id: String,
-    // The next four are internal-only; not in the eMuleBB `TransferSource`
+    // The next four are internal-only; not in the eMuleBB `DownloadSource`
     // contract (peer is conveyed via `address`), so they are never serialized.
     #[serde(skip_serializing)]
     pub hash: String,
@@ -1326,9 +1328,10 @@ pub struct TransferSource {
     pub user_hash: Option<String>,
     pub user_name: String,
     pub client_software: String,
-    pub reported_file_names: Vec<TransferFileNameObservation>,
+    pub reported_file_names: Vec<DownloadFileNameObservation>,
+    pub reported_file_names_has_more: bool,
     pub download_state: String,
-    pub download_speed_ki_bps: f64,
+    pub download_rate_bytes_per_second: u64,
     pub available_parts: u32,
     pub part_count: u32,
     pub address: String,
@@ -1373,14 +1376,12 @@ pub struct TransferPart {
     pub available_sources: u32,
 }
 
-/// Transfer details envelope: the transfer plus its per-part breakdown and live
-/// source list. Mirrors the master `BuildTransferDetailsJson` shape.
+/// Selected header and part diagnostics; source collections are independent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferDetails {
     pub transfer: Transfer,
     pub parts: Vec<TransferPart>,
-    pub sources: Vec<TransferSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1590,4 +1591,14 @@ impl VpnGuardStatus {
 
 pub(crate) fn default_search_method() -> String {
     "automatic".to_string()
+}
+
+impl Default for SearchResultDownloadCreate {
+    fn default() -> Self {
+        Self {
+            category: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            redownload: false,
+        }
+    }
 }

@@ -31,7 +31,7 @@ type StorageInitializer = Box<dyn FnOnce() -> Result<InitialProfileStorage>>;
 
 #[derive(Debug, Clone)]
 pub struct MetadataStore {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
     // WHY: close the connection before releasing its process profile lease.
     // Clones retain both handles; independent profile connections share the lease.
     _profile_lease: Option<Arc<ProfileLeaseGuard>>,

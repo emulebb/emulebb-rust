@@ -33,6 +33,7 @@ emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-routing = { path = "../emulebb-kad-routing" }
 emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-settings = { path = "../emulebb-settings" }
+futures-util.workspace = true
 globset.workspace = true
 hex.workspace = true
 ipnet.workspace = true

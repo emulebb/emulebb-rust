@@ -59,7 +59,7 @@ use emulebb_ed2k::{
         Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedPublishDemandSignal,
         Ed2kSourceConnectionAdmission, Ed2kSourceHint, Ed2kTransferDeletionRecoveryReport,
         Ed2kTransferRetirementRecoveryReport, Ed2kTransferRootReconciliation, Ed2kTransferRuntime,
-        Ed2kUploadSessionPhaseSnapshot, is_unresolved_ed2k_display_name, new_transfer_job,
+        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{
@@ -125,7 +125,17 @@ mod diagnostic_protocol_fixture;
 mod direct_download_runtime;
 mod discovery_fetch;
 mod disk_guard;
-mod download_duplicate;
+mod download_attempts;
+mod download_controls;
+mod download_maintenance;
+mod download_scheduler;
+mod download_selection;
+pub use download_controls::DownloadChange;
+mod downloads;
+use download_attempts::DownloadAttemptControl;
+pub use downloads::{
+    DownloadCommentPage, DownloadPage, DownloadSourcePage, DownloadState, DownloadSummary,
+};
 mod download_source_registry;
 mod download_task_supervisor;
 mod ed2k_buddy_reask;
@@ -200,9 +210,7 @@ pub use diagnostic_protocol_fixture::{
     QueuedSourceReaskControlErrorKind,
 };
 use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
-pub use download_duplicate::{
-    DownloadConflictError, DownloadConflictEvidence, DownloadConflictKind, KnownFilePolicy,
-};
+
 use download_source_registry::DownloadSourceCandidate;
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_direct_download_types::{
@@ -219,17 +227,16 @@ use ed2k_source_batch::{
     claim_connected_server_source_batch, claim_ed2k_udp_source_batch, claim_kad_source_refresh,
 };
 use ed2k_sources::{
-    Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity,
-    cancel_ed2k_direct_callback_request, cancel_ed2k_server_callback_request,
-    claim_ed2k_direct_callback_request, claim_ed2k_server_callback_request,
-    collect_kad_ed2k_metadata, collect_kad_ed2k_sources, commit_ed2k_direct_callback_request,
-    commit_ed2k_server_callback_request, direct_download_candidate_sources, drop_self_sources,
-    ed2k_server_callback_permitted, ed2k_server_callback_route, found_source_from_hint,
+    Ed2kServerCallbackRoute, OwnSourceIdentity, cancel_ed2k_direct_callback_request,
+    cancel_ed2k_server_callback_request, claim_ed2k_direct_callback_request,
+    claim_ed2k_server_callback_request, collect_kad_download_size, collect_kad_ed2k_sources,
+    commit_ed2k_direct_callback_request, commit_ed2k_server_callback_request,
+    direct_download_candidate_sources, drop_self_sources, ed2k_server_callback_permitted,
+    ed2k_server_callback_route, found_source_from_endpoint,
     global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
     hash_only_ed2k_search_query, kad_metadata_words, kad_source_result_to_ed2k_found_source,
     keyword_target, manifest_has_ed2k_transfer_progress, merge_download_sources,
-    new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
-    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
+    new_direct_ed2k_source_count, select_ed2k_download_size, should_query_kad_source_supplement,
     should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
     should_skip_no_progress_source_requery, significant_keyword_words_unique,
     sort_download_sources, source_endpoint_key, source_key,
@@ -237,7 +244,7 @@ use ed2k_sources::{
 #[cfg(test)]
 use ed2k_sources::{
     ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, kad_keyword_lowercase,
-    select_kad_keyword_metadata, significant_keyword_words,
+    select_kad_download_size, significant_keyword_words,
 };
 use kad_buddy::{
     BuddyNeedInput, FindBuddyReqRefusal, INCOMING_BUDDY_ATTACH_TIMEOUT_SECS, IncomingBuddy,
@@ -311,28 +318,27 @@ pub use emulebb_settings::{
     core_settings_schema, settings_section_resource_inventory,
 };
 pub use rest_model::{
-    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadSourceMetrics,
+    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadCreate,
+    DownloadCreateSource, DownloadFileNameObservation, DownloadSource, DownloadSourceMetrics,
     Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus, IpFilterStatus,
     KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField, Search,
     SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate, SearchResultMedia,
     SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
     SharedFileKadKeywordPublish, SharedFileListCursor, SharedFileListItem, SharedFileListPage,
     SharedFileListQuery, SharedFilePublicationStatus, SharedFilePublishLane,
-    SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferCreate,
-    TransferDetails, TransferEvent, TransferEventDiagnostics, TransferEventResetReason,
-    TransferEventType, TransferFileNameObservation, TransferNameCandidate, TransferNameConsensus,
-    TransferPart, TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
+    SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferDetails,
+    TransferEvent, TransferEventDiagnostics, TransferEventResetReason, TransferEventType,
+    TransferPart, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
     UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
-    ServerLiveDetails, apply_server_update, download_priority_score, enrich_sources_with_live,
-    ensure_category_selector_is_unambiguous, format_ed2k_file_link, kad_status_from_running,
-    manifest_default_state_name, normalize_transfer_name, preserve_transfer_public_metadata,
-    server_endpoint_from_create, server_info_from_parts, source_by_client_id, source_friend_name,
-    transfer_create_links, transfer_create_state_name, transfer_from_manifest,
-    transfer_parts_from_manifest, transfer_sources_from_manifest, validate_server_priority,
-    validate_server_update, validate_shared_file_comment_rating, validate_shared_upload_priority,
-    validate_source_client_id, validate_transfer_priority, validate_transfer_update_family,
+    ServerLiveDetails, apply_download_source_stats, apply_server_update,
+    download_source_from_record, ensure_category_selector_is_unambiguous, format_ed2k_file_link,
+    kad_status_from_running, manifest_default_state_name, normalize_transfer_name,
+    preserve_transfer_public_metadata, server_endpoint_from_create, server_info_from_parts,
+    source_friend_name, transfer_from_manifest, transfer_parts_from_manifest,
+    validate_server_priority, validate_server_update, validate_shared_file_comment_rating,
+    validate_shared_upload_priority, validate_source_client_id, validate_transfer_update_family,
     validate_url_import,
 };
 
@@ -399,44 +405,6 @@ enum Ed2kServerCallbackDispatch {
     DeliveryUnknown(anyhow::Error),
 }
 
-/// RAII guard that removes a transfer hash from `active_download_attempts` (and
-/// its `download_cancels` entry) on drop, so the dedup slot and the per-hash
-/// cancel signal are freed on every exit path of a background download attempt —
-/// normal return, early return, *or* a panic that unwinds the task (FIX B2). The
-/// maps live behind an async mutex, so the cleanup is performed by a short
-/// detached task spawned from `Drop`.
-///
-/// The guard carries the generation id of the `download_cancels` entry it
-/// installed and only removes that entry when the stored id still matches: a
-/// delete or recreate of the same hash may have replaced the entry with a newer
-/// attempt's token, and this (now-cancelled, exiting) attempt must not clobber
-/// the live one. Removing the dedup slot is unconditional (one attempt per hash
-/// at a time by construction).
-struct DownloadAttemptGuard {
-    core: EmulebbCore,
-    hash: String,
-    cancel_id: u64,
-}
-
-impl Drop for DownloadAttemptGuard {
-    fn drop(&mut self) {
-        let core = self.core.clone();
-        let hash = std::mem::take(&mut self.hash);
-        let cancel_id = self.cancel_id;
-        tokio::spawn(async move {
-            let mut state = core.state.lock().await;
-            state.active_download_attempts.remove(&hash);
-            if state
-                .download_cancels
-                .get(&hash)
-                .is_some_and(|(id, _)| *id == cancel_id)
-            {
-                state.download_cancels.remove(&hash);
-            }
-        });
-    }
-}
-
 #[derive(Clone)]
 pub struct EmulebbCore {
     started_at: Instant,
@@ -444,7 +412,7 @@ pub struct EmulebbCore {
     metadata_store: MetadataStore,
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
-    transfer_creation_gate: Arc<Mutex<()>>,
+    download_attempts: Arc<DownloadAttemptControl>,
     category_mutation_gate: Arc<Mutex<()>>,
     persisted_transfers_hydrated: Arc<AtomicBool>,
     persisted_transfer_hydration_gate: Arc<Mutex<()>>,
@@ -461,7 +429,13 @@ pub struct EmulebbCore {
     category_incoming_dir: Arc<PathBuf>,
     /// Retry/backoff and operator-facing error state for verified downloads
     /// whose finished-file materialization has not succeeded yet.
-    delivery_failures: Arc<std::sync::Mutex<HashMap<String, delivery::DeliveryFailure>>>,
+    delivery_cursor: Arc<Mutex<Option<emulebb_metadata::JobId>>>,
+    cleanup_cursors: Arc<
+        Mutex<(
+            Option<emulebb_metadata::JobId>,
+            Option<emulebb_metadata::JobId>,
+        )>,
+    >,
     /// Process lifecycle state surfaced by `GET /api/v1/app` (the `lifecycle`
     /// module maps it to the REST token). Starts `running`; the daemon flips it
     /// to `stopping` when graceful teardown begins so a polling controller sees
@@ -766,7 +740,6 @@ impl EmulebbCore {
             metadata_store,
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
-            transfer_creation_gate: Arc::new(Mutex::new(())),
             category_mutation_gate: Arc::new(Mutex::new(())),
             persisted_transfers_hydrated: Arc::new(AtomicBool::new(false)),
             persisted_transfer_hydration_gate: Arc::new(Mutex::new(())),
@@ -774,7 +747,8 @@ impl EmulebbCore {
             profile_dir,
             category_incoming_dir: Arc::new(incoming_dir.clone()),
             incoming_dir,
-            delivery_failures: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            delivery_cursor: Arc::new(Mutex::new(None)),
+            cleanup_cursors: Arc::new(Mutex::new((None, None))),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             ed2k_network,
             kad_local_store,
@@ -835,6 +809,7 @@ impl EmulebbCore {
             persistence_owner: Arc::new(persistence_owner::PersistenceSlot::default()),
             #[cfg(test)]
             kad_startup_gate: Arc::new(std::sync::Mutex::new(None)),
+            download_attempts: Arc::new(DownloadAttemptControl::default()),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -882,167 +857,6 @@ impl EmulebbCore {
             .lock()
             .await
             .upsert_file(&file, emulebb_index::IndexedFileOrigin::Transfer)
-    }
-
-    async fn upsert_transfer_from_parts(
-        &self,
-        hash: String,
-        name: String,
-        size_bytes: u64,
-        state_name: &str,
-        category: Option<(i64, String)>,
-        redownload: bool,
-    ) -> Result<Transfer> {
-        let file_hash = hash.parse()?;
-        let job = new_transfer_job(file_hash, name, size_bytes);
-        let mut manifest = if redownload {
-            self.ed2k_transfers.replace_with_download_job(&job).await?
-        } else {
-            self.ed2k_transfers.ensure_job(&job).await?
-        };
-        if manifest.transfer_row_removed {
-            manifest = self
-                .ed2k_transfers
-                .restore_transfer_row(&manifest.file_hash)
-                .await?;
-        }
-        if matches!(state_name, "paused" | "stopped") {
-            manifest = self
-                .ed2k_transfers
-                .set_control_state(&manifest.file_hash, Some(state_name))
-                .await?;
-        } else {
-            // Active create: clear any prior paused/stopped control so the
-            // download driver runs (matches resume_transfer).
-            manifest = self
-                .ed2k_transfers
-                .set_control_state(&manifest.file_hash, None)
-                .await?;
-        }
-        if let Some((category_id, _)) = category.as_ref() {
-            self.assign_transfer_category(&manifest.file_hash, Some(*category_id))
-                .await?;
-            manifest.category_id = Some(*category_id);
-        }
-        let effective_state_name = if manifest.completed || manifest.final_rehash_pending {
-            manifest_default_state_name(&manifest)
-        } else {
-            state_name
-        };
-        let mut transfer = self.transfer_from_manifest(&manifest, effective_state_name);
-        let _fence = self.ed2k_transfers.lock_category_publication().await;
-        let category_id = self
-            .ed2k_transfers
-            .current_category_id_fenced(&manifest.file_hash)
-            .await?;
-        let mut state = self.state.lock().await;
-        transfer.category_id = category_id;
-        transfer.category_name = category_id.and_then(|id| {
-            state
-                .categories
-                .get(&id)
-                .map(|category| category.name.clone())
-        });
-        let event_type = if state.transfers.contains_key(&transfer.hash) {
-            TransferEventType::Updated
-        } else {
-            TransferEventType::Added
-        };
-        if let Some(existing) = state.transfers.get(&transfer.hash) {
-            preserve_transfer_public_metadata(&mut transfer, existing);
-        }
-        state
-            .transfers
-            .insert(transfer.hash.clone(), transfer.clone());
-        drop(state);
-        self.publish_transfer_event(event_type, Some(transfer.clone()), None);
-        // Non-paused downloads start immediately: kick the download driver so
-        // ED2K source acquisition begins without requiring an explicit resume.
-        if !manifest.completed && !matches!(effective_state_name, "paused" | "stopped") {
-            self.queue_ed2k_download_attempt(transfer.clone());
-        }
-        Ok(transfer)
-    }
-
-    async fn refresh_transfer_from_manifest(
-        &self,
-        hash: &str,
-        state_name: &str,
-    ) -> Result<Option<Transfer>> {
-        let transfer = self
-            .refresh_transfer_from_manifest_silent(hash, state_name)
-            .await?;
-        if let Some(transfer) = transfer.as_ref() {
-            self.publish_transfer_updated(transfer.clone());
-        }
-        Ok(transfer)
-    }
-
-    async fn refresh_transfer_from_manifest_silent(
-        &self,
-        hash: &str,
-        state_name: &str,
-    ) -> Result<Option<Transfer>> {
-        let Some(manifest) = self.ed2k_transfers.manifest_optional(hash).await? else {
-            return Ok(None);
-        };
-        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
-        let _fence = self.ed2k_transfers.lock_category_publication().await;
-        let category_id = self.ed2k_transfers.current_category_id_fenced(hash).await?;
-        let mut state = self.state.lock().await;
-        transfer.category_id = category_id;
-        transfer.category_name = category_id.and_then(|id| {
-            state
-                .categories
-                .get(&id)
-                .map(|category| category.name.clone())
-        });
-        if let Some(existing) = state.transfers.get(&transfer.hash) {
-            preserve_transfer_public_metadata(&mut transfer, existing);
-            // A queued/background result may arrive after explicit control
-            // publication. Preserve that control while refreshing progress.
-            if !manifest.completed && !manifest.final_rehash_pending && existing.state == "paused" {
-                transfer.state.clone_from(&existing.state);
-                transfer.stopped = existing.stopped;
-            }
-        }
-        state
-            .transfers
-            .insert(transfer.hash.clone(), transfer.clone());
-        Ok(Some(transfer))
-    }
-
-    async fn refresh_transfer_from_manifest_default(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(manifest) = self.ed2k_transfers.manifest_optional(hash).await? else {
-            return Ok(None);
-        };
-        if manifest.transfer_row_removed {
-            self.state
-                .lock()
-                .await
-                .transfers
-                .remove(&manifest.file_hash);
-            return Ok(None);
-        }
-        let state_name = manifest_default_state_name(&manifest);
-        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
-        let _fence = self.ed2k_transfers.lock_category_publication().await;
-        let category_id = self.ed2k_transfers.current_category_id_fenced(hash).await?;
-        let mut state = self.state.lock().await;
-        transfer.category_id = category_id;
-        transfer.category_name = category_id.and_then(|id| {
-            state
-                .categories
-                .get(&id)
-                .map(|category| category.name.clone())
-        });
-        if let Some(existing) = state.transfers.get(&transfer.hash) {
-            preserve_transfer_public_metadata(&mut transfer, existing);
-        }
-        state
-            .transfers
-            .insert(transfer.hash.clone(), transfer.clone());
-        Ok(Some(transfer))
     }
 
     pub fn subscribe_transfer_events(&self) -> broadcast::Receiver<TransferEvent> {
@@ -1360,6 +1174,7 @@ impl EmulebbCore {
     async fn run_ed2k_download_attempt(
         &self,
         transfer: &Transfer,
+        job_token: emulebb_metadata::JobToken,
         cancel: &CancellationToken,
     ) -> Result<Option<&'static str>> {
         // Already cancelled before any work started (delete/pause raced the
@@ -1371,12 +1186,12 @@ impl EmulebbCore {
         // barrier set. Finish that authoritative whole-file check before any
         // network prerequisites so restart cannot bypass or unnecessarily
         // delay delivery.
-        if let Ok(manifest) = self.ed2k_transfers.manifest(&transfer.hash).await
+        if let Ok(manifest) = self.ed2k_transfers.manifest(job_token).await
             && manifest.final_rehash_pending
         {
             let completed = self
                 .ed2k_transfers
-                .finalize_pending_transfer(&transfer.hash)
+                .finalize_pending_transfer(job_token)
                 .await?;
             return Ok(Some(if completed {
                 "completed"
@@ -1388,53 +1203,14 @@ impl EmulebbCore {
             return Ok(Some("queued"));
         };
         let config = self.effective_ed2k_config(&network.ed2k).await?;
-        // Disk free-space floor: pause before engaging sources when the transfer
-        // volume cannot hold the remaining payload, instead of failing late
-        // mid-write and churn-retrying.
-        if self
-            .should_pause_download_for_disk_space(&transfer.hash)
-            .await
-        {
-            tracing::warn!(
-                "ED2K download paused: insufficient free space for {} on {}",
-                transfer.hash,
-                self.transfer_root.display()
-            );
-            return Ok(Some("insufficient"));
+        if !self.check_download_storage_space(job_token).await? {
+            return Ok(None);
         }
         let file_hash: Ed2kHash = transfer
             .hash
             .parse()
             .with_context(|| format!("invalid ED2K transfer hash {}", transfer.hash))?;
-        let mut transfer = transfer.clone();
-        if transfer.size_bytes == 0 {
-            if let Some(metadata) = self
-                .resolve_hash_only_ed2k_metadata(network, file_hash)
-                .await?
-            {
-                let learned_name = should_adopt_hash_only_metadata_name(&transfer)
-                    .then_some(metadata.display_name.as_deref())
-                    .flatten();
-                let manifest = self
-                    .ed2k_transfers
-                    .reconcile_job_metadata(&transfer.hash, learned_name, metadata.file_size)
-                    .await?;
-                let mut updated = self.transfer_from_manifest(&manifest, &transfer.state);
-                preserve_transfer_public_metadata(&mut updated, &transfer);
-                self.state
-                    .lock()
-                    .await
-                    .transfers
-                    .insert(updated.hash.clone(), updated.clone());
-                transfer = updated;
-            }
-            if transfer.size_bytes == 0 {
-                tracing::debug!(
-                    "ED2K hash-only metadata search returned no size for {}; probing known sources",
-                    transfer.hash
-                );
-            }
-        }
+        let transfer = transfer.clone();
         let mut sources = self
             .acquire_ed2k_sources(
                 network,
@@ -1503,6 +1279,7 @@ impl EmulebbCore {
             // sources (no Kad buddy) keep the OP_CALLBACKREQUEST path below.
             detach_kad_buddy_sources_for_reask(
                 self.ed2k_reask_handle.lock().unwrap().clone().as_ref(),
+                job_token,
                 file_hash,
                 &sources,
                 &mut requested_callback_sources,
@@ -1588,6 +1365,7 @@ impl EmulebbCore {
                     continue;
                 }
                 let callback_download = Ed2kCallbackDownload {
+                    job_token,
                     file_hash,
                     display_name: transfer.name.clone(),
                     file_size: transfer.size_bytes,
@@ -1827,7 +1605,11 @@ impl EmulebbCore {
                 direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
             had_direct_sources |= !candidate_direct_sources.is_empty();
             let (direct_sources, deferred_count, deferred_retry_delay) = self
-                .acquire_direct_download_source_leases(&transfer.hash, &candidate_direct_sources)
+                .acquire_direct_download_source_leases(
+                    job_token,
+                    &transfer.hash,
+                    &candidate_direct_sources,
+                )
                 .await;
             let acquired_direct_source_count = direct_sources.len();
             deferred_active_direct_sources |= deferred_count != 0;
@@ -1875,6 +1657,7 @@ impl EmulebbCore {
                 let egress_route = network.egress_route;
                 let outcome = run_ed2k_direct_downloads(
                     DirectDownloadOptions {
+                        job_token,
                         bind_ip: network.bind_ip,
                         hello_identity,
                         secure_ident: Arc::clone(&network.secure_ident),
@@ -1891,6 +1674,7 @@ impl EmulebbCore {
                           hello_identity,
                           secure_ident,
                           transfer_runtime,
+                          job_token,
                           file_name,
                           file_size,
                           connect_timeout| {
@@ -1905,6 +1689,7 @@ impl EmulebbCore {
                                 .unwrap_or_default();
                             download_files_from_peer(
                                 Ed2kPeerDownloadOptions {
+                                    job_token,
                                     bind_ip,
                                     egress_route,
                                     peer: &source,
@@ -1940,7 +1725,7 @@ impl EmulebbCore {
                     .copied()
                     .filter(|endpoint| !detached_endpoints.contains(endpoint))
                     .collect();
-                self.release_direct_download_source_leases(&endpoints_to_release)
+                self.release_direct_download_source_leases(job_token, &endpoints_to_release)
                     .await;
                 let outcome = outcome?;
                 // A4AF NNP swap (eMuleBB CUpDownClient::SwapToAnotherFile):
@@ -1960,6 +1745,7 @@ impl EmulebbCore {
                     )
                     .await;
                     self.hold_no_needed_parts_sources(
+                        job_token,
                         &transfer.hash,
                         &outcome.no_needed_parts_sources,
                     )
@@ -1973,6 +1759,7 @@ impl EmulebbCore {
                 // wanted file when its source set has one.
                 if !outcome.file_not_found_sources.is_empty() {
                     self.dead_list_file_not_found_sources(
+                        job_token,
                         &transfer.hash,
                         &outcome.file_not_found_sources,
                     )
@@ -1987,6 +1774,7 @@ impl EmulebbCore {
                             )
                             .await;
                             self.hold_no_needed_parts_sources(
+                                alternate.job_token,
                                 &alternate.file_hash,
                                 std::slice::from_ref(&alternate.source),
                             )
@@ -1994,6 +1782,7 @@ impl EmulebbCore {
                         }
                         Ed2kPeerDownloadOutcome::FileNotFound => {
                             self.dead_list_file_not_found_sources(
+                                alternate.job_token,
                                 &alternate.file_hash,
                                 std::slice::from_ref(&alternate.source),
                             )
@@ -2001,7 +1790,8 @@ impl EmulebbCore {
                         }
                         Ed2kPeerDownloadOutcome::Completed
                         | Ed2kPeerDownloadOutcome::AcceptedButIncomplete => {
-                            if let Some(target) = self.transfer(&alternate.file_hash).await?
+                            if let Some(target) =
+                                self.selected_transfer(alternate.job_token).await?
                                 && should_retry_download_attempt_state(&target.state)
                             {
                                 self.queue_ed2k_download_attempt(target);
@@ -2016,7 +1806,7 @@ impl EmulebbCore {
                 if outcome.completed {
                     let completed = self
                         .ed2k_transfers
-                        .finalize_pending_transfer(&transfer.hash)
+                        .finalize_pending_transfer(job_token)
                         .await?;
                     return Ok(Some(if completed {
                         "completed"
@@ -2056,14 +1846,14 @@ impl EmulebbCore {
                 }
                 break;
             }
-            let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
+            let manifest = self.ed2k_transfers.manifest(job_token).await?;
             if manifest.completed {
                 return Ok(Some("completed"));
             }
             if manifest.final_rehash_pending {
                 let completed = self
                     .ed2k_transfers
-                    .finalize_pending_transfer(&transfer.hash)
+                    .finalize_pending_transfer(job_token)
                     .await?;
                 return Ok(Some(if completed {
                     "completed"
@@ -2132,7 +1922,7 @@ impl EmulebbCore {
                             sources.len(),
                             new_direct_source_count
                         );
-                        let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
+                        let manifest = self.ed2k_transfers.manifest(job_token).await?;
                         if manifest_has_ed2k_transfer_progress(&manifest)
                             || new_direct_source_count != 0
                             || (!had_direct_sources
@@ -2165,7 +1955,7 @@ impl EmulebbCore {
             return Ok(None);
         }
 
-        let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
+        let manifest = self.ed2k_transfers.manifest(job_token).await?;
         let has_progress = manifest_has_ed2k_transfer_progress(&manifest);
         let retry_on_error = last_direct_error.is_some()
             && ed2k_download_retry::should_retry_after_exhausted_direct_sources(
@@ -2226,6 +2016,7 @@ impl EmulebbCore {
 
     async fn acquire_direct_download_source_leases(
         &self,
+        token: emulebb_metadata::JobToken,
         file_hash: &str,
         sources: &[Ed2kFoundSource],
     ) -> (Vec<Ed2kFoundSource>, usize, Option<Duration>) {
@@ -2255,7 +2046,7 @@ impl EmulebbCore {
                 continue;
             }
             let endpoint = source_endpoint_key(source);
-            if state.active_download_peer_endpoints.contains(&endpoint) {
+            if state.active_download_peer_endpoints.contains_key(&endpoint) {
                 // Candidate already engaged this round: a dedup skip, NOT a source
                 // drop. The MFC oracle emits source_dropped only on genuine srclist
                 // removal, so these skips are not surfaced (they inflated the count).
@@ -2282,7 +2073,12 @@ impl EmulebbCore {
                 source,
                 file_hash,
             );
-            if registry_lease.is_some() && state.active_download_peer_endpoints.insert(endpoint) {
+            if registry_lease.is_some()
+                && state
+                    .active_download_peer_endpoints
+                    .insert(endpoint, token)
+                    .is_none()
+            {
                 acquired.push(source.clone());
                 crate::diag_sched::source_engaged(file_hash, source);
             } else {
@@ -2326,56 +2122,38 @@ impl EmulebbCore {
         (acquired, deferred, deferred_retry_delay)
     }
 
-    async fn release_direct_download_source_leases(&self, endpoints: &[(Ipv4Addr, u16)]) {
+    async fn release_direct_download_source_leases(
+        &self,
+        token: emulebb_metadata::JobToken,
+        endpoints: &[(Ipv4Addr, u16)],
+    ) {
         let mut state = self.state.lock().await;
         for endpoint in endpoints {
-            state.active_download_peer_endpoints.remove(endpoint);
-            state.download_source_registry.release_endpoint(*endpoint);
+            if state.active_download_peer_endpoints.get(endpoint) == Some(&token) {
+                state.active_download_peer_endpoints.remove(endpoint);
+                state.download_source_registry.release_endpoint(*endpoint);
+            }
         }
     }
 
-    async fn release_download_source_file(&self, hash: &str) {
+    async fn release_download_source_file(&self, token: emulebb_metadata::JobToken, hash: &str) {
         let mut state = self.state.lock().await;
-        let cleared = state.download_source_registry.release_file(hash);
-        for endpoint in cleared {
+        let endpoints: Vec<_> = state
+            .active_download_peer_endpoints
+            .iter()
+            .filter(|(_, owner)| **owner == token)
+            .map(|(endpoint, _)| *endpoint)
+            .collect();
+        for endpoint in endpoints {
             state.active_download_peer_endpoints.remove(&endpoint);
+            state.download_source_registry.release_endpoint(endpoint);
         }
+        state.download_source_registry.release_file(hash);
     }
 
-    /// Signal the in-flight background download attempt for `hash` to stop. Quick
-    /// lock, no await held: clones nothing across `.await`. Idempotent and
-    /// race-safe with a natural completion — if no attempt is running (or it just
-    /// finished and its guard removed the entry) this is a no-op; cancelling an
-    /// already-finished token has no effect. Returns whether a live cancel token
-    /// was signalled (only for diagnostics/tests; callers don't depend on it).
-    async fn cancel_download_attempt(&self, hash: &str) -> bool {
-        let state = self.state.lock().await;
-        if let Some((_, token)) = state.download_cancels.get(hash) {
-            token.cancel();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Tear down all download bookkeeping for `hash` (used by `delete`): cancel the
-    /// in-flight attempt, forget the hash's source candidates and release its
-    /// leases via [`DownloadSourceRegistry::release_file`], drop the matching
-    /// `active_download_peer_endpoints`, and clear the `active_download_attempts`
-    /// dedup slot + cancel entry so the hash can be immediately re-created and
-    /// re-download. The orphan attempt, on its next loop-top cancel check, exits;
-    /// its own per-endpoint release is then idempotent with the release done here.
-    async fn teardown_download_for_delete(&self, hash: &str) {
-        let mut state = self.state.lock().await;
-        if let Some((_, token)) = state.download_cancels.get(hash) {
-            token.cancel();
-        }
-        let cleared = state.download_source_registry.release_file(hash);
-        for endpoint in cleared {
-            state.active_download_peer_endpoints.remove(&endpoint);
-        }
-        state.active_download_attempts.remove(hash);
-        state.download_cancels.remove(hash);
+    /// Signal the selected job's current attempt without releasing ownership.
+    fn cancel_download_attempt(&self, job_id: emulebb_metadata::JobId) -> bool {
+        self.download_attempts.cancel(job_id)
     }
 
     /// Dead-list every FNF-answering source for `file_hash` for the oracle
@@ -2387,9 +2165,13 @@ impl EmulebbCore {
     /// that peer, preserving its A4AF source set instead of discarding it.
     async fn dead_list_file_not_found_sources(
         &self,
+        token: emulebb_metadata::JobToken,
         file_hash: &str,
         sources: &[Ed2kFoundSource],
     ) -> usize {
+        if !self.download_attempts.owns(token) {
+            return 0;
+        }
         let swap_targets = {
             let mut state = self.state.lock().await;
             let now = Instant::now();
@@ -2414,7 +2196,7 @@ impl EmulebbCore {
             swap_targets
         };
         for source in sources {
-            self.remove_persisted_download_source(file_hash, source)
+            self.remove_persisted_download_source(token, file_hash, source)
                 .await;
         }
         let swapped = swap_targets.len();
@@ -2433,12 +2215,20 @@ impl EmulebbCore {
     /// source is left unlisted.
     async fn dead_list_udp_fnf_source(
         &self,
+        token: emulebb_metadata::JobToken,
         file_hash: &str,
         source_tcp_endpoint: (Ipv4Addr, u16),
         source_user_hash: Option<[u8; 16]>,
     ) -> bool {
         let (swap_target, source) = {
             let mut state = self.state.lock().await;
+            if state
+                .active_download_peer_endpoints
+                .get(&source_tcp_endpoint)
+                != Some(&token)
+            {
+                return false;
+            }
             let now = Instant::now();
             let Some(source) = state
                 .download_source_registry
@@ -2467,7 +2257,7 @@ impl EmulebbCore {
             state.download_source_registry.release_endpoint(endpoint);
             (wanted_a4af_swap_target(&state, &source, file_hash), source)
         };
-        self.remove_persisted_download_source(file_hash, &source)
+        self.remove_persisted_download_source(token, file_hash, &source)
             .await;
         if let Some(target) = swap_target {
             self.queue_ed2k_download_attempt(target);
@@ -2477,10 +2267,15 @@ impl EmulebbCore {
         }
     }
 
-    async fn remove_persisted_download_source(&self, file_hash: &str, source: &Ed2kFoundSource) {
+    async fn remove_persisted_download_source(
+        &self,
+        token: emulebb_metadata::JobToken,
+        file_hash: &str,
+        source: &Ed2kFoundSource,
+    ) {
         if let Err(error) = self
             .ed2k_transfers
-            .remove_source_identity(file_hash, source.ip, source.tcp_port, source.user_hash)
+            .remove_source_identity(token, source.ip, source.tcp_port, source.user_hash)
             .await
         {
             tracing::warn!(
@@ -2498,7 +2293,6 @@ impl EmulebbCore {
         sources: &[Ed2kFoundSource],
     ) -> (usize, usize) {
         let mut state = self.state.lock().await;
-        let file_priority = download_priority_score(&transfer.priority);
         let needed_parts = transfer.parts_total.saturating_sub(transfer.parts_obtained);
         let now = Instant::now();
         let source_count_before = state
@@ -2518,7 +2312,6 @@ impl EmulebbCore {
                 now,
                 DownloadSourceCandidate {
                     file_hash: transfer.hash.clone(),
-                    file_priority,
                     needed_parts,
                     rare_parts: 0,
                     source: source.clone(),
@@ -2555,6 +2348,7 @@ impl EmulebbCore {
                         return None;
                     }
                     Some(Ed2kPeerDownloadFile {
+                        job_token: target.job_token(),
                         file_hash: candidate.file_hash.parse().ok()?,
                         display_name: target.name.clone(),
                         file_size: target.size_bytes,
@@ -2642,9 +2436,13 @@ impl EmulebbCore {
     /// cadence doubles. Returns the number of sources held.
     async fn hold_no_needed_parts_sources(
         &self,
+        token: emulebb_metadata::JobToken,
         file_hash: &str,
         sources: &[Ed2kFoundSource],
     ) -> usize {
+        if !self.download_attempts.owns(token) {
+            return 0;
+        }
         let reask_handle = self.ed2k_reask_handle.lock().unwrap().clone();
         let mut state = self.state.lock().await;
         let now = Instant::now();
@@ -2674,168 +2472,29 @@ impl EmulebbCore {
                 // Double the UDP reask cadence too when the source has a loop
                 // entry (keyed by its client-UDP endpoint; unknown = no-op).
                 if let (Some(handle), Some(udp_port)) = (&reask_handle, source.source_udp_port) {
-                    handle.mark_no_needed_parts((source.ip, udp_port));
+                    handle.mark_no_needed_parts(token, (source.ip, udp_port));
                 }
             }
         }
         held
     }
 
-    /// Spawn a background download attempt for `transfer`. Synchronous (returns
-    /// immediately after spawning) so it carries no opaque async return type:
-    /// an attempt may run an A4AF source-set transition, which re-queues another attempt
-    /// (run_attempt -> swap -> queue -> run_attempt); keeping this a plain `fn`
-    /// severs that type-inference cycle while the spawn breaks the recursion at
-    /// runtime. The dedup guard runs inside the spawned task.
-    fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
-        let core = self.clone();
-        self.ed2k_download_tasks.spawn(move |shutdown| {
-            Self::run_queued_ed2k_download_attempt(core, transfer, shutdown)
-        });
-    }
-
-    fn queue_ed2k_download_retry(&self, hash: String) {
-        let core = self.clone();
-        self.ed2k_download_tasks
-            .spawn(move |shutdown| Self::run_queued_ed2k_download_retry(core, hash, shutdown));
-    }
-
-    /// Body of one background download attempt, run as a tracked task.
-    ///
-    /// The dedup entry in `active_download_attempts` is inserted via an RAII guard
-    /// ([`DownloadAttemptGuard`]) so it is removed on every exit path — including a
-    /// panic that unwinds the task. Without the guard, a panic mid-attempt left the
-    /// hash in the set forever, permanently blocking the transfer from restarting
-    /// (FIX B2).
-    async fn run_queued_ed2k_download_attempt(
-        core: EmulebbCore,
-        transfer: Transfer,
-        shutdown: CancellationToken,
-    ) {
-        if shutdown.is_cancelled() {
-            return;
-        }
-        let hash = transfer.hash.clone();
-        // WHY: REST resume returns before the peer transfer finishes, so repeated
-        // resume requests must not start duplicate writers for the same part file.
-        let (guard, cancel) = {
-            let mut state = core.state.lock().await;
-            if !state.active_download_attempts.insert(hash.clone()) {
-                crate::diag_sched::download_attempt_started(&hash, true);
-                return;
-            }
-            crate::diag_sched::download_attempt_started(&hash, false);
-            // Install a fresh per-hash cancel token for this attempt; the loop
-            // checks it each round and delete/pause/stop/recheck signal it to stop
-            // the attempt promptly. The guard removes it on exit (only when its
-            // generation id still matches, so a recreate's token is not clobbered).
-            let cancel = CancellationToken::new();
-            let cancel_id = state.next_download_cancel_id;
-            state.next_download_cancel_id = state.next_download_cancel_id.wrapping_add(1);
-            state
-                .download_cancels
-                .insert(hash.clone(), (cancel_id, cancel.clone()));
-            (
-                DownloadAttemptGuard {
-                    core: core.clone(),
-                    hash: hash.clone(),
-                    cancel_id,
-                },
-                cancel,
-            )
-        };
-
-        let attempt = core.run_ed2k_download_attempt(&transfer, &cancel);
-        tokio::pin!(attempt);
-        let result = tokio::select! {
-            result = &mut attempt => result,
-            () = shutdown.cancelled() => {
-                cancel.cancel();
-                attempt.await
-            }
-        };
-        let mut retry_downloading = false;
-        let settled_state: &str;
-        match result {
-            Ok(Some(next_state)) => {
-                settled_state = next_state;
-                retry_downloading = should_retry_download_attempt_state(next_state);
-                // Materialize the finished file by name (eMule move-to-Incoming)
-                // BEFORE refreshing the in-memory transfer, so the refreshed view
-                // surfaces the deliveredPath in the same step.
-                if next_state == "completed" {
-                    core.release_download_source_file(&hash).await;
-                    core.deliver_completed_transfer(&hash).await;
-                } else if let Err(error) =
-                    core.refresh_transfer_from_manifest(&hash, next_state).await
-                {
-                    tracing::warn!(
-                        "failed to refresh ED2K transfer {hash} after download attempt: {error}"
-                    );
-                }
-            }
-            Ok(None) => {
-                settled_state = "cancelled";
-            }
-            Err(error) => {
-                settled_state = "error";
-                tracing::warn!("ED2K background download attempt failed for {hash}: {error:#}");
-                if let Err(refresh_error) =
-                    core.refresh_transfer_from_manifest(&hash, "queued").await
-                {
-                    tracing::warn!(
-                        "failed to refresh ED2K transfer {hash} after failed download attempt: {refresh_error}"
-                    );
-                }
-            }
-        }
-        // Release the dedup slot before re-queueing so the retry can re-acquire it.
-        drop(guard);
-        // Evidence instrumentation: make the task-exit decision (and whether it
-        // re-drives) visible. A queued active download still needs the periodic
-        // Process-style re-drive: sources, server availability, and peer upload
-        // state can change after an attempt that made no immediate progress.
-        crate::diag_sched::download_task_settled(&hash, settled_state, retry_downloading);
-        if retry_downloading && !shutdown.is_cancelled() {
-            core.queue_ed2k_download_retry(hash);
-        }
-    }
-
-    /// Body of one delayed background download retry, run as a tracked task.
-    async fn run_queued_ed2k_download_retry(
-        core: EmulebbCore,
-        hash: String,
-        shutdown: CancellationToken,
-    ) {
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)) => {}
-            () = shutdown.cancelled() => return,
-        }
-        let Ok(Some(transfer)) = core.transfer(&hash).await else {
-            crate::diag_sched::download_retry_outcome(&hash, "missing", false);
-            return;
-        };
-        if !should_retry_download_attempt_state(&transfer.state) {
-            crate::diag_sched::download_retry_outcome(&hash, &transfer.state, false);
-            return;
-        }
-        crate::diag_sched::download_retry_outcome(&hash, &transfer.state, true);
-        core.queue_ed2k_download_attempt(transfer);
-    }
-
     #[expect(
         clippy::cognitive_complexity,
         reason = "linear protocol orchestration flow"
     )]
-    async fn resolve_hash_only_ed2k_metadata(
+    async fn resolve_download_size(
         &self,
         network: &Ed2kNetworkConfig,
         file_hash: Ed2kHash,
-    ) -> Result<Option<LearnedEd2kMetadata>> {
-        let cancel = CancellationToken::new();
+        cancel: &CancellationToken,
+    ) -> Result<Option<u64>> {
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
         let timeout = Duration::from_secs(network.ed2k.connect_timeout_secs.max(15));
         let query = hash_only_ed2k_search_query(file_hash);
-        let mut learned = LearnedEd2kMetadata::default();
+        let mut learned = None;
         let background_search = self.connected_ed2k_search_handle().await;
 
         // WHY: hash-only metadata resolution shares the same keyword-search
@@ -2847,17 +2506,17 @@ impl EmulebbCore {
                 &query,
                 SearchCriteria::default(),
                 timeout,
-                &cancel,
+                cancel,
             )
             .await
             {
                 Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(results)) => {
-                    if let Some(candidate) = select_ed2k_keyword_metadata(&results, file_hash) {
-                        learned.merge_missing_from(candidate);
+                    if let Some(candidate) = select_ed2k_download_size(&results, file_hash) {
+                        learned = Some(candidate);
                         tracing::debug!(
                             "ED2K hash-only metadata learned from background search file_hash={} file_size={}",
                             file_hash,
-                            learned.file_size.unwrap_or_default()
+                            learned.unwrap_or_default()
                         );
                     }
                 }
@@ -2872,20 +2531,20 @@ impl EmulebbCore {
             }
         }
 
-        if !learned.is_complete()
+        if learned.is_none()
             && let Some(dht) = self.ed2k_dht_node().await
             && let Some(candidate) =
-                collect_kad_ed2k_metadata(&dht, &query, file_hash, timeout).await
+                collect_kad_download_size(&dht, &query, file_hash, timeout, cancel).await
         {
-            learned.merge_missing_from(candidate);
+            learned = Some(candidate);
             tracing::debug!(
                 "ED2K hash-only metadata learned from Kad search file_hash={} file_size={}",
                 file_hash,
-                learned.file_size.unwrap_or_default()
+                learned.unwrap_or_default()
             );
         }
 
-        Ok((!learned.is_empty()).then_some(learned))
+        Ok(learned)
     }
 
     #[expect(
@@ -2956,7 +2615,11 @@ impl EmulebbCore {
                                     source_count_after,
                                 );
                                 if result_hash != file_hash {
-                                    self.remember_ed2k_sources(result_hash, &results).await?;
+                                    self.remember_ed2k_sources(
+                                        batch_transfer.job_token(),
+                                        &results,
+                                    )
+                                    .await?;
                                 }
                             }
                             if result_hash == file_hash {
@@ -3050,8 +2713,11 @@ impl EmulebbCore {
                                         source_count_after,
                                     );
                                     if result_hash != file_hash {
-                                        self.remember_ed2k_sources(result_hash, &result.sources)
-                                            .await?;
+                                        self.remember_ed2k_sources(
+                                            batch_transfer.job_token(),
+                                            &result.sources,
+                                        )
+                                        .await?;
                                     }
                                 }
                                 if result_hash == file_hash {
@@ -3096,7 +2762,8 @@ impl EmulebbCore {
         // MFC keeps sources attached to the part file across later source
         // searches, so fresh non-empty lookups must not hide older direct
         // endpoints that remain valid candidates for the same file.
-        merge_download_sources(&mut sources, self.remembered_ed2k_sources(file_hash).await?);
+        self.merge_remembered_ed2k_sources(transfer.job_token(), file_hash, &mut sources)
+            .await?;
         // Self-source exclusion (eMule `CDownloadQueue::CheckAndAddSource`): never
         // treat our own client as a download source. A server or Kad lookup can
         // reflect our own (ip, tcp_port) or user-hash back to us, which would
@@ -3135,7 +2802,7 @@ impl EmulebbCore {
             !acquire_ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
         });
         for source in &sources {
-            self.remember_ed2k_sources(file_hash, std::slice::from_ref(source))
+            self.remember_ed2k_sources(transfer.job_token(), std::slice::from_ref(source))
                 .await?;
         }
         Ok(sources)
@@ -3143,7 +2810,7 @@ impl EmulebbCore {
 
     async fn remember_ed2k_sources(
         &self,
-        file_hash: Ed2kHash,
+        token: emulebb_metadata::JobToken,
         sources: &[Ed2kFoundSource],
     ) -> Result<()> {
         for source in sources {
@@ -3152,7 +2819,7 @@ impl EmulebbCore {
             }
             self.ed2k_transfers
                 .remember_source(
-                    &file_hash.to_string(),
+                    token,
                     Ed2kSourceHint {
                         ip: source.ip.to_string(),
                         tcp_port: source.tcp_port,
@@ -3167,28 +2834,32 @@ impl EmulebbCore {
         Ok(())
     }
 
-    async fn remembered_ed2k_sources(&self, file_hash: Ed2kHash) -> Result<Vec<Ed2kFoundSource>> {
-        let manifest = match self.ed2k_transfers.manifest(&file_hash.to_string()).await {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                tracing::warn!("failed to read remembered ED2K sources for {file_hash}: {error}");
-                return Ok(Vec::new());
+    async fn merge_remembered_ed2k_sources(
+        &self,
+        token: emulebb_metadata::JobToken,
+        file_hash: Ed2kHash,
+        sources: &mut Vec<Ed2kFoundSource>,
+    ) -> Result<()> {
+        // WHY: discovery needs endpoint scalars, not piece geometry or source
+        // descriptions. Keyset pages keep each database read bounded and the
+        // captured generation prevents a delayed lookup observing a later job.
+        let mut after = 0;
+        loop {
+            let page = self
+                .ed2k_transfers
+                .download_source_endpoints_after(token, after, 256)
+                .await?;
+            if page.is_empty() {
+                return Ok(());
             }
-        };
-        let sources = manifest
-            .sources
-            .iter()
-            .filter_map(|hint| match found_source_from_hint(file_hash, hint) {
-                Ok(source) => Some(source),
-                Err(error) => {
-                    tracing::warn!(
-                        "skipping invalid remembered ED2K source for {file_hash}: {error}"
-                    );
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        Ok(sources)
+            after = page.last().expect("nonempty endpoint page").id;
+            merge_download_sources(
+                sources,
+                page.iter()
+                    .map(|endpoint| found_source_from_endpoint(file_hash, endpoint))
+                    .collect(),
+            );
+        }
     }
 
     fn ed2k_hello_identity(&self, network: &Ed2kNetworkConfig) -> Ed2kHelloIdentity {
@@ -3379,6 +3050,7 @@ impl EmulebbCore {
             };
             let dest = SocketAddr::new(IpAddr::V4(source.ip), source_udp_port);
             let callback_download = Ed2kCallbackDownload {
+                job_token: transfer.job_token(),
                 file_hash,
                 display_name: transfer.name.clone(),
                 file_size: transfer.size_bytes,
@@ -7492,7 +7164,6 @@ const ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS: u64 = 500;
 const ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS: u64 = 750;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
-const ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS: u64 = 5;
 
 fn ed2k_download_state_without_sources(file_size: u64) -> &'static str {
     if file_size == 0 {
@@ -7509,7 +7180,7 @@ fn ed2k_download_state_without_sources(file_size: u64) -> &'static str {
 /// control plane in a live test).
 const RESUME_DOWNLOADS_INITIAL_DELAY_SECS: u64 = 20;
 const RESUME_DOWNLOADS_STAGGER_MS: u64 = 1500;
-/// Parse a REST-surface IP string (the `Upload.address` / `TransferSource.ip`
+/// Parse a REST-surface IP string (the `Upload.address` / `DownloadSource.ip`
 /// fields) into an `Ipv4Addr` for the ban store. Returns `None` when the value
 /// is empty or not a dialable IPv4 (e.g. a LowID client-id), so the ban falls
 /// back to the user-hash key alone.

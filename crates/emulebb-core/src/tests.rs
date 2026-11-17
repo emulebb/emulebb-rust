@@ -4,6 +4,7 @@ use emulebb_kad_proto::{NodeId, Tag, TagValue};
 use md4::{Digest, Md4};
 
 use super::*;
+use crate::download_attempts::DownloadAttemptGuard;
 
 #[path = "../tests/support/discovery_fixture.rs"]
 pub(crate) mod discovery_fixture;
@@ -589,17 +590,18 @@ async fn passive_source_results_are_remembered_for_existing_transfer() {
     let transfer_root = unique_runtime_dir("emulebb-core-passive-source-memory");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
     let file_hash = Ed2kHash::from_bytes([0x41; 16]);
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "passive-source-target.bin".to_string(),
-            4096,
-        ))
-        .await
-        .unwrap();
+    let token = admit_scheduler_test_job(
+        &transfer_runtime,
+        &transfer_root,
+        file_hash,
+        "passive-source-target.bin".into(),
+        4096,
+    )
+    .await;
 
     remember_passive_source_results(
         &transfer_runtime,
+        token,
         &[SourceResult {
             file_hash,
             source_id: Ed2kHash::from_bytes([0x52; 16]),
@@ -615,16 +617,15 @@ async fn passive_source_results_are_remembered_for_existing_transfer() {
     )
     .await;
 
-    let manifest = transfer_runtime
-        .manifest(&file_hash.to_string())
+    let sources = transfer_runtime
+        .download_sources_after(token, 0, 16)
         .await
         .unwrap();
-
-    assert_eq!(manifest.sources.len(), 1);
-    assert_eq!(manifest.sources[0].ip, "198.51.100.22");
-    assert_eq!(manifest.sources[0].tcp_port, 4662);
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].source.ip, "198.51.100.22");
+    assert_eq!(sources[0].source.tcp_port, 4662);
     assert_eq!(
-        manifest.sources[0].user_hash.as_deref(),
+        sources[0].source.user_hash.as_deref(),
         Some("52525252525252525252525252525252")
     );
 }
@@ -634,17 +635,18 @@ async fn passive_note_results_update_empty_existing_transfer_metadata() {
     let transfer_root = unique_runtime_dir("emulebb-core-passive-note-memory");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
     let file_hash = Ed2kHash::from_bytes([0x42; 16]);
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "passive-note-target.bin".to_string(),
-            4096,
-        ))
-        .await
-        .unwrap();
+    let token = admit_scheduler_test_job(
+        &transfer_runtime,
+        &transfer_root,
+        file_hash,
+        "passive-note-target.bin".into(),
+        4096,
+    )
+    .await;
 
     remember_passive_note_results(
         &transfer_runtime,
+        token,
         &[KadNoteResult {
             file_hash,
             source_id: Ed2kHash::from_bytes([0x53; 16]),
@@ -655,10 +657,7 @@ async fn passive_note_results_update_empty_existing_transfer_metadata() {
     )
     .await;
 
-    let manifest = transfer_runtime
-        .manifest(&file_hash.to_string())
-        .await
-        .unwrap();
+    let manifest = transfer_runtime.manifest(token).await.unwrap();
 
     assert_eq!(manifest.comment, "clean release");
     assert_eq!(manifest.rating, 4);
@@ -669,14 +668,14 @@ async fn passive_note_results_do_not_replace_local_transfer_metadata() {
     let transfer_root = unique_runtime_dir("emulebb-core-passive-note-preserve");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
     let file_hash = Ed2kHash::from_bytes([0x43; 16]);
-    transfer_runtime
-        .ensure_job(&new_transfer_job(
-            file_hash,
-            "passive-note-preserve.bin".to_string(),
-            4096,
-        ))
-        .await
-        .unwrap();
+    let token = admit_scheduler_test_job(
+        &transfer_runtime,
+        &transfer_root,
+        file_hash,
+        "passive-note-preserve.bin".into(),
+        4096,
+    )
+    .await;
     transfer_runtime
         .update_shared_file_metadata(&file_hash.to_string(), None, Some(("local note", 2)))
         .await
@@ -684,6 +683,7 @@ async fn passive_note_results_do_not_replace_local_transfer_metadata() {
 
     remember_passive_note_results(
         &transfer_runtime,
+        token,
         &[KadNoteResult {
             file_hash,
             source_id: Ed2kHash::from_bytes([0x54; 16]),
@@ -694,13 +694,47 @@ async fn passive_note_results_do_not_replace_local_transfer_metadata() {
     )
     .await;
 
-    let manifest = transfer_runtime
-        .manifest(&file_hash.to_string())
-        .await
-        .unwrap();
+    let manifest = transfer_runtime.manifest(token).await.unwrap();
 
     assert_eq!(manifest.comment, "local note");
     assert_eq!(manifest.rating, 2);
+}
+
+pub(crate) async fn admit_scheduler_test_job(
+    runtime: &Ed2kTransferRuntime,
+    temp: &Path,
+    file_hash: Ed2kHash,
+    name: String,
+    size: u64,
+) -> emulebb_metadata::JobToken {
+    let admitted = runtime
+        .admit_download_job(
+            &emulebb_metadata::DownloadJobRequest {
+                file_hash: file_hash.to_string(),
+                display_name: name.clone(),
+                expected_size_bytes: Some(size),
+                category_id: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+            },
+            true,
+            None,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    let token = admitted.job.token;
+    drop(admitted);
+    let started = runtime.start_download_job(token, temp).await.unwrap();
+    let token = started.as_ref().unwrap().token;
+    drop(started);
+    drop(
+        runtime
+            .ensure_job(&new_transfer_job(token, file_hash, name, size))
+            .await
+            .unwrap(),
+    );
+    token
 }
 
 async fn completed_ed2k_transfer_runtime(
@@ -711,32 +745,34 @@ async fn completed_ed2k_transfer_runtime(
     String,
     String,
     u64,
+    emulebb_metadata::JobToken,
 ) {
     let runtime_dir = unique_runtime_dir(test_name);
     let payload_path = runtime_dir.join("fixture.bin");
     let payload = b"completed direct download scheduler payload".repeat(64);
     std::fs::write(&payload_path, &payload).unwrap();
-    let transfer_runtime =
-        Arc::new(Ed2kTransferRuntime::load_or_create(&runtime_dir.join("transfers")).unwrap());
+    let temp = runtime_dir.join("transfers");
+    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&temp).unwrap());
     let summary = transfer_runtime
         .ingest_local_file(&payload_path, "fixture.bin")
         .await
         .unwrap();
+    let token = admit_scheduler_test_job(
+        &transfer_runtime,
+        &temp,
+        summary.file_hash.parse().unwrap(),
+        summary.display_name.clone(),
+        summary.file_size,
+    )
+    .await;
+    drop(
+        transfer_runtime
+            .store_md4_hashset(token, Vec::new())
+            .await
+            .unwrap(),
+    );
     transfer_runtime
-        .ensure_job(&emulebb_ed2k::ed2k_transfer::Ed2kTransferJob {
-            file_hash: summary.file_hash.clone(),
-            display_name: summary.display_name.clone(),
-            file_size: summary.file_size,
-            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
-        })
-        .await
-        .unwrap();
-    transfer_runtime
-        .store_md4_hashset(&summary.file_hash, Vec::new())
-        .await
-        .unwrap();
-    transfer_runtime
-        .store_piece_data(&summary.file_hash, 0, &payload)
+        .store_piece_data(token, 0, &payload)
         .await
         .unwrap();
     let secure_ident =
@@ -747,6 +783,7 @@ async fn completed_ed2k_transfer_runtime(
         summary.file_hash,
         summary.display_name,
         summary.file_size,
+        token,
     )
 }
 
@@ -768,6 +805,7 @@ fn direct_test_source(file_hash: Ed2kHash, ip: Ipv4Addr, tcp_port: u16) -> Ed2kF
 }
 
 fn direct_download_options(
+    job_token: emulebb_metadata::JobToken,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
     secure_ident: Arc<Ed2kSecureIdent>,
     file_hash_hex: String,
@@ -776,6 +814,7 @@ fn direct_download_options(
     sources: Vec<Ed2kFoundSource>,
 ) -> DirectDownloadOptions {
     DirectDownloadOptions {
+        job_token,
         bind_ip: Ipv4Addr::new(192, 0, 2, 10),
         hello_identity: Ed2kHelloIdentity {
             user_hash: [0x11; 16],
@@ -798,11 +837,31 @@ fn direct_download_options(
     }
 }
 
-fn a4af_test_transfer(hash: &str, state_name: &str) -> Transfer {
+fn a4af_test_owner(core: &EmulebbCore, hash: &str) -> DownloadAttemptGuard {
+    let transfer = a4af_test_transfer(core, hash, "downloading");
+    core.download_attempts
+        .try_enter(transfer.job_token(), hash.parse().unwrap())
+        .unwrap()
+}
+
+fn a4af_test_transfer(core: &EmulebbCore, hash: &str, state_name: &str) -> Transfer {
+    let job = core
+        .metadata_store
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: hash.to_owned(),
+            display_name: "Sample.bin".into(),
+            expected_size_bytes: Some(1),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
     Transfer {
+        id: job.token.job_id,
+        execution_generation: job.token.generation,
         hash: hash.to_string(),
         name: "file".to_string(),
-        name_consensus: Default::default(),
         path: String::new(),
         delivered_path: None,
         delivery_error: None,
@@ -816,7 +875,6 @@ fn a4af_test_transfer(hash: &str, state_name: &str) -> Transfer {
         upload_speed_ki_bps: 0.0,
         stopped: state_name == "paused" || state_name == "stopped",
         ed2k_link: String::new(),
-        priority: "normal".to_string(),
         category_id: None,
         category_name: None,
         eta: None,
@@ -826,7 +884,6 @@ fn a4af_test_transfer(hash: &str, state_name: &str) -> Transfer {
         parts_obtained: 0,
         parts_progress_text: "0".to_string(),
         parts_available: 0,
-        auto_priority: false,
         in_incoming: false,
     }
 }

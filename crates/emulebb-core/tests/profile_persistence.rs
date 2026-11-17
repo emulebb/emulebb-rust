@@ -5,9 +5,8 @@ use std::{
 };
 
 use emulebb_core::{
-    AppSettingsUpdate, CategoryCreate, CoreSettingsUpdate, EmulebbCore, FriendCreate,
-    LocalShareCreate, NullableStringField, ServerCreate, ServerUpdate, TransferCreate,
-    TransferUpdate,
+    AppSettingsUpdate, CategoryCreate, CoreSettingsUpdate, DownloadCreate, DownloadCreateSource,
+    EmulebbCore, FriendCreate, LocalShareCreate, NullableStringField, ServerCreate, ServerUpdate,
 };
 use emulebb_index::FileIndex;
 
@@ -193,39 +192,11 @@ async fn removed_shared_root_survives_core_restart() {
 }
 
 #[tokio::test]
-async fn delete_category_resets_referencing_transfers_to_uncategorized() {
+async fn delete_category_resets_referencing_downloads_to_uncategorized() {
     let runtime_dir = unique_test_dir("delete-category-reset");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
-    let payload_path = runtime_dir.join("Shared.Payload.bin");
-    fs::write(&payload_path, b"category reset payload").unwrap();
     let core = open_core(&metadata_path, &transfer_root);
-    core.add_shared_directory_root(&runtime_dir.display().to_string())
-        .await
-        .unwrap();
-
-    let share = core
-        .share_local_file(LocalShareCreate {
-            path: payload_path.display().to_string(),
-            name: Some("Shared.Payload.bin".to_string()),
-        })
-        .await
-        .unwrap();
-    // Shared files stay out of the transfer queue. Deliberately re-download the
-    // same identity so this test has a real queued transfer to categorize while
-    // the independent shared source remains available.
-    let restored = core
-        .create_transfer(TransferCreate {
-            known_file_policy: emulebb_core::KnownFilePolicy::Redownload,
-            link: Some(share.ed2k_link.clone()),
-            links: None,
-            category_id: None,
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    assert_eq!(restored.hash, share.hash);
     let category = core
         .create_category(CategoryCreate {
             name: "Movies".to_string(),
@@ -237,29 +208,37 @@ async fn delete_category_resets_referencing_transfers_to_uncategorized() {
         .unwrap();
     assert_ne!(category.id, 0);
 
-    let updated = core
-        .update_transfer(
-            &share.hash,
-            TransferUpdate {
-                category_id: Some(Some(category.id)),
-                ..TransferUpdate::default()
+    let (created, download) = core
+        .create_download(DownloadCreate {
+            source: DownloadCreateSource::Content {
+                hash: "45454545454545454545454545454545".into(),
+                name: "Sample.bin".into(),
+                size_bytes: Some(16),
             },
-        )
+            category: Some(category.name.clone()),
+            intent: emulebb_metadata::DownloadIntent::Stopped,
+            redownload: false,
+        })
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(updated.category_id, Some(category.id));
-    assert_eq!(updated.category_name.as_deref(), Some("Movies"));
-
+    assert!(created);
+    assert_eq!(download.hash, "45454545454545454545454545454545");
+    assert_eq!(download.category.as_deref(), Some("Movies"));
+    let id = download.id;
+    drop(download);
     assert!(core.delete_category(category.id).await.unwrap().is_some());
 
-    let transfer = core.transfer(&share.hash).await.unwrap().unwrap();
+    let page = core.download_page(Default::default()).await.unwrap();
+    let download = page
+        .downloads
+        .iter()
+        .find(|download| download.id == id)
+        .unwrap();
     assert_eq!(
-        transfer.category_id, None,
-        "transfer category_id must reset to uncategorized after its category is deleted"
+        download.category, None,
+        "deleting a category resets its existing jobs to uncategorized"
     );
-    assert_eq!(transfer.category_name, None);
-
+    drop(page);
     // Idempotent: deleting an already-removed category returns None.
     assert!(core.delete_category(category.id).await.unwrap().is_none());
 }

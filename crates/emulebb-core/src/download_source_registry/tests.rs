@@ -34,11 +34,11 @@ fn registry_leases_one_file_per_peer_and_prefers_best_candidate() {
     let now = Instant::now();
     registry.add_candidate(
         now,
-        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 10, source.clone()),
+        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 1, source.clone()),
     );
     registry.add_candidate(
         now,
-        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 1, source.clone()),
+        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 10, source.clone()),
     );
 
     let leased = registry
@@ -114,11 +114,11 @@ fn registry_defers_when_peer_is_better_for_another_file() {
     let now = Instant::now();
     registry.add_candidate(
         now,
-        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 10, source.clone()),
+        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 1, source.clone()),
     );
     registry.add_candidate(
         now,
-        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 1, source.clone()),
+        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 10, source.clone()),
     );
 
     assert!(
@@ -148,8 +148,8 @@ fn registry_swap_target_picks_best_other_wanted_file_and_skips_current() {
     let source = source_with_hash([0x55; 16]);
     let mut registry = DownloadSourceRegistry::default();
     let now = Instant::now();
-    // Peer serves three files: current (a), a low-priority other (b), and a
-    // high-priority other (c). The NNP swap must pick c over b and never a.
+    // Peer serves three files. Exclude the current file (a), then prefer
+    // the other file with more needed parts (c) over file b at equal rarity.
     registry.add_candidate(
         now,
         candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9, 9, source.clone()),
@@ -496,14 +496,13 @@ fn source_with_endpoint(last_octet: u8, tcp_port: u16) -> Ed2kFoundSource {
 
 fn candidate(
     file_hash: &str,
-    file_priority: u32,
+    needed_parts: u32,
     rare_parts: u32,
     source: Ed2kFoundSource,
 ) -> DownloadSourceCandidate {
     DownloadSourceCandidate {
         file_hash: file_hash.to_string(),
-        file_priority,
-        needed_parts: 4,
+        needed_parts,
         rare_parts,
         source,
         // Overwritten by add_candidate; placeholder only.

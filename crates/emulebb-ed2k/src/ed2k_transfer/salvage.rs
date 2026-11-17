@@ -60,7 +60,7 @@ impl Ed2kTransferRuntime {
         recovery_body: &[u8],
     ) -> Result<Option<PartSalvageOutcome>> {
         let _guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_aich_manifest_unlocked(token).await?;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?.edit()?;
         let file_hash = manifest.file_hash.clone();
 
         // Need a trusted AICH root that matches the answer's master hash.
@@ -188,7 +188,7 @@ impl Ed2kTransferRuntime {
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
         let _guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
         let file_hash = manifest.file_hash.clone();
         let part_index = u32::from(part);
         let piece_size = manifest.piece_size;
@@ -351,7 +351,7 @@ impl Ed2kTransferRuntime {
         start: u64,
         end: u64,
         data: &[u8],
-    ) -> Result<(PieceWriteOutcome, super::Ed2kResumeManifest)> {
+    ) -> Result<(PieceWriteOutcome, super::ResidentManifest)> {
         let is_salvage = {
             let _guard = self.lock_manifest(token).await;
             // Cache-hit probe: checking one piece's bitmap flag must not clone

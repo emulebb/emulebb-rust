@@ -39,6 +39,7 @@ type RequestedCallbackSources = HashSet<Ed2kFoundSourceKey>;
 /// nothing when UDP reask is disabled (`reask_handle` is `None`).
 pub(crate) fn detach_kad_buddy_sources_for_reask(
     reask_handle: Option<&ReaskSourceHandle>,
+    job_token: emulebb_metadata::JobToken,
     file_hash: Ed2kHash,
     sources: &[Ed2kFoundSource],
     requested_callback_sources: &mut RequestedCallbackSources,
@@ -52,6 +53,7 @@ pub(crate) fn detach_kad_buddy_sources_for_reask(
     {
         register_kad_buddy_source_for_reask(
             reask_handle,
+            job_token,
             file_hash,
             source,
             ED2K_DEFAULT_UDP_VERSION,
@@ -66,6 +68,7 @@ pub(crate) fn detach_kad_buddy_sources_for_reask(
 /// a synthetic local source has no preceding hello from which to learn it.
 pub(crate) fn register_kad_buddy_source_for_reask(
     reask_handle: &ReaskSourceHandle,
+    job_token: emulebb_metadata::JobToken,
     file_hash: Ed2kHash,
     source: &Ed2kFoundSource,
     source_udp_version: u8,
@@ -84,6 +87,7 @@ pub(crate) fn register_kad_buddy_source_for_reask(
     // the TCP port only if the Kad result carried no UDP port.
     let endpoint = (source.ip, source.source_udp_port.unwrap_or(source.tcp_port));
     let registered = reask_handle.register_kad_buddy_source(ReaskDetachArgs {
+        job_token,
         file_hash,
         endpoint,
         // Core's lease key port (source_endpoint_key). A buddy source holds no
@@ -117,6 +121,13 @@ mod tests {
     use emulebb_ed2k::{ReaskCommand, reask_command_channel};
     use emulebb_kad_dht::SourceResult;
     use std::net::Ipv4Addr;
+
+    fn job_token() -> emulebb_metadata::JobToken {
+        emulebb_metadata::JobToken {
+            job_id: "1".parse().unwrap(),
+            generation: 3,
+        }
+    }
 
     fn buddy_source(file_hash: Ed2kHash) -> Ed2kFoundSource {
         Ed2kFoundSource {
@@ -174,12 +185,19 @@ mod tests {
         let sources = vec![buddy_source(file_hash)];
         let mut requested = HashSet::new();
 
-        detach_kad_buddy_sources_for_reask(Some(&handle), file_hash, &sources, &mut requested);
+        detach_kad_buddy_sources_for_reask(
+            Some(&handle),
+            job_token(),
+            file_hash,
+            &sources,
+            &mut requested,
+        );
 
         // Exactly one Register command carrying the buddy id + endpoint, keyed on
         // the source's own eD2k UDP endpoint.
         match rx.try_recv().expect("a buddy registration") {
             ReaskCommand::Register(args) => {
+                assert_eq!(args.job_token, job_token());
                 assert_eq!(args.file_hash, file_hash);
                 assert!(args.low_id);
                 assert_eq!(args.endpoint, (Ipv4Addr::new(192, 0, 2, 77), 4672));
@@ -193,7 +211,13 @@ mod tests {
             other => panic!("expected Register, got {other:?}"),
         }
         // The source is now in the dedup set, so a second pass registers nothing.
-        detach_kad_buddy_sources_for_reask(Some(&handle), file_hash, &sources, &mut requested);
+        detach_kad_buddy_sources_for_reask(
+            Some(&handle),
+            job_token(),
+            file_hash,
+            &sources,
+            &mut requested,
+        );
         assert!(rx.try_recv().is_err());
     }
 
@@ -208,13 +232,20 @@ mod tests {
         high_id.buddy_id = None;
         high_id.buddy_endpoint = None;
         let (handle, mut rx) = reask_command_channel();
-        detach_kad_buddy_sources_for_reask(Some(&handle), file_hash, &[high_id], &mut requested);
+        detach_kad_buddy_sources_for_reask(
+            Some(&handle),
+            job_token(),
+            file_hash,
+            &[high_id],
+            &mut requested,
+        );
         assert!(rx.try_recv().is_err());
         assert!(requested.is_empty());
 
         // A buddy source is a no-op when UDP reask is disabled (no handle).
         detach_kad_buddy_sources_for_reask(
             None,
+            job_token(),
             file_hash,
             &[buddy_source(file_hash)],
             &mut requested,

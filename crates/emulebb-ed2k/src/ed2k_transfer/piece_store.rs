@@ -469,7 +469,7 @@ impl Ed2kTransferRuntime {
         data: &[u8],
     ) -> Result<()> {
         let _guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
         let hash = manifest.file_hash.clone();
         let file_hash = hash.as_str();
         let piece_size = manifest.piece_size;
@@ -554,9 +554,9 @@ impl Ed2kTransferRuntime {
         start: u64,
         end: u64,
         data: &[u8],
-    ) -> Result<(PieceWriteOutcome, Ed2kResumeManifest)> {
+    ) -> Result<(PieceWriteOutcome, super::ResidentManifest)> {
         let guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let manifest = self.load_manifest_unlocked(token).await?;
         let hash = manifest.file_hash.clone();
         let file_hash = hash.as_str();
         let block_received_at = Instant::now();
@@ -575,6 +575,57 @@ impl Ed2kTransferRuntime {
         let current_piece_bytes_written = piece_snapshot.bytes_written;
         let expected_start = piece_start + current_piece_bytes_written;
         let expected_end = expected_start + data_len;
+        if !piece_snapshot.has_block_bitmap()
+            && !piece_snapshot.ich_corrupted
+            && start == expected_start
+            && end == expected_end
+            && end < piece_end
+        {
+            // WHY: the common incomplete-prefix append needs one piece delta,
+            // not a full mutable geometry snapshot. Admit replacement credit
+            // before payload IO and release our read pin before publication.
+            let permit = self.local_mutations.residents.reserve(token.job_id)?;
+            drop(manifest);
+            let mut file = self.take_payload_handle(token).await?;
+            use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+            file.seek(std::io::SeekFrom::Start(start)).await?;
+            file.write_all(data).await?;
+            // WHY: stop can checkpoint acknowledged dirty progress without
+            // waiting for this job's I/O guard. Publish only flushed payload.
+            file.flush().await?;
+            self.store_payload_handle(token, file);
+            let mut next = piece_snapshot.clone();
+            next.bytes_written += data_len;
+            next.state = Ed2kTransferState::Missing;
+            let manifest = self
+                .publish_piece_progress_unlocked(
+                    token,
+                    file_hash,
+                    Some(&piece_snapshot),
+                    &next,
+                    permit,
+                )
+                .await?;
+            let should_checkpoint = self.should_checkpoint_manifest_unlocked(&manifest).await;
+            if should_checkpoint {
+                let mut file = self.take_payload_handle(token).await?;
+                file.flush().await?;
+                self.store_payload_handle(token, file);
+                self.store_manifest_piece_progress_unlocked(&manifest, piece_index, guard)
+                    .await?;
+            }
+            log_append_piece_block(AppendPieceBlockLog {
+                manifest: &manifest,
+                piece_index,
+                start,
+                end,
+                block_received_at,
+                should_checkpoint,
+                checkpoint_reason: should_checkpoint.then_some("periodic_progress"),
+            });
+            return Ok((PieceWriteOutcome::Incomplete, manifest));
+        }
+        let mut manifest = manifest.edit()?;
         if piece_snapshot.has_block_bitmap()
             || start != expected_start
             || end != expected_end
@@ -598,7 +649,7 @@ impl Ed2kTransferRuntime {
                     guard,
                 )
                 .await?;
-            return Ok((outcome, manifest));
+            return Ok((outcome, manifest.freeze()?));
         }
 
         let mut file = self.take_payload_handle(token).await?;
@@ -730,13 +781,14 @@ impl Ed2kTransferRuntime {
                     should_checkpoint,
                     checkpoint_reason,
                 });
-                return Ok((outcome, manifest));
+                return Ok((outcome, manifest.freeze()?));
             }
 
+            file.flush().await?;
             self.store_payload_handle(token, file);
-            self.note_dirty_piece_unlocked(&manifest, piece_index)
+            let manifest = self
+                .publish_dirty_manifest_unlocked(&manifest, piece_index)
                 .await?;
-            manifest = self.cache_manifest_unlocked(&manifest).await?;
             log_append_piece_block(AppendPieceBlockLog {
                 manifest: &manifest,
                 piece_index,
@@ -760,7 +812,7 @@ impl Ed2kTransferRuntime {
             should_checkpoint,
             checkpoint_reason,
         });
-        Ok((outcome, manifest))
+        Ok((outcome, manifest.freeze()?))
     }
 
     /// Append a block and return the refreshed manifest snapshot used by
@@ -774,7 +826,7 @@ impl Ed2kTransferRuntime {
         start: u64,
         end: u64,
         data: &[u8],
-    ) -> Result<(PieceWriteOutcome, Ed2kResumeManifest)> {
+    ) -> Result<(PieceWriteOutcome, super::ResidentManifest)> {
         let (outcome, mut manifest) = self
             .append_piece_block_inner(token, piece_index, start, end, data)
             .await?;
@@ -1029,7 +1081,7 @@ impl Ed2kTransferRuntime {
             VerifiedPayloadAuthority::ManagedCompleted { token, expected } => {
                 let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
                 let _manifest_guard = self.lock_manifest(*token).await;
-                let mut manifest = self.load_manifest_unlocked(*token).await?;
+                let mut manifest = self.load_manifest_unlocked(*token).await?.edit()?;
                 if !manifest.completed || manifest.payload_fingerprint.as_ref() != expected.as_ref()
                 {
                     return Ok(());
@@ -1079,7 +1131,7 @@ impl Ed2kTransferRuntime {
     ) -> Result<()> {
         let _lifecycle_guard = self.lock_lifecycle(failure.token.job_id).await;
         let _manifest_guard = self.lock_manifest(failure.token).await;
-        let mut manifest = self.load_manifest_unlocked(failure.token).await?;
+        let mut manifest = self.load_manifest_unlocked(failure.token).await?.edit()?;
         if manifest.completed || manifest.final_rehash_pending {
             return Ok(());
         }

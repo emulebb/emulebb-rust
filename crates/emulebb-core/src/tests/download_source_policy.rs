@@ -50,7 +50,7 @@ async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
     });
 
     let file_hash = Ed2kHash::from_bytes([0x52; 16]);
-    let transfer = a4af_test_transfer(&file_hash.to_string(), "downloading");
+    let transfer = a4af_test_transfer(&core, &file_hash.to_string(), "downloading");
     let source = Ed2kFoundSource {
         file_hash,
         ip: Ipv4Addr::LOCALHOST,
@@ -98,7 +98,9 @@ async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
     // redundant second engagement.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let file_a = Ed2kHash::from_bytes([0x71; 16]).to_string();
+    let file_a_owner = a4af_test_owner(&core, &file_a.to_string());
     let file_b = Ed2kHash::from_bytes([0x72; 16]).to_string();
+    let file_b_owner = a4af_test_owner(&core, &file_b.to_string());
     let source = direct_test_source(
         Ed2kHash::from_bytes([0x71; 16]),
         Ipv4Addr::new(192, 0, 2, 31),
@@ -106,15 +108,14 @@ async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
     );
     {
         let mut state = core.state.lock().await;
-        // File A is the peer's best (higher priority), so it wins the single
-        // per-peer relationship; file B is the lower-priority other file.
-        for (hash, priority) in [(&file_a, 9u32), (&file_b, 3u32)] {
+        // File A needs more parts, so it wins the single per-peer
+        // relationship; file B is the other wanted file.
+        for (hash, needed_parts) in [(&file_a, 9u32), (&file_b, 3u32)] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-                    file_priority: priority,
-                    needed_parts: 4,
+                    needed_parts,
                     rare_parts: 1,
                     source: source.clone(),
                     last_seen: Instant::now(),
@@ -124,10 +125,18 @@ async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
     }
 
     let (a_sources, a_deferred, a_delay) = core
-        .acquire_direct_download_source_leases(&file_a, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            file_a_owner.token(),
+            &file_a,
+            std::slice::from_ref(&source),
+        )
         .await;
     let (b_sources, b_deferred, b_delay) = core
-        .acquire_direct_download_source_leases(&file_b, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            file_b_owner.token(),
+            &file_b,
+            std::slice::from_ref(&source),
+        )
         .await;
 
     // Engaged once (file A, the peer's best), deferred (NOT double-engaged)
@@ -148,10 +157,17 @@ async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
 
     // After the peer is released, the same endpoint remains cooldown-deferred
     // until the MFC-style retry window expires instead of being redialed.
-    core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
-        .await;
+    core.release_direct_download_source_leases(
+        file_a_owner.token(),
+        &[source_endpoint_key(&source)],
+    )
+    .await;
     let (a_again, a_again_deferred, a_again_delay) = core
-        .acquire_direct_download_source_leases(&file_a, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            file_a_owner.token(),
+            &file_a,
+            std::slice::from_ref(&source),
+        )
         .await;
     assert!(a_again.is_empty());
     assert_eq!(a_again_deferred, 1);
@@ -169,6 +185,7 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
     // untouched (the list is per-(file, source)).
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let dead_file = Ed2kHash::from_bytes([0x74; 16]).to_string();
+    let dead_file_owner = a4af_test_owner(&core, &dead_file.to_string());
     let other_file = Ed2kHash::from_bytes([0x75; 16]).to_string();
     let source = direct_test_source(
         Ed2kHash::from_bytes([0x74; 16]),
@@ -179,14 +196,14 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
         let mut state = core.state.lock().await;
         state.transfers.insert(
             other_file.clone(),
-            a4af_test_transfer(&other_file, "downloading"),
+            a4af_test_transfer(&core, &other_file, "downloading"),
         );
         for hash in [&dead_file, &other_file] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: (*hash).clone(),
-                    file_priority: 5,
+
                     needed_parts: 4,
                     rare_parts: 0,
                     source: source.clone(),
@@ -197,8 +214,12 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
     }
 
     assert_eq!(
-        core.dead_list_file_not_found_sources(&dead_file, std::slice::from_ref(&source))
-            .await,
+        core.dead_list_file_not_found_sources(
+            dead_file_owner.token(),
+            &dead_file,
+            std::slice::from_ref(&source)
+        )
+        .await,
         1,
         "FNF removes only the dead file relation and swaps the peer to its other wanted file"
     );
@@ -222,7 +243,7 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
     }
 
     // Re-registration is refused while the 45-minute block runs.
-    let transfer = a4af_test_transfer(&dead_file, "downloading");
+    let transfer = a4af_test_transfer(&core, &dead_file, "downloading");
     core.register_download_source_candidates(&transfer, std::slice::from_ref(&source))
         .await;
     {
@@ -240,7 +261,11 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
     // Lease acquisition skips the dead source without deferring: no retry
     // wait is owed to a dead source.
     let (engaged, deferred, retry_delay) = core
-        .acquire_direct_download_source_leases(&dead_file, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            dead_file_owner.token(),
+            &dead_file,
+            std::slice::from_ref(&source),
+        )
         .await;
     assert!(engaged.is_empty());
     assert_eq!(deferred, 0);
@@ -254,6 +279,7 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
     // peer behind the same IP serves the file.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let file = Ed2kHash::from_bytes([0x76; 16]).to_string();
+    let file_owner = a4af_test_owner(&core, &file.to_string());
     let peer_ip = Ipv4Addr::new(192, 0, 2, 33);
     let source = direct_test_source(Ed2kHash::from_bytes([0x76; 16]), peer_ip, 41012);
     {
@@ -262,7 +288,6 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: file.clone(),
-                file_priority: 5,
                 needed_parts: 4,
                 rare_parts: 0,
                 source: source.clone(),
@@ -271,7 +296,12 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
         );
     }
 
-    core.dead_list_udp_fnf_source(&file, (peer_ip, 41012), None)
+    core.state
+        .lock()
+        .await
+        .active_download_peer_endpoints
+        .insert((peer_ip, 41012), file_owner.token());
+    core.dead_list_udp_fnf_source(file_owner.token(), &file, (peer_ip, 41012), None)
         .await;
     {
         let now = Instant::now();
@@ -284,7 +314,7 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
             "the UDP-FNF source's candidate must be dropped"
         );
     }
-    let transfer = a4af_test_transfer(&file, "downloading");
+    let transfer = a4af_test_transfer(&core, &file, "downloading");
     core.register_download_source_candidates(&transfer, std::slice::from_ref(&source))
         .await;
     assert_eq!(
@@ -299,6 +329,7 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
 
     // Two distinct peers at one IP are disambiguated by the TCP lease endpoint.
     let shared_ip_file = Ed2kHash::from_bytes([0x77; 16]).to_string();
+    let shared_ip_file_owner = a4af_test_owner(&core, &shared_ip_file.to_string());
     let shared_ip = Ipv4Addr::new(192, 0, 2, 34);
     {
         let mut state = core.state.lock().await;
@@ -307,7 +338,7 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: shared_ip_file.clone(),
-                    file_priority: 5,
+
                     needed_parts: 4,
                     rare_parts: 0,
                     source: direct_test_source(
@@ -320,8 +351,18 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
             );
         }
     }
-    core.dead_list_udp_fnf_source(&shared_ip_file, (shared_ip, 41013), None)
-        .await;
+    core.state
+        .lock()
+        .await
+        .active_download_peer_endpoints
+        .insert((shared_ip, 41013), shared_ip_file_owner.token());
+    core.dead_list_udp_fnf_source(
+        shared_ip_file_owner.token(),
+        &shared_ip_file,
+        (shared_ip, 41013),
+        None,
+    )
+    .await;
     assert_eq!(
         core.state
             .lock()
@@ -334,6 +375,7 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
 
     // Reused endpoint identities are disambiguated by the hash learned in hello.
     let reused_file = Ed2kHash::from_bytes([0x78; 16]).to_string();
+    let reused_file_owner = a4af_test_owner(&core, &reused_file.to_string());
     let reused_endpoint = (Ipv4Addr::new(192, 0, 2, 35), 41015);
     let selected_hash = [0x81; 16];
     {
@@ -349,7 +391,7 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: reused_file.clone(),
-                    file_priority: 5,
+
                     needed_parts: 4,
                     rare_parts: 0,
                     source: candidate_source,
@@ -358,8 +400,18 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
             );
         }
     }
-    core.dead_list_udp_fnf_source(&reused_file, reused_endpoint, Some(selected_hash))
-        .await;
+    core.state
+        .lock()
+        .await
+        .active_download_peer_endpoints
+        .insert(reused_endpoint, reused_file_owner.token());
+    core.dead_list_udp_fnf_source(
+        reused_file_owner.token(),
+        &reused_file,
+        reused_endpoint,
+        Some(selected_hash),
+    )
+    .await;
     assert_eq!(
         core.state
             .lock()
@@ -387,15 +439,16 @@ async fn a4af_nnp_source_is_swapped_to_another_wanted_file() {
     {
         let mut state = core.state.lock().await;
         // The other file is a wanted (downloading) transfer.
-        state
-            .transfers
-            .insert(other.clone(), a4af_test_transfer(&other, "downloading"));
+        state.transfers.insert(
+            other.clone(),
+            a4af_test_transfer(&core, &other, "downloading"),
+        );
         for hash in [&current, &other] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-                    file_priority: 5,
+
                     needed_parts: 4,
                     rare_parts: 1,
                     source: source.clone(),
@@ -431,7 +484,6 @@ async fn a4af_nnp_source_without_other_wanted_file_is_dropped() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: current.clone(),
-                file_priority: 5,
                 needed_parts: 4,
                 rare_parts: 1,
                 source: source.clone(),
@@ -452,7 +504,7 @@ async fn a4af_nnp_source_without_other_wanted_file_is_dropped() {
 #[tokio::test]
 async fn a4af_nnp_swap_skips_terminal_best_candidate_for_live_fallback() {
     // The swap target walk must skip terminal candidates instead of letting a
-    // completed high-priority file mask a lower-priority wanted file.
+    // completed file mask another wanted file.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let current = Ed2kHash::from_bytes([0x76; 16]).to_string();
     let other = Ed2kHash::from_bytes([0x77; 16]).to_string();
@@ -464,20 +516,20 @@ async fn a4af_nnp_swap_skips_terminal_best_candidate_for_live_fallback() {
     );
     {
         let mut state = core.state.lock().await;
-        state
-            .transfers
-            .insert(other.clone(), a4af_test_transfer(&other, "completed"));
+        state.transfers.insert(
+            other.clone(),
+            a4af_test_transfer(&core, &other, "completed"),
+        );
         state.transfers.insert(
             fallback.clone(),
-            a4af_test_transfer(&fallback, "downloading"),
+            a4af_test_transfer(&core, &fallback, "downloading"),
         );
-        for (hash, priority) in [(&current, 5), (&other, 9), (&fallback, 1)] {
+        for (hash, needed_parts) in [(&current, 5), (&other, 9), (&fallback, 1)] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-                    file_priority: priority,
-                    needed_parts: 4,
+                    needed_parts,
                     rare_parts: 1,
                     source: source.clone(),
                     last_seen: Instant::now(),
@@ -499,7 +551,9 @@ async fn a4af_nnp_swap_skips_terminal_best_candidate_for_live_fallback() {
 async fn completed_file_releases_peer_for_next_wanted_file() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let completed = Ed2kHash::from_bytes([0x79; 16]).to_string();
+    let completed_owner = a4af_test_owner(&core, &completed.to_string());
     let wanted = Ed2kHash::from_bytes([0x7A; 16]).to_string();
+    let wanted_owner = a4af_test_owner(&core, &wanted.to_string());
     let source = direct_test_source(
         Ed2kHash::from_bytes([0x79; 16]),
         Ipv4Addr::new(192, 0, 2, 36),
@@ -513,7 +567,7 @@ async fn completed_file_releases_peer_for_next_wanted_file() {
                 now,
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-                    file_priority: 5,
+
                     needed_parts: 1,
                     rare_parts: 0,
                     source: source.clone(),
@@ -523,10 +577,15 @@ async fn completed_file_releases_peer_for_next_wanted_file() {
         }
     }
 
-    core.release_download_source_file(&completed).await;
+    core.release_download_source_file(completed_owner.token(), &completed)
+        .await;
 
     let (acquired, deferred, _) = core
-        .acquire_direct_download_source_leases(&wanted, std::slice::from_ref(&source))
+        .acquire_direct_download_source_leases(
+            wanted_owner.token(),
+            &wanted,
+            std::slice::from_ref(&source),
+        )
         .await;
     assert_eq!(acquired.len(), 1);
     assert_eq!(deferred, 0);
@@ -541,6 +600,7 @@ async fn nnp_source_is_held_for_the_doubled_reask_cycle_not_dropped_or_dead_list
     // 58-minute hold rather than the 20-minute endpoint cooldown.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let file = Ed2kHash::from_bytes([0x78; 16]).to_string();
+    let file_owner = a4af_test_owner(&core, &file.to_string());
     let source = direct_test_source(
         Ed2kHash::from_bytes([0x78; 16]),
         Ipv4Addr::new(192, 0, 2, 35),
@@ -553,7 +613,6 @@ async fn nnp_source_is_held_for_the_doubled_reask_cycle_not_dropped_or_dead_list
             now,
             DownloadSourceCandidate {
                 file_hash: file.clone(),
-                file_priority: 5,
                 needed_parts: 4,
                 rare_parts: 1,
                 source: source.clone(),
@@ -563,7 +622,7 @@ async fn nnp_source_is_held_for_the_doubled_reask_cycle_not_dropped_or_dead_list
     }
 
     let held = core
-        .hold_no_needed_parts_sources(&file, std::slice::from_ref(&source))
+        .hold_no_needed_parts_sources(file_owner.token(), &file, std::slice::from_ref(&source))
         .await;
     assert_eq!(held, 1, "the NNP source must be held");
 
@@ -622,6 +681,7 @@ async fn nnp_hold_purges_one_source_per_window_under_source_cap_pressure() {
         },
     );
     let file = Ed2kHash::from_bytes([0x79; 16]).to_string();
+    let file_owner = a4af_test_owner(&core, &file.to_string());
     let now = Instant::now();
     let sources: Vec<Ed2kFoundSource> = (0..5u8)
         .map(|index| {
@@ -639,7 +699,7 @@ async fn nnp_hold_purges_one_source_per_window_under_source_cap_pressure() {
                 now,
                 DownloadSourceCandidate {
                     file_hash: file.clone(),
-                    file_priority: 5,
+
                     needed_parts: 4,
                     rare_parts: 1,
                     source: source.clone(),
@@ -652,7 +712,7 @@ async fn nnp_hold_purges_one_source_per_window_under_source_cap_pressure() {
     // Two NNP verdicts in one round: the first is purged (5 >= 4 with the
     // purge window open), the second is held (the 40-second window is spent).
     let held = core
-        .hold_no_needed_parts_sources(&file, &sources[0..2])
+        .hold_no_needed_parts_sources(file_owner.token(), &file, &sources[0..2])
         .await;
     assert_eq!(held, 1, "only one NNP source is purged per 40s window");
 
@@ -749,7 +809,11 @@ fn callback_route_uses_connected_tcp_or_cross_server_udp() {
 #[test]
 fn manifest_progress_includes_hashset_and_partial_piece_bytes() {
     let file_hash = Ed2kHash::from_bytes([0x48; 16]);
-    let job = new_transfer_job(file_hash, "partial.bin".to_string(), 4096);
+    let token = emulebb_metadata::JobToken {
+        job_id: emulebb_metadata::JobId::new(1).unwrap(),
+        generation: 0,
+    };
+    let job = new_transfer_job(token, file_hash, "partial.bin".to_string(), 4096);
     let mut manifest = Ed2kResumeManifest::new(&job);
     assert!(!manifest_has_ed2k_transfer_progress(&manifest));
 
@@ -869,20 +933,18 @@ fn drop_self_sources_keeps_foreign_when_only_port_collides() {
 }
 
 #[test]
-fn remembered_source_hint_becomes_direct_dial_source() {
+fn remembered_source_endpoint_becomes_direct_dial_source() {
     let file_hash: Ed2kHash = "00112233445566778899aabbccddeeff".parse().unwrap();
-    let source = found_source_from_hint(
+    let source = found_source_from_endpoint(
         file_hash,
-        &Ed2kSourceHint {
-            ip: "192.0.2.10".to_string(),
+        &emulebb_metadata::MetadataDownloadSourceEndpoint {
+            id: 1,
+            ip: "192.0.2.10".parse().unwrap(),
             tcp_port: 4662,
-            user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+            user_hash: Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             connect_options: Some(0x07),
-            file_comment: String::new(),
-            file_rating: 0,
         },
-    )
-    .unwrap();
+    );
 
     assert_eq!(source.file_hash, file_hash);
     assert_eq!(source.ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
@@ -896,18 +958,108 @@ fn remembered_source_hint_becomes_direct_dial_source() {
     );
 }
 
+#[tokio::test]
+async fn remembered_endpoint_pages_do_not_hydrate_jobs_or_cross_generations() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let hash = Ed2kHash::from_bytes([0x37; 16]);
+    let job = core
+        .metadata_store
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: hash.to_string(),
+            display_name: "Sample.bin".into(),
+            expected_size_bytes: None,
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            piece_size: ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    let sources: Vec<_> = (1..=300)
+        .map(|port| direct_test_source(hash, Ipv4Addr::new(192, 0, 2, 37), port))
+        .collect();
+    core.remember_ed2k_sources(job.token, &sources)
+        .await
+        .unwrap();
+    // A large description must not truncate the fixed-size endpoint pages.
+    core.ed2k_transfers
+        .remember_source_file_description(
+            job.token,
+            Ed2kSourceHint {
+                ip: sources[0].ip.to_string(),
+                tcp_port: sources[0].tcp_port,
+                user_hash: None,
+                connect_options: None,
+                file_comment: "x".repeat(65_536),
+                file_rating: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let mut remembered = Vec::new();
+    core.merge_remembered_ed2k_sources(job.token, hash, &mut remembered)
+        .await
+        .unwrap();
+    assert_eq!(remembered.len(), sources.len());
+    assert_eq!(
+        remembered
+            .iter()
+            .map(|source| source.tcp_port)
+            .collect::<std::collections::BTreeSet<_>>(),
+        sources.iter().map(|source| source.tcp_port).collect()
+    );
+    assert!(
+        core.ed2k_transfers
+            .download_job(job.token.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .storage
+            .is_none()
+    );
+    assert!(core.ed2k_transfers.verifying_downloads().await.is_empty());
+
+    assert!(
+        core.ed2k_transfers
+            .stop_download_job(job.token)
+            .await
+            .unwrap()
+    );
+    let mut stale = Vec::new();
+    core.merge_remembered_ed2k_sources(job.token, hash, &mut stale)
+        .await
+        .unwrap();
+    assert!(stale.is_empty());
+    let late_source = direct_test_source(hash, Ipv4Addr::new(192, 0, 2, 38), 301);
+    assert!(
+        core.remember_ed2k_sources(job.token, &[late_source])
+            .await
+            .is_err()
+    );
+    let current = core
+        .ed2k_transfers
+        .download_job(job.token.job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(current.token, job.token);
+    let mut current_sources = Vec::new();
+    core.merge_remembered_ed2k_sources(current.token, hash, &mut current_sources)
+        .await
+        .unwrap();
+    assert_eq!(current_sources.len(), 300);
+}
+
 #[test]
-fn remembered_source_hint_does_not_fabricate_crypt_options_from_user_hash() {
+fn remembered_source_endpoint_does_not_fabricate_crypt_options_from_user_hash() {
     let file_hash: Ed2kHash = "00112233445566778899aabbccddeeff".parse().unwrap();
-    let hint = Ed2kSourceHint {
-        ip: "192.0.2.11".to_string(),
+    let hint = emulebb_metadata::MetadataDownloadSourceEndpoint {
+        id: 1,
+        ip: "192.0.2.11".parse().unwrap(),
         tcp_port: 4662,
-        user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+        user_hash: Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
         connect_options: None,
-        file_comment: String::new(),
-        file_rating: 0,
     };
-    let source = found_source_from_hint(file_hash, &hint).unwrap();
+    let source = found_source_from_endpoint(file_hash, &hint);
 
     assert!(!source.obfuscated);
     assert_eq!(source.obfuscation_options, None);
@@ -915,22 +1067,20 @@ fn remembered_source_hint_does_not_fabricate_crypt_options_from_user_hash() {
 }
 
 #[test]
-fn remembered_source_hint_preserves_every_crypt_bit_combination() {
+fn remembered_source_endpoint_preserves_every_crypt_bit_combination() {
     let file_hash: Ed2kHash = "00112233445566778899aabbccddeeff".parse().unwrap();
 
     for connect_options in 0u8..=0x07 {
-        let source = found_source_from_hint(
+        let source = found_source_from_endpoint(
             file_hash,
-            &Ed2kSourceHint {
-                ip: "192.0.2.12".to_string(),
+            &emulebb_metadata::MetadataDownloadSourceEndpoint {
+                id: 1,
+                ip: "192.0.2.12".parse().unwrap(),
                 tcp_port: 4662,
-                user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+                user_hash: Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
                 connect_options: Some(connect_options),
-                file_comment: String::new(),
-                file_rating: 0,
             },
-        )
-        .unwrap();
+        );
 
         assert_eq!(source.obfuscation_options, Some(connect_options));
         assert_eq!(source.obfuscated, connect_options & 0x01 != 0);

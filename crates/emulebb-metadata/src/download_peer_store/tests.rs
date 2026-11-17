@@ -102,6 +102,221 @@ fn peer_deltas_preserve_chosen_name_and_verified_checkpoint_cannot_replay_old_na
 }
 
 #[test]
+fn source_windows_are_latest_first_identity_scoped_and_explicit_about_omissions() {
+    let store = MetadataStore::in_memory().unwrap();
+    let current = job(&store);
+    let anonymous = source(1, String::new());
+    let mut identified = source(2, String::new());
+    identified.user_hash = Some("77".repeat(16));
+    for input in [&anonymous, &identified] {
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::Source {
+                    source: input.clone(),
+                    description_only: false,
+                },
+            )
+            .unwrap();
+    }
+    for index in 0..20 {
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::ObserveName {
+                    observation: observation(format!("Sample-{index}.bin")),
+                    source: None,
+                },
+            )
+            .unwrap();
+    }
+    let mut named = observation("Peer.bin".into());
+    named.user_hash = identified.user_hash.clone();
+    named.source_ip = Some("198.51.100.8".into());
+    named.source_tcp_port = Some(4000);
+    store
+        .apply_download_peer_delta(
+            current.token,
+            &MetadataDownloadPeerDelta::ObserveName {
+                observation: named,
+                source: None,
+            },
+        )
+        .unwrap();
+    let page = store
+        .download_job_sources_after(current.token, 0, 2)
+        .unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].reported_file_names.len(), 16);
+    assert_eq!(page[0].reported_file_names[0].raw_name, "Sample-19.bin");
+    assert_eq!(page[0].reported_file_names[15].raw_name, "Sample-4.bin");
+    assert!(page[0].reported_file_names_has_more);
+    assert_eq!(page[1].reported_file_names.len(), 1);
+    assert_eq!(page[1].reported_file_names[0].raw_name, "Peer.bin");
+    assert!(!page[1].reported_file_names_has_more);
+    let exact = store
+        .download_job_source(
+            current.token,
+            MetadataDownloadSourceSelector::Endpoint("192.0.2.1".parse().unwrap(), 4662),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        exact.reported_file_names[0].raw_name,
+        page[0].reported_file_names[0].raw_name
+    );
+    assert_eq!(
+        exact.reported_file_names_has_more,
+        page[0].reported_file_names_has_more
+    );
+    let exact = store
+        .download_job_source(
+            current.token,
+            MetadataDownloadSourceSelector::UserHash([0x77; 16]),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact.reported_file_names[0].raw_name, "Peer.bin");
+    assert!(
+        store
+            .download_job_source(
+                current.token,
+                MetadataDownloadSourceSelector::UserHash([0x78; 16])
+            )
+            .unwrap()
+            .is_none()
+    );
+    drop(page);
+    // An oversized current observation is omitted, never truncated. The same
+    // stable latest window still reports that something was omitted.
+    store.connection().unwrap().execute(
+        "UPDATE download_job_file_name_observations SET raw_name=?2 WHERE job_id=?1 AND user_hash IS NOT NULL",
+        params![current.token.job_id, "x".repeat(65_537)],
+    ).unwrap();
+    let page = store
+        .download_job_sources_after(current.token, 0, 2)
+        .unwrap();
+    assert!(page[1].reported_file_names.is_empty());
+    assert!(page[1].reported_file_names_has_more);
+    assert_eq!(
+        store
+            .download_job(current.token.job_id)
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "chosen.bin"
+    );
+    let conn = store.connection().unwrap();
+    for (sql, parameters, index) in [
+        (
+            SOURCE_HASH_NAMES_SQL,
+            vec![
+                rusqlite::types::Value::Integer(current.token.job_id.get()),
+                rusqlite::types::Value::Blob(vec![0x77; 16]),
+            ],
+            "download_job_names_hash_window_idx",
+        ),
+        (
+            SOURCE_ENDPOINT_NAMES_SQL,
+            vec![
+                rusqlite::types::Value::Integer(current.token.job_id.get()),
+                rusqlite::types::Value::Text("192.0.2.1".into()),
+                rusqlite::types::Value::Integer(4662),
+            ],
+            "download_job_names_endpoint_window_idx",
+        ),
+    ] {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(plan.iter().any(|step| step.contains(index)), "{plan:?}");
+        assert!(
+            !plan.iter().any(|step| step.contains("USE TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_source_windows_share_the_page_budget_without_hiding_later_sources() {
+    let store = MetadataStore::in_memory().unwrap();
+    let current = job(&store);
+    for peer in 1..=3 {
+        let input = source(peer, "c".repeat(65_536));
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::Source {
+                    source: input.clone(),
+                    description_only: false,
+                },
+            )
+            .unwrap();
+        for _ in 0..16 {
+            let mut name = observation("r".repeat(65_536));
+            name.normalized_name = "Sample.bin".into();
+            name.source_ip = Some(input.ip.clone());
+            store
+                .apply_download_peer_delta(
+                    current.token,
+                    &MetadataDownloadPeerDelta::ObserveName {
+                        observation: name,
+                        source: None,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    let mut after = 0;
+    let mut count = 0;
+    loop {
+        let page = store
+            .download_job_sources_after(current.token, after, 3)
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page[0].id > after);
+        for entry in &page {
+            assert!(entry.reported_file_names.len() < 16);
+            assert!(entry.reported_file_names_has_more);
+            assert!(
+                entry
+                    .reported_file_names
+                    .iter()
+                    .all(|name| name.raw_name.len() == 65_536)
+            );
+        }
+        let mut bytes = page.capacity() * std::mem::size_of::<MetadataDownloadSourceEntry>();
+        for entry in &page {
+            bytes += entry.source.ip.capacity()
+                + entry.source.file_comment.capacity()
+                + entry.source.user_hash.as_ref().map_or(0, String::capacity)
+                + entry.reported_file_names.capacity()
+                    * std::mem::size_of::<MetadataTransferFileNameObservation>();
+            for name in &entry.reported_file_names {
+                bytes += name.source_ip.as_ref().map_or(0, String::capacity)
+                    + name.user_hash.as_ref().map_or(0, String::capacity)
+                    + name.client_software.capacity()
+                    + name.origin.capacity()
+                    + name.server_endpoint.as_ref().map_or(0, String::capacity)
+                    + name.raw_name.capacity()
+                    + name.normalized_name.capacity();
+            }
+        }
+        assert!(bytes <= PAGE_BYTES, "{bytes}");
+        count += page.len();
+        after = page.last().unwrap().id;
+    }
+    assert_eq!(count, 3);
+}
+
+#[test]
 fn peer_pages_bound_actual_text_and_keep_stable_cursor_and_endpoint_counts() {
     let store = MetadataStore::in_memory().unwrap();
     let current = job(&store);

@@ -82,7 +82,7 @@ async fn search_state_survives_core_restart_and_downloads_result() {
     let search = reloaded.search(&search_id).await.unwrap();
     assert_eq!(search.results[0].hash, file_hash);
 
-    let transfer = reloaded
+    let (_, download) = reloaded
         .download_search_result(
             &search_id,
             &file_hash,
@@ -91,7 +91,7 @@ async fn search_state_survives_core_restart_and_downloads_result() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(transfer.hash, file_hash);
+    assert_eq!(download.hash, file_hash);
 }
 
 #[tokio::test]

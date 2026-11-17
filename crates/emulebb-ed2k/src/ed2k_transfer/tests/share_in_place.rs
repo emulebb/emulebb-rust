@@ -441,7 +441,9 @@ async fn non_utf8_local_share_reopens_and_serves_exact_bytes() {
             .download_evidence(&summary.file_hash)
             .await
             .unwrap()
-            .current_local_files[0]
+            .present_file
+            .as_ref()
+            .unwrap()
             .path,
         NativePath::from(source_path.as_path()).display_path(),
     );

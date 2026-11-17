@@ -6,6 +6,16 @@ use super::Ed2kTransferRuntime;
 use emulebb_metadata::JobToken;
 
 const DOWNLOAD_ACTIVITY_STALE_AFTER: Duration = Duration::from_secs(30);
+
+/// Borrowed diagnostic scalars. A source page never needs to clone a peer's
+/// complete part bitmap merely to display its count or current rate.
+pub struct Ed2kLiveSourceStats<'a> {
+    pub download_speed_bytes_per_sec: u64,
+    pub transferring: bool,
+    pub available_parts: u32,
+    pub queue_rank: Option<u32>,
+    pub client_software: Option<&'a str>,
+}
 /// Retain source protocol knowledge through the stock per-source reask cadence.
 /// Activity/rate views still expire after 30 seconds, but part availability must
 /// survive long enough to build the next 29-minute UDP reask accurately.
@@ -459,6 +469,33 @@ impl Ed2kTransferRuntime {
     /// Live sources currently known for a file, pruned of stale entries.
     pub fn live_download_sources(&self, token: JobToken) -> Vec<Ed2kLiveSource> {
         self.live_download_sources_at(token, Instant::now())
+    }
+
+    /// Inspect one exact execution/endpoint without allocating a diagnostic
+    /// snapshot. The caller admits any text it copies inside the callback.
+    pub fn with_live_download_source_stats<R>(
+        &self,
+        token: JobToken,
+        endpoint: &str,
+        read: impl FnOnce(Option<Ed2kLiveSourceStats<'_>>) -> R,
+    ) -> R {
+        let Ok(sources) = self.download_sources.lock() else {
+            return read(None);
+        };
+        let now = Instant::now();
+        let peer = sources
+            .get(&token)
+            .and_then(|peers| peers.get(endpoint))
+            .filter(|peer| !is_activity_stale(peer.last_seen_at, now));
+        read(peer.map(|peer| Ed2kLiveSourceStats {
+            download_speed_bytes_per_sec: source_speed_bytes_per_sec(peer, now),
+            transferring: is_transferring(peer, now),
+            available_parts: peer.part_bitmap.as_ref().map_or(0, |bitmap| {
+                bitmap.iter().filter(|present| **present).count() as u32
+            }),
+            queue_rank: peer.queue_rank,
+            client_software: peer.client_software.as_deref(),
+        }))
     }
 
     pub(crate) fn live_download_sources_at(

@@ -22,7 +22,9 @@ impl LocalMutationRegistry {
             .ok_or(LocalMutationError::TooLarge)?;
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
-        let lease = Self::reserve_unit(&mut state, charge, false, false)?;
+        let (resident_write, lease) = self.residents.reserve_with(token.job_id, || {
+            Self::reserve_unit(&mut state, charge, false, false)
+        })?;
         let delta = delta.clone();
         let metadata = runtime.metadata.clone();
         let locks = Arc::clone(&runtime.content_locks);
@@ -58,7 +60,10 @@ impl LocalMutationRegistry {
                         .get_mut(&token.job_id)
                         .filter(|value| value.token == token)
                     {
-                        manifest.display_name = name.clone();
+                        manifest.write_with(resident_write, |manifest| {
+                            manifest.display_name = name.clone();
+                            Ok(())
+                        })?;
                     }
                     let mut catalog = catalog.blocking_write();
                     let mut changed = false;

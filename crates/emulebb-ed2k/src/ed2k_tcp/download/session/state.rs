@@ -34,6 +34,11 @@ pub(in crate::ed2k_tcp) struct DownloadConnectionState {
 }
 
 impl DownloadConnectionState {
+    /// Expected discovery identity is never evidence of a completed hello.
+    pub(in crate::ed2k_tcp) fn observed_peer_hash(&self) -> Option<[u8; 16]> {
+        self.hello_complete.then_some(self.peer_user_hash).flatten()
+    }
+
     pub(in crate::ed2k_tcp) fn from_inbound_hello(
         profile: &DecodedHelloProfile,
         peer_secure_ident: &Ed2kPeerSecureIdentState,

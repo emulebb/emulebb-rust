@@ -562,13 +562,13 @@ impl EmulebbCore {
             };
             state
                 .kad_aich_search_votes
-                .retain(|(candidate_search_id, _), _| candidate_search_id != search_id);
+                .retain(|(_, candidate_search_id), _| candidate_search_id != search_id);
             if let Some(kad_aich_votes) = kad_aich_votes {
                 for (hash, votes) in kad_aich_votes {
                     if accepted_hashes.contains(&hash) {
                         state
                             .kad_aich_search_votes
-                            .insert((search_id.to_string(), hash), votes);
+                            .insert((hash, search_id.to_string()), votes);
                     }
                 }
             }

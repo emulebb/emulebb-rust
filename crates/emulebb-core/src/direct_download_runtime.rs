@@ -38,6 +38,7 @@ where
             Ed2kHelloIdentity,
             Arc<Ed2kSecureIdent>,
             Arc<Ed2kTransferRuntime>,
+            emulebb_metadata::JobToken,
             String,
             u64,
             Duration,
@@ -49,6 +50,7 @@ where
     DownloadFuture: Future<Output = Result<Ed2kPeerDownloadReport>> + Send + 'static,
 {
     let DirectDownloadOptions {
+        job_token,
         bind_ip,
         hello_identity,
         secure_ident,
@@ -90,6 +92,7 @@ where
         let mut pending_sources = VecDeque::from(retry_sources.clone());
         let mut active_downloads = JoinSet::new();
         let spawn_context = DirectDownloadSpawnContext {
+            job_token,
             bind_ip,
             hello_identity,
             secure_ident: &secure_ident,
@@ -128,12 +131,25 @@ where
                         last_error = Some(anyhow::anyhow!(error));
                     }
                     for file_result in report.file_outcomes {
+                        if let Some((peer, peer_hash)) = file_result.observed_peer {
+                            crate::diag_sched::source_identity(
+                                file_result.job_token,
+                                &file_result.file_hash.to_string(),
+                                peer,
+                                peer_hash,
+                            );
+                        }
                         let result_file_hash = file_result.file_hash.to_string();
-                        let is_primary = result_file_hash == file_hash_hex;
+                        let is_primary = file_result.job_token == job_token;
+                        anyhow::ensure!(
+                            !is_primary || result_file_hash == file_hash_hex,
+                            "peer outcome differs from admitted job identity"
+                        );
                         let mut result_source = source.clone();
                         result_source.file_hash = file_result.file_hash;
                         if !is_primary {
                             alternate_file_outcomes.push(DirectDownloadAlternateOutcome {
+                                job_token: file_result.job_token,
                                 file_hash: result_file_hash.clone(),
                                 source: result_source.clone(),
                                 outcome: file_result.outcome,
@@ -141,7 +157,7 @@ where
                         }
                         match file_result.outcome {
                             Ed2kPeerDownloadOutcome::Completed if is_primary => {
-                                let manifest = transfer_runtime.manifest(&file_hash_hex).await?;
+                                let manifest = transfer_runtime.manifest(job_token).await?;
                                 tracing::debug!(
                                     "ED2K direct download peer completed file_hash={} peer={} manifest_completed={} verified_ranges={} file_size={}",
                                     file_hash_hex,
@@ -257,7 +273,7 @@ where
         }
 
         let outcome = DirectDownloadOutcome {
-            completed: transfer_runtime.manifest(&file_hash_hex).await?.completed,
+            completed: transfer_runtime.manifest(job_token).await?.completed,
             accepted_incomplete_peers,
             last_error: last_error
                 .as_ref()
@@ -304,6 +320,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
             Ed2kHelloIdentity,
             Arc<Ed2kSecureIdent>,
             Arc<Ed2kTransferRuntime>,
+            emulebb_metadata::JobToken,
             String,
             u64,
             Duration,
@@ -353,6 +370,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
             source.user_hash.is_some(),
             context.retry_round
         );
+        let job_token = context.job_token;
         let bind_ip = context.bind_ip;
         let hello_identity = context.hello_identity;
         let file_size = context.file_size;
@@ -365,6 +383,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
                 hello_identity,
                 secure_ident,
                 transfer_runtime,
+                job_token,
                 file_name,
                 file_size,
                 connect_timeout,

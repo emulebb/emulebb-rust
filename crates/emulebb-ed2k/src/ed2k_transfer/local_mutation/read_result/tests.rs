@@ -188,3 +188,69 @@ fn maximum_provider_native_path_projection_and_open_copy_fit_exact_read_charge()
     drop(mapped);
     assert_eq!(capacity.usage().bytes, 0);
 }
+
+#[test]
+fn consumer_projection_admits_before_conversion_and_keeps_output_charged() {
+    let capacity = Arc::new(CapacityControl::default());
+    let input = RetainedRead::new(
+        vec![7u8; 4096],
+        capacity.reserve(4096, false, false).unwrap(),
+    );
+    let output = input
+        .try_project(8192, |value| {
+            assert_eq!(capacity.usage().bytes, 12_288);
+            let mut output = Vec::with_capacity(8192);
+            output.extend_from_slice(&value);
+            output.extend_from_slice(&value);
+            Ok(output)
+        })
+        .unwrap();
+    assert_eq!(output.len(), 8192);
+    assert_eq!(capacity.usage().bytes, 8192);
+    drop(output);
+    assert_eq!(capacity.usage().bytes, 0);
+}
+#[test]
+fn consumer_projection_refusal_never_runs_conversion() {
+    let capacity = Arc::new(CapacityControl::default());
+    let headroom = capacity.reserve(MAX_BYTES - 4096, false, false).unwrap();
+    let input = RetainedRead::new(
+        vec![1u8; 4096],
+        capacity.reserve(4096, false, false).unwrap(),
+    );
+    let mut called = false;
+    assert!(
+        input
+            .try_project(1, |_| {
+                called = true;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(!called);
+    assert_eq!(capacity.usage().bytes, MAX_BYTES - 4096);
+    drop(headroom);
+}
+#[test]
+fn consumer_projection_error_and_panic_release_both_allowances() {
+    let capacity = Arc::new(CapacityControl::default());
+    let input = RetainedRead::new(
+        vec![1u8; 4096],
+        capacity.reserve(4096, false, false).unwrap(),
+    );
+    assert!(
+        input
+            .try_project::<()>(8192, |_| anyhow::bail!("projection failed"))
+            .is_err()
+    );
+    assert_eq!(capacity.usage().bytes, 0);
+    let input = RetainedRead::new(
+        vec![1u8; 4096],
+        capacity.reserve(4096, false, false).unwrap(),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = input.try_project::<()>(8192, |_| panic!("projection panicked"));
+    }));
+    assert!(result.is_err());
+    assert_eq!(capacity.usage().bytes, 0);
+}

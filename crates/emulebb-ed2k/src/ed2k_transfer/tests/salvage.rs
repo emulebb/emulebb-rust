@@ -131,7 +131,7 @@ async fn rejected_recovery_proofs_never_attempt_raw_payload_reads_or_change_stat
     let (runtime, file_hash, data, aich) =
         initialized_salvage_transfer("ed2k-salvage-proof-before-io").await;
     runtime.cbb_record_received_data(file_hash, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
-    let mut before = runtime.manifest(file_hash).await.unwrap();
+    let mut before = runtime.manifest(file_hash).await.unwrap().edit().unwrap();
     let mut bitmap = PartBlockBitmap::empty(ED2K_PART_SIZE);
     bitmap.set_present(1);
     before.pieces[0].apply_block_bitmap(&bitmap);

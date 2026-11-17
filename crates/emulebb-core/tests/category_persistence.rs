@@ -1,120 +1,110 @@
+use emulebb_core::{
+    CategoryCreate, DownloadCreate, DownloadCreateSource, EmulebbCore, NullableStringField,
+};
+use emulebb_index::FileIndex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use emulebb_core::{CategoryCreate, EmulebbCore, NullableStringField, TransferCreate};
-use emulebb_index::FileIndex;
-
+async fn category(core: &EmulebbCore, name: &str) -> emulebb_core::Category {
+    core.create_category(CategoryCreate {
+        name: name.into(),
+        temp_dir: NullableStringField::Missing,
+        destination_dir: NullableStringField::Missing,
+        comment: None,
+    })
+    .await
+    .unwrap()
+}
+async fn queue_download(core: &EmulebbCore, hash: &str, category: &str) -> emulebb_metadata::JobId {
+    let (created, download) = core
+        .create_download(DownloadCreate {
+            source: DownloadCreateSource::Content {
+                hash: hash.into(),
+                name: "Sample.bin".into(),
+                size_bytes: Some(4096),
+            },
+            category: Some(category.into()),
+            intent: emulebb_metadata::DownloadIntent::Stopped,
+            redownload: false,
+        })
+        .await
+        .unwrap();
+    assert!(created);
+    assert_eq!(download.category.as_deref(), Some(category));
+    download.id
+}
 #[tokio::test]
-async fn transfer_category_survives_restart() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-transfer-category-restart");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
+async fn download_category_and_public_identity_survive_restart() {
+    let root = unique_runtime_dir("category-restart");
+    let db = root.join("metadata.sqlite");
     let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::open(&db).unwrap(),
+        root.join("transfers"),
     )
     .unwrap();
-    let category = core
-        .create_category(CategoryCreate {
-            name: "Queued-Samples".to_string(),
-            temp_dir: NullableStringField::Missing,
-            destination_dir: NullableStringField::Missing,
-            comment: None,
-        })
-        .await
-        .unwrap();
-
-    let transfer = core
-        .create_transfer(TransferCreate {
-            known_file_policy: Default::default(),
-            link: Some(
-                "ed2k://|file|Category.Restart.bin|4096|00112233445566778899aabbccddeeff|/"
-                    .to_string(),
-            ),
-            links: None,
-            category_id: Some(category.id),
-            category_name: None,
-            paused: Some(true),
-        })
-        .await
-        .unwrap();
-    assert_eq!(transfer.category_id, Some(category.id));
-    assert_eq!(
-        transfer.category_name.as_deref(),
-        Some(category.name.as_str())
-    );
-
-    let reloaded = EmulebbCore::new(
+    let category = category(&core, "Queued-Samples").await;
+    let id = queue_download(&core, "00112233445566778899aabbccddeeff", &category.name).await;
+    drop(core);
+    let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::open(&db).unwrap(),
+        root.join("transfers"),
     )
     .unwrap();
-    let reloaded_transfer = reloaded
-        .transfer("00112233445566778899aabbccddeeff")
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(reloaded_transfer.category_id, Some(category.id));
+    let page = core.download_page(Default::default()).await.unwrap();
+    assert_eq!(page.downloads.len(), 1);
+    assert_eq!(page.downloads[0].id, id);
     assert_eq!(
-        reloaded_transfer.category_name.as_deref(),
-        Some(category.name.as_str())
+        page.downloads[0].category.as_deref(),
+        Some("Queued-Samples")
+    );
+    assert_eq!(
+        page.downloads[0].state,
+        emulebb_core::DownloadState::Stopped
     );
 }
-
 #[tokio::test]
-async fn deleting_category_preserves_other_transfer_categories() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-category-delete-stable");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
+async fn deleting_a_category_preserves_other_download_categories_and_names() {
+    let root = unique_runtime_dir("category-delete");
+    let db = root.join("metadata.sqlite");
     let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::open(&db).unwrap(),
+        root.join("transfers"),
     )
     .unwrap();
-    let first = create_category(&core, "First-Samples").await;
-    let deleted = create_category(&core, "Deleted-Samples").await;
-    let surviving = create_category(&core, "Surviving-Samples").await;
-    let first_hash = "00112233445566778899aabbccddeeff";
-    let deleted_hash = "102132435465768798a9babbdcddedef";
-    let surviving_hash = "ffeeddccbbaa99887766554433221100";
-
-    create_transfer(&core, first_hash, "First.Category.bin", first.id).await;
-    create_transfer(&core, deleted_hash, "Deleted.Category.bin", deleted.id).await;
-    create_transfer(
-        &core,
-        surviving_hash,
-        "Surviving.Category.bin",
-        surviving.id,
-    )
-    .await;
-
-    let removed = core.delete_category(deleted.id).await.unwrap().unwrap();
-    assert_eq!(removed.name, deleted.name);
-
+    let first = category(&core, "First-Samples").await;
+    let deleted = category(&core, "Deleted-Samples").await;
+    let surviving = category(&core, "Surviving-Samples").await;
+    let first_id = queue_download(&core, "00112233445566778899aabbccddeeff", &first.name).await;
+    let deleted_id = queue_download(&core, "102132435465768798a9babbdcddedef", &deleted.name).await;
+    let surviving_id =
+        queue_download(&core, "ffeeddccbbaa99887766554433221100", &surviving.name).await;
     assert_eq!(
-        core.transfer(first_hash)
+        core.delete_category(deleted.id)
             .await
             .unwrap()
             .unwrap()
-            .category_id,
-        Some(first.id),
-        "other category assignments stay unchanged"
+            .name,
+        deleted.name
     );
-    let deleted_transfer = core.transfer(deleted_hash).await.unwrap().unwrap();
-    assert_eq!(deleted_transfer.category_id, None);
-    // A transfer reset to uncategorized has its category name cleared (consistent
-    // with profile_persistence::delete_category_resets_referencing_transfers_to_uncategorized).
-    assert_eq!(deleted_transfer.category_name, None);
-    let surviving_transfer = core.transfer(surviving_hash).await.unwrap().unwrap();
-    assert_eq!(surviving_transfer.category_id, Some(surviving.id));
-    assert_eq!(
-        surviving_transfer.category_name.as_deref(),
-        Some(surviving.name.as_str())
-    );
-
+    let page = core.download_page(Default::default()).await.unwrap();
+    for (id, expected) in [
+        (first_id, Some(first.name.as_str())),
+        (deleted_id, None),
+        (surviving_id, Some(surviving.name.as_str())),
+    ] {
+        assert_eq!(
+            page.downloads
+                .iter()
+                .find(|download| download.id == id)
+                .unwrap()
+                .category
+                .as_deref(),
+            expected
+        );
+    }
+    drop(page);
     let categories = core.categories().await.unwrap();
     assert!(
         categories
@@ -126,52 +116,31 @@ async fn deleting_category_preserves_other_transfer_categories() {
             .iter()
             .any(|category| category.id == surviving.id && category.name == surviving.name)
     );
-
-    let reloaded = EmulebbCore::new(
+    drop(core);
+    let core = EmulebbCore::new(
         "test",
-        FileIndex::open(&metadata_path).unwrap(),
-        &transfer_root,
+        FileIndex::open(&db).unwrap(),
+        root.join("transfers"),
     )
     .unwrap();
+    let page = core.download_page(Default::default()).await.unwrap();
     assert_eq!(
-        reloaded
-            .transfer(deleted_hash)
-            .await
+        page.downloads
+            .iter()
+            .find(|download| download.id == deleted_id)
             .unwrap()
-            .unwrap()
-            .category_id,
+            .category,
         None
     );
-    let reloaded_surviving = reloaded.transfer(surviving_hash).await.unwrap().unwrap();
-    assert_eq!(reloaded_surviving.category_id, Some(surviving.id));
     assert_eq!(
-        reloaded_surviving.category_name.as_deref(),
+        page.downloads
+            .iter()
+            .find(|download| download.id == surviving_id)
+            .unwrap()
+            .category
+            .as_deref(),
         Some(surviving.name.as_str())
     );
-}
-
-async fn create_category(core: &EmulebbCore, name: &str) -> emulebb_core::Category {
-    core.create_category(CategoryCreate {
-        name: name.to_string(),
-        temp_dir: NullableStringField::Missing,
-        destination_dir: NullableStringField::Missing,
-        comment: None,
-    })
-    .await
-    .unwrap()
-}
-
-async fn create_transfer(core: &EmulebbCore, hash: &str, name: &str, category_id: i64) {
-    core.create_transfer(TransferCreate {
-        known_file_policy: Default::default(),
-        link: Some(format!("ed2k://|file|{name}|4096|{hash}|/")),
-        links: None,
-        category_id: Some(category_id),
-        category_name: None,
-        paused: Some(true),
-    })
-    .await
-    .unwrap();
 }
 
 fn unique_runtime_dir(name: &str) -> std::path::PathBuf {

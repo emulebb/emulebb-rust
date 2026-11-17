@@ -62,7 +62,7 @@ pub(crate) fn load_core_state(
         search_cancels: HashMap::new(),
         // Search-result responder provenance is session-local. A restored
         // display row must never become a fresh network trust vote.
-        kad_aich_search_votes: HashMap::new(),
+        kad_aich_search_votes: std::collections::BTreeMap::new(),
         next_search_id,
         transfers: HashMap::new(),
         core_settings,
@@ -72,11 +72,8 @@ pub(crate) fn load_core_state(
         server_overrides: HashMap::new(),
         disabled_servers,
         server_fail_counts: HashMap::new(),
-        banned_source_clients: HashSet::new(),
-        active_download_attempts: HashSet::new(),
-        download_cancels: HashMap::new(),
-        next_download_cancel_id: 0,
-        active_download_peer_endpoints: HashSet::new(),
+
+        active_download_peer_endpoints: std::collections::HashMap::new(),
         download_source_registry: crate::download_source_registry::DownloadSourceRegistry::default(
         ),
         ed2k_dead_sources: crate::ed2k_dead_source_list::DeadSourceList::default(),

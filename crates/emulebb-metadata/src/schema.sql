@@ -429,6 +429,10 @@ WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
 CREATE INDEX download_jobs_visible_page_idx ON download_jobs(id) WHERE removed_at_s IS NULL;
 CREATE INDEX download_jobs_work_page_idx ON download_jobs(intent, id)
 WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND storage_failure_code IS NULL;
+CREATE INDEX download_jobs_pending_delivery_page_idx ON download_jobs(id)
+WHERE completed=1 AND final_rehash_pending=0 AND terminal_completed_at_s IS NULL
+AND removed_at_s IS NULL AND delete_requested_at_s IS NULL
+AND intent='started' AND storage_failure_code IS NULL;
 CREATE INDEX download_jobs_unfinished_page_idx ON download_jobs(id)
 WHERE removed_at_s IS NULL AND terminal_completed_at_s IS NULL;
 CREATE INDEX download_jobs_completed_page_idx ON download_jobs(id)
@@ -774,6 +778,12 @@ CREATE INDEX download_job_file_name_observations_page_idx ON download_job_file_n
 
 CREATE INDEX download_job_file_name_observations_job_idx
 ON download_job_file_name_observations(job_id, observed_at_s, id);
+CREATE INDEX download_job_names_hash_window_idx
+ON download_job_file_name_observations(job_id, user_hash, observed_at_s DESC, id DESC)
+WHERE user_hash IS NOT NULL;
+CREATE INDEX download_job_names_endpoint_window_idx
+ON download_job_file_name_observations(job_id, source_ip, source_tcp_port, observed_at_s DESC, id DESC)
+WHERE user_hash IS NULL;
 
 CREATE TABLE kad_bootstrap_endpoints (
     position INTEGER PRIMARY KEY,

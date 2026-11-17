@@ -124,9 +124,9 @@ impl Ed2kTransferRuntime {
 
         if !snapshot.completed {
             let _manifest_guard = self.lock_manifest(token).await;
-            let mut manifest = self.load_manifest_unlocked(token).await?;
+            let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
             anyhow::ensure!(
-                manifest == snapshot,
+                *manifest == *snapshot,
                 "persisted ED2K download {file_hash} changed during storage reconciliation"
             );
             let reset_pieces =
@@ -167,9 +167,9 @@ impl Ed2kTransferRuntime {
             .await?;
             let restore_result = async {
                 let manifest_guard = self.lock_manifest(token).await;
-                let mut manifest = self.load_manifest_unlocked(token).await?;
+                let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
                 anyhow::ensure!(
-                    manifest == snapshot,
+                    *manifest == *snapshot,
                     "persisted ED2K download {file_hash} changed during payload restoration"
                 );
                 self.invalidate_payload_handle(token);
@@ -189,7 +189,7 @@ impl Ed2kTransferRuntime {
                 // Payload checkpoints cannot replace persisted Delivered authority.
                 // Keep that evidence intact until the retained, exact-snapshot
                 // verification transition publishes the content-only proof.
-                if manifest != snapshot {
+                if *manifest != *snapshot {
                     self.store_manifest_unlocked(&manifest).await?;
                 }
                 if manifest.delivery_state == Ed2kDeliveryState::Delivered
@@ -229,9 +229,9 @@ impl Ed2kTransferRuntime {
         }
 
         let _manifest_guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?;
+        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
         anyhow::ensure!(
-            manifest == snapshot,
+            *manifest == *snapshot,
             "persisted ED2K download {file_hash} changed during completion demotion"
         );
         self.invalidate_payload_handle(token);
@@ -293,7 +293,10 @@ async fn persist_verified_canonical_state(
 ) -> Result<()> {
     {
         let _manifest_guard = runtime.lock_manifest(snapshot.token).await;
-        let mut manifest = runtime.load_manifest_unlocked(snapshot.token).await?;
+        let mut manifest = runtime
+            .load_manifest_unlocked(snapshot.token)
+            .await?
+            .edit()?;
         anyhow::ensure!(
             manifest == *snapshot,
             "persisted ED2K download {} changed during canonical payload verification",
@@ -676,7 +679,12 @@ mod tests {
     ) {
         runtime.ensure_job(job).await.unwrap();
         let _guard = runtime.lock_manifest(job.token).await;
-        let mut manifest = runtime.load_manifest_unlocked(job.token).await.unwrap();
+        let mut manifest = runtime
+            .load_manifest_unlocked(job.token)
+            .await
+            .unwrap()
+            .edit()
+            .unwrap();
         manifest.pieces = pieces;
         rebuild_verified_ranges(&mut manifest);
         runtime.store_manifest_unlocked(&manifest).await.unwrap();
@@ -1018,7 +1026,7 @@ mod tests {
                 manifest.delivery_ownership,
                 super::super::Ed2kDeliveryOwnership::Owned
             );
-            recorded_fingerprint = manifest.source_fingerprint.unwrap();
+            recorded_fingerprint = manifest.source_fingerprint.clone().unwrap();
 
             fs::rename(&delivered_path, incoming.join("operator-original.bin")).unwrap();
             fs::write(&delivered_path, payload).unwrap();
@@ -1254,7 +1262,12 @@ mod tests {
         let job = complete_download(&runtime, "missing-fingerprint.bin", payload).await;
         {
             let _guard = runtime.lock_manifest(job.token).await;
-            let mut manifest = runtime.load_manifest_unlocked(job.token).await.unwrap();
+            let mut manifest = runtime
+                .load_manifest_unlocked(job.token)
+                .await
+                .unwrap()
+                .edit()
+                .unwrap();
             manifest.payload_fingerprint = None;
             runtime.store_manifest_unlocked(&manifest).await.unwrap();
         }
@@ -1279,6 +1292,7 @@ mod tests {
             .await
             .unwrap()
             .payload_fingerprint
+            .clone()
             .unwrap();
         let payload_path = runtime.payload_path(job.token.job_id).unwrap();
         let replacement = payload_path.with_extension("replacement");

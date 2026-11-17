@@ -21,7 +21,7 @@ use crate::{
         decode_sending_part_payload, dump_ed2k_tcp_download_meta, encode_packet,
         inflate_compressed_part_fragment,
     },
-    ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, diag_bad_peer},
+    ed2k_transfer::{Ed2kTransferRuntime, ResidentManifest, diag_bad_peer},
 };
 
 use super::{
@@ -40,7 +40,7 @@ pub(super) struct DownloadPartPacket<'a> {
     pub(super) file_hash_hex: &'a str,
     pub(super) pending_part_requests: &'a mut Vec<PendingPartRequest>,
     pub(super) pending_compressed_parts: &'a mut Vec<PendingCompressedPart>,
-    pub(super) manifest: &'a mut Ed2kResumeManifest,
+    pub(super) manifest: &'a mut ResidentManifest,
     pub(super) session_state: &'a mut DownloadSessionState,
     pub(super) peer_addr: SocketAddr,
     pub(super) packet: &'a EmuleTcpPacket,
@@ -540,7 +540,7 @@ struct FlushDownloadBlocks<'a> {
     transfer_runtime: &'a Ed2kTransferRuntime,
     file_hash_hex: &'a str,
     pending_part_requests: &'a mut Vec<PendingPartRequest>,
-    manifest: &'a mut Ed2kResumeManifest,
+    manifest: &'a mut ResidentManifest,
     session_state: &'a mut DownloadSessionState,
     peer_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,

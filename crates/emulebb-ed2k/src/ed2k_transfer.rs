@@ -39,6 +39,8 @@ mod block_bitmap;
 mod block_lease;
 mod callback;
 mod catalog;
+mod category_cache;
+pub use category_cache::{CategoryCacheFence, CategoryCacheMutation};
 mod completion_rehash;
 mod corruption_blackbox;
 mod credit_ledger;
@@ -58,6 +60,7 @@ mod ich_salvage;
 mod inbound_admission;
 mod ingest;
 mod local_mutation;
+pub use local_mutation::StorageSpaceReservation;
 pub use local_mutation::{LocalMutationError, read_result::RetainedRead};
 mod manifest;
 mod media_metadata;
@@ -70,11 +73,14 @@ mod piece_store;
 mod reask_reciprocity;
 mod reload_index;
 mod requested_block;
+mod resident;
 mod salvage;
 mod shared_catalog;
 pub use shared_catalog::{CategoryCatalogDecision, CategoryRootMutation, category_copy_matches};
 mod source_exchange;
 mod store;
+
+pub use resident::{ResidentDraft, ResidentManifest};
 mod transfer_sql;
 mod upload;
 mod upload_cooldown;
@@ -88,8 +94,8 @@ pub use catalog::{
 };
 pub(crate) use completion_rehash::mark_final_rehash_pending;
 pub use deliver::Ed2kDeliveryOutcome;
-pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
+pub use download_activity::{Ed2kLiveSource, Ed2kLiveSourceStats};
 use download_coordinator::{
     DEFAULT_CONNECTION_WINDOW, DEFAULT_REASK_PACING_INTERVAL, Ed2kDownloadCoordinator,
 };
@@ -97,7 +103,7 @@ pub use download_coordinator::{Ed2kDownloadCoordinatorConfig, MAX_SOURCES_FILE_U
 use download_throttle::Ed2kDownloadThrottle;
 pub use download_throttle::Ed2kDownloadThrottleReservation;
 pub use duplicate::{
-    Ed2kActiveTransferEvidence, Ed2kCurrentLocalFileEvidence, Ed2kCurrentLocalFileKind,
+    Ed2kActiveDownloadEvidence, Ed2kCurrentLocalFileEvidence, Ed2kCurrentLocalFileKind,
     Ed2kDownloadEvidence, Ed2kPreviouslyCompletedEvidence,
 };
 pub(crate) use hashset::decode_aich_hash_hex;
@@ -314,7 +320,7 @@ pub struct Ed2kTransferRuntime {
     /// destructive deletion. Unlike the manifest IO lock this may be held
     /// across slow filesystem work without delaying unrelated manifest reads.
     lifecycle_locks: Arc<StdMutex<HashMap<JobId, std::sync::Weak<Mutex<()>>>>>,
-    manifest_cache: Arc<Mutex<HashMap<JobId, Ed2kResumeManifest>>>,
+    manifest_cache: Arc<Mutex<HashMap<JobId, ResidentManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<JobToken, Ed2kManifestCheckpointState>>>,
     /// Process-local download block reservations. Durable manifests describe
     /// bytes which reached the piece store; they never own network work. This

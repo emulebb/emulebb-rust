@@ -1,92 +1,131 @@
 use super::*;
 
 impl EmulebbCore {
-    /// Populate the in-memory transfer view from persisted, non-removed rows.
-    ///
-    /// This is deliberately separate from the completed shared catalog: a
-    /// profile may seed 100k files while exposing only a small transfer list.
-    /// The barrier is shared by startup, list, and bulk-clear so endpoint call
-    /// order cannot decide which persisted transfers are visible.
-    pub async fn hydrate_persisted_transfer_rows(&self) -> Result<usize> {
-        if self.persisted_transfers_hydrated.load(Ordering::Acquire) {
-            return Ok(0);
+    /// A protocol callback can observe only its actual selected execution.
+    pub(crate) async fn selected_transfer(
+        &self,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<Option<Transfer>> {
+        if !self.download_attempts.owns(token) {
+            return Ok(None);
         }
-        let _hydration_guard = self.persisted_transfer_hydration_gate.lock().await;
-        if self.persisted_transfers_hydrated.load(Ordering::Acquire) {
-            return Ok(0);
+        let Some(job) = self.ed2k_transfers.download_job(token.job_id).await? else {
+            return Ok(None);
+        };
+        if job.token != token
+            || job.removed_at_s.is_some()
+            || job.storage_failure.is_some()
+            || job.intent != emulebb_metadata::DownloadIntent::Started
+        {
+            return Ok(None);
         }
+        drop(job);
+        let state = self.state.lock().await;
+        let mut transfer = state
+            .transfers
+            .values()
+            .find(|transfer| transfer.job_token() == token)
+            .cloned();
+        drop(state);
+        if let Some(transfer) = &mut transfer {
+            self.apply_live_transfer_fields(transfer);
+        }
+        Ok(transfer)
+    }
 
-        let manifests = self.ed2k_transfers.active_manifests().await?;
-        let mut inserted = 0usize;
-        for manifest in manifests {
-            let mut transfer = self.transfer_from_manifest(
-                &manifest,
-                crate::views::manifest_default_state_name(&manifest),
-            );
-            let _fence = self.ed2k_transfers.lock_category_publication().await;
-            let category_id = self
-                .ed2k_transfers
-                .current_category_id_fenced(&transfer.hash)
-                .await?;
-            let mut state = self.state.lock().await;
-            transfer.category_id = category_id;
-            transfer.category_name = category_id.and_then(|id| {
-                state
-                    .categories
-                    .get(&id)
-                    .map(|category| category.name.clone())
-            });
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                state.transfers.entry(transfer.hash.clone())
-            {
-                entry.insert(transfer);
-                inserted = inserted.saturating_add(1);
-            }
+    /// Refresh only the captured execution. Callers cannot look up a replacement
+    /// attempt by hash when their protocol work completes late.
+    pub(crate) async fn refresh_transfer_from_manifest(
+        &self,
+        token: emulebb_metadata::JobToken,
+        state_name: &str,
+    ) -> Result<Option<Transfer>> {
+        let transfer = self
+            .refresh_transfer_from_manifest_silent(token, state_name)
+            .await?;
+        if let Some(transfer) = &transfer {
+            self.publish_transfer_updated(transfer.clone());
         }
-        self.persisted_transfers_hydrated
-            .store(true, Ordering::Release);
-        Ok(inserted)
+        Ok(transfer)
+    }
+
+    async fn refresh_transfer_from_manifest_silent(
+        &self,
+        token: emulebb_metadata::JobToken,
+        state_name: &str,
+    ) -> Result<Option<Transfer>> {
+        let Some(manifest) = self.ed2k_transfers.manifest_optional(token).await? else {
+            return Ok(None);
+        };
+        let mut transfer = self.transfer_from_manifest(&manifest, state_name)?;
+        let _fence = self.ed2k_transfers.lock_category_publication().await;
+        let Some(job) = self.ed2k_transfers.download_job(token.job_id).await? else {
+            return Ok(None);
+        };
+        if job.token != token || job.removed_at_s.is_some() {
+            return Ok(None);
+        }
+        let mut state = self.state.lock().await;
+        if state
+            .transfers
+            .get(&transfer.hash)
+            .is_some_and(|current| current.job_token() != token)
+        {
+            return Ok(None);
+        }
+        transfer.category_id = job.category_id;
+        transfer.category_name = job
+            .category_id
+            .and_then(|id| state.categories.get(&id))
+            .map(|category| category.name.clone());
+        transfer.added_at = Some(job.created_at_s);
+        transfer.completed_at = job.completed_at_s;
+        if let Some(existing) = state.transfers.get(&transfer.hash) {
+            preserve_transfer_public_metadata(&mut transfer, existing);
+        }
+        state
+            .transfers
+            .insert(transfer.hash.clone(), transfer.clone());
+        Ok(Some(transfer))
+    }
+
+    async fn refresh_transfer_from_manifest_default(
+        &self,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<Option<Transfer>> {
+        let Some(manifest) = self.ed2k_transfers.manifest_optional(token).await? else {
+            return Ok(None);
+        };
+        let state = manifest_default_state_name(&manifest).to_owned();
+        drop(manifest);
+        self.refresh_transfer_from_manifest_silent(token, &state)
+            .await
     }
 
     pub(crate) fn transfer_from_manifest(
         &self,
         manifest: &Ed2kResumeManifest,
         state_name: &str,
-    ) -> Transfer {
+    ) -> Result<Transfer> {
         let parts_total = manifest.pieces.len() as u32;
         let mut transfer = transfer_from_manifest(
             manifest,
             state_name,
             self.ed2k_transfers
-                .payload_path(&manifest.file_hash)
+                .payload_path(manifest.token.job_id)?
                 .display()
                 .to_string(),
             self.ed2k_transfers
-                .download_speed_bytes_per_sec(&manifest.file_hash),
+                .download_speed_bytes_per_sec(manifest.token),
             self.ed2k_transfers
-                .transferring_source_count(&manifest.file_hash),
+                .transferring_source_count(manifest.token),
             self.ed2k_transfers
-                .available_part_count(&manifest.file_hash, parts_total),
+                .available_part_count(manifest.token, parts_total),
+            self.ed2k_transfers.downloaded_session_bytes(manifest.token),
             self.ed2k_transfers
-                .downloaded_session_bytes(&manifest.file_hash),
-            self.ed2k_transfers
-                .live_download_sources(&manifest.file_hash)
+                .live_download_sources(manifest.token)
                 .len() as u32,
         );
-        transfer.delivery_error = self
-            .delivery_failures
-            .lock()
-            .unwrap()
-            .get(&manifest.file_hash)
-            .map(|failure| failure.message.clone());
-        // Surface persisted addedAt/completedAt from the metadata store.
-        if let Ok(Some((created_ms, completed_ms))) = self
-            .metadata_store
-            .transfer_timestamps_by_hash(&manifest.file_hash)
-        {
-            transfer.added_at = Some(created_ms);
-            transfer.completed_at = completed_ms;
-        }
         // Classify "completed download" vs "shared-only file" by directory (eMule
         // semantics, unlike qBittorrent where every complete torrent is also a
         // share). A transfer is a download if it is still downloading, was
@@ -97,7 +136,7 @@ impl EmulebbCore {
         transfer.in_incoming = !manifest.completed
             || manifest.delivered_path.is_some()
             || path_is_within(&transfer.path, &self.incoming_dir);
-        transfer
+        Ok(transfer)
     }
 
     pub(crate) async fn set_transfer_state(
@@ -112,149 +151,5 @@ impl EmulebbCore {
         drop(state);
         self.publish_transfer_updated(transfer.clone());
         Some(transfer)
-    }
-
-    pub(crate) async fn set_transfer_control_state(
-        &self,
-        hash: &str,
-        state_name: &str,
-    ) -> Result<Option<Transfer>> {
-        if self.transfer(hash).await?.is_none() {
-            return Ok(None);
-        }
-        let manifest = self
-            .ed2k_transfers
-            .set_control_state(hash, Some(state_name))
-            .await?;
-        // Pause/stop must stop the transfer NOW: the driver does not read
-        // control_state mid-attempt, so without this an in-flight attempt keeps
-        // connecting peers and writing pieces through the rest of the current
-        // round and only the next retry is suppressed. Cancel the in-flight
-        // attempt so it stops at its next loop-top/mid-round check. Resume
-        // re-queues a fresh attempt (its cancel token is recreated then).
-        self.cancel_download_attempt(hash).await;
-        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
-        let _fence = self.ed2k_transfers.lock_category_publication().await;
-        let category_id = self.ed2k_transfers.current_category_id_fenced(hash).await?;
-        let mut state = self.state.lock().await;
-        transfer.category_id = category_id;
-        transfer.category_name = category_id.and_then(|id| {
-            state
-                .categories
-                .get(&id)
-                .map(|category| category.name.clone())
-        });
-        if let Some(existing) = state.transfers.get(&transfer.hash) {
-            preserve_transfer_public_metadata(&mut transfer, existing);
-        }
-        state
-            .transfers
-            .insert(transfer.hash.clone(), transfer.clone());
-        drop(state);
-        self.publish_transfer_updated(transfer.clone());
-        Ok(Some(transfer))
-    }
-
-    pub async fn resume_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(current) = self.transfer(hash).await? else {
-            return Ok(None);
-        };
-        if current.state == "completed" {
-            return Ok(Some(current));
-        }
-        anyhow::ensure!(!current.stopped, "stopped transfer cannot be resumed");
-        self.ed2k_transfers.resume_transfer(hash).await?;
-        let Some(transfer) = self.set_transfer_state(hash, "downloading").await else {
-            return Ok(None);
-        };
-        self.queue_ed2k_download_attempt(transfer.clone());
-        Ok(Some(transfer))
-    }
-
-    /// Startup download hydration: load persisted INCOMPLETE downloads into the
-    /// in-memory transfer set and queue a download attempt for each, so in-progress
-    /// downloads resume after a restart. Mirrors the fact that the MFC oracle's
-    /// `CDownloadQueue` resumes every incomplete `.part` file on launch. Without
-    /// this, `state.transfers` starts empty (`profile_state.rs`) and every persisted
-    /// partial download is abandoned across restarts (evidence: 39 multi-GB partials
-    /// stranded on a single restart). Returns the number resumed.
-    ///
-    /// Persisted transfer rows are hydrated independently before this queueing
-    /// pass. This method skips completed transfers, user paused/stopped transfers
-    /// (`control_state`).
-    pub async fn resume_persisted_downloads(&self) -> usize {
-        // Load ONLY the incomplete rows, off the async runtime (spawn_blocking) — see
-        // `incomplete_manifests`. Loading the full library inline (`manifests`) blocks
-        // a tokio worker and starves REST at startup.
-        let manifests = match self.ed2k_transfers.incomplete_manifests().await {
-            Ok(manifests) => manifests,
-            Err(error) => {
-                tracing::warn!(
-                    "startup download hydration: failed to list persisted transfers: {error:#}"
-                );
-                return 0;
-            }
-        };
-        // Resume GRADUALLY. Queuing dozens of downloads at once (39 observed on the
-        // soak profile) thunder-herds the state lock and the source coordinator on
-        // top of the large-library shared reload, starving REST at startup (the
-        // control plane wedged in a live test). Let the network startup burst
-        // settle, then stagger each resume — eMule's CDownloadQueue likewise drives
-        // incomplete files a few at a time, not all in one tick.
-        tokio::time::sleep(Duration::from_secs(RESUME_DOWNLOADS_INITIAL_DELAY_SECS)).await;
-        let mut resumed = 0usize;
-        for manifest in manifests {
-            if manifest.completed
-                || matches!(
-                    manifest.control_state.as_deref(),
-                    Some("paused") | Some("stopped")
-                )
-            {
-                continue;
-            }
-            let mut transfer = self.transfer_from_manifest(
-                &manifest,
-                crate::views::manifest_default_state_name(&manifest),
-            );
-            let transfer = {
-                let _fence = self.ed2k_transfers.lock_category_publication().await;
-                let category_id = match self
-                    .ed2k_transfers
-                    .current_category_id_fenced(&transfer.hash)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to read category during resume");
-                        continue;
-                    }
-                };
-                let mut state = self.state.lock().await;
-                if let Some(existing) = state.transfers.get(&transfer.hash) {
-                    existing.clone()
-                } else {
-                    transfer.category_id = category_id;
-                    transfer.category_name = category_id.and_then(|id| {
-                        state
-                            .categories
-                            .get(&id)
-                            .map(|category| category.name.clone())
-                    });
-                    state
-                        .transfers
-                        .insert(transfer.hash.clone(), transfer.clone());
-                    transfer
-                }
-            };
-            self.queue_ed2k_download_attempt(transfer);
-            resumed = resumed.saturating_add(1);
-            tokio::time::sleep(Duration::from_millis(RESUME_DOWNLOADS_STAGGER_MS)).await;
-        }
-        if resumed > 0 {
-            tracing::info!(
-                "startup download hydration: resumed {resumed} persisted incomplete downloads (staggered)"
-            );
-        }
-        resumed
     }
 }

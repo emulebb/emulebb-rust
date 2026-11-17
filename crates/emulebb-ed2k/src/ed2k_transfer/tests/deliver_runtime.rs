@@ -120,6 +120,7 @@ async fn prepare_deletion_tombstone(root: &Path, display_name: &str) -> Deletion
         .await
         .unwrap()
         .source_fingerprint
+        .clone()
         .unwrap();
     let transfer_dir = runtime.transfer_dir(hash.token.job_id).unwrap();
     persist_deletion_intent(&runtime, &hash);
@@ -353,7 +354,12 @@ async fn materialize_completed_payload_uses_explicitly_repaired_chosen_name() {
     let root = unique_test_dir("ed2k-deliver-repaired-name");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let hash = ingest_completed(&runtime, &root, "Caf%C3%A9 &amp; FranÃ§ais.mkv").await;
-    let chosen = runtime.manifest(hash.token).await.unwrap().display_name;
+    let chosen = runtime
+        .manifest(hash.token)
+        .await
+        .unwrap()
+        .display_name
+        .clone();
     assert!(
         chosen.contains("&amp;"),
         "admission must preserve the chosen name"
@@ -955,7 +961,8 @@ async fn materialize_verifies_identical_replacement_without_ownership() {
         .manifest(hash.token)
         .await
         .unwrap()
-        .source_fingerprint;
+        .source_fingerprint
+        .clone();
 
     fs::remove_file(&delivered).unwrap();
     fs::write(&delivered, &verified_payload).unwrap();
@@ -2379,6 +2386,7 @@ async fn materialize_records_delivered_fingerprint_for_reload_reuse() {
     assert_eq!(manifest.delivery_state, Ed2kDeliveryState::Delivered);
     let recorded = manifest
         .source_fingerprint
+        .clone()
         .expect("the delivered file fingerprint must be recorded");
     let (_, _, scanned_fingerprint) =
         Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
