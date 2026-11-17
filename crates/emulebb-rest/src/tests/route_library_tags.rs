@@ -1,14 +1,5 @@
 use crate::rest_test_support::*;
 
-async fn known(app: &Router, byte: u8) -> String {
-    let hash = format!("{byte:02x}").repeat(16);
-    let (status, _) = request(app,"POST","/api/v1/downloads",Some(json!({
-        "source":{"type":"content","hash":hash,"name":"Sample.bin","sizeBytes":123},"intent":"stopped"
-    }))).await;
-    assert_eq!(status, StatusCode::CREATED);
-    hash
-}
-
 #[tokio::test]
 async fn tags_have_name_identity_creation_location_and_case_insensitive_conflicts() {
     let app = test_router();
@@ -60,7 +51,7 @@ async fn tags_have_name_identity_creation_location_and_case_insensitive_conflict
 #[tokio::test]
 async fn tag_pages_have_scoped_live_continuations_and_default_one_hundred_rows() {
     let app = test_router();
-    let hash = known(&app, 1).await;
+    let hash = known_library_hash(&app, 1).await;
     for index in 0..102 {
         assert_eq!(
             request(
@@ -123,8 +114,8 @@ async fn tag_pages_have_scoped_live_continuations_and_default_one_hundred_rows()
 #[tokio::test]
 async fn tag_bulk_actions_report_ordered_hash_outcomes_without_affecting_jobs() {
     let app = test_router();
-    let first = known(&app, 1).await;
-    let second = known(&app, 2).await;
+    let first = known_library_hash(&app, 1).await;
+    let second = known_library_hash(&app, 2).await;
     let missing = "ff".repeat(16);
     request(
         &app,
@@ -209,7 +200,7 @@ async fn tag_bulk_actions_report_ordered_hash_outcomes_without_affecting_jobs() 
 #[tokio::test]
 async fn malformed_tag_batches_are_rejected_before_any_assignment() {
     let app = test_router();
-    let hash = known(&app, 1).await;
+    let hash = known_library_hash(&app, 1).await;
     request(
         &app,
         "POST",

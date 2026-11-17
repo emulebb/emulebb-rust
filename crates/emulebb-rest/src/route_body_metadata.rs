@@ -180,6 +180,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     ];
     const URL_IMPORT: &[&str] = &["url"];
     const KAD_BOOTSTRAP: &[&str] = &["address", "port"];
+    const LIBRARY_SHARING: &[&str] = &["enabled", "hashes"];
     const LIBRARY_TAG_CREATE: &[&str] = &["name"];
     const LIBRARY_TAG_ASSIGN: &[&str] = &["tag", "hashes"];
     const EMPTY: &[&str] = &[];
@@ -225,6 +226,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         return Some(QUEUED_SOURCE_REASK_CONTROL);
     }
 
+    if method == "POST" && path == "/api/v1/library/files/sharing" {
+        return Some(LIBRARY_SHARING);
+    }
     if method == "POST" && path == "/api/v1/library/tags" {
         return Some(LIBRARY_TAG_CREATE);
     }

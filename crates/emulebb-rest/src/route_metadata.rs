@@ -629,6 +629,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
         ("GET", "/api/v1/shared-files") => Some(SHARED_FILES),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
+        ("POST", "/api/v1/library/files/sharing") => Some(NONE),
         ("GET", "/api/v1/library/tags") => Some(LIBRARY_TAGS),
         ("POST", "/api/v1/library/tags") => Some(NONE),
         ("GET", "/api/v1/downloads") => Some(DOWNLOADS),

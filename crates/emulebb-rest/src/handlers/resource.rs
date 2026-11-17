@@ -70,3 +70,40 @@ pub(super) fn decode_cursor(value: &str, scope: &str) -> Result<String, Box<Resp
         .ok_or_else(invalid_cursor)?;
     Ok(position.to_owned())
 }
+
+/// One ordered outcome for an explicitly selected library hash.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct HashOutcome {
+    hash: String,
+    status: &'static str,
+    http_status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<serde_json::Value>,
+}
+impl HashOutcome {
+    pub(super) fn success(hash: String, changed: bool) -> Self {
+        Self {
+            hash,
+            status: if changed { "accepted" } else { "unchanged" },
+            http_status: 200,
+            error: None,
+        }
+    }
+    pub(super) fn failed(
+        hash: String,
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            hash,
+            status: "failed",
+            http_status: status.as_u16(),
+            error: Some(
+                serde_json::json!({"code": code, "message": message.into(), "details": details}),
+            ),
+        }
+    }
+}

@@ -1,6 +1,6 @@
 //! Immutable tag resources and explicit, bounded hash assignment actions.
 use super::prelude::*;
-use super::resource::{decode_cursor, encode_cursor, invalid, item, page};
+use super::resource::{HashOutcome, decode_cursor, encode_cursor, invalid, item, page};
 use axum::{
     body::Bytes,
     extract::{Path, RawQuery, State},
@@ -9,7 +9,7 @@ use axum::{
 };
 use emulebb_core::LibraryTagError;
 use emulebb_core::{LibraryTagChange, LibraryTagRequest, LibraryTagValue};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,22 +188,6 @@ pub(crate) async fn library_file_tags(
     list(state, Some(hash), raw).await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Outcome {
-    hash: String,
-    status: &'static str,
-    http_status: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<Failure>,
-}
-#[derive(Serialize)]
-struct Failure {
-    code: &'static str,
-    message: &'static str,
-    details: serde_json::Value,
-}
-
 async fn change(state: RestState, body: Bytes, assigned: bool) -> Response {
     let request = match parse_required_json_body::<Assign>(&body) {
         Ok(value) => value,
@@ -231,35 +215,23 @@ async fn change(state: RestState, body: Bytes, assigned: bool) -> Response {
                     };
                     values
                         .into_iter()
-                        .map(|value| {
-                            let (status, http_status, error) = match value.change {
-                                LibraryTagChange::Changed => ("accepted", 200, None),
-                                LibraryTagChange::Unchanged => ("unchanged", 200, None),
-                                LibraryTagChange::NotFound => (
-                                    "failed",
-                                    404,
-                                    Some(Failure {
-                                        code: "NOT_FOUND",
-                                        message: "library file not found",
-                                        details: serde_json::json!({}),
-                                    }),
-                                ),
-                                LibraryTagChange::StorageFailed => (
-                                    "failed",
-                                    500,
-                                    Some(Failure {
-                                        code: "PERSISTENCE_FAILED",
-                                        message: "database operation failed",
-                                        details: serde_json::json!({}),
-                                    }),
-                                ),
-                            };
-                            Outcome {
-                                hash: value.hash,
-                                status,
-                                http_status,
-                                error,
-                            }
+                        .map(|value| match value.change {
+                            LibraryTagChange::Changed => HashOutcome::success(value.hash, true),
+                            LibraryTagChange::Unchanged => HashOutcome::success(value.hash, false),
+                            LibraryTagChange::NotFound => HashOutcome::failed(
+                                value.hash,
+                                StatusCode::NOT_FOUND,
+                                "NOT_FOUND",
+                                "library file not found",
+                                serde_json::json!({}),
+                            ),
+                            LibraryTagChange::StorageFailed => HashOutcome::failed(
+                                value.hash,
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "PERSISTENCE_FAILED",
+                                "database operation failed",
+                                serde_json::json!({}),
+                            ),
                         })
                         .collect::<Vec<_>>()
                 }),

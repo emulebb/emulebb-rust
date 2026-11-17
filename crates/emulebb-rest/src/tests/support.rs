@@ -269,3 +269,12 @@ pub(crate) async fn request(
         },
     )
 }
+
+pub(crate) async fn known_library_hash(app: &Router, byte: u8) -> String {
+    let hash = format!("{byte:02x}").repeat(16);
+    let (status, _) = request(app,"POST","/api/v1/downloads",Some(json!({
+        "source":{"type":"content","hash":hash,"name":"Sample.bin","sizeBytes":123},"intent":"stopped"
+    }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    hash
+}
