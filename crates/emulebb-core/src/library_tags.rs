@@ -1,7 +1,7 @@
 //! Bounded tag resources; public identities are names, never SQL row IDs.
-use crate::{EmulebbCore, persistence_owner::ByteLease};
+use crate::{EmulebbCore, LibraryReply};
 use anyhow::{Result, ensure};
-use serde::{Serialize, Serializer};
+use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub enum LibraryTagRequest {
@@ -28,15 +28,6 @@ impl LibraryTagRequest {
             }
             Ok(())
         };
-        let hash = |hash: &str| -> Result<()> {
-            ensure!(
-                hash.len() == 32
-                    && !hash.bytes().any(|b| b.is_ascii_uppercase())
-                    && hex::decode_to_slice(hash, &mut [0u8; 16]).is_ok(),
-                "hash must be 32 lowercase hexadecimal characters"
-            );
-            Ok(())
-        };
         match self {
             Self::Create(value) | Self::Get(value) | Self::Delete(value) => name(value),
             Self::Page {
@@ -46,7 +37,7 @@ impl LibraryTagRequest {
             } => {
                 ensure!((1..=200).contains(limit), "tag page limit must be 1..200");
                 if let Some(value) = value {
-                    hash(value)?;
+                    crate::library_policy::validate_hash(value)?;
                 }
                 if let Some(value) = after {
                     name(value)?;
@@ -55,15 +46,7 @@ impl LibraryTagRequest {
             }
             Self::Change { tag, hashes, .. } => {
                 name(tag)?;
-                ensure!(
-                    (1..=100).contains(&hashes.len()),
-                    "tag changes require 1..100 hashes"
-                );
-                let mut seen = std::collections::HashSet::with_capacity(hashes.len());
-                for value in hashes {
-                    hash(value)?;
-                    ensure!(seen.insert(value), "tag changes require distinct hashes");
-                }
+                crate::library_policy::validate_hashes(hashes)?;
                 Ok(())
             }
         }
@@ -130,35 +113,12 @@ pub enum LibraryTagValue {
     Assignments(Vec<LibraryTagAssignment>),
 }
 
-/// The existing owner charges backing storage until serialization or caller drop.
-pub struct LibraryTagReply<T = LibraryTagValue> {
-    pub(crate) value: T,
-    pub(crate) lease: ByteLease,
-}
-
-impl<T> LibraryTagReply<T> {
-    pub fn value(&self) -> &T {
-        &self.value
-    }
-
-    /// Project a bounded response without releasing its retained owner charge.
-    pub fn map<U>(self, project: impl FnOnce(T) -> U) -> LibraryTagReply<U> {
-        LibraryTagReply {
-            value: project(self.value),
-            lease: self.lease,
-        }
-    }
-}
-
-impl<T: Serialize> Serialize for LibraryTagReply<T> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        self.value.serialize(serializer)
-    }
-}
-
 impl EmulebbCore {
     /// Validate before admission; the profile owner completes admitted SQL work.
-    pub async fn library_tags(&self, request: &LibraryTagRequest) -> Result<LibraryTagReply> {
+    pub async fn library_tags(
+        &self,
+        request: &LibraryTagRequest,
+    ) -> Result<LibraryReply<LibraryTagValue>> {
         request.validate()?;
         let owner = self
             .persistence_owner

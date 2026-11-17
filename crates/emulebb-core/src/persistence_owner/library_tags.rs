@@ -1,14 +1,15 @@
 //! Tag commands use the existing profile coordinator and blocking SQL worker.
 use super::*;
+use crate::LibraryReply;
 use crate::library_tags::{
-    LibraryTag, LibraryTagAssignment, LibraryTagChange, LibraryTagPage, LibraryTagReply,
-    LibraryTagRequest, LibraryTagValue,
+    LibraryTag, LibraryTagAssignment, LibraryTagChange, LibraryTagPage, LibraryTagRequest,
+    LibraryTagValue,
 };
 use emulebb_metadata::LibraryTagError;
 
 // Covers 200 names of at most 64 bytes, vector capacity, and response projection.
 // Reserve before SQL so a successful commit never needs another admission wait.
-const RESULT_BYTES: usize = 64 * 1024;
+use crate::library_policy::RESULT_BYTES;
 pub(super) type Outcome = Result<LibraryTagValue, LibraryTagError>;
 
 fn domain<T>(result: anyhow::Result<T>) -> Result<Result<T, LibraryTagError>, PersistenceError> {
@@ -98,7 +99,7 @@ impl PersistenceOwner {
     pub(crate) async fn library_tags(
         &self,
         request: &LibraryTagRequest,
-    ) -> Result<Result<LibraryTagReply, LibraryTagError>, PersistenceError> {
+    ) -> Result<Result<LibraryReply<LibraryTagValue>, LibraryTagError>, PersistenceError> {
         let charge = request
             .payload_bytes()
             .and_then(|bytes| bytes.checked_mul(4))
@@ -149,7 +150,7 @@ pub(super) async fn process(
         return Err(PersistenceError::Worker);
     };
     Ok(Response::LibraryTags(
-        value.map(|value| LibraryTagReply { value, lease }),
+        value.map(|value| LibraryReply { value, lease }),
     ))
 }
 

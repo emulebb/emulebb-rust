@@ -125,10 +125,14 @@ mod discovery_fetch;
 mod disk_guard;
 mod download_attempts;
 mod download_controls;
+mod library_policy;
+pub use library_policy::LibraryReply;
+mod library_sharing;
+pub use library_sharing::{LibraryFileChange, LibrarySharingOutcome, LibrarySharingRequest};
 mod library_tags;
 pub use library_tags::{
-    LibraryTag, LibraryTagAssignment, LibraryTagChange, LibraryTagPage, LibraryTagReply,
-    LibraryTagRequest, LibraryTagValue,
+    LibraryTag, LibraryTagAssignment, LibraryTagChange, LibraryTagPage, LibraryTagRequest,
+    LibraryTagValue,
 };
 mod download_events;
 pub use download_events::{

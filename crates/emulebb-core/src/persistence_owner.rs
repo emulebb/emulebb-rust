@@ -21,6 +21,7 @@ mod download_create;
 pub(crate) use download_create::DownloadCreateCommand;
 mod download_patch;
 mod kad;
+mod library_sharing;
 mod library_tags;
 
 #[cfg(test)]
@@ -76,6 +77,20 @@ impl std::fmt::Display for PersistenceError {
 }
 impl std::error::Error for PersistenceError {}
 
+impl From<&emulebb_ed2k::ed2k_transfer::LocalMutationError> for PersistenceError {
+    fn from(error: &emulebb_ed2k::ed2k_transfer::LocalMutationError) -> Self {
+        use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+        match error {
+            LocalMutationError::Busy => Self::Busy,
+            LocalMutationError::Closing => Self::Closing,
+            LocalMutationError::TooLarge => Self::TooLarge,
+            LocalMutationError::Storage => Self::Storage("database operation failed".into()),
+            LocalMutationError::Committed => Self::CommittedPublicationFailed,
+            LocalMutationError::Unknown => Self::CommitUnknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CategoryNameConflict;
 impl std::fmt::Display for CategoryNameConflict {
@@ -90,6 +105,7 @@ enum Command {
     Delete { hash: String },
     Category(category::CategoryCommand),
     LibraryTags(crate::LibraryTagRequest),
+    LibrarySharing(library_sharing::SharingCommand),
     Downloads(download::DownloadCommand),
     KadLoad,
     KadIdentity,
@@ -101,7 +117,10 @@ enum Command {
 enum Response {
     Friend(Option<Friend>),
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
-    LibraryTags(Result<crate::LibraryTagReply, emulebb_metadata::LibraryTagError>),
+    LibraryTags(
+        Result<crate::LibraryReply<crate::LibraryTagValue>, emulebb_metadata::LibraryTagError>,
+    ),
+    LibrarySharing(crate::LibraryReply<Vec<crate::LibrarySharingOutcome>>),
     Downloads(crate::DownloadControlBatch),
     DownloadPatched(Result<crate::DownloadChange, emulebb_metadata::DownloadPatchError>),
     DownloadCreated(
@@ -906,6 +925,7 @@ impl PersistenceOwner {
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
             Command::LibraryTags(_)
+            | Command::LibrarySharing(_)
             | Command::Category(_)
             | Command::Downloads(_)
             | Command::KadLoad
@@ -1046,6 +1066,14 @@ async fn process(
         )
         .await;
     }
+    if matches!(&request.command, Command::LibrarySharing(_)) {
+        return library_sharing::process(
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::LibraryTags(_)) {
         return library_tags::process(
             db,
@@ -1129,6 +1157,7 @@ async fn process(
                 DbCommand::Delete(existing.clone())
             }
             Command::LibraryTags(_)
+            | Command::LibrarySharing(_)
             | Command::Category(_)
             | Command::Downloads(_)
             | Command::KadLoad
