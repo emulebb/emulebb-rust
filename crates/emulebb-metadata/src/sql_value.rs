@@ -45,11 +45,27 @@ mod tests {
             .unwrap();
         store.add_file_all_time_uploaded(&hash, u64::MAX).unwrap();
         store
-            .apply_credit_deltas(&[], &[(hash.clone(), u64::MAX)])
+            .apply_credit_deltas(
+                &[],
+                &[crate::MetadataFileUploadDelta {
+                    file_hash: hash.clone(),
+                    uploaded_bytes: u64::MAX,
+                    accepted_sessions: 0,
+                }],
+            )
             .unwrap();
         for _ in 0..2 {
             store.add_file_upload_request(&hash, 1).unwrap();
-            store.add_file_upload_accept(&hash).unwrap();
+            store
+                .apply_credit_deltas(
+                    &[],
+                    &[crate::MetadataFileUploadDelta {
+                        file_hash: hash.clone(),
+                        accepted_sessions: 1,
+                        ..Default::default()
+                    }],
+                )
+                .unwrap();
         }
         let values: (i64, i64, i64) = store.connection().unwrap().query_row(
             "SELECT all_time_uploaded_bytes, all_time_upload_requests, all_time_upload_accepts FROM known_files",

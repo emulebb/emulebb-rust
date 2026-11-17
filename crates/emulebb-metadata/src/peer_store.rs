@@ -6,6 +6,14 @@ use crate::{
     store::{decode_fixed_hex, unix_ms},
 };
 
+/// Retained file accounting deltas committed with the existing credit batch.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataFileUploadDelta {
+    pub file_hash: String,
+    pub uploaded_bytes: u64,
+    pub accepted_sessions: u64,
+}
+
 impl super::MetadataStore {
     pub fn upsert_peer_credit(&self, credit: &MetadataPeerCredit) -> Result<()> {
         let user_hash = decode_fixed_hex(&credit.user_hash, 16, "peer user hash")?;
@@ -102,13 +110,13 @@ impl super::MetadataStore {
         Ok(())
     }
 
-    /// Apply a batch of parked peer-credit and file all-time-uploaded deltas
+    /// Apply a batch of parked peer-credit and file upload-accounting deltas
     /// in ONE transaction (one WAL fsync), the flush half of the in-memory
     /// credit parking that replaced the per-fragment/per-block commits.
     pub fn apply_credit_deltas(
         &self,
         peer_deltas: &[(String, u64, u64)],
-        file_uploaded_deltas: &[(String, u64)],
+        file_uploaded_deltas: &[MetadataFileUploadDelta],
     ) -> Result<()> {
         if peer_deltas.is_empty() && file_uploaded_deltas.is_empty() {
             return Ok(());
@@ -153,16 +161,17 @@ impl super::MetadataStore {
                 now,
             ])?;
         }
-        for (file_hash, delta) in file_uploaded_deltas {
-            let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        for delta in file_uploaded_deltas {
+            let hash = decode_fixed_hex(&delta.file_hash, 16, "ED2K hash")?;
             tx.prepare_cached(
                 r#"
                 UPDATE known_files
-                SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes)
+                SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes),
+                    all_time_upload_accepts = all_time_upload_accepts + min(?3, 9223372036854775807 - all_time_upload_accepts)
                 WHERE ed2k_hash = ?1
                 "#,
             )?
-            .execute(params![hash, u64_to_i64_saturating(*delta)])?;
+            .execute(params![hash, u64_to_i64_saturating(delta.uploaded_bytes), u64_to_i64_saturating(delta.accepted_sessions)])?;
         }
         tx.commit()?;
         Ok(())

@@ -1547,7 +1547,16 @@ fn upload_demand_counters_persist_on_known_files() {
             .add_file_upload_request(&manifest.file_hash, 1_700_000_000_000)
             .unwrap()
     );
-    assert!(store.add_file_upload_accept(&manifest.file_hash).unwrap());
+    store
+        .apply_credit_deltas(
+            &[],
+            &[crate::MetadataFileUploadDelta {
+                file_hash: manifest.file_hash.clone(),
+                accepted_sessions: 1,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
 
     assert!(
         store

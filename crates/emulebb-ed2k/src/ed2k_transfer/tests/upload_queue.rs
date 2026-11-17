@@ -511,6 +511,10 @@ async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
         .begin_upload_session_at(upload_peer(2, 0x13, 0x0A00_0013), &file_hash, now)
         .await;
     assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let work = runtime.begin_upload_work(&active_handle).await.unwrap();
+    assert!(work.claim_payload_acceptance());
+    assert!(!work.claim_payload_acceptance());
+    drop(work);
 
     assert_eq!(
         runtime
@@ -545,6 +549,11 @@ async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
             .await,
         Ed2kUploadSessionStatus::Granted
     );
+    let later = now + std::time::Duration::from_secs(3);
+    let mut queue = runtime.upload_queue.lock().await;
+    queue.release_session(&waiting_handle, later);
+    let new_stint = queue.begin_upload_work(&active_handle, later).unwrap();
+    assert!(new_stint.claim_payload_acceptance());
 }
 
 #[tokio::test]

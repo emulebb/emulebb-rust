@@ -130,3 +130,165 @@ async fn session_release_flushes_the_parked_tail() {
         (2 * FRAGMENT, 2 * FRAGMENT)
     );
 }
+
+#[tokio::test]
+async fn accepted_upload_sessions_count_once_across_guards_and_again_after_release() {
+    let root = unique_test_dir("ed2k-upload-accepted-sessions");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let hash = Ed2kHash::from_bytes([0x27; 16]);
+    seed_known_counter_file(&runtime, &hash).await;
+    let database = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
+    let accepted = || {
+        database
+            .query_row(
+                "SELECT all_time_upload_accepts FROM known_files WHERE ed2k_hash=?1",
+                [hash.0.as_slice()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let peer = upload_peer(1, 0x17, 0x0A00_0027);
+    let (handle, status) = runtime
+        .begin_upload_session_at(peer.clone(), &hash, Instant::now())
+        .await;
+    assert_eq!(
+        status,
+        crate::ed2k_transfer::Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        accepted(),
+        0,
+        "a queue grant is not an admitted payload request"
+    );
+    let first = runtime.begin_upload_work(&handle).await.unwrap();
+    let parallel = runtime.begin_upload_work(&handle).await.unwrap();
+    tokio::join!(
+        runtime.note_file_upload_accept(&hash, &first),
+        runtime.note_file_upload_accept(&hash, &parallel)
+    );
+    assert_eq!(accepted(), 0, "acceptance is parked until checkpoint");
+    runtime.flush_parked_credit().await;
+    assert_eq!(accepted(), 1);
+    drop((first, parallel));
+    let next_packet = runtime.begin_upload_work(&handle).await.unwrap();
+    runtime.note_file_upload_accept(&hash, &next_packet).await;
+    assert_eq!(accepted(), 1);
+    drop(next_packet);
+    runtime.release_upload_session(&handle).await;
+    let (next, status) = runtime
+        .begin_upload_session_at(peer, &hash, Instant::now())
+        .await;
+    assert_eq!(
+        status,
+        crate::ed2k_transfer::Ed2kUploadSessionStatus::Granted
+    );
+    let work = runtime.begin_upload_work(&next).await.unwrap();
+    runtime.note_file_upload_accept(&hash, &work).await;
+    runtime.flush_parked_credit().await;
+    assert_eq!(accepted(), 2);
+    let catalog = runtime.shared_catalog();
+    let guard = catalog.read().await;
+    let entry = &guard[guard.index_by_hash(&hash).unwrap()];
+    assert_eq!(entry.publish.session_accept_count, 2);
+    assert_eq!(entry.publish.all_time_accept_count, 2);
+}
+
+async fn seed_known_counter_file(runtime: &Ed2kTransferRuntime, hash: &Ed2kHash) {
+    use emulebb_metadata::{MetadataIndexedFile, MetadataIndexedFileOrigin};
+    let mut metadata = runtime.metadata.clone();
+    metadata
+        .upsert_indexed_file(
+            &MetadataIndexedFile {
+                ed2k_hash: hash.to_string(),
+                name: "Sample.bin".into(),
+                size_bytes: 4096,
+                content_type: String::new(),
+                availability_score: 0,
+            },
+            MetadataIndexedFileOrigin::PassiveCache,
+        )
+        .unwrap();
+    seed_verified_entry(runtime, hash).await;
+}
+
+#[tokio::test]
+async fn accepted_stint_checkpoint_failure_preserves_credit_bytes_and_exactly_once_count() {
+    let root = unique_test_dir("ed2k-upload-accept-checkpoint-failure");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let hash = Ed2kHash::from_bytes([0x28; 16]);
+    seed_known_counter_file(&runtime, &hash).await;
+    let database = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
+    let totals = || {
+        database.query_row(
+        "SELECT all_time_uploaded_bytes,all_time_upload_accepts FROM known_files WHERE ed2k_hash=?1",
+        [hash.0.as_slice()], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)),
+    ).unwrap()
+    };
+    let peer = [0x39; 16];
+    let (handle, _) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x18, 0x0A00_0028), &hash, Instant::now())
+        .await;
+    let work = runtime.begin_upload_work(&handle).await.unwrap();
+    runtime.note_file_upload_accept(&hash, &work).await;
+    runtime.add_file_all_time_uploaded(&hash, 11).unwrap();
+    runtime.add_peer_credit_delta(peer, 9, 0).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER synthetic_accept_failure BEFORE UPDATE ON known_files
+        WHEN new.all_time_upload_accepts > old.all_time_upload_accepts
+        BEGIN SELECT RAISE(ABORT,'synthetic accepted-stint checkpoint failure'); END;",
+        )
+        .unwrap();
+    runtime.flush_parked_credit().await;
+    assert_eq!(totals(), (0, 0), "the entire batch rolls back together");
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM peers", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    runtime.add_file_all_time_uploaded(&hash, 7).unwrap();
+    runtime.add_peer_credit_delta(peer, 3, 0).unwrap();
+    runtime.note_file_upload_accept(&hash, &work).await;
+    database
+        .execute_batch("DROP TRIGGER synthetic_accept_failure")
+        .unwrap();
+    runtime.flush_parked_credit().await;
+    assert_eq!(totals(), (18, 1));
+    assert_eq!(
+        runtime
+            .peer_credit_by_hash(peer)
+            .unwrap()
+            .unwrap()
+            .uploaded_bytes,
+        12
+    );
+    runtime.flush_parked_credit().await;
+    assert_eq!(
+        totals(),
+        (18, 1),
+        "retries and duplicate packets cannot double count"
+    );
+    drop(work);
+    drop(database);
+    drop(runtime);
+    let reopened = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let database = rusqlite::Connection::open(root.join("metadata.sqlite")).unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT all_time_upload_accepts FROM known_files", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .peer_credit_by_hash(peer)
+            .unwrap()
+            .unwrap()
+            .uploaded_bytes,
+        12
+    );
+}

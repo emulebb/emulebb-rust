@@ -418,9 +418,17 @@ impl Ed2kTransferRuntime {
         self.notify_shared_publish_demand_changed();
     }
 
-    /// Record one accepted upload request for a shared file.
-    pub(crate) async fn note_file_upload_accept(&self, file_hash: &Ed2kHash) {
-        let _ = self.metadata.add_file_upload_accept(&file_hash.to_string());
+    /// Record the first admitted payload request in an upload stint. Queue
+    /// grants and later request packets do not increment accepted sessions.
+    pub(crate) async fn note_file_upload_accept(
+        &self,
+        file_hash: &Ed2kHash,
+        work: &Ed2kUploadWorkGuard,
+    ) {
+        if !work.claim_payload_acceptance() {
+            return;
+        }
+        self.park_file_upload_accept(file_hash);
         self.update_shared_publish_stats(file_hash, |entry| {
             entry.publish.session_accept_count =
                 entry.publish.session_accept_count.saturating_add(1);

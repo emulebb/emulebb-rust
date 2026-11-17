@@ -414,22 +414,6 @@ impl super::MetadataStore {
         Ok(updated != 0)
     }
 
-    /// Record one accepted upload request for a known file.
-    pub fn add_file_upload_accept(&self, file_hash: &str) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        let conn = self.connection()?;
-        let updated = conn
-            .prepare_cached(
-                r#"
-                UPDATE known_files
-                SET all_time_upload_accepts = all_time_upload_accepts + min(1, 9223372036854775807 - all_time_upload_accepts)
-                WHERE ed2k_hash = ?1
-                "#,
-            )?
-            .execute(params![hash])?;
-        Ok(updated != 0)
-    }
-
     /// Returns the file's persisted `(all_time_uploaded_bytes, size_bytes)`,
     /// using accepted size or the sole current job's claim. Returns `None` for
     /// an unknown hash or unknown size (so the caller can mirror eMule's

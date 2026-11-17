@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -245,6 +245,7 @@ pub(super) struct Ed2kUploadSessionKey {
 /// Opaque handle bound to one live uploader transport session.
 #[derive(Debug, Default)]
 struct Ed2kUploadLeaseActivity {
+    accepted_payload: AtomicBool,
     in_flight_work: AtomicUsize,
     wire_progress_bytes: AtomicU64,
 }
@@ -329,6 +330,12 @@ pub(crate) struct Ed2kUploadWorkGuard {
 }
 
 impl Ed2kUploadWorkGuard {
+    /// Count the first admitted payload request in this upload stint once,
+    /// across cloned handles and repeated request packets.
+    pub(crate) fn claim_payload_acceptance(&self) -> bool {
+        !self.activity.accepted_payload.swap(true, Ordering::Relaxed)
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
@@ -877,6 +884,10 @@ impl Ed2kUploadQueueState {
                     self.waiting_order.retain(|queued| queued != &existing_key);
                 }
                 if existing_key.file_hash != key.file_hash {
+                    session
+                        .activity
+                        .accepted_payload
+                        .store(false, Ordering::Relaxed);
                     session.queued_ranges.clear();
                     session.request_generation = 0;
                     session.served_ranges.clear();
@@ -2226,6 +2237,12 @@ impl Ed2kUploadQueueState {
             let waiting_sequence = self.take_waiting_sequence();
             if let Some(session) = self.sessions.get_mut(&key) {
                 session.phase = Ed2kUploadSessionPhase::Waiting;
+                // WHY: re-promotion starts a fresh upload stint. In-flight work
+                // prevents recycling, so an accepted request cannot cross reset.
+                session
+                    .activity
+                    .accepted_payload
+                    .store(false, Ordering::Relaxed);
                 session.promotion_deadline = None;
                 session.queued_at = now;
                 session.last_activity = now;

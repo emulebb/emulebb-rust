@@ -1,4 +1,4 @@
-//! In-memory parking of peer-credit and file all-time-uploaded deltas.
+//! In-memory parking of peer-credit and file upload-accounting deltas.
 //!
 //! The upload hot path used to commit TWO SQLite transactions per served
 //! 180 K fragment (`add_peer_credit_delta` + `add_file_all_time_uploaded`),
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
-use emulebb_metadata::MetadataStore;
+use emulebb_metadata::{MetadataFileUploadDelta, MetadataStore};
 use parking_lot::Mutex;
 
 use super::Ed2kTransferRuntime;
@@ -37,14 +37,20 @@ const PARKED_CREDIT_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Parked per-peer deltas: user hash -> (uploaded, downloaded).
 type ParkedPeerDeltas = HashMap<[u8; 16], (u64, u64)>;
-/// Parked per-file uploaded deltas keyed by lowercase hex hash.
-type ParkedFileDeltas = HashMap<String, u64>;
+/// Parked file-byte and accepted-session deltas keyed by lowercase hex hash.
+type ParkedFileDeltas = HashMap<String, ParkedFileCounters>;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ParkedFileCounters {
+    uploaded_bytes: u64,
+    accepted_sessions: u64,
+}
 
 #[derive(Debug)]
 pub(super) struct ParkedCreditLedger {
     /// Peer user hash -> (uploaded delta, downloaded delta) not yet in SQLite.
     peers: ParkedPeerDeltas,
-    /// File hash (lowercase hex) -> all-time-uploaded delta not yet in SQLite.
+    /// File hash -> byte and accepted-session deltas not yet in SQLite.
     files: ParkedFileDeltas,
     last_flush_started: Instant,
 }
@@ -79,8 +85,11 @@ impl ParkedCreditLedger {
             slot.1 = slot.1.saturating_add(downloaded);
         }
         for (file_hash, delta) in files {
-            let slot = self.files.entry(file_hash).or_insert(0);
-            *slot = slot.saturating_add(delta);
+            let slot = self.files.entry(file_hash).or_default();
+            slot.uploaded_bytes = slot.uploaded_bytes.saturating_add(delta.uploaded_bytes);
+            slot.accepted_sessions = slot
+                .accepted_sessions
+                .saturating_add(delta.accepted_sessions);
         }
     }
 }
@@ -102,9 +111,13 @@ fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) {
         .iter()
         .map(|(user_hash, (uploaded, downloaded))| (hex::encode(user_hash), *uploaded, *downloaded))
         .collect();
-    let file_rows: Vec<(String, u64)> = files
+    let file_rows: Vec<MetadataFileUploadDelta> = files
         .iter()
-        .map(|(file_hash, delta)| (file_hash.clone(), *delta))
+        .map(|(file_hash, delta)| MetadataFileUploadDelta {
+            file_hash: file_hash.clone(),
+            uploaded_bytes: delta.uploaded_bytes,
+            accepted_sessions: delta.accepted_sessions,
+        })
         .collect();
     if let Err(error) = runtime_parts
         .metadata
@@ -168,8 +181,8 @@ impl Ed2kTransferRuntime {
         }
         let flush_due = {
             let mut ledger = self.parked_credit.lock();
-            let slot = ledger.files.entry(file_hash.to_string()).or_insert(0);
-            *slot = slot.saturating_add(delta);
+            let slot = ledger.files.entry(file_hash.to_string()).or_default();
+            slot.uploaded_bytes = slot.uploaded_bytes.saturating_add(delta);
             ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
         };
         self.accumulate_and_try_flush_catalog_upload(file_hash, delta);
@@ -177,6 +190,19 @@ impl Ed2kTransferRuntime {
             self.spawn_parked_credit_flush();
         }
         Ok(())
+    }
+
+    /// Park a single accepted-stint event with the existing file-byte batch.
+    pub(super) fn park_file_upload_accept(&self, file_hash: &Ed2kHash) {
+        let flush_due = {
+            let mut ledger = self.parked_credit.lock();
+            let slot = ledger.files.entry(file_hash.to_string()).or_default();
+            slot.accepted_sessions = slot.accepted_sessions.saturating_add(1);
+            ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
+        };
+        if flush_due {
+            self.spawn_parked_credit_flush();
+        }
     }
 
     /// Read-through: parked (not yet flushed) deltas for one peer.
@@ -195,8 +221,7 @@ impl Ed2kTransferRuntime {
             .lock()
             .files
             .get(&file_hash.to_string())
-            .copied()
-            .unwrap_or(0)
+            .map_or(0, |delta| delta.uploaded_bytes)
     }
 
     /// Commit any parked pre-bind deltas for this peer and discard them from
