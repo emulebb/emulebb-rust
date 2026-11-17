@@ -366,7 +366,7 @@ mod tests {
         CoreState {
             searches: HashMap::new(),
             search_cancels: HashMap::new(),
-            kad_aich_search_votes: HashMap::new(),
+            kad_aich_search_votes: std::collections::BTreeMap::new(),
             next_search_id: 1,
             transfers,
             core_settings: default_core_settings(),
@@ -376,11 +376,8 @@ mod tests {
             server_overrides: HashMap::new(),
             disabled_servers: HashSet::new(),
             server_fail_counts: HashMap::new(),
-            banned_source_clients: HashSet::new(),
-            active_download_attempts: HashSet::new(),
-            download_cancels: HashMap::new(),
-            next_download_cancel_id: 0,
-            active_download_peer_endpoints: HashSet::new(),
+
+            active_download_peer_endpoints: std::collections::HashMap::new(),
             download_source_registry: DownloadSourceRegistry::default(),
             ed2k_dead_sources: crate::ed2k_dead_source_list::DeadSourceList::default(),
             ed2k_server_source_last_queried: HashMap::new(),
@@ -398,10 +395,16 @@ mod tests {
     }
 
     fn transfer(file_hash: Ed2kHash, state: &str, size_bytes: u64) -> Transfer {
+        // Pure projection fixtures have distinct opaque IDs, never hash-derived IDs.
+        static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
         Transfer {
+            id: emulebb_metadata::JobId::new(
+                NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )
+            .unwrap(),
+            execution_generation: 0,
             hash: file_hash.to_string(),
             name: "Sample File.bin".to_string(),
-            name_consensus: Default::default(),
             path: String::new(),
             delivered_path: None,
             delivery_error: None,
@@ -415,7 +418,6 @@ mod tests {
             upload_speed_ki_bps: 0.0,
             stopped: false,
             ed2k_link: String::new(),
-            priority: "normal".to_string(),
             category_id: None,
             category_name: None,
             eta: None,
@@ -425,7 +427,6 @@ mod tests {
             parts_obtained: 0,
             parts_progress_text: "0".to_string(),
             parts_available: 0,
-            auto_priority: false,
             in_incoming: false,
         }
     }

@@ -17,6 +17,7 @@ pub(crate) type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPe
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectDownloadAlternateOutcome {
+    pub(crate) job_token: emulebb_metadata::JobToken,
     pub(crate) file_hash: String,
     pub(crate) source: Ed2kFoundSource,
     pub(crate) outcome: Ed2kPeerDownloadOutcome,
@@ -46,6 +47,7 @@ pub(crate) struct DirectDownloadOutcome {
 }
 
 pub(crate) struct DirectDownloadOptions {
+    pub(crate) job_token: emulebb_metadata::JobToken,
     pub(crate) bind_ip: Ipv4Addr,
     pub(crate) hello_identity: Ed2kHelloIdentity,
     pub(crate) secure_ident: Arc<Ed2kSecureIdent>,
@@ -59,6 +61,7 @@ pub(crate) struct DirectDownloadOptions {
 }
 
 pub(crate) struct DirectDownloadSpawnContext<'a, DownloadFn> {
+    pub(crate) job_token: emulebb_metadata::JobToken,
     pub(crate) bind_ip: Ipv4Addr,
     pub(crate) hello_identity: Ed2kHelloIdentity,
     pub(crate) secure_ident: &'a Arc<Ed2kSecureIdent>,

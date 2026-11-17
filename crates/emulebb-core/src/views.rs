@@ -1,24 +1,20 @@
 //! REST view builders and request validators.
 //!
 //! Pure (non-async) helpers that build the REST response structs (`Transfer`,
-//! `TransferSource`, `TransferPart`, `NetworkStatus`, `ServerInfo`) from the
+//! `DownloadSource`, `TransferPart`, `NetworkStatus`, `ServerInfo`) from the
 //! lower-layer manifest/live-session/server state, and the request-validation
 //! helpers for transfer/source/server/shared-file mutations. Moved verbatim out
 //! of `lib.rs` during the maintainability restructuring; they carry no behavior
 //! beyond what they had inline. Re-exported `pub(crate)` from the crate root so
 //! the `EmulebbCore` impl and the test module reach them by their bare names.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-
 use anyhow::{Result, ensure};
-use chrono::DateTime;
-use emulebb_ed2k::ed2k_transfer::{Ed2kLiveSource, Ed2kResumeManifest, Ed2kTransferState};
+use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
-    NetworkStatus, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Transfer,
-    TransferCreate, TransferFileNameObservation, TransferNameCandidate, TransferNameConsensus,
-    TransferPart, TransferSource, TransferUpdate,
+    DownloadFileNameObservation, DownloadSource, NetworkStatus, ServerCreate, ServerInfo,
+    ServerUpdate, SharedFileUpdate, Transfer, TransferPart, TransferUpdate,
 };
 
 // MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
@@ -105,12 +101,10 @@ pub(crate) fn transfer_from_manifest(
     } else {
         None
     };
-    // Master parity (GetTransferStateName + IsStopped): a stopped transfer is
-    // reported with the `paused` state plus a separate `stopped` flag, not a
-    // distinct `stopped` state token (which is not in the TransferState enum).
     let stopped = state_name == "stopped";
-    let emitted_state = if stopped { "paused" } else { state_name };
     Transfer {
+        id: manifest.token.job_id,
+        execution_generation: manifest.token.generation,
         ed2k_link: format_ed2k_file_link(
             &manifest.display_name,
             manifest.file_size,
@@ -119,7 +113,6 @@ pub(crate) fn transfer_from_manifest(
         ),
         hash: manifest.file_hash.clone(),
         name: manifest.display_name.clone(),
-        name_consensus: transfer_name_consensus(manifest),
         path: payload_path,
         delivered_path: manifest
             .delivered_path
@@ -128,14 +121,13 @@ pub(crate) fn transfer_from_manifest(
         delivery_error: None,
         size_bytes: manifest.file_size,
         completed_bytes,
-        state: emitted_state.to_string(),
+        state: state_name.to_string(),
         progress,
-        sources: (manifest.sources.len() as u32).max(live_source_count),
+        sources: live_source_count,
         sources_transferring,
         download_speed_ki_bps: download_speed_bytes_per_sec as f64 / 1024.0,
         upload_speed_ki_bps: 0.0,
         stopped,
-        priority: "normal".to_string(),
         category_id: None,
         category_name: None,
         eta,
@@ -145,7 +137,6 @@ pub(crate) fn transfer_from_manifest(
         parts_obtained,
         parts_progress_text,
         parts_available,
-        auto_priority: false,
         // Classified by the caller (EmulebbCore::transfer_from_manifest), which
         // knows the configured incoming/category directories; this pure builder
         // has no directory context, so it defaults to false here.
@@ -173,7 +164,6 @@ pub(crate) fn kad_status_from_running(running: bool) -> NetworkStatus {
 }
 
 pub(crate) fn preserve_transfer_public_metadata(transfer: &mut Transfer, existing: &Transfer) {
-    transfer.priority = existing.priority.clone();
     transfer.category_id = existing.category_id;
     transfer.category_name = existing.category_name.clone();
 }
@@ -185,8 +175,8 @@ pub(crate) fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str
         "completed"
     } else if manifest.final_rehash_pending {
         "completing"
-    } else if let Some(control_state) = manifest.control_state.as_deref() {
-        control_state
+    } else if manifest.intent == emulebb_metadata::DownloadIntent::Stopped {
+        "stopped"
     } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
         "downloading"
     } else {
@@ -194,21 +184,8 @@ pub(crate) fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str
     }
 }
 
-pub(crate) fn transfer_create_state_name(paused: Option<bool>) -> &'static str {
-    if paused.unwrap_or(false) {
-        "paused"
-    } else {
-        // A newly added, non-paused download starts immediately (eMule/aMule
-        // parity), so it is created active rather than waiting in "queued".
-        "downloading"
-    }
-}
-
 pub(crate) fn validate_transfer_update_family(request: &TransferUpdate) -> Result<()> {
     let mut mutation_family_count = 0;
-    if request.priority.is_some() {
-        mutation_family_count += 1;
-    }
     if request.category_id.is_some() || request.category_name.is_some() {
         mutation_family_count += 1;
     }
@@ -217,36 +194,13 @@ pub(crate) fn validate_transfer_update_family(request: &TransferUpdate) -> Resul
     }
     ensure!(
         mutation_family_count != 0,
-        "transfer PATCH requires priority, category, or name"
+        "transfer PATCH requires category or name"
     );
     ensure!(
         mutation_family_count == 1,
         "transfer PATCH accepts only one mutation family"
     );
-    if let Some(priority) = request.priority.as_deref() {
-        let _ = validate_transfer_priority(priority)?;
-    }
     Ok(())
-}
-
-pub(crate) fn validate_transfer_priority(priority: &str) -> Result<&str> {
-    match priority {
-        "auto" | "verylow" | "low" | "normal" | "high" | "veryhigh" => Ok(priority),
-        _ => Err(anyhow::anyhow!(
-            "priority must be one of auto, verylow, low, normal, high, veryhigh"
-        )),
-    }
-}
-
-pub(crate) fn download_priority_score(priority: &str) -> u32 {
-    match priority {
-        "verylow" => 1,
-        "low" => 3,
-        "high" => 7,
-        "veryhigh" => 9,
-        "auto" | "normal" => 5,
-        _ => 5,
-    }
 }
 
 pub(crate) fn normalize_transfer_name(name: Option<String>) -> Result<String> {
@@ -282,213 +236,100 @@ pub(crate) fn ensure_category_selector_is_unambiguous(
     Ok(())
 }
 
-pub(crate) fn transfer_create_links(request: TransferCreate) -> Result<Vec<String>> {
-    match (request.link, request.links) {
-        (Some(link), None) => {
-            ensure!(!link.trim().is_empty(), "link is required");
-            Ok(vec![link])
-        }
-        (None, Some(links)) => {
-            ensure!(!links.is_empty(), "links must contain at least one entry");
-            for link in &links {
-                ensure!(
-                    !link.trim().is_empty(),
-                    "links must not contain empty entries"
-                );
-            }
-            Ok(links)
-        }
-        (Some(_), Some(_)) => Err(anyhow::anyhow!("link and links are mutually exclusive")),
-        (None, None) => Err(anyhow::anyhow!("link or links is required")),
-    }
-}
-
-pub(crate) fn transfer_sources_from_manifest(
-    manifest: &Ed2kResumeManifest,
-    banned_clients: &HashSet<String>,
-) -> Vec<TransferSource> {
-    manifest
-        .sources
-        .iter()
-        .map(|source| {
-            let endpoint = format!("{}:{}", source.ip, source.tcp_port);
-            let client_id = source.user_hash.clone().unwrap_or_else(|| endpoint.clone());
-            let banned = banned_clients.contains(&client_id);
-            TransferSource {
-                client_id,
-                hash: manifest.file_hash.clone(),
-                endpoint: endpoint.clone(),
-                ip: source.ip.clone(),
-                tcp_port: source.tcp_port,
-                port: source.tcp_port,
-                file_comment: source.file_comment.clone(),
-                file_rating: source.file_rating,
-                user_hash: source.user_hash.clone(),
-                user_name: endpoint.clone(),
-                client_software: source_file_name_observations(manifest, source)
-                    .iter()
-                    .rev()
-                    .find(|observation| !observation.client_software.is_empty())
-                    .map_or_else(
-                        || "unknown".to_string(),
-                        |observation| observation.client_software.clone(),
-                    ),
-                reported_file_names: source_file_name_observations(manifest, source)
-                    .into_iter()
-                    .filter_map(|observation| {
-                        DateTime::from_timestamp_millis(observation.observed_at_ms).map(
-                            |observed_at| TransferFileNameObservation {
-                                raw_name: observation.raw_name.clone(),
-                                normalized_name: observation.normalized_name.clone(),
-                                origin: observation.origin.clone(),
-                                server_endpoint: observation.server_endpoint.clone(),
-                                observed_at,
-                            },
-                        )
-                    })
-                    .collect(),
-                download_state: if banned { "banned" } else { "remembered" }.to_string(),
-                download_speed_ki_bps: 0.0,
-                available_parts: 0,
-                part_count: manifest.pieces.len() as u32,
-                address: source.ip.clone(),
-                server_ip: String::new(),
-                server_port: 0,
-                low_id: false,
-                queue_rank: 0,
-                view_shared_files: false,
-                shared_files_request_pending: false,
-                banned,
-                status: "remembered".to_string(),
-            }
-        })
-        .collect()
-}
-
-fn transfer_name_consensus(manifest: &Ed2kResumeManifest) -> TransferNameConsensus {
-    let mut latest_by_source = BTreeMap::new();
-    for observation in &manifest.file_name_observations {
-        let key = file_name_source_key(
-            observation.source_ip.as_deref(),
-            observation.source_tcp_port,
-            observation.user_hash.as_deref(),
-            &observation.origin,
-            observation.server_endpoint.as_deref(),
-        );
-        if latest_by_source.get(&key).is_none_or(
-            |existing: &&emulebb_ed2k::ed2k_transfer::Ed2kFileNameObservation| {
-                existing.observed_at_ms <= observation.observed_at_ms
-            },
-        ) {
-            latest_by_source.insert(key, observation);
-        }
-    }
-    let mut votes = BTreeMap::<String, usize>::new();
-    for observation in latest_by_source.into_values() {
-        *votes
-            .entry(observation.normalized_name.clone())
-            .or_default() += 1;
-    }
-    let candidates = votes
-        .into_iter()
-        .map(|(normalized_name, votes)| TransferNameCandidate {
-            raw_names: manifest
-                .file_name_observations
-                .iter()
-                .filter(|observation| observation.normalized_name == normalized_name)
-                .map(|observation| observation.raw_name.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-            normalized_name,
-            votes,
-        })
-        .collect();
-    TransferNameConsensus {
-        selected_name: manifest.display_name.clone(),
-        pinned: manifest.display_name_pinned,
-        follow_majority: manifest.follow_majority_filename,
-        observation_count: manifest.file_name_observations.len(),
-        candidates,
-    }
-}
-
-fn file_name_source_key(
-    ip: Option<&str>,
-    tcp_port: Option<u16>,
-    user_hash: Option<&str>,
-    origin: &str,
-    server_endpoint: Option<&str>,
-) -> String {
-    user_hash
-        .map(|hash| format!("hash:{hash}"))
-        .or_else(|| {
-            ip.zip(tcp_port)
-                .map(|(ip, port)| format!("endpoint:{ip}:{port}"))
-        })
-        .unwrap_or_else(|| format!("origin:{origin}:{}", server_endpoint.unwrap_or_default()))
-}
-
-fn source_file_name_observations<'a>(
-    manifest: &'a Ed2kResumeManifest,
-    source: &emulebb_ed2k::ed2k_transfer::Ed2kSourceHint,
-) -> Vec<&'a emulebb_ed2k::ed2k_transfer::Ed2kFileNameObservation> {
-    let source_key = file_name_source_key(
-        Some(&source.ip),
-        Some(source.tcp_port),
-        source.user_hash.as_deref(),
-        "peer",
-        None,
-    );
-    manifest
-        .file_name_observations
-        .iter()
-        .filter(|observation| {
-            file_name_source_key(
-                observation.source_ip.as_deref(),
-                observation.source_tcp_port,
-                observation.user_hash.as_deref(),
-                &observation.origin,
-                observation.server_endpoint.as_deref(),
-            ) == source_key
-        })
-        .collect()
-}
-
-/// Overlays live download-session state from the F1 registry onto the remembered
-/// source list: matching a remembered source by `ip:tcp_port`, set its live
-/// download state, speed, and advertised part availability. Sources with no live
-/// session keep their "remembered" defaults.
-pub(crate) fn enrich_sources_with_live(
-    sources: &mut [TransferSource],
-    live: &[Ed2kLiveSource],
+/// Project a bounded source row. Observation backing moves into the response;
+/// source history and piece geometry are never materialized by this builder.
+pub(crate) fn download_source_from_record(
+    hash: &str,
+    entry: emulebb_metadata::MetadataDownloadSourceEntry,
+    banned: bool,
     part_count: u32,
-) {
-    let live_by_endpoint: HashMap<String, &Ed2kLiveSource> = live
+) -> DownloadSource {
+    let source = entry.source;
+    let endpoint = format!("{}:{}", source.ip, source.tcp_port);
+    let client_id = source.user_hash.clone().unwrap_or_else(|| endpoint.clone());
+    let client_software = entry
+        .reported_file_names
         .iter()
-        .map(|source| (source.endpoint.to_string(), source))
+        .find(|name| !name.client_software.is_empty())
+        .map_or_else(|| "unknown".to_owned(), |name| name.client_software.clone());
+    let reported_file_names = entry
+        .reported_file_names
+        .into_iter()
+        .map(|name| DownloadFileNameObservation {
+            raw_name: name.raw_name,
+            normalized_name: name.normalized_name,
+            origin: name.origin,
+            server_endpoint: name.server_endpoint,
+            observed_at: name.observed_at_s,
+        })
         .collect();
-    for source in sources.iter_mut() {
-        let Some(live_source) = live_by_endpoint.get(&source.endpoint) else {
-            continue;
+    DownloadSource {
+        client_id,
+        hash: hash.to_owned(),
+        endpoint: endpoint.clone(),
+        ip: source.ip.clone(),
+        tcp_port: source.tcp_port,
+        port: source.tcp_port,
+        file_comment: source.file_comment,
+        file_rating: source.file_rating,
+        user_hash: source.user_hash,
+        user_name: endpoint,
+        client_software,
+        reported_file_names,
+        reported_file_names_has_more: entry.reported_file_names_has_more,
+        download_state: if banned { "banned" } else { "remembered" }.to_owned(),
+        download_rate_bytes_per_second: 0,
+        available_parts: 0,
+        part_count,
+        address: source.ip,
+        server_ip: String::new(),
+        server_port: 0,
+        low_id: false,
+        queue_rank: 0,
+        view_shared_files: false,
+        shared_files_request_pending: false,
+        banned,
+        status: "remembered".to_owned(),
+    }
+}
+
+/// Overlay a single borrowed peer view inside an already admitted projection.
+/// No complete peer bitmap or all-peer snapshot is copied for a source page.
+pub(crate) fn apply_download_source_stats(
+    runtime: &emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime,
+    token: emulebb_metadata::JobToken,
+    source: &mut DownloadSource,
+    live_text_bytes: &mut usize,
+) -> Result<()> {
+    if source.banned {
+        return Ok(());
+    }
+    runtime.with_live_download_source_stats(token, &source.endpoint, |live| {
+        let Some(live) = live else {
+            return Ok(());
         };
-        source.download_speed_ki_bps = live_source.download_speed_bytes_per_sec as f64 / 1024.0;
-        source.available_parts = live_source.available_parts;
-        source.part_count = part_count;
-        if let Some(rank) = live_source.queue_rank {
+        if let Some(software) = live.client_software {
+            ensure!(
+                software.len() <= *live_text_bytes,
+                emulebb_ed2k::ed2k_transfer::LocalMutationError::TooLarge
+            );
+            *live_text_bytes -= software.len();
+            source.client_software = software.to_owned();
+        }
+        source.download_rate_bytes_per_second = live.download_speed_bytes_per_sec;
+        source.available_parts = live.available_parts;
+        if let Some(rank) = live.queue_rank {
             source.queue_rank = rank;
         }
-        if let Some(software) = &live_source.client_software {
-            source.client_software = software.clone();
-        }
-        let state = if live_source.transferring {
+        let state = if live.transferring {
             "downloading"
         } else {
             "connected"
         };
-        source.download_state = state.to_string();
-        source.status = state.to_string();
-    }
+        source.download_state = state.to_owned();
+        source.status = state.to_owned();
+        Ok(())
+    })
 }
 
 /// Builds the per-part download breakdown from the resume manifest. ED2K parts
@@ -525,7 +366,7 @@ pub(crate) fn transfer_parts_from_manifest(
                 size,
                 completed_bytes,
                 gap_bytes,
-                complete: size > 0 && gap_bytes == 0,
+                complete: verified,
                 requested: requested_parts.contains(&piece.piece_index),
                 corrupted: false,
                 available_sources: available_sources_per_part
@@ -535,17 +376,6 @@ pub(crate) fn transfer_parts_from_manifest(
             }
         })
         .collect()
-}
-
-pub(crate) fn source_by_client_id(
-    sources: Vec<TransferSource>,
-    client_id: &str,
-) -> Option<TransferSource> {
-    sources.into_iter().find(|source| {
-        source.client_id == client_id
-            || source.endpoint == client_id
-            || source.user_hash.as_deref() == Some(client_id)
-    })
 }
 
 pub(crate) fn validate_source_client_id(client_id: &str) -> Result<()> {
@@ -573,7 +403,7 @@ pub(crate) fn validate_source_client_id(client_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn source_friend_name(source: &TransferSource) -> String {
+pub(crate) fn source_friend_name(source: &DownloadSource) -> String {
     if source.user_name.trim().is_empty() {
         source.client_id.clone()
     } else {
@@ -642,7 +472,7 @@ pub(crate) fn server_info_from_parts(
         port,
         endpoint,
         name: name.unwrap_or_default().to_string(),
-        priority: "normal".to_string(),
+        priority: "normal".to_owned(),
         static_server,
         enabled: true,
         connected,

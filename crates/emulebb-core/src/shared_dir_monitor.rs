@@ -41,6 +41,7 @@
 //! forwarding to the applier, which is the single authority on whether a
 //! Share/Remove actually has an effect.
 
+use anyhow::Context;
 use emulebb_metadata::NativeFileFingerprint;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1459,7 +1460,18 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
     let hash = previous.hash.clone();
     let cached_fingerprint = fingerprint.clone();
     let cache_result = tokio::task::spawn_blocking(move || {
-        metadata.upsert_local_file_instance(&new_path, &hash, &cached_fingerprint)
+        let existing = metadata
+            .reusable_local_file_by_identity(&cached_fingerprint)?
+            .context("renamed source has no matching verified identity evidence")?;
+        anyhow::ensure!(
+            existing.file_hash == hash,
+            "renamed source identity belongs to different content"
+        );
+        let evidence = emulebb_metadata::NativeFileIdentityEvidence::new(
+            cached_fingerprint.identity,
+            existing.secondary_identity,
+        )?;
+        metadata.upsert_local_file_instance(&new_path, &hash, &cached_fingerprint, evidence)
     })
     .await;
     match cache_result {
@@ -2853,15 +2865,19 @@ mod tests {
         );
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if core.ed2k_transfers.manifest(&old_hash).await.is_err() {
-                    break;
-                }
+            while core.share(&old_hash).await.is_some() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("missing invalidated source should be retired");
+        .expect("missing shared source should be withdrawn");
+        assert!(
+            core.download_page(Default::default())
+                .await
+                .unwrap()
+                .downloads
+                .is_empty()
+        );
         tokio::task::yield_now().await;
         assert!(core.shares().await.is_empty());
         assert!(signal.try_recv().is_none());

@@ -1,227 +1,12 @@
 use super::*;
 
 impl EmulebbCore {
-    /// Finish hidden download retirements before reconciling the piece root.
-    pub async fn recover_pending_transfer_retirements(
+    pub async fn browse_download_source(
         &self,
-    ) -> Result<Ed2kTransferRetirementRecoveryReport> {
-        self.ed2k_transfers
-            .recover_pending_transfer_retirements()
-            .await
-    }
-
-    /// Attempt every durable destructive-deletion intent. Per-transfer cleanup
-    /// failures remain hidden and are returned for later maintenance retries.
-    pub async fn recover_pending_transfer_deletions(
-        &self,
-    ) -> Result<Ed2kTransferDeletionRecoveryReport> {
-        self.ed2k_transfers
-            .recover_pending_transfer_deletions()
-            .await
-    }
-
-    /// Reclaim only safe crash residue beneath the internal transfer root and
-    /// report every preserved unmanaged collision before profile exposure.
-    pub async fn reconcile_transfer_root(&self) -> Result<Ed2kTransferRootReconciliation> {
-        self.ed2k_transfers.reconcile_transfer_root().await
-    }
-
-    /// Reconcile every managed download against canonical internal or verified
-    /// delivered payload authority before startup exposes transfer state.
-    pub async fn reconcile_managed_download_storage(
-        &self,
-    ) -> Result<Ed2kDownloadStorageReconciliation> {
-        self.ed2k_transfers
-            .reconcile_managed_download_storage()
-            .await
-    }
-
-    pub async fn transfer(&self, hash: &str) -> Result<Option<Transfer>> {
-        let cached = {
-            let state = self.state.lock().await;
-            self.persistence_owner.check_coherent_state()?;
-            state.transfers.get(hash).cloned()
-        };
-        let mut transfer = match cached {
-            Some(transfer) => transfer,
-            None => match self.refresh_transfer_from_manifest_default(hash).await? {
-                Some(transfer) => transfer,
-                None => return Ok(None),
-            },
-        };
-        // Preserve the category ID/name pair from one coherent state snapshot.
-        let state = self.state.lock().await;
-        self.persistence_owner.check_coherent_state()?;
-        if let Some(current) = state.transfers.get(hash) {
-            transfer.category_id = current.category_id;
-            transfer.category_name = current.category_name.clone();
-        }
-        drop(state);
-        self.apply_live_transfer_fields(&mut transfer);
-        Ok(Some(transfer))
-    }
-
-    pub async fn update_transfer(
-        &self,
-        hash: &str,
-        request: TransferUpdate,
-    ) -> Result<Option<Transfer>> {
-        validate_transfer_update_family(&request)?;
-        if self.transfer(hash).await?.is_none() {
-            return Ok(None);
-        }
-        if let Some(priority) = request.priority.as_deref() {
-            let priority = validate_transfer_priority(priority)?.to_string();
-            let mut state = self.state.lock().await;
-            let Some(transfer) = state.transfers.get_mut(hash) else {
-                return Ok(None);
-            };
-            transfer.priority = priority;
-            let transfer = transfer.clone();
-            drop(state);
-            self.publish_transfer_updated(transfer.clone());
-            return Ok(Some(transfer));
-        }
-        if request.category_id.is_some() || request.category_name.is_some() {
-            let selected = self
-                .resolve_transfer_category(
-                    request.category_id.flatten(),
-                    request
-                        .category_name
-                        .as_ref()
-                        .and_then(|value| value.as_deref()),
-                )
-                .await?;
-            self.assign_transfer_category(hash, selected.as_ref().map(|value| value.0))
-                .await?;
-            let transfer = self
-                .transfer(hash)
-                .await?
-                .context("transfer disappeared after category assignment")?;
-            self.publish_transfer_updated(transfer.clone());
-            return Ok(Some(transfer));
-        }
-        let name = normalize_transfer_name(request.name)?;
-        let current = self.state.lock().await.transfers.get(hash).cloned();
-        if current
-            .as_ref()
-            .is_some_and(|transfer| matches!(transfer.state.as_str(), "completed" | "completing"))
-        {
-            anyhow::bail!("completed transfers cannot be renamed through this endpoint");
-        }
-        let manifest = self.ed2k_transfers.pin_display_name(hash, &name).await?;
-        let state_name = current
-            .as_ref()
-            .map(|transfer| transfer.state.as_str())
-            .unwrap_or_else(|| manifest_default_state_name(&manifest));
-        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
-        if let Some(existing) = current.as_ref() {
-            preserve_transfer_public_metadata(&mut transfer, existing);
-        }
-        transfer.name = name;
-        transfer.ed2k_link = format_ed2k_file_link(
-            &transfer.name,
-            transfer.size_bytes,
-            &transfer.hash,
-            manifest.aich_root.as_deref(),
-        );
-        self.state
-            .lock()
-            .await
-            .transfers
-            .insert(transfer.hash.clone(), transfer.clone());
-        self.publish_transfer_updated(transfer.clone());
-        Ok(Some(transfer))
-    }
-
-    pub async fn transfer_sources(&self, hash: &str) -> Result<Option<Vec<TransferSource>>> {
-        if self.transfer(hash).await?.is_none() {
-            return Ok(None);
-        }
-        let manifest = self.ed2k_transfers.manifest(hash).await?;
-        let banned = self.state.lock().await.banned_source_clients.clone();
-        let mut sources = transfer_sources_from_manifest(&manifest, &banned);
-        enrich_sources_with_live(
-            &mut sources,
-            &self.ed2k_transfers.live_download_sources(hash),
-            manifest.pieces.len() as u32,
-        );
-        Ok(Some(sources))
-    }
-
-    pub async fn transfer_comments(&self, hash: &str) -> Result<Option<Vec<TransferComment>>> {
-        let Some(transfer) = self.transfer(hash).await? else {
-            return Ok(None);
-        };
-        let Some(sources) = self.transfer_sources(hash).await? else {
-            return Ok(None);
-        };
-        Ok(Some(
-            sources
-                .into_iter()
-                .filter(|source| !source.file_comment.is_empty() || source.file_rating > 0)
-                .map(|source| TransferComment {
-                    source: source.client_id,
-                    user_name: Some(source.user_name),
-                    file_name: transfer.name.clone(),
-                    comment: source.file_comment,
-                    rating: source.file_rating,
-                })
-                .collect(),
-        ))
-    }
-
-    /// Transfer details: the transfer plus its per-part breakdown and source
-    /// list, mirroring the master `BuildTransferDetailsJson` shape.
-    pub async fn transfer_details(&self, hash: &str) -> Result<Option<TransferDetails>> {
-        let Some(cached) = self.transfer(hash).await? else {
-            return Ok(None);
-        };
-        let manifest = self.ed2k_transfers.manifest(hash).await?;
-        // WHY: active downloads can verify parts before the cached state changes.
-        // Build the header and parts from the same manifest, preserving public metadata.
-        let state_name = if cached.stopped {
-            "stopped"
-        } else {
-            &cached.state
-        };
-        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
-        preserve_transfer_public_metadata(&mut transfer, &cached);
-        let banned = self.state.lock().await.banned_source_clients.clone();
-        let part_total = manifest.pieces.len() as u32;
-        let mut sources = transfer_sources_from_manifest(&manifest, &banned);
-        enrich_sources_with_live(
-            &mut sources,
-            &self.ed2k_transfers.live_download_sources(hash),
-            part_total,
-        );
-        let available_sources_per_part = self
-            .ed2k_transfers
-            .available_sources_per_part(hash, part_total);
-        let requested_parts = self.ed2k_transfers.requested_download_parts(hash);
-        let parts =
-            transfer_parts_from_manifest(&manifest, &available_sources_per_part, &requested_parts);
-        Ok(Some(TransferDetails {
-            transfer,
-            parts,
-            sources,
-        }))
-    }
-
-    pub async fn transfer_source(
-        &self,
-        hash: &str,
+        id: emulebb_metadata::JobId,
         client_id: &str,
-    ) -> Result<Option<TransferSource>> {
-        validate_source_client_id(client_id)?;
-        Ok(self
-            .transfer_sources(hash)
-            .await?
-            .and_then(|sources| source_by_client_id(sources, client_id)))
-    }
-
-    pub async fn browse_transfer_source(&self, hash: &str, client_id: &str) -> Result<bool> {
-        let Some(source) = self.transfer_source(hash, client_id).await? else {
+    ) -> Result<bool> {
+        let Some(source) = self.download_source(id, client_id).await? else {
             return Ok(false);
         };
         ensure!(
@@ -231,12 +16,12 @@ impl EmulebbCore {
         Ok(true)
     }
 
-    pub async fn add_transfer_source_friend(
+    pub async fn add_download_source_friend(
         &self,
-        hash: &str,
+        id: emulebb_metadata::JobId,
         client_id: &str,
     ) -> Result<Option<Friend>> {
-        let Some(source) = self.transfer_source(hash, client_id).await? else {
+        let Some(source) = self.download_source(id, client_id).await? else {
             return Ok(None);
         };
         let Some(user_hash) = source.user_hash.as_deref() else {
@@ -250,12 +35,12 @@ impl EmulebbCore {
         .map(Some)
     }
 
-    pub async fn remove_transfer_source_friend(
+    pub async fn remove_download_source_friend(
         &self,
-        hash: &str,
+        id: emulebb_metadata::JobId,
         client_id: &str,
     ) -> Result<Option<Friend>> {
-        let Some(source) = self.transfer_source(hash, client_id).await? else {
+        let Some(source) = self.download_source(id, client_id).await? else {
             return Ok(None);
         };
         let Some(user_hash) = source.user_hash.as_deref() else {
@@ -264,8 +49,12 @@ impl EmulebbCore {
         self.delete_friend(user_hash).await
     }
 
-    pub async fn ban_transfer_source(&self, hash: &str, client_id: &str) -> Result<Option<bool>> {
-        let Some(source) = self.transfer_source(hash, client_id).await? else {
+    pub async fn ban_download_source(
+        &self,
+        id: emulebb_metadata::JobId,
+        client_id: &str,
+    ) -> Result<Option<bool>> {
+        let Some(source) = self.download_source(id, client_id).await? else {
             return Ok(None);
         };
         // Back the manual source ban with the enforced ban store (IP + user
@@ -275,157 +64,41 @@ impl EmulebbCore {
             parse_ban_ip(&source.ip),
             parse_ban_hash(source.user_hash.as_deref()),
         );
-        self.state
-            .lock()
-            .await
-            .banned_source_clients
-            .insert(source.client_id);
         Ok(Some(true))
     }
 
-    pub async fn unban_transfer_source(&self, hash: &str, client_id: &str) -> Result<Option<bool>> {
-        let Some(source) = self.transfer_source(hash, client_id).await? else {
+    pub async fn unban_download_source(
+        &self,
+        id: emulebb_metadata::JobId,
+        client_id: &str,
+    ) -> Result<Option<bool>> {
+        let Some(source) = self.download_source(id, client_id).await? else {
             return Ok(None);
         };
         let user_hash = parse_ban_hash(source.user_hash.as_deref());
         self.ed2k_transfers
             .ban_store()
             .unban(parse_ban_ip(&source.ip), user_hash.as_ref());
-        self.state
-            .lock()
-            .await
-            .banned_source_clients
-            .remove(&source.client_id);
         Ok(Some(false))
     }
 
-    pub async fn remove_transfer_source(&self, hash: &str, client_id: &str) -> Result<Option<()>> {
+    pub async fn remove_download_source(
+        &self,
+        id: emulebb_metadata::JobId,
+        client_id: &str,
+    ) -> Result<Option<()>> {
         validate_source_client_id(client_id)?;
-        if self.transfer(hash).await?.is_none() {
+        let Some(job) = self.ed2k_transfers.download_job(id).await? else {
+            return Ok(None);
+        };
+        if job.removed_at_s.is_some() {
             return Ok(None);
         }
-        if !self.ed2k_transfers.remove_source(hash, client_id).await? {
+        let token = job.token;
+        drop(job);
+        if !self.ed2k_transfers.remove_source(token, client_id).await? {
             return Ok(None);
         }
-        self.state
-            .lock()
-            .await
-            .banned_source_clients
-            .remove(client_id);
         Ok(Some(()))
-    }
-
-    pub async fn pause_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
-        self.set_transfer_control_state(hash, "paused").await
-    }
-
-    pub async fn stop_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
-        self.set_transfer_control_state(hash, "stopped").await
-    }
-
-    pub async fn recheck_transfer(&self, hash: &str) -> Result<Option<()>> {
-        let Some(current) = self.transfer(hash).await? else {
-            return Ok(None);
-        };
-        ensure!(
-            !matches!(current.state.as_str(), "hashing" | "completing"),
-            "transfer is already being hashed or completed"
-        );
-        // Cancel any in-flight download attempt before re-verifying so the recheck
-        // does not race a live piece write for the same hash (state flap; the
-        // manifest IO is serialized so there is no corruption, but the recheck
-        // must observe a settled on-disk state). The attempt stops at its next
-        // cancel check; if recheck finds the transfer still wants data it re-queues
-        // a fresh attempt below.
-        self.cancel_download_attempt(hash).await;
-        // Mark hashing while the on-disk parts are re-verified (oracle forces a
-        // full part re-hash on recheck; CPartFile::HashSinglePart per part).
-        self.set_transfer_state(hash, "hashing").await;
-        // Drive the real re-verification: re-read every verified part from disk
-        // and MD4-check it against the hashset, rewriting piece states + verified
-        // ranges + the completed flag (and demoting any corrupted part to Missing
-        // so it is re-downloaded). The piece store owns the manifest lock + IO.
-        let recheck = self.ed2k_transfers.recheck_transfer(hash).await;
-        // Re-derive the public transfer state from the freshly-rewritten manifest
-        // (completed -> "completed"; otherwise downloading/queued), regardless of
-        // success, so the transfer never gets stuck in "hashing".
-        let refreshed = self.refresh_transfer_from_manifest_default(hash).await;
-        recheck?;
-        match refreshed? {
-            Some(transfer) => {
-                self.publish_transfer_updated(transfer.clone());
-                // If the recheck found corruption (now not complete but with
-                // progress), re-engage the download so the demoted parts refetch.
-                if transfer.state == "downloading" {
-                    self.queue_ed2k_download_attempt(transfer);
-                } else if matches!(transfer.state.as_str(), "completed" | "completing") {
-                    // A recheck that confirms a complete file delivers it by name
-                    // (covers a manually-rechecked transfer that was never driven
-                    // through the download-completion path).
-                    self.deliver_completed_transfer(hash).await;
-                }
-                Ok(Some(()))
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub async fn delete_transfer_files(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(transfer) = self.transfer(hash).await? else {
-            return Ok(None);
-        };
-        if !self.ed2k_transfers.delete_transfer_files(hash).await? {
-            return Ok(None);
-        }
-        // Cancel any in-flight attempt and free everything it holds for this hash
-        // (candidates, leases, active endpoints, the dedup + cancel slots) so the
-        // orphan attempt stops churning peers and the hash can be re-created and
-        // re-download immediately instead of early-returning on a stale dedup slot.
-        self.teardown_download_for_delete(hash).await;
-        let mut state = self.state.lock().await;
-        state.transfers.remove(hash);
-        drop(state);
-        self.publish_transfer_removed(hash);
-        Ok(Some(transfer))
-    }
-
-    pub async fn delete_completed_transfer_row(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(current_transfer) = self.transfer(hash).await? else {
-            return Ok(None);
-        };
-        let removed_manifest = self
-            .ed2k_transfers
-            .remove_completed_transfer_row(hash)
-            .await?;
-        let transfer = removed_manifest.map_or(current_transfer, |manifest| {
-            let state_name = manifest_default_state_name(&manifest);
-            self.transfer_from_manifest(&manifest, state_name)
-        });
-        self.state.lock().await.transfers.remove(hash);
-        self.publish_transfer_removed(hash);
-        self.queue_ed2k_shared_catalog_publish();
-        Ok(Some(transfer))
-    }
-
-    pub async fn clear_completed_transfer_rows(&self) -> Result<()> {
-        self.hydrate_persisted_transfer_rows().await?;
-        let hashes = {
-            let state = self.state.lock().await;
-            state
-                .transfers
-                .values()
-                .filter(|transfer| transfer.state == "completed")
-                .map(|transfer| transfer.hash.clone())
-                .collect::<Vec<_>>()
-        };
-        for hash in hashes {
-            self.ed2k_transfers
-                .remove_completed_transfer_row(&hash)
-                .await?;
-            self.state.lock().await.transfers.remove(&hash);
-            self.publish_transfer_removed(hash);
-        }
-        self.queue_ed2k_shared_catalog_publish();
-        Ok(())
     }
 }

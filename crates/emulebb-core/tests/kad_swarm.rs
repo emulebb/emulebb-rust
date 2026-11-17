@@ -3,7 +3,8 @@ mod kad_swarm_support;
 use std::time::Duration;
 
 use emulebb_core::{
-    LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate, TransferCreate,
+    DownloadCreate, DownloadCreateSource, LocalShare, SharedDirectoriesUpdate,
+    SharedDirectoryRootUpdate,
 };
 use emulebb_kad_proto::{Ed2kHash, PublishEntry, Tag, TagValue, tag_name};
 use kad_swarm_support::{
@@ -371,35 +372,38 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
         .expect("start downloader Kad");
     wait_for_kad_connected(&download_core).await;
 
-    let transfers = download_core
-        .create_transfers(TransferCreate {
-            known_file_policy: Default::default(),
-            link: None,
-            links: Some(vec![
-                share.ed2k_link.clone(),
-                second_share.ed2k_link.clone(),
-            ]),
-            paused: Some(true),
-            category_id: None,
-            category_name: None,
-        })
-        .await
-        .expect("queue Kad-discovered transfers");
-    assert_eq!(transfers.len(), 2);
-    for transfer in &transfers {
-        download_core
-            .resume_transfer(&transfer.hash)
+    for link in [&share.ed2k_link, &second_share.ed2k_link] {
+        let (created, _) = download_core
+            .create_download(DownloadCreate {
+                source: DownloadCreateSource::Ed2kLink { link: link.clone() },
+                category: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                redownload: false,
+            })
             .await
-            .expect("resume Kad-discovered transfer");
+            .expect("queue one Kad-discovered download");
+        assert!(created);
     }
-
     let completed = wait_for_completed_download(&download_core, &share.hash).await;
     assert_eq!(completed.size_bytes, payload.len() as u64);
     assert_eq!(
         std::fs::read(&completed.path).expect("read completed Kad transfer payload"),
         payload
     );
-    assert!(download_core.transfer(&share.hash).await.unwrap().is_none());
+    let completed_page = download_core
+        .download_page(emulebb_metadata::DownloadJobQuery {
+            view: emulebb_metadata::DownloadJobView::Completed,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        completed_page
+            .downloads
+            .iter()
+            .any(|download| download.hash == share.hash)
+    );
+    drop(completed_page);
 
     let second_completed = wait_for_completed_download(&download_core, &second_share.hash).await;
     assert_eq!(second_completed.size_bytes, second_payload.len() as u64);

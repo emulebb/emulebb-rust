@@ -54,17 +54,28 @@ pub async fn wait_for_completed_download(
 ) -> emulebb_core::LocalShare {
     let deadline = Instant::now() + TRANSFER_TIMEOUT;
     loop {
-        if let Some(share) = core.share(hash).await
-            && core.transfer(hash).await.unwrap().is_none()
+        let page = core
+            .download_page(emulebb_metadata::DownloadJobQuery {
+                view: emulebb_metadata::DownloadJobView::Completed,
+                ..Default::default()
+            })
+            .await;
+        let share = core.share(hash).await;
+        if page
+            .as_ref()
+            .is_ok_and(|page| page.downloads.iter().any(|download| download.hash == hash))
         {
-            return share;
+            if let Some(share) = share {
+                return share;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "ED2K download did not become a local share: transfer={:?}, share={:?}",
-            core.transfer(hash).await,
-            core.share(hash).await,
+            "download did not finish delivery: headers={:?}, share={:?}",
+            page.as_ref().map(|page| &page.downloads),
+            share
         );
+        drop(page);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

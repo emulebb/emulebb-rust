@@ -1,7 +1,7 @@
 //! eD2k download-source and learned-metadata helpers.
 //!
 //! Pure (plus two Kad-lookup async) helpers that build/normalize/merge
-//! `Ed2kFoundSource` candidates and the `LearnedEd2kMetadata` learned from
+//! `Ed2kFoundSource` candidates and optional download sizes learned from
 //! keyword results, plus the small source-requery/callback-route decision
 //! predicates that drive the download orchestration. Moved verbatim out of
 //! `lib.rs` during the maintainability restructuring; they carry no behavior
@@ -15,11 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
 use emulebb_ed2k::{
     config::Ed2kRuntimeConfig,
     ed2k_server::{Ed2kFoundSource, Ed2kFoundSourceKey, Ed2kSearchFile},
-    ed2k_transfer::{Ed2kResumeManifest, Ed2kSourceHint},
+    ed2k_transfer::Ed2kResumeManifest,
 };
 use emulebb_kad_dht::{DhtNode, RpcWorkClass, SearchResult as KadSearchResult, SourceResult};
 pub(crate) use emulebb_kad_proto::kad_lowercase as kad_keyword_lowercase;
@@ -30,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ED2K_DOWNLOAD_KAD_SOURCE_CAP, ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS,
-    ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS, ED2K_HASH_ONLY_QUERY_PREFIX, Transfer,
+    ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS, ED2K_HASH_ONLY_QUERY_PREFIX,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,45 +178,28 @@ pub(crate) fn source_key(source: &Ed2kFoundSource) -> Ed2kFoundSourceKey {
     source.identity_key()
 }
 
-pub(crate) fn found_source_from_hint(
+/// Convert a fixed-size canonical endpoint without fetching descriptions or
+/// execution geometry. Crypt support comes only from observed option bits.
+pub(crate) fn found_source_from_endpoint(
     file_hash: Ed2kHash,
-    hint: &Ed2kSourceHint,
-) -> Result<Ed2kFoundSource> {
-    let ip = hint
-        .ip
-        .parse::<Ipv4Addr>()
-        .with_context(|| format!("invalid remembered source IP {}", hint.ip))?;
-    let user_hash = hint
-        .user_hash
-        .as_deref()
-        .map(|value| -> Result<[u8; 16]> {
-            let bytes = hex::decode(value)
-                .with_context(|| format!("invalid remembered source user hash {value}"))?;
-            let user_hash: [u8; 16] = bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("remembered source user hash has wrong length"))?;
-            Ok(user_hash)
-        })
-        .transpose()?;
-    Ok(Ed2kFoundSource {
+    endpoint: &emulebb_metadata::MetadataDownloadSourceEndpoint,
+) -> Ed2kFoundSource {
+    Ed2kFoundSource {
         file_hash,
-        ip,
-        tcp_port: hint.tcp_port,
-        client_id: u32::from_be_bytes(ip.octets()),
+        ip: endpoint.ip,
+        tcp_port: endpoint.tcp_port,
+        client_id: u32::from_be_bytes(endpoint.ip.octets()),
         low_id: false,
-        obfuscated: hint
+        obfuscated: endpoint
             .connect_options
             .is_some_and(|options| options & 0x01 != 0),
-        // Preserve the discovery path's actual byte. A user hash is necessary
-        // key material for crypt, but is not evidence that the peer advertised
-        // support/request/require bits and must never fabricate them.
-        obfuscation_options: hint.connect_options,
-        user_hash,
+        obfuscation_options: endpoint.connect_options,
+        user_hash: endpoint.user_hash,
         source_server: None,
         buddy_id: None,
         buddy_endpoint: None,
         source_udp_port: None,
-    })
+    }
 }
 
 pub(crate) fn configured_server_attempts(config: &Ed2kRuntimeConfig) -> usize {
@@ -259,80 +241,37 @@ pub(crate) fn ed2k_keyword_server_attempts(config: &Ed2kRuntimeConfig, query: &s
         .min(configured_server_attempts(config))
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct LearnedEd2kMetadata {
-    pub(crate) display_name: Option<String>,
-    pub(crate) file_size: Option<u64>,
-}
-
-impl LearnedEd2kMetadata {
-    pub(crate) fn merge_missing_from(&mut self, other: Self) {
-        if self.display_name.is_none() {
-            self.display_name = other.display_name;
-        }
-        if self.file_size.is_none() {
-            self.file_size = other.file_size;
-        }
-    }
-
-    pub(crate) fn is_complete(&self) -> bool {
-        self.display_name.is_some() && self.file_size.is_some()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.display_name.is_none() && self.file_size.is_none()
-    }
-}
-
-pub(crate) fn normalized_optional_display_name(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
 pub(crate) fn hash_only_ed2k_search_query(file_hash: Ed2kHash) -> String {
     format!("{ED2K_HASH_ONLY_QUERY_PREFIX}{file_hash}")
 }
 
-pub(crate) fn select_ed2k_keyword_metadata(
+/// Only an exact content match with a nonzero size can fill an unknown claim.
+/// Filename observations never participate in selecting the job's chosen name.
+pub(crate) fn select_ed2k_download_size(
     results: &[Ed2kSearchFile],
     file_hash: Ed2kHash,
-) -> Option<LearnedEd2kMetadata> {
+) -> Option<u64> {
     results
         .iter()
         .filter(|result| result.file_hash == file_hash)
         .filter_map(|result| {
-            let metadata = LearnedEd2kMetadata {
-                display_name: normalized_optional_display_name(result.file_name.as_deref()),
-                file_size: result.file_size.filter(|file_size| *file_size != 0),
-            };
-            (!metadata.is_empty()).then_some((
-                metadata.file_size.is_some(),
-                metadata.display_name.is_some(),
-                result.source_count.unwrap_or_default(),
-                metadata,
-            ))
+            result
+                .file_size
+                .filter(|size| *size != 0)
+                .map(|size| (result.source_count.unwrap_or_default(), size))
         })
-        .max_by_key(|(has_size, has_name, source_count, _)| (*has_size, *has_name, *source_count))
-        .map(|(_, _, _, metadata)| metadata)
+        .max_by_key(|(sources, _)| *sources)
+        .map(|(_, size)| size)
 }
 
-pub(crate) fn select_kad_keyword_metadata(
+pub(crate) fn select_kad_download_size(
     result: &KadSearchResult,
     file_hash: Ed2kHash,
-) -> Option<LearnedEd2kMetadata> {
-    if result.hash != file_hash {
-        return None;
-    }
-    let metadata = LearnedEd2kMetadata {
-        display_name: result
-            .names
-            .iter()
-            .find_map(|name| normalized_optional_display_name(Some(name))),
-        file_size: result.size.filter(|file_size| *file_size != 0),
-    };
-    (!metadata.is_empty()).then_some(metadata)
+) -> Option<u64> {
+    (result.hash == file_hash)
+        .then_some(result.size)
+        .flatten()
+        .filter(|size| *size != 0)
 }
 
 /// Kad keyword separators, mirroring eMuleBB-MFC's `INV_KAD_KEYWORD_CHARS`
@@ -508,10 +447,6 @@ pub(crate) fn global_udp_source_search_excluded_endpoint(
         .flatten()
 }
 
-pub(crate) fn should_adopt_hash_only_metadata_name(transfer: &Transfer) -> bool {
-    crate::is_unresolved_ed2k_display_name(&transfer.hash, &transfer.name)
-}
-
 pub(crate) fn ed2k_server_callback_route(
     source_server: Option<SocketAddr>,
     connected_server: Option<SocketAddr>,
@@ -609,13 +544,15 @@ pub(crate) fn kad_source_result_to_ed2k_found_source(
     })
 }
 
-pub(crate) async fn collect_kad_ed2k_metadata(
+pub(crate) async fn collect_kad_download_size(
     dht: &DhtNode,
     query: &str,
     file_hash: Ed2kHash,
     timeout: Duration,
-) -> Option<LearnedEd2kMetadata> {
-    let cancel = CancellationToken::new();
+    parent_cancel: &CancellationToken,
+) -> Option<u64> {
+    let cancel = parent_cancel.child_token();
+    let _cancel_on_drop = cancel.clone().drop_guard();
     let mut stream = match dht
         .search_keywords_with_cancel_and_class(
             keyword_target(query),
@@ -641,22 +578,21 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     );
     let sleep = tokio::time::sleep(timeout);
     tokio::pin!(sleep);
-    let mut learned = LearnedEd2kMetadata::default();
+    let mut learned = None;
     let mut result_count: u32 = 0;
 
     loop {
         tokio::select! {
+            () = cancel.cancelled() => break,
             _ = &mut sleep => break,
             result = stream.next() => {
                 let Some(result) = result else {
                     break;
                 };
                 result_count = result_count.saturating_add(1);
-                if let Some(candidate) = select_kad_keyword_metadata(&result, file_hash) {
-                    learned.merge_missing_from(candidate);
-                    if learned.is_complete() {
-                        break;
-                    }
+                if let Some(candidate) = select_kad_download_size(&result, file_hash) {
+                    learned = Some(candidate);
+                    break;
                 }
             }
         }
@@ -669,7 +605,7 @@ pub(crate) async fn collect_kad_ed2k_metadata(
         crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
         result_count,
     );
-    (!learned.is_empty()).then_some(learned)
+    learned
 }
 
 #[expect(

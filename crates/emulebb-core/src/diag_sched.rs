@@ -18,6 +18,28 @@ use serde_json::{Map, Value, json};
 
 const FAMILY: &str = "sched";
 
+/// Observe an actual hello on the captured job session before delivery can
+/// retire its source children. Attribution is supplied by the existing writer.
+pub(crate) fn source_identity(
+    token: emulebb_metadata::JobToken,
+    file_hash: &str,
+    peer: std::net::SocketAddr,
+    peer_hash: [u8; 16],
+) {
+    emit(
+        FAMILY,
+        "source_identity",
+        "info",
+        json!({
+            "downloadId": token.job_id.to_string(),
+            "fileHash": file_hash,
+            "peer": peer.to_string(),
+            "peerHash": hex::encode(peer_hash),
+        }),
+        json!({ "outcome": "observed" }),
+    );
+}
+
 fn peer_string(source: &Ed2kFoundSource) -> String {
     format!("{}:{}", source.ip, source.tcp_port)
 }

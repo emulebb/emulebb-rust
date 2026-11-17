@@ -106,9 +106,44 @@ async fn reserved_partial_is_excluded_from_scan_and_direct_share() {
     configure_test_root(&core, &root).await;
     let partial = root.join("partial.bin");
     let other = root.join("complete.bin");
-    core.metadata_store
-        .reserve_delivery_output(&partial, uuid::Uuid::new_v4())
+    fs::write(&other, b"complete bytes").unwrap();
+    let summary = core
+        .ed2k_transfers
+        .ingest_local_file(&other, "complete.bin")
+        .await
         .unwrap();
+    let token = crate::tests::admit_scheduler_test_job(
+        &core.ed2k_transfers,
+        &core.transfer_root,
+        summary.file_hash.parse().unwrap(),
+        "complete.bin".into(),
+        14,
+    )
+    .await;
+    drop(
+        core.ed2k_transfers
+            .store_md4_hashset(token, Vec::new())
+            .await
+            .unwrap(),
+    );
+    core.ed2k_transfers
+        .store_piece_data(token, 0, b"complete bytes")
+        .await
+        .unwrap();
+    let attempt = uuid::Uuid::new_v4();
+    core.metadata_store
+        .begin_transfer_delivery_attempt(
+            token,
+            attempt,
+            &partial,
+            &root.join(format!(".emulebb-delivery-{attempt}.tmp")),
+        )
+        .unwrap();
+    assert!(
+        core.metadata_store
+            .reserve_delivery_output(token, &partial, attempt)
+            .unwrap()
+    );
     fs::write(&partial, b"partial bytes").unwrap();
     fs::write(&other, b"complete bytes").unwrap();
     let scan = scan_shared_files(&core).await.unwrap();
@@ -153,6 +188,16 @@ fn scanned_file(path: &Path) -> ScannedSharedFile {
     }
 }
 
+fn source_evidence(
+    path: &Path,
+    fingerprint: &NativeFileFingerprint,
+) -> emulebb_metadata::NativeFileIdentityEvidence {
+    let file = fs::File::open(long_path(path)).unwrap();
+    let (current, evidence) = Ed2kTransferRuntime::opened_source_identity(&file).unwrap();
+    assert!(fingerprint.safely_matches(&current));
+    evidence
+}
+
 fn synthetic_fingerprint(size_bytes: u64, modified_nanoseconds: u32) -> NativeFileFingerprint {
     NativeFileFingerprint {
         identity: emulebb_metadata::NativeFileIdentity::Unix {
@@ -168,9 +213,9 @@ fn synthetic_fingerprint(size_bytes: u64, modified_nanoseconds: u32) -> NativeFi
 
 fn synthetic_windows_fingerprint(size_bytes: u64) -> NativeFileFingerprint {
     NativeFileFingerprint {
-        identity: emulebb_metadata::NativeFileIdentity::WindowsHighResolution {
+        identity: emulebb_metadata::NativeFileIdentity::WindowsLowResolution {
             volume_serial_number: 13,
-            file_id: 17,
+            file_index: 17,
         },
         size_bytes,
         modified: emulebb_metadata::NativeFileTimestamp::new(1_700_000_000, 0).unwrap(),
@@ -707,7 +752,13 @@ async fn incremental_reload_reuses_unchanged_coarse_timestamp() {
         .unwrap()
         .file_hash;
     core.metadata_store
-        .upsert_local_file_instance(&long_path(&source), &file_hash, &coarse_fingerprint)
+        .upsert_local_file_instance(
+            &long_path(&source),
+            &file_hash,
+            &coarse_fingerprint,
+            emulebb_metadata::NativeFileIdentityEvidence::new(coarse_fingerprint.identity, None)
+                .unwrap(),
+        )
         .unwrap();
 
     let plan = plan_incremental_reload(
@@ -745,7 +796,12 @@ async fn incremental_reload_reuses_windows_whole_second_timestamp_with_change_ti
         .unwrap()
         .file_hash;
     core.metadata_store
-        .upsert_local_file_instance(&long_path(&source), &file_hash, &fingerprint)
+        .upsert_local_file_instance(
+            &long_path(&source),
+            &file_hash,
+            &fingerprint,
+            emulebb_metadata::NativeFileIdentityEvidence::new(fingerprint.identity, None).unwrap(),
+        )
         .unwrap();
 
     let plan = plan_incremental_reload(
@@ -795,7 +851,8 @@ async fn incremental_reload_accepts_unique_stock_hash_without_payload_reads() {
         .accept_imported_local_files(&[(
             imported.clone(),
             emulebb_ed2k::long_path::long_path(&source),
-            fingerprint.unwrap(),
+            fingerprint.clone().unwrap(),
+            source_evidence(&source, fingerprint.as_ref().unwrap()),
         )])
         .unwrap();
 
@@ -859,7 +916,8 @@ async fn added_path_reuses_accepted_live_identity_without_stock_lookup_or_payloa
                 last_upload_request_ms: 0,
             },
             key,
-            fp,
+            fp.clone(),
+            source_evidence(&first, &fp),
         )])
         .unwrap();
     let plan = plan_incremental_reload(&core, vec![scanned_file(&second)])
@@ -904,7 +962,8 @@ async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart(
                 last_upload_request_ms: 1_700_000_001_000,
             },
             emulebb_ed2k::long_path::long_path(&source),
-            fingerprint.unwrap(),
+            fingerprint.clone().unwrap(),
+            source_evidence(&source, fingerprint.as_ref().unwrap()),
         )])
         .unwrap();
     let report = core.reconcile_shared_files().await.unwrap();

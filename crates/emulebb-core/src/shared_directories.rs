@@ -1494,7 +1494,16 @@ async fn plan_incremental_reload_with_pruning(
                     if let Some(current) = fingerprint.as_ref()
                         && let Some(existing) = metadata.reusable_local_file_by_identity(current)?
                     {
-                        metadata.upsert_local_file_instance(&key, &existing.file_hash, current)?;
+                        let evidence = emulebb_metadata::NativeFileIdentityEvidence::new(
+                            current.identity,
+                            existing.secondary_identity,
+                        )?;
+                        metadata.upsert_local_file_instance(
+                            &key,
+                            &existing.file_hash,
+                            current,
+                            evidence,
+                        )?;
                         stats.reused_count += 1;
                         reused_shares.push(ReusedReloadShare {
                             file_hash: existing.file_hash,

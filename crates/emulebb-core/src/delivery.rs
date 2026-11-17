@@ -1,58 +1,16 @@
-//! Finished-file delivery wiring (core side).
-//!
-//! When a transfer completes, the eD2K runtime materializes its internal piece
-//! store into an operator-facing file by name (see
-//! `emulebb_ed2k::ed2k_transfer::deliver`). This module resolves WHERE that file
-//! lands â€” a per-category download path when set, otherwise the global incoming
-//! directory (eMule per-category Incoming override, else the global Incoming
-//! folder) â€” and drives delivery at completion, on a confirming recheck, and as
-//! a startup sweep for transfers that finished before delivery ran.
-
+//! Job-addressed completed-output delivery and bounded maintenance.
+use crate::EmulebbCore;
+use anyhow::{Result, ensure};
+use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, LocalMutationError};
+use emulebb_metadata::{JobId, JobToken};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
-use anyhow::{Result, ensure};
-use emulebb_ed2k::ed2k_transfer::{Ed2kDeliveryOutcome, Ed2kResumeManifest};
-
-use crate::EmulebbCore;
-
-const DELIVERY_RETRY_INITIAL: Duration = Duration::from_secs(30);
-const DELIVERY_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
-
-#[derive(Debug, Clone)]
-pub(crate) struct DeliveryFailure {
-    pub(crate) message: String,
-    attempts: u32,
-    retry_at: Instant,
-}
-
-impl DeliveryFailure {
-    fn next(message: String, previous: Option<&Self>) -> Self {
-        let attempts = previous.map_or(1, |failure| failure.attempts.saturating_add(1));
-        let shift = attempts.saturating_sub(1).min(5);
-        let delay = DELIVERY_RETRY_INITIAL
-            .checked_mul(1u32 << shift)
-            .unwrap_or(DELIVERY_RETRY_MAX)
-            .min(DELIVERY_RETRY_MAX);
-        Self {
-            message,
-            attempts,
-            retry_at: Instant::now() + delay,
-        }
-    }
-
-    fn is_due(&self) -> bool {
-        Instant::now() >= self.retry_at
-    }
-}
+const DELIVERY_JOBS_PER_PASS: usize = 4;
 
 impl EmulebbCore {
-    /// Override the default finished-file delivery directory (eMule global
-    /// Incoming folder). The daemon calls this with the resolved `incomingDir`
-    /// config path before wrapping the core in an `Arc`.
     #[must_use]
     pub fn with_incoming_dir(mut self, incoming_dir: PathBuf) -> Self {
         self.category_incoming_dir = Arc::new(incoming_dir.clone());
@@ -60,81 +18,120 @@ impl EmulebbCore {
         self
     }
 
-    /// The configured finished-file delivery directory.
     #[must_use]
     pub fn incoming_dir(&self) -> &Path {
         &self.incoming_dir
     }
 
-    /// Resolve the delivery destination directory for one completed transfer:
-    /// its category's path when set, otherwise the global incoming directory.
-    async fn delivery_destination_dir(&self, manifest: &Ed2kResumeManifest) -> Result<PathBuf> {
-        let id = self
-            .ed2k_transfers
-            .current_category_id(&manifest.file_hash)
-            .await?;
-        let state = self.state.lock().await;
-        Ok(id
-            .and_then(|id| state.categories.get(&id))
-            .and_then(|category| category.destination_dir.as_ref())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.incoming_dir.clone()))
-    }
-
-    /// Materialize one completed transfer's payload into its destination by name
-    /// (eMule move-to-Incoming). Idempotent: a no-op once delivered. Logs and
-    /// records errors so a delivery failure never aborts the verified payload;
-    /// the retry worker keeps the transfer in `completing` until it succeeds.
-    pub(crate) async fn deliver_completed_transfer(&self, hash: &str) {
-        let manifest = match self.ed2k_transfers.manifest(hash).await {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                tracing::warn!(%error, "delivery skipped: no manifest for {hash}");
-                return;
-            }
+    /// Resolve the current category destination before the native owner fixes
+    /// an attempt. Existing attempt journals retain their own selected target.
+    async fn download_delivery_destination(&self, token: JobToken) -> Result<Option<PathBuf>> {
+        let _fence = self.ed2k_transfers.lock_category_publication().await;
+        let Some(job) = self.ed2k_transfers.download_job(token.job_id).await? else {
+            return Ok(None);
         };
-        if !manifest.completed || manifest.final_rehash_pending {
-            return;
-        }
-        let dest_dir = match self.delivery_destination_dir(&manifest).await {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(%error, "delivery skipped: category unavailable");
-                return;
-            }
-        };
-        match self
-            .ed2k_transfers
-            .materialize_completed_payload(hash, &dest_dir)
-            .await
+        if job.token != token
+            || job.removed_at_s.is_some()
+            || job.completed_at_s.is_some()
+            || job.storage_failure.is_some()
+            || job.intent != emulebb_metadata::DownloadIntent::Started
+            || !job.payload_verified
         {
-            Ok(
-                Ed2kDeliveryOutcome::Delivered(path) | Ed2kDeliveryOutcome::AlreadyDelivered(path),
-            ) => match self.promote_delivered_transfer(hash).await {
-                Ok(()) => {
-                    self.delivery_failures.lock().unwrap().remove(hash);
-                    tracing::info!("promoted completed transfer {hash} at {}", path.display());
-                }
-                Err(error) => self.record_delivery_failure(hash, &error),
-            },
-            Ok(Ed2kDeliveryOutcome::NotCompleted) => {}
-            Err(error) => {
-                self.record_delivery_failure(hash, &error);
-                let _ = self
-                    .refresh_transfer_from_manifest(hash, "completing")
-                    .await;
-            }
+            return Ok(None);
         }
+        let state = self.state.lock().await;
+        self.persistence_owner.check_coherent_state()?;
+        let category = job
+            .category_id
+            .map(|id| {
+                state.categories.get(&id).ok_or_else(|| {
+                    anyhow::anyhow!("download category is absent from coherent Core state")
+                })
+            })
+            .transpose()?;
+        Ok(Some(
+            category
+                .and_then(|category| category.destination_dir.as_ref())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.incoming_dir.clone()),
+        ))
     }
 
-    async fn promote_delivered_transfer(&self, hash: &str) -> Result<()> {
+    /// Deliver only this captured execution. Historical completion is never
+    /// revisited to recreate a missing output. Native journaling owns recovery
+    /// when a delivery attempt was interrupted before terminal completion.
+    pub(crate) async fn deliver_completed_download(&self, token: JobToken) -> Result<bool> {
+        let Some(destination) = self.download_delivery_destination(token).await? else {
+            return Ok(false);
+        };
+        let result: Result<bool> = async {
+            // Reopen only this eligible job's owned storage after restart or a
+            // generation change. Terminal history never reaches this branch.
+            self.ed2k_transfers
+                .prepare_download_job_storage(token)
+                .await?;
+            match self
+                .ed2k_transfers
+                .materialize_completed_payload(token, &destination)
+                .await?
+            {
+                Ed2kDeliveryOutcome::Delivered(_) | Ed2kDeliveryOutcome::AlreadyDelivered(_) => {}
+                Ed2kDeliveryOutcome::NotCompleted => return Ok(false),
+            }
+            self.promote_delivered_download(token).await?;
+            Ok(true)
+        }
+        .await;
+        if let Err(error) = &result {
+            // WHY: subsystem admission is a pending retry, not a disk fault.
+            // Actual unfinished storage failures require explicit start, with
+            // the exact token fencing late delivery against another execution.
+            let capacity = matches!(
+                error.downcast_ref::<LocalMutationError>(),
+                Some(LocalMutationError::Busy | LocalMutationError::Closing)
+            ) || matches!(
+                error.downcast_ref::<crate::persistence_owner::PersistenceError>(),
+                Some(
+                    crate::persistence_owner::PersistenceError::Busy
+                        | crate::persistence_owner::PersistenceError::Closing
+                )
+            );
+            if !capacity {
+                let mut message = format!("{error:#}");
+                message.truncate(message.floor_char_boundary(1024));
+                let fault = emulebb_metadata::DownloadJobStorageFailure::new(
+                    "DELIVERY_FAILED",
+                    &message,
+                    chrono::Utc::now().timestamp(),
+                )?;
+                let outcome = self
+                    .ed2k_transfers
+                    .fail_download_job_storage(token, &fault)
+                    .await?;
+                if outcome.applied {
+                    self.download_attempts.cancel_execution(token);
+                }
+            }
+        }
+        result
+    }
+
+    async fn promote_delivered_download(&self, token: JobToken) -> Result<()> {
         crate::shared_directories::sync_implicit_shared_directory_roots(self).await?;
         let (path, fingerprint) = self
             .ed2k_transfers
-            .register_delivered_local_content(hash)
+            .register_delivered_local_content(token)
             .await?;
         let normalized_path = crate::long_path(&path);
         let file_metadata = tokio::fs::metadata(&normalized_path).await?;
+        let job = self
+            .ed2k_transfers
+            .download_job(token.job_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("delivered job disappeared during admission"))?;
+        ensure!(job.token == token, "stale delivered job admission");
+        let hash = job.file_hash.clone();
+        drop(job);
         if !crate::shared_directories::load_shared_file_ignore_policy(self)?
             .should_ignore(&normalized_path, &file_metadata)
         {
@@ -143,72 +140,67 @@ impl EmulebbCore {
                     self,
                     &normalized_path,
                     &fingerprint,
-                    hash,
+                    &hash
                 )
                 .await?,
                 "delivered output is not eligible under an Incoming or category root"
             );
         }
-        self.ed2k_transfers
-            .remove_completed_transfer_row(hash)
-            .await?;
-        self.state.lock().await.transfers.remove(hash);
-        self.publish_transfer_removed(hash);
+        if !self.ed2k_transfers.complete_download_job(token).await? {
+            let current = self.ed2k_transfers.download_job(token.job_id).await?;
+            ensure!(
+                current.as_ref().is_some_and(|job| job.token == token
+                    && job.completed_at_s.is_some()
+                    && job.removed_at_s.is_none()),
+                "download completion was superseded"
+            );
+        }
+        // Retire only the selected runtime view. The durable job remains visible
+        // in completed history; physical pieces retire through the native journal.
+        let mut state = self.state.lock().await;
+        if state
+            .transfers
+            .get(&hash)
+            .is_some_and(|selected| selected.job_token() == token)
+        {
+            state.transfers.remove(&hash);
+        }
+        drop(state);
+        self.download_attempts.changed.notify_waiters();
         self.queue_ed2k_shared_catalog_publish();
         Ok(())
     }
 
-    fn record_delivery_failure(&self, hash: &str, error: &anyhow::Error) {
-        let message = format!("{error:#}");
-        let mut failures = self.delivery_failures.lock().unwrap();
-        let failure = DeliveryFailure::next(message, failures.get(hash));
-        failures.insert(hash.to_string(), failure);
-        tracing::warn!(%error, "failed to complete delivery of transfer {hash}");
-    }
-
-    /// Retry completed downloads whose delivery or local-share promotion did
-    /// not finish before shutdown. Best-effort per transfer.
-    pub async fn deliver_pending_completed_transfers(&self) {
-        let hashes = match self
-            .ed2k_transfers
-            .pending_completed_delivery_hashes()
-            .await
-        {
-            Ok(hashes) => hashes,
-            Err(error) => {
-                tracing::warn!(%error, "startup delivery sweep skipped: failed to list candidates");
-                return;
-            }
+    /// One bounded maintenance pass, advancing even over pending failures. Its
+    /// cursor/gate has no other readers and never holds global Core state over I/O.
+    /// Read-result leases are dropped before delivery enters its native owner.
+    pub async fn maintain_download_delivery(&self) -> Result<usize> {
+        let Ok(mut cursor) = self.delivery_cursor.try_lock() else {
+            return Ok(0);
         };
-        for hash in hashes {
-            let due = self
-                .delivery_failures
-                .lock()
-                .unwrap()
-                .get(&hash)
-                .is_none_or(DeliveryFailure::is_due);
-            if !due {
+        let mut attempted = 0;
+        for _ in 0..DELIVERY_JOBS_PER_PASS {
+            let page = self
+                .ed2k_transfers
+                .pending_delivery_jobs_after(*cursor, 1)
+                .await?;
+            let id: Option<JobId> = page.first().copied();
+            drop(page);
+            let Some(id) = id else {
+                *cursor = None;
+                break;
+            };
+            *cursor = Some(id);
+            let Some(job) = self.ed2k_transfers.download_job(id).await? else {
                 continue;
+            };
+            let token = job.token;
+            drop(job);
+            attempted += 1;
+            if let Err(error) = self.deliver_completed_download(token).await {
+                tracing::warn!(job_id = %id, %error, "download delivery remains pending");
             }
-            self.deliver_completed_transfer(&hash).await;
-            tokio::task::yield_now().await;
         }
-    }
-
-    /// Verify every active completed download's persisted delivery state before
-    /// the transfer view is published. Pending rows are delivered, while
-    /// delivered rows use their native fingerprint as a fast path and fall back
-    /// to a full ED2K rehash when the recorded filesystem identity changed.
-    pub async fn reconcile_persisted_completed_deliveries(&self) -> anyhow::Result<usize> {
-        let hashes = self
-            .ed2k_transfers
-            .completed_delivery_reconciliation_hashes()
-            .await?;
-        let count = hashes.len();
-        for hash in hashes {
-            self.deliver_completed_transfer(&hash).await;
-            tokio::task::yield_now().await;
-        }
-        Ok(count)
+        Ok(attempted)
     }
 }

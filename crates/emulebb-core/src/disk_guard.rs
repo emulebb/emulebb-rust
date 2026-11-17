@@ -1,37 +1,17 @@
-//! Aggregate protected-volume download free-space policy.
-//!
-//! Before a download attempt engages sources, check that the transfer-root
-//! volume can hold the remaining payload. If it cannot, active downloads enter
-//! the explicit `insufficient` state
-//! instead of running and failing late mid-write with a disk-full error (which
-//! would otherwise churn-retry). An unknowable free-space value fails closed;
-//! an unavailable manifest snapshot remains best-effort because there is no
-//! trustworthy reservation set to evaluate.
-
-use std::{collections::HashMap, path::PathBuf};
-
-use emulebb_ed2k::{disk_space, ed2k_transfer::Ed2kResumeManifest};
-use emulebb_settings::Ed2kSettings;
-
+//! Aggregate protected-volume policy for the bounded selected cohort.
 use crate::{EmulebbCore, physical_disk::volume_key};
+use anyhow::Result;
+use emulebb_ed2k::{disk_space, ed2k_transfer::StorageSpaceReservation};
+use emulebb_metadata::{DownloadIntent, DownloadJobStorageFailure, JobToken};
+use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Debug)]
 struct ProtectedVolume {
     probe_path: PathBuf,
     reserved_bytes: u64,
     free_floor_bytes: u64,
+    required: bool,
 }
-
-fn reserve_on_volume(
-    volumes: &mut HashMap<String, ProtectedVolume>,
-    path: PathBuf,
-    bytes: u64,
-    floor: u64,
-) {
-    let key = volume_key(&path);
-    reserve_on_volume_key(volumes, key, path, bytes, floor);
-}
-
 fn reserve_on_volume_key(
     volumes: &mut HashMap<String, ProtectedVolume>,
     key: String,
@@ -39,197 +19,147 @@ fn reserve_on_volume_key(
     bytes: u64,
     floor: u64,
 ) {
-    let volume = volumes.entry(key).or_insert_with(|| ProtectedVolume {
+    let volume = volumes.entry(key).or_insert(ProtectedVolume {
         probe_path: path,
         reserved_bytes: 0,
         free_floor_bytes: 0,
+        required: false,
     });
     volume.reserved_bytes = volume.reserved_bytes.saturating_add(bytes);
     volume.free_floor_bytes = volume.free_floor_bytes.max(floor);
 }
-
 fn volume_is_insufficient(available: Option<u64>, reserved: u64, floor: u64) -> bool {
     available.is_none_or(|available| available < reserved.saturating_add(floor))
 }
-
+/// Runs only inside the native filesystem owner. Volume identification may
+/// touch unavailable mounts, so it cannot execute on an async Core worker.
+fn sufficient_storage(input: &[StorageSpaceReservation]) -> bool {
+    let mut volumes = HashMap::new();
+    for item in input {
+        let key = volume_key(&item.path);
+        reserve_on_volume_key(
+            &mut volumes,
+            key.clone(),
+            item.path.clone(),
+            item.bytes,
+            item.floor,
+        );
+        if item.required {
+            volumes.get_mut(&key).expect("inserted volume").required = true;
+        }
+    }
+    volumes
+        .values()
+        .filter(|volume| volume.required)
+        .all(|volume| {
+            !volume_is_insufficient(
+                disk_space::available_space(&volume.probe_path),
+                volume.reserved_bytes,
+                volume.free_floor_bytes,
+            )
+        })
+}
 impl EmulebbCore {
-    /// Override the profile/config directory protected by the MFC-compatible
-    /// config-volume free-space floor.
     #[must_use]
     pub fn with_profile_dir(mut self, profile_dir: PathBuf) -> Self {
         self.profile_dir = profile_dir;
         self
     }
 
-    async fn mark_active_downloads_insufficient(&self) {
-        let (updated, cancellations) = {
-            let mut state = self.state.lock().await;
-            let mut updated = Vec::new();
-            for transfer in state.transfers.values_mut() {
-                if matches!(transfer.state.as_str(), "downloading" | "queued") && !transfer.stopped
-                {
-                    transfer.state = "insufficient".to_string();
-                    updated.push(transfer.clone());
-                }
-            }
-            let cancellations = state
-                .download_cancels
-                .values()
-                .map(|(_, cancel)| cancel.clone())
-                .collect::<Vec<_>>();
-            (updated, cancellations)
-        };
-        for cancel in cancellations {
-            cancel.cancel();
+    /// Reserve only selected jobs, including their delivery copies. A storage
+    /// failure is durable and can be cleared only by an explicit start.
+    pub(crate) async fn check_download_storage_space(&self, token: JobToken) -> Result<bool> {
+        let settings = self.app_settings().await?.ed2k;
+        let mut tokens: Vec<_> = self
+            .download_attempts
+            .snapshot()
+            .into_iter()
+            .map(|(token, _)| token)
+            .collect();
+        if !tokens.contains(&token) {
+            tokens.push(token);
         }
-        for transfer in updated {
-            self.publish_transfer_updated(transfer);
-        }
-    }
-
-    /// Requeue downloads held by the aggregate free-space guard once all
-    /// protected volumes can satisfy their reservations again.
-    pub async fn retry_insufficient_downloads(&self) -> usize {
-        let candidates = {
-            let state = self.state.lock().await;
-            state
-                .transfers
-                .values()
-                .filter(|transfer| transfer.state == "insufficient" && !transfer.stopped)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        let Some(first) = candidates.first() else {
-            return 0;
-        };
-        if self.should_pause_download_for_disk_space(&first.hash).await {
-            return 0;
-        }
-
-        let mut requeued = 0usize;
-        for candidate in candidates {
-            let transfer = {
-                let mut state = self.state.lock().await;
-                let Some(transfer) = state.transfers.get_mut(&candidate.hash) else {
-                    continue;
-                };
-                if transfer.state != "insufficient" || transfer.stopped {
-                    continue;
-                }
-                transfer.state = "downloading".to_string();
-                transfer.clone()
-            };
-            self.publish_transfer_updated(transfer.clone());
-            self.queue_ed2k_download_attempt(transfer);
-            requeued = requeued.saturating_add(1);
-        }
-        requeued
-    }
-
-    /// Whether any protected volume cannot satisfy all incomplete downloads
-    /// plus its configured free-space floor. This is intentionally global:
-    /// files sharing one volume are stopped as a group instead of each one
-    /// independently believing the same free bytes are available.
-    pub(crate) async fn should_pause_download_for_disk_space(&self, _file_hash: &str) -> bool {
-        let Ok(manifests) = self.ed2k_transfers.incomplete_manifests().await else {
-            return false;
-        };
-        let settings = self
-            .app_settings()
-            .await
-            .map(|settings| settings.ed2k)
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "failed to load disk-space settings; using defaults");
-                Ed2kSettings::default()
-            });
-        let categories = self.state.lock().await.categories.clone();
-        let volumes = self.protected_volumes(&manifests, &settings, &categories);
-
-        let insufficient = volumes.into_iter().any(|(key, volume)| {
-            let available = disk_space::available_space(&volume.probe_path);
-            let insufficient =
-                volume_is_insufficient(available, volume.reserved_bytes, volume.free_floor_bytes);
-            if insufficient {
-                tracing::warn!(
-                    volume = %key,
-                    probe_succeeded = available.is_some(),
-                    available_bytes = available.unwrap_or(0),
-                    reserved_bytes = volume.reserved_bytes,
-                    free_floor_bytes = volume.free_floor_bytes,
-                    "protected download volume has insufficient free space"
-                );
-            }
-            insufficient
+        let mut input = Vec::with_capacity(1 + 2 * tokens.len());
+        input.push(StorageSpaceReservation {
+            path: self.profile_dir.clone(),
+            bytes: 0,
+            floor: settings.min_free_config_space_bytes,
+            required: true,
         });
-        if insufficient {
-            self.mark_active_downloads_insufficient().await;
+        let mut current = false;
+        for selected in tokens {
+            let Some(job) = self.ed2k_transfers.download_job(selected.job_id).await? else {
+                continue;
+            };
+            if job.token != selected
+                || job.removed_at_s.is_some()
+                || job.completed_at_s.is_some()
+                || job.storage_failure.is_some()
+                || job.intent != DownloadIntent::Started
+            {
+                continue;
+            }
+            let required = selected == token;
+            current |= required;
+            let state = self.state.lock().await;
+            let category = job.category_id.and_then(|id| state.categories.get(&id));
+            let temp = job
+                .selected_temp
+                .clone()
+                .or_else(|| {
+                    category
+                        .and_then(|category| category.temp_dir.as_ref())
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| self.transfer_root.clone());
+            let incoming = category
+                .and_then(|category| category.destination_dir.as_ref())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.incoming_dir.clone());
+            input.push(StorageSpaceReservation {
+                path: temp,
+                bytes: job
+                    .expected_size_bytes
+                    .unwrap_or(0)
+                    .saturating_sub(job.checkpointed_bytes),
+                floor: settings.min_free_transfer_space_bytes,
+                required,
+            });
+            input.push(StorageSpaceReservation {
+                path: incoming,
+                bytes: job.expected_size_bytes.unwrap_or(0),
+                floor: settings.min_free_incoming_space_bytes,
+                required,
+            });
         }
-        insufficient
-    }
-
-    fn protected_volumes(
-        &self,
-        manifests: &[Ed2kResumeManifest],
-        settings: &Ed2kSettings,
-        categories: &std::collections::BTreeMap<i64, crate::Category>,
-    ) -> HashMap<String, ProtectedVolume> {
-        let mut volumes = HashMap::new();
-        reserve_on_volume(
-            &mut volumes,
-            self.profile_dir.clone(),
-            0,
-            settings.min_free_config_space_bytes,
-        );
-        for manifest in manifests {
-            self.reserve_incomplete_manifest(&mut volumes, manifest, settings, categories);
+        if !current {
+            return Ok(false);
         }
-        volumes
-    }
-
-    fn reserve_incomplete_manifest(
-        &self,
-        volumes: &mut HashMap<String, ProtectedVolume>,
-        manifest: &Ed2kResumeManifest,
-        settings: &Ed2kSettings,
-        categories: &std::collections::BTreeMap<i64, crate::Category>,
-    ) {
-        if manifest.completed {
-            return;
+        if self
+            .ed2k_transfers
+            .inspect_storage_space(&input, sufficient_storage)
+            .await?
+        {
+            return Ok(true);
         }
-        let remaining = manifest
-            .file_size
-            .saturating_sub(manifest.durable_present_bytes());
-        reserve_on_volume(
-            volumes,
-            self.transfer_root.clone(),
-            remaining,
-            settings.min_free_transfer_space_bytes,
-        );
-
-        let destination = categories
-            .get(&manifest.category_id.unwrap_or_default())
-            .and_then(|category| category.destination_dir.as_deref())
-            .filter(|path| !path.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.incoming_dir.clone());
-        // Delivery always needs a second full payload while the verified piece
-        // store remains the immutable upload authority. On the same volume this
-        // reservation merges with the remaining piece-store reservation.
-        reserve_on_volume(
-            volumes,
-            destination,
-            manifest.file_size,
-            settings.min_free_incoming_space_bytes,
-        );
+        let failure = DownloadJobStorageFailure::new(
+            "STORAGE_SPACE_UNAVAILABLE",
+            "protected storage is unavailable or cannot satisfy the free-space reservation",
+            chrono::Utc::now().timestamp(),
+        )?;
+        let outcome = self
+            .ed2k_transfers
+            .fail_download_job_storage(token, &failure)
+            .await?;
+        if outcome.applied {
+            self.download_attempts.cancel_execution(token);
+        }
+        Ok(false)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FileIndex, TransferCreate, unique_runtime_dir};
-    use emulebb_ed2k::ed2k_transfer::Ed2kTransferJob;
-
     #[test]
     fn aggregate_reservation_honors_floor_and_unknown_space_fails_closed() {
         assert!(volume_is_insufficient(None, u64::MAX, u64::MAX));
@@ -271,84 +201,13 @@ mod tests {
     }
 
     #[test]
-    fn protected_volumes_always_include_the_profile_config_floor() {
-        let root = unique_runtime_dir("emulebb-config-volume-floor");
-        let profile_dir = root.join("profile");
-        let transfer_root = root.join("transfers");
-        std::fs::create_dir_all(&profile_dir).unwrap();
-        std::fs::create_dir_all(&transfer_root).unwrap();
-        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
-            .unwrap()
-            .with_profile_dir(profile_dir.clone());
-
-        let volumes = core.protected_volumes(
-            &[],
-            &Ed2kSettings::default(),
-            &std::collections::BTreeMap::new(),
-        );
-        let config_volume = &volumes[&volume_key(&profile_dir)];
-        assert_eq!(config_volume.reserved_bytes, 0);
-        assert_eq!(
-            config_volume.free_floor_bytes,
-            emulebb_settings::MIN_FREE_CONFIG_SPACE_BYTES
-        );
-    }
-
-    #[test]
-    fn same_volume_download_reserves_piece_store_and_delivered_copy() {
-        let root = unique_runtime_dir("emulebb-same-volume-delivery-reservation");
-        let profile_dir = root.join("profile");
-        let transfer_root = root.join("transfers");
-        std::fs::create_dir_all(&profile_dir).unwrap();
-        std::fs::create_dir_all(&transfer_root).unwrap();
-        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
-            .unwrap()
-            .with_profile_dir(profile_dir);
-        let manifest = Ed2kResumeManifest::new(&Ed2kTransferJob {
-            file_hash: "00112233445566778899aabbccddeeff".to_string(),
-            display_name: "reserved.bin".to_string(),
-            file_size: 1024,
-            piece_size: 1024,
-        });
-
-        let volumes = core.protected_volumes(
-            &[manifest],
-            &Ed2kSettings::default(),
-            &std::collections::BTreeMap::new(),
-        );
-        let shared_volume = &volumes[&volume_key(&transfer_root)];
-
-        assert_eq!(shared_volume.reserved_bytes, 2048);
-    }
-
-    #[tokio::test]
-    async fn marking_insufficient_stops_all_active_downloads() {
-        let root = unique_runtime_dir("emulebb-disk-stop-all");
-        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &root).unwrap();
-        let hashes = [
-            "00112233445566778899aabbccddeeff",
-            "ffeeddccbbaa99887766554433221100",
-        ];
-        for (index, hash) in hashes.iter().enumerate() {
-            let transfer = core
-                .create_transfer(TransferCreate {
-                    known_file_policy: Default::default(),
-                    link: Some(format!("ed2k://|file|disk-{index}.bin|1024|{hash}|/")),
-                    links: None,
-                    category_id: None,
-                    category_name: None,
-                    paused: Some(true),
-                })
-                .await
-                .unwrap();
-            core.set_transfer_state(&transfer.hash, "downloading").await;
-        }
-        core.mark_active_downloads_insufficient().await;
-        for hash in hashes {
-            assert_eq!(
-                core.transfer(hash).await.unwrap().unwrap().state,
-                "insufficient"
-            );
-        }
+    fn storage_inspection_fails_closed_at_an_unattainable_floor() {
+        let input = [StorageSpaceReservation {
+            path: std::env::temp_dir(),
+            bytes: 1,
+            floor: u64::MAX,
+            required: true,
+        }];
+        assert!(!sufficient_storage(&input));
     }
 }

@@ -452,10 +452,10 @@ impl PersistenceOwner {
                         let result = match outcome {
                             Ok(Ok(value)) => Ok(DbResponse::Category(value)),
                             Ok(Err(error)) => {
-                                tracing::warn!(%error, "category SQL failed");
-                                Err(PersistenceError::Storage(
-                                    "database operation failed".into(),
-                                ))
+                                tracing::warn!(%error, "category persistence failed");
+                                Err(error.downcast::<PersistenceError>().unwrap_or_else(|_| {
+                                    PersistenceError::Storage("database operation failed".into())
+                                }))
                             }
                             Err(_) => Err(PersistenceError::CommitUnknown),
                         };
