@@ -1019,11 +1019,11 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
 
     for (path, expected_message) in [
         (
-            "/api/v1/uploads/192.0.2.44:4662",
+            "/api/v1/uploads/12345678-1234-4234-8234-123456789abc",
             "active upload client not found",
         ),
         (
-            "/api/v1/upload-queue/192.0.2.44:4662",
+            "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc",
             "upload queue client not found",
         ),
     ] {
@@ -1045,18 +1045,18 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
     }
 
     for path in [
-        "/api/v1/uploads/192.0.2.44:4662/operations/remove",
-        "/api/v1/uploads/192.0.2.44:4662/operations/release-slot",
-        "/api/v1/uploads/192.0.2.44:4662/operations/add-friend",
-        "/api/v1/uploads/192.0.2.44:4662/operations/remove-friend",
-        "/api/v1/uploads/192.0.2.44:4662/operations/ban",
-        "/api/v1/uploads/192.0.2.44:4662/operations/unban",
-        "/api/v1/upload-queue/192.0.2.44:4662/operations/remove",
-        "/api/v1/upload-queue/192.0.2.44:4662/operations/release-slot",
-        "/api/v1/upload-queue/192.0.2.44:4662/operations/add-friend",
-        "/api/v1/upload-queue/192.0.2.44:4662/operations/remove-friend",
-        "/api/v1/upload-queue/192.0.2.44:4662/operations/ban",
-        "/api/v1/upload-queue/192.0.2.44:4662/operations/unban",
+        "/api/v1/uploads/12345678-1234-4234-8234-123456789abc/operations/remove",
+        "/api/v1/uploads/12345678-1234-4234-8234-123456789abc/operations/release-slot",
+        "/api/v1/uploads/12345678-1234-4234-8234-123456789abc/operations/add-friend",
+        "/api/v1/uploads/12345678-1234-4234-8234-123456789abc/operations/remove-friend",
+        "/api/v1/uploads/12345678-1234-4234-8234-123456789abc/operations/ban",
+        "/api/v1/uploads/12345678-1234-4234-8234-123456789abc/operations/unban",
+        "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc/operations/remove",
+        "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc/operations/release-slot",
+        "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc/operations/add-friend",
+        "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc/operations/remove-friend",
+        "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc/operations/ban",
+        "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc/operations/unban",
     ] {
         let response = app
             .clone()
