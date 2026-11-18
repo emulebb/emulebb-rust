@@ -284,6 +284,7 @@ fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[Indexe
         MetadataSearchResultFields, MetadataSearchSpec,
     };
     let mut header = MetadataSearchData {
+        parent_search_id: None,
         normalized_query: "paged result".into(),
         spec: MetadataSearchSpec {
             query: "paged result".into(),
@@ -364,5 +365,5 @@ fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[Indexe
     }
     header.status = "completed".into();
     header.completed_at_s = Some(1);
-    store.update_search(session_id, &header).unwrap();
+    store.transition_search(session_id, &header, &[]).unwrap();
 }

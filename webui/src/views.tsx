@@ -1,5 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
+import { SearchObservations } from "./searchObservations";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
@@ -45,8 +46,8 @@ import {
   RestClient,
   RuntimeDiagnostics,
   SearchItem,
-  SearchResultObservation,
   SearchResultMedia,
+  SearchResult,
   ServerItem,
   SharedDirectories,
   SharedFileIgnores,
@@ -388,6 +389,11 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
 export function SearchView(props: {
   searches: SearchItem[];
   selectedSearch: SearchItem | null;
+  resultPage: CursorPage<SearchResult> | null;
+  resultCursor: string | null;
+  sessionCursor: string | null;
+  sessionNextCursor: string | null;
+  selectSearchSessionsPage: (cursor: string | null) => void;
   selectedSearchId?: string;
   categories: Category[];
   client: RestClient;
@@ -396,12 +402,13 @@ export function SearchView(props: {
   searchSort: string;
   searchOrder: string;
   selectSearchSort: (sort: string, order: string) => void;
-  selectSearchPage: (offset: number) => void;
+  selectSearchPage: (cursor: string | null) => void;
   onSearchCreated: (search: SearchItem) => void;
   onSearchDeleted: (searchId: string) => void;
   onSearchesCleared: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [parentSearchId, setParentSearchId] = useState<string | null>(null);
   const [method, setMethod] = useState("automatic");
   const [fileType, setFileType] = useState("");
   const [extension, setExtension] = useState("");
@@ -417,20 +424,14 @@ export function SearchView(props: {
   const [artist, setArtist] = useState("");
   const [category, setCategory] = useState("");
   const [paused, setPaused] = useState(false);
-  const orderedSearches = useMemo(
-    () => [...props.searches].sort((left, right) => Number(right.id) - Number(left.id)),
-    [props.searches]
-  );
+  const [observationSelection, setObservationSelection] = useState<{ session: string; claim: string } | null>(null);
+  const selectedSearch = props.selectedSearch?.id === props.selectedSearchId ? props.selectedSearch : null;
+  const orderedSearches = props.searches;
   const selectedSummary = props.searches.find((search) => search.id === props.selectedSearchId);
-  const displayedSearch = props.selectedSearch ?? selectedSummary;
-  const results = props.selectedSearch?.items ?? props.selectedSearch?.results ?? [];
-  const resultTotal = props.selectedSearch?.total ?? displayedSearch?.resultCount ?? results.length;
-  const resultOffset = props.selectedSearch?.offset ?? 0;
-  const resultLimit = Math.max(1, (props.selectedSearch?.limit ?? results.length) || 1);
-  const resultPageStart = results.length === 0 ? 0 : resultOffset + 1;
-  const resultPageEnd = Math.min(resultOffset + results.length, resultTotal);
+  const displayedSearch = selectedSearch ?? selectedSummary;
+  const results = props.resultPage?.data ?? [];
   const searchQueryError = searchQueryValidationError(query);
-  const displayedStatus = displayedSearch?.status ?? displayedSearch?.state ?? "unknown";
+  const displayedStatus = displayedSearch?.status ?? "unknown";
   const searchProgress = displayedSearch?.progress;
   const searchPhaseLabel = searchProgress?.phase
     ? searchProgress.phase.replace(/-/g, " ")
@@ -443,11 +444,7 @@ export function SearchView(props: {
         ? "Waiting"
         : "—";
   const resolvedMethodLabel = displayedSearch?.resolvedMethod
-    ?? (displayedStatus === "completed"
-      ? "none (local only)"
-      : displayedStatus === "queued" || displayedStatus === "running"
-        ? "pending"
-        : "none");
+    ?? (displayedStatus === "queued" || displayedStatus === "running" ? "pending" : "none");
   const criteria = displayedSearch?.criteria;
   const criteriaRows = [
     criteria?.extension ? ["Extension", `.${criteria.extension.replace(/^\./, "")}`] : null,
@@ -471,6 +468,7 @@ export function SearchView(props: {
     }
     const next = await props.client.post<SearchItem>("searches", {
       query: normalizedQuery,
+      ...(parentSearchId ? { parentSearchId } : {}),
       method,
       type: fileType,
       ...(extension.trim() ? { extension: extension.trim() } : {}),
@@ -485,7 +483,27 @@ export function SearchView(props: {
       ...(album.trim() ? { album: album.trim() } : {}),
       ...(artist.trim() ? { artist: artist.trim() } : {})
     });
+    setParentSearchId(null);
     props.onSearchCreated(next);
+  };
+
+  const useSelectedCriteria = () => {
+    if (!displayedSearch) return;
+    const source = displayedSearch.criteria;
+    const numberText = (value: number | null | undefined) => value == null ? "" : String(value);
+    setParentSearchId(displayedSearch.id);
+    setQuery(displayedSearch.query ?? "");
+    setMethod(displayedSearch.requestedMethod ?? "automatic");
+    setFileType(displayedSearch.type ?? "");
+    setExtension(source?.extension ?? "");
+    setMinSizeBytes(numberText(source?.minSizeBytes));
+    setMaxSizeBytes(numberText(source?.maxSizeBytes));
+    setMinAvailability(numberText(source?.minAvailability));
+    setMinCompleteSources(numberText(source?.minCompleteSources));
+    setMinBitrateKbps(numberText(source?.minBitrateKbps));
+    setMinLengthSeconds(numberText(source?.minLengthSeconds));
+    setCodec(source?.codec ?? ""); setTitle(source?.title ?? "");
+    setAlbum(source?.album ?? ""); setArtist(source?.artist ?? "");
   };
 
   const deleteSelectedSearch = async () => {
@@ -494,11 +512,13 @@ export function SearchView(props: {
       return;
     }
     await props.client.delete(`searches/${searchId}`);
+    if (parentSearchId === searchId) setParentSearchId(null);
     props.onSearchDeleted(searchId);
   };
 
   const clearSearches = async () => {
     await props.client.delete("searches?confirm=true");
+    setParentSearchId(null);
     props.onSearchesCleared();
   };
 
@@ -506,8 +526,10 @@ export function SearchView(props: {
     <section class="panel card">
       <div class="section-title">
         <h2>Search</h2>
-        <span>{props.searches.length} sessions</span>
+        <span>{props.searches.length} sessions on this page</span>
       </div>
+      {parentSearchId && <div class="form-row"><span>New search linked to #{parentSearchId}</span>
+        <button class="btn" type="button" onClick={() => setParentSearchId(null)}>Clear link</button></div>}
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         if (!searchQueryError) {
@@ -535,7 +557,7 @@ export function SearchView(props: {
         <button class="btn" type="submit" disabled={!normalizeSearchQuery(query) || Boolean(searchQueryError)}><Search size={16} />Start</button>
       </form>
       {searchQueryError && <p class="field-error">{searchQueryError}</p>}
-      {orderedSearches.length > 0 && (
+      {(orderedSearches.length > 0 || displayedSearch != null) && (
         <div class="form-row subtle-row search-session-row">
           <label for="search-session">Search session</label>
           <select
@@ -545,13 +567,25 @@ export function SearchView(props: {
             onInput={(event) => props.selectSearch(event.currentTarget.value)}
           >
             {!props.selectedSearchId && <option value="" disabled>Select a search session</option>}
+            {displayedSearch && !orderedSearches.some((search) => search.id === displayedSearch.id) &&
+              <option value={displayedSearch.id}>#{displayedSearch.id} {displayedSearch.query} · {displayedStatus}</option>}
             {orderedSearches.map((search) => (
               <option key={search.id} value={search.id}>
-                #{search.id} {search.query || "Untitled search"} · {search.status ?? search.state ?? "unknown"} · {search.resultCount ?? search.total ?? 0} results
+                #{search.id} {search.query || "Untitled search"} · {search.status ?? "unknown"} · {search.resultCount} results
               </option>
             ))}
           </select>
           {displayedSearch && <StatusPill value={displayedStatus} />}
+          <button class="btn btn-outline-secondary" type="button" disabled={!displayedSearch} onClick={useSelectedCriteria}>
+            Use criteria for new search
+          </button>
+          {displayedSearch?.parentSearchId && <button class="btn" type="button"
+            onClick={() => props.selectSearch(displayedSearch.parentSearchId!)}>View parent #{displayedSearch.parentSearchId}</button>}
+          <button class="btn btn-outline-secondary" type="button"
+            disabled={!displayedSearch || !["queued", "running"].includes(displayedStatus)}
+            onClick={() => { void props.run(() => props.client.post(`searches/${displayedSearch!.id}/stop`), "Search stopped"); }}>
+            Stop search
+          </button>
           <button
             class="btn btn-outline-secondary"
             type="button"
@@ -568,7 +602,7 @@ export function SearchView(props: {
           <button
             class="btn btn-outline-danger"
             type="button"
-            disabled={props.searches.length === 0}
+            disabled={props.searches.length === 0 && !displayedSearch}
             onClick={() => {
               if (window.confirm("Clear every saved search session and result?")) {
                 void props.run(clearSearches, "Search sessions cleared", { refresh: false });
@@ -658,6 +692,10 @@ export function SearchView(props: {
           <option value="codec:asc">Codec, A–Z</option>
         </select>
       </div>
+      <div class="form-row" role="group" aria-label="Search session pages">
+        <span>Session pages</span><CursorControls cursor={props.sessionCursor} nextCursor={props.sessionNextCursor}
+          loading={false} change={props.selectSearchSessionsPage} />
+      </div>
       <TableScroll label="Search results">
         <table class="table table-vcenter card-table">
           <thead>
@@ -667,70 +705,31 @@ export function SearchView(props: {
               <th>Sources</th>
               <th>Rating</th>
               <th>Type</th>
-              <th>Origin</th>
+              <th>Observations</th>
               <th>Hash</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody>
             {results.map((result) => {
-              const observations = result.observations ?? [];
               const mediaSummary = searchResultMediaSummary(result.media);
-              const origins = [...new Set(observations.map((observation) => observation.origin))];
-              const alternateNames = [...new Set(
-                observations
-                  .map((observation) => observation.normalizedName)
-                  .filter((name) => name && name !== result.displayName)
-              )];
-              const aichHashes = [...new Set(
-                observations
-                  .map((observation) => observation.aichHash)
-                  .concat(result.aichHash)
-                  .filter((hash): hash is string => Boolean(hash))
-              )];
               return (
               <tr key={result.id}>
                 <td class="search-result-name-cell">
                   <strong>{result.displayName ?? result.hash}</strong>
-                  {alternateNames.length > 0 && (
-                    <span class="search-result-alternates">Also seen as: {alternateNames.join(", ")}</span>
-                  )}
                   {result.complete && <span class="search-result-complete">Complete file</span>}
                   {result.directory && <span class="search-result-directory">Folder: {result.directory}</span>}
                   {mediaSummary && <span class="search-result-media">{mediaSummary}</span>}
-                  {aichHashes.length > 0 && (
-                    <span class={`search-result-aich${aichHashes.length > 1 ? " search-result-aich-conflict" : ""}`}>
-                      {aichHashes.length === 1 ? "AICH" : "Conflicting AICH claims"}: {aichHashes.join(", ")}
-                    </span>
-                  )}
-                  {observations.length > 0 && (
-                    <details class="search-observations">
-                      <summary>{observations.length} observation{observations.length === 1 ? "" : "s"}</summary>
-                      <ul>
-                        {observations.map((observation, index) => {
-                          const observationMedia = searchResultMediaSummary(observation.media);
-                          return (
-                            <li key={`${observation.origin}-${observation.rawName}-${index}`}>
-                              <strong>{observation.origin}</strong>: {observation.normalizedName}
-                              {observation.rawName !== observation.normalizedName ? ` (raw: ${observation.rawName})` : ""} · {searchResultObservationEvidence(observation)}
-                              {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
-                              {observation.aichHash ? ` · AICH ${observation.aichHash}` : ""}
-                              {observationMedia ? ` · ${observationMedia}` : ""}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </details>
-                  )}
+                  {result.aichHash && <span class="search-result-aich">AICH: {result.aichHash}</span>}
                 </td>
                 <td>{result.sizeBytes === null ? "Unknown" : formatBytes(result.sizeBytes)}</td>
                 <td>
-                  {result.sources ?? result.availability ?? 0}
+                  {result.sources ?? 0}
                   <span class="search-complete-sources">{result.completeSources ?? 0} complete</span>
                 </td>
                 <td>{(result.rating ?? 0) > 0 ? `${result.rating}/5` : "—"}</td>
                 <td>{result.fileType ?? ""}</td>
-                <td>{origins.length > 0 ? origins.join(", ") : "unknown"}</td>
+                <td><button class="btn" type="button" onClick={() => setObservationSelection({ session: selectedSearch!.id, claim: result.id })}>Observations</button></td>
                 <td><code class="search-result-hash">{result.hash}</code></td>
                 <td>
                   <button class="btn"
@@ -738,7 +737,7 @@ export function SearchView(props: {
                     title="Download this result"
                     onClick={() => void props.run(
                       () => createDownloadWithChoice((redownload) =>
-                        props.client.post(`searches/${props.selectedSearch?.id}/results/${result.id}/download`, {
+                        props.client.post(`searches/${selectedSearch?.id}/results/${result.id}/download`, {
                           intent: paused ? "stopped" : "started",
                           category: category || null,
                           redownload
@@ -758,29 +757,16 @@ export function SearchView(props: {
           </tbody>
         </table>
       </TableScroll>
-      {props.selectedSearch && (
-        <div class="form-row subtle-row search-pagination" aria-label="Search result pages">
-          <span>
-            Showing {resultPageStart.toLocaleString()}–{resultPageEnd.toLocaleString()} of {resultTotal.toLocaleString()} results
-          </span>
-          <button
-            class="btn"
-            type="button"
-            disabled={resultOffset === 0}
-            aria-label="Previous search results page"
-            onClick={() => props.selectSearchPage(Math.max(0, resultOffset - resultLimit))}
-          >
-            Previous
-          </button>
-          <button
-            class="btn"
-            type="button"
-            disabled={resultPageEnd >= resultTotal}
-            aria-label="Next search results page"
-            onClick={() => props.selectSearchPage(resultOffset + resultLimit)}
-          >
-            Next
-          </button>
+      {observationSelection && observationSelection.session === selectedSearch?.id && (
+        <SearchObservations key={`${observationSelection.session}:${observationSelection.claim}`}
+          client={props.client} session={observationSelection.session} claim={observationSelection.claim}
+          close={() => setObservationSelection(null)} />
+      )}
+      {selectedSearch && (
+        <div class="form-row subtle-row search-pagination" role="group" aria-label="Search result pages">
+          <span>{results.length.toLocaleString()} results on this page · {(displayedSearch?.resultCount ?? 0).toLocaleString()} collected</span>
+          <CursorControls cursor={props.resultCursor} nextCursor={props.resultPage?.meta.nextCursor ?? null}
+            loading={props.resultPage === null} change={props.selectSearchPage} />
         </div>
       )}
     </section>
@@ -806,21 +792,6 @@ function searchResultMediaSummary(media?: SearchResultMedia): string {
   return fields.filter(Boolean).join(" · ");
 }
 
-function searchResultObservationEvidence(observation: SearchResultObservation): string {
-  const sourceEndpoint = observation.sourceClientId != null && observation.sourceClientPort != null
-    ? `client ${observation.sourceClientId}:${observation.sourceClientPort}`
-    : "";
-  return [
-    observation.sizeBytes === null ? "Unknown size" : formatBytes(observation.sizeBytes),
-    observation.fileType && observation.fileType !== "unknown" ? `type ${observation.fileType}` : "",
-    `${observation.sources} sources / ${observation.completeSources} complete`,
-    observation.reporterEndpoint ? `reporter ${observation.reporterEndpoint}` : "",
-    sourceEndpoint,
-    observation.complete ? "complete file" : "",
-    observation.directory ? `folder ${observation.directory}` : "",
-    observation.observedAt ? `observed ${shortTime(observation.observedAt)}` : ""
-  ].filter(Boolean).join(" · ");
-}
 
 function formatMediaDuration(totalSeconds: number): string {
   const seconds = Math.max(0, Math.trunc(totalSeconds));

@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 
-import { RestClient, RestError, type SearchItem } from "../../src/api";
+import { RestClient, RestError, type SearchItem, type CursorPage, type SearchResult } from "../../src/api";
 import { SearchView } from "../../src/views";
 
 describe("SearchView", () => {
@@ -17,16 +17,19 @@ describe("SearchView", () => {
       query: "linux",
       status: "completed",
       resultCount: 1,
-      total: 1,
-      offset: 0,
-      limit: 100,
-      items: [{ id: "11", hash, displayName: "Sample.bin", sizeBytes: 1 }]
+
     };
+    const resultPage: CursorPage<SearchResult> = { data: [{ id: "11", hash, displayName: "Sample.bin", sizeBytes: 1 }], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
       <SearchView
         searches={[search]}
         selectedSearch={search}
+        resultPage={resultPage}
+        resultCursor="current"
+        sessionCursor={null}
+        sessionNextCursor={null}
+        selectSearchSessionsPage={() => {}}
         selectedSearchId="7"
         categories={[]}
         client={client}
@@ -61,26 +64,29 @@ describe("SearchView", () => {
     confirm.mockRestore();
   });
 
-  it("shows the exact result window and requests adjacent pages", () => {
+  it("uses result cursors while distinguishing unknown size from zero", () => {
     const selectSearchPage = vi.fn();
     const search: SearchItem = {
       id: "7",
       query: "linux",
       status: "completed",
       resultCount: 250,
-      total: 250,
-      offset: 100,
-      limit: 100,
-      items: [
+
+    };
+    const resultPage: CursorPage<SearchResult> = { data: [
         { id: "11", hash: "00112233445566778899aabbccddeeff", displayName: "Result 101.bin", sizeBytes: null },
         { id: "12", hash: "ffeeddccbbaa99887766554433221100", displayName: "Result 102.bin", sizeBytes: 0 }
-      ]
-    };
+      ], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
       <SearchView
         searches={[search]}
         selectedSearch={search}
+        resultPage={resultPage}
+        resultCursor="current"
+        sessionCursor={null}
+        sessionNextCursor={null}
+        selectSearchSessionsPage={() => {}}
         selectedSearchId="7"
         categories={[]}
         client={new RestClient()}
@@ -96,18 +102,18 @@ describe("SearchView", () => {
       />
     );
 
-    expect(screen.getByText("Showing 101–102 of 250 results")).toBeInTheDocument();
+    expect(screen.getByText("2 results on this page · 250 collected")).toBeInTheDocument();
     for (const button of screen.getAllByRole("button", { name: "Download" })) {
       expect(button).toBeEnabled();
     }
 
     expect(screen.getByText("Unknown")).toBeInTheDocument();
     expect(screen.getByText("0 B")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Previous search results page" }));
-    fireEvent.click(screen.getByRole("button", { name: "Next search results page" }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Search result pages" })).getByRole("button", { name: "First page" }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Search result pages" })).getByRole("button", { name: "Next page" }));
 
-    expect(selectSearchPage).toHaveBeenNthCalledWith(1, 0);
-    expect(selectSearchPage).toHaveBeenNthCalledWith(2, 200);
+    expect(selectSearchPage).toHaveBeenNthCalledWith(1, null);
+    expect(selectSearchPage).toHaveBeenNthCalledWith(2, "next");
   });
 
   it("presents search provenance and manages result ordering and sessions", async () => {
@@ -132,9 +138,6 @@ describe("SearchView", () => {
         unit: "servers"
       },
       resultCount: 1,
-      total: 1,
-      offset: 0,
-      limit: 100,
       criteria: {
         extension: "flac",
         minAvailability: 4,
@@ -142,7 +145,9 @@ describe("SearchView", () => {
         codec: "flac",
         artist: "Example Artist"
       },
-      items: [{
+
+    };
+    const resultPage: CursorPage<SearchResult> = { data: [{
         id: "13",
         hash: "00112233445566778899aabbccddeeff",
         displayName: "Primary.flac",
@@ -162,49 +167,18 @@ describe("SearchView", () => {
           bitrateKbps: 192,
           codec: "FLAC"
         },
-        observations: [
-          {
-            origin: "server",
-            reporterEndpoint: null,
-            rawName: "Primary.flac",
-            normalizedName: "Primary.flac",
-            sizeBytes: 4096,
-            sources: 8,
-            completeSources: 3,
-            fileType: "audio",
-            media: { artist: "", album: "", title: "", lengthSeconds: 321, bitrateKbps: 192, codec: "FLAC" },
-            rating: 4,
-            aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            complete: true,
-            sourceClientId: 16909060,
-            sourceClientPort: 4662,
-            directory: "Audio",
-            observedAt: "2026-10-06T12:00:00Z"
-          },
-          {
-            origin: "global",
-            reporterEndpoint: "192.0.2.10:4661",
-            rawName: "Alternate.flac",
-            normalizedName: "Alternate.flac",
-            sizeBytes: 4096,
-            sources: 12,
-            completeSources: 5,
-            fileType: "audio",
-            media: { artist: "Example Artist", album: "Example Album", title: "Example Title", lengthSeconds: 321, bitrateKbps: 192, codec: "FLAC" },
-            rating: 3,
-            aichHash: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-            complete: false,
-            directory: "",
-            observedAt: "2026-10-06T12:00:01Z"
-          }
-        ]
-      }]
-    };
+
+      }], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
       <SearchView
         searches={[search]}
         selectedSearch={search}
+        resultPage={resultPage}
+        resultCursor="current"
+        sessionCursor={null}
+        sessionNextCursor={null}
+        selectSearchSessionsPage={() => {}}
         selectedSearchId="9"
         categories={[]}
         client={client}
@@ -225,18 +199,14 @@ describe("SearchView", () => {
     expect(screen.getByText("4 / 10 servers")).toBeInTheDocument();
     expect(screen.getByText("Extension: .flac")).toBeInTheDocument();
     expect(screen.getByText("Minimum complete: 2")).toBeInTheDocument();
-    expect(screen.getByText("Also seen as: Alternate.flac")).toBeInTheDocument();
     expect(screen.getByText("Complete file")).toBeInTheDocument();
+    expect(screen.getByText("AICH: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Observations" })).toBeInTheDocument();
     expect(screen.getByText("Folder: Curated Audio")).toBeInTheDocument();
     expect(screen.getByText("Title: Example Title · Artist: Example Artist · Album: Example Album · 5:21 · 192 kbps · Codec: FLAC")).toBeInTheDocument();
     expect(screen.getByText("5 complete")).toBeInTheDocument();
     expect(screen.getByText("4/5")).toBeInTheDocument();
-    expect(screen.getByText("Conflicting AICH claims: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")).toBeInTheDocument();
-    expect(screen.getByText(/AICH AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/)).toBeInTheDocument();
-    expect(screen.getByText("server, global")).toBeInTheDocument();
     expect(screen.getAllByText("00112233445566778899aabbccddeeff").length).toBeGreaterThan(0);
-    expect(screen.getByText(/4.0 KiB · type audio · 8 sources \/ 3 complete · client 16909060:4662 · complete file · folder Audio/)).toBeInTheDocument();
-    expect(screen.getByText(/12 sources \/ 5 complete · reporter 192.0.2.10:4661/)).toBeInTheDocument();
 
     fireEvent.input(screen.getByRole("combobox", { name: "Sort search results" }), {
       target: { value: "bitrateKbps:desc" }
@@ -252,5 +222,63 @@ describe("SearchView", () => {
     expect(onSearchesCleared).toHaveBeenCalled();
     expect(confirm).toHaveBeenCalledTimes(2);
     confirm.mockRestore();
+  });
+});
+
+
+describe("SearchView collection control", () => {
+  it("stops active collection and keeps retained results visible", async () => {
+    const client = new RestClient();
+    const post = vi.spyOn(client, "post").mockResolvedValue(undefined);
+    const onDeleted = vi.fn();
+    const search: SearchItem = { id:"9007199254740993",query:"sample",status:"running",resultCount:1 };
+    const page: CursorPage<SearchResult> = {data:[{id:"11",hash:"11".repeat(16),displayName:"Sample.bin",sizeBytes:4096}],meta:{apiVersion:"v1",nextCursor:null,hasMore:false}};
+    const props = {
+      searches:[search],selectedSearch:search,selectedSearchId:search.id,
+      resultPage:page,resultCursor:null,sessionCursor:null,sessionNextCursor:null,
+      selectSearchSessionsPage:vi.fn(),categories:[],client,
+      run:async (operation:()=>Promise<unknown>)=>{await operation();},selectSearch:vi.fn(),
+      searchSort:"sources",searchOrder:"desc",selectSearchSort:vi.fn(),selectSearchPage:vi.fn(),
+      onSearchCreated:vi.fn(),onSearchDeleted:onDeleted,onSearchesCleared:vi.fn()
+    };
+    const view=render(<SearchView {...props} />);
+    fireEvent.click(screen.getByRole("button",{name:"Stop search"}));
+    await waitFor(()=>expect(post).toHaveBeenCalledWith(`searches/${search.id}/stop`));
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(screen.getByText("Sample.bin")).toBeTruthy();
+    const stopped: SearchItem = {...search,status:"stopped"};
+    view.rerender(<SearchView {...props} searches={[stopped]} selectedSearch={stopped} />);
+    expect((screen.getByRole("button",{name:"Stop search"}) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Sample.bin")).toBeTruthy();
+  });
+});
+
+
+describe("SearchView linked creation", () => {
+  it("prefills editable criteria and posts an exact parent ID through normal creation", async () => {
+    const client=new RestClient();
+    const search: SearchItem={id:"9007199254740993",query:"Parent query",requestedMethod:"server",type:"audio",status:"stopped",resultCount:12,
+      criteria:{extension:"flac",minSizeBytes:1024,minBitrateKbps:192,artist:"Sample Artist"}};
+    const created: SearchItem={id:"9007199254740994",parentSearchId:search.id,query:"Edited query",status:"queued",resultCount:0};
+    const post=vi.spyOn(client,"post").mockResolvedValue(created);
+    const onCreated=vi.fn();
+    render(<SearchView searches={[]} selectedSearch={search} selectedSearchId={search.id}
+      resultPage={null} resultCursor={null} sessionCursor={null} sessionNextCursor={null}
+      selectSearchSessionsPage={()=>{}} categories={[]} client={client}
+      run={async operation=>{await operation();}} selectSearch={()=>{}}
+      searchSort="sources" searchOrder="desc" selectSearchSort={()=>{}} selectSearchPage={()=>{}}
+      onSearchCreated={onCreated} onSearchDeleted={()=>{}} onSearchesCleared={()=>{}} />);
+    expect(screen.getByRole("option",{name: new RegExp(search.id)})).toBeTruthy();
+    fireEvent.click(screen.getByRole("button",{name:"Use criteria for new search"}));
+    const input=screen.getByPlaceholderText("Search query") as HTMLInputElement;
+    expect(input.value).toBe("Parent query");
+    fireEvent.input(input,{target:{value:"Edited query"}});
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(()=>expect(post).toHaveBeenCalledWith("searches",expect.objectContaining({
+      query:"Edited query",parentSearchId:"9007199254740993",method:"server",type:"audio",
+      extension:"flac",minSizeBytes:1024,minBitrateKbps:192,artist:"Sample Artist"
+    })));
+    expect(onCreated).toHaveBeenCalledWith(created);
+    await waitFor(()=>expect(screen.queryByText(`New search linked to #${search.id}`)).toBeNull());
   });
 });

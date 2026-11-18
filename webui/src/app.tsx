@@ -36,6 +36,8 @@ import {
   RestClient,
   RuntimeDiagnostics,
   SearchItem,
+  SearchResult,
+  CursorPage,
   SharedDirectories,
   SharedFileIgnores,
   SharedFile,
@@ -109,19 +111,6 @@ const pollingEventStreamStatus: EventStreamStatus = {
   retryIntervalMs: EVENT_STREAM_RETRY_MS
 };
 
-function mostRecentSearch(searches: SearchItem[] | undefined): SearchItem | undefined {
-  return searches?.reduce<SearchItem | undefined>((recent, candidate) => {
-    if (!recent) {
-      return candidate;
-    }
-    const candidateId = Number(candidate.id);
-    const recentId = Number(recent.id);
-    return Number.isFinite(candidateId) && (!Number.isFinite(recentId) || candidateId > recentId)
-      ? candidate
-      : recent;
-  }, undefined);
-}
-
 function currentRoute(): AppRoute {
   const route = routeFromPathname(window.location.pathname);
   if (route) {
@@ -191,7 +180,10 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [searches, setSearches] = useState<SearchItem[]>([]);
   const [selectedSearch, setSelectedSearch] = useState<SearchItem | null>(null);
-  const [searchPage, setSearchPage] = useState({ searchId: "", offset: 0 });
+  const [searchPage, setSearchPage] = useState<{ searchId: string; cursor: string | null }>({ searchId: "", cursor: null });
+  const [searchResultPage, setSearchResultPage] = useState<CursorPage<SearchResult> | null>(null);
+  const [searchSessionCursor, setSearchSessionCursor] = useState<string | null>(null);
+  const [searchSessionNextCursor, setSearchSessionNextCursor] = useState<string | null>(null);
   const [searchSort, setSearchSort] = useState("sources");
   const [searchOrder, setSearchOrder] = useState("desc");
   const [message, setMessage] = useState("");
@@ -222,8 +214,11 @@ export function App({ appearance }: { appearance: Appearance }) {
     setUploadQueue([]);
     setLogs([]);
     setSearches([]);
+    setSearchResultPage(null);
+    setSearchSessionCursor(null);
+    setSearchSessionNextCursor(null);
     setSelectedSearch(null);
-    setSearchPage({ searchId: "", offset: 0 });
+    setSearchPage({ searchId: "", cursor: null });
     setSearchSort("sources");
     setSearchOrder("desc");
   }, []);
@@ -255,7 +250,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   }, []);
 
   const tab = route.tab;
-  const selectedSearchOffset = route.searchId === searchPage.searchId ? searchPage.offset : 0;
+  const selectedSearchCursor = route.searchId === searchPage.searchId ? searchPage.cursor : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -528,40 +523,35 @@ export function App({ appearance }: { appearance: Appearance }) {
     const selectedSearchId = route.searchId;
     setSelectedSearch((current) => current?.id === selectedSearchId ? current : null);
     let cancelled = false;
+    setSearchResultPage(null);
     const loadSearchSessions = async () => {
       try {
-        const collection = await client.get<Page<SearchItem> | SearchItem[]>("searches");
-        const nextSearches = Array.isArray(collection) ? collection : collection.items ?? [];
-        if (cancelled) {
-          return;
-        }
-        setSearches(nextSearches);
+        const sessionQuery = new URLSearchParams({ limit: "100" });
+        if (searchSessionCursor) sessionQuery.set("cursor", searchSessionCursor);
+        const collection = await client.getPage<SearchItem>(`searches?${sessionQuery}`);
+        if (cancelled) return;
+        setSearches(collection.data);
+        setSearchSessionNextCursor(collection.meta.nextCursor);
         if (!selectedSearchId) {
-          const recent = mostRecentSearch(nextSearches);
-          if (recent?.id !== undefined) {
-            navigateToSearch(recent.id, true);
-          } else {
-            setSelectedSearch(null);
-          }
+          const recent = collection.data[0];
+          if (recent) navigateToSearch(recent.id, true);
+          else setSelectedSearch(null);
           return;
         }
-        const search = await client.get<SearchItem>(
-          `searches/${selectedSearchId}?offset=${selectedSearchOffset}&limit=${SEARCH_RESULT_PAGE_SIZE}&includeEvidence=false&exactTotal=true&sort=${searchSort}&order=${searchOrder}`
-        );
-        if (!cancelled) {
-          setSelectedSearch(search);
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(errorMessage(caught));
-        }
-      }
+        const resultQuery = new URLSearchParams({ limit: String(SEARCH_RESULT_PAGE_SIZE), sort: searchSort, order: searchOrder });
+        if (selectedSearchCursor) resultQuery.set("cursor", selectedSearchCursor);
+        const [search, resultPage] = await Promise.all([
+          client.get<SearchItem>(`searches/${selectedSearchId}`),
+          client.getPage<SearchResult>(`searches/${selectedSearchId}/results?${resultQuery}`)
+        ]);
+        if (!cancelled) { setSelectedSearch(search); setSearchResultPage(resultPage); }
+      } catch (caught) { if (!cancelled) setError(errorMessage(caught)); }
     };
     void loadSearchSessions();
     return () => {
       cancelled = true;
     };
-  }, [tab, route.searchId, selectedSearchOffset, searchSort, searchOrder, refreshGeneration, authState, navigateToSearch]);
+  }, [tab, route.searchId, selectedSearchCursor, searchSessionCursor, searchSort, searchOrder, refreshGeneration, authState, navigateToSearch]);
 
   const downloadSseEnabled = supportsDownloadSse(appInfo) || supportsDownloadSse(capabilities);
 
@@ -921,6 +911,11 @@ export function App({ appearance }: { appearance: Appearance }) {
               <SearchView
                 searches={searches}
                 selectedSearch={selectedSearch}
+                resultPage={searchResultPage}
+                resultCursor={selectedSearchCursor}
+                sessionCursor={searchSessionCursor}
+                sessionNextCursor={searchSessionNextCursor}
+                selectSearchSessionsPage={setSearchSessionCursor}
                 selectedSearchId={route.searchId}
                 categories={categories}
                 client={client}
@@ -931,30 +926,30 @@ export function App({ appearance }: { appearance: Appearance }) {
                 selectSearchSort={(sort, order) => {
                   setSearchSort(sort);
                   setSearchOrder(order);
-                  setSearchPage({ searchId: route.searchId ?? "", offset: 0 });
+                  setSearchPage({ searchId: route.searchId ?? "", cursor: null });
                 }}
-                selectSearchPage={(offset) => {
-                  if (route.searchId) {
-                    setSearchPage({ searchId: route.searchId, offset: Math.max(0, offset) });
-                  }
+                selectSearchPage={(cursor) => {
+                  if (route.searchId) setSearchPage({ searchId: route.searchId, cursor });
                 }}
                 onSearchCreated={(search) => {
-                  setSearches((current) => [
-                    ...current.filter((candidate) => candidate.id !== search.id),
-                    search
-                  ]);
+                  setSearchSessionCursor(null);
                   setSelectedSearch(search);
+                  setSearchPage({ searchId: search.id, cursor: null });
                   navigateToSearch(search.id);
                 }}
                 onSearchDeleted={() => {
                   setSelectedSearch(null);
-                  setSearchPage({ searchId: "", offset: 0 });
+                  setSearchResultPage(null);
+                  setSearchPage({ searchId: "", cursor: null });
                   navigateToTab("search");
                 }}
                 onSearchesCleared={() => {
                   setSearches([]);
+                  setSearchSessionCursor(null);
+                  setSearchSessionNextCursor(null);
+                  setSearchResultPage(null);
                   setSelectedSearch(null);
-                  setSearchPage({ searchId: "", offset: 0 });
+                  setSearchPage({ searchId: "", cursor: null });
                   navigateToTab("search");
                 }}
               />

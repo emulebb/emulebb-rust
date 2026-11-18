@@ -15,11 +15,13 @@ workspace = true
 packet-diagnostics = ["emulebb-core/packet-diagnostics"]
 
 [dependencies]
+data-encoding.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
 emulebb-diagnostics = { path = "../emulebb-diagnostics" }
 emulebb-core = { path = "../emulebb-core" }
+emulebb-metadata = { path = "../emulebb-metadata" }
 futures-util.workspace = true
 http-body-util.workspace = true
 hex.workspace = true
@@ -42,4 +44,3 @@ rusqlite.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
-emulebb-metadata = { path = "../emulebb-metadata" }

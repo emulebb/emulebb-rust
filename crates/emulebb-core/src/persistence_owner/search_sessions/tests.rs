@@ -15,7 +15,6 @@ async fn removal_after_disconnect(clear: bool) {
     let first_cancel = CancellationToken::new();
     let second_cancel = CancellationToken::new();
     let mut second = state.lock().await.searches[&first_id].clone();
-    second.results.clear();
     second.spec.query = "another query".into();
     second.id = crate::search_state::create_search(&store, &second).unwrap();
     let second_id = second.id.clone();
@@ -48,7 +47,10 @@ async fn removal_after_disconnect(clear: bool) {
     tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
-    assert_eq!(store.load_searches().unwrap().len(), usize::from(!clear));
+    assert_eq!(
+        store.search_headers_page(None, 10).unwrap().items.len(),
+        usize::from(!clear)
+    );
     caller.abort();
     *owner.publication_gate.lock().unwrap() = None;
     let late_ingress = {
@@ -93,4 +95,87 @@ async fn delete_finishes_after_disconnect_and_late_ingress_cannot_restore_member
 #[tokio::test]
 async fn clear_finishes_after_disconnect_and_preserves_independent_evidence() {
     removal_after_disconnect(true).await;
+}
+
+#[tokio::test]
+async fn stop_finishes_after_disconnect_and_preserves_frozen_results() {
+    let (store, state, owner, publication, observations) = search_fixture().await;
+    owner
+        .observe_content(&observations, Some(&publication))
+        .await
+        .unwrap();
+    let id = publication.search_id.clone();
+    let queue = Arc::new(parking_lot::Mutex::new(SearchQueue::new()));
+    queue
+        .lock()
+        .enqueue(
+            id.clone(),
+            publication.request.clone(),
+            SearchQueueLane::Server,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    let cancel = CancellationToken::new();
+    state
+        .lock()
+        .await
+        .search_cancels
+        .insert(id.clone(), cancel.clone());
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let caller = {
+        let owner = Arc::clone(&owner);
+        let queue = Arc::clone(&queue);
+        let parsed = id.parse().unwrap();
+        tokio::spawn(async move { owner.stop_search_session(parsed, &queue).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .search_header(id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .data
+            .status,
+        "stopped"
+    );
+    assert!(!cancel.is_cancelled());
+    caller.abort();
+    *owner.publication_gate.lock().unwrap() = None;
+    gate.release.notify_one();
+    wait_for_slots(&owner, 0).await;
+    assert!(cancel.is_cancelled());
+    assert_eq!(queue.lock().pending_len(), 0);
+    assert!(!state.lock().await.searches.contains_key(&id));
+    owner
+        .observe_content(&observations, Some(&publication))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .search_header(id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .result_count,
+        1
+    );
+    assert_eq!(
+        store
+            .search_result_observations_page(id.parse().unwrap(), 1, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items[0]
+            .observation_count,
+        1
+    );
+    assert!(
+        owner
+            .stop_search_session(id.parse().unwrap(), &queue)
+            .await
+            .unwrap()
+    );
+    assert_eq!(usage(&owner), (0, 0));
+    owner.close_and_drain().await.unwrap();
 }

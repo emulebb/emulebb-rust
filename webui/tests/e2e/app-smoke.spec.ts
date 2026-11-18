@@ -298,6 +298,7 @@ test("loads a selected search session from a deep link", async ({ page }) => {
   const state: any = mockSnapshotFixture();
   state.searches = [{
     id: "7",
+    parentSearchId: null,
     query: "synthetic archive",
     requestedMethod: "kad",
     resolvedMethod: "kad",
@@ -322,35 +323,21 @@ test("loads a selected search session from a deep link", async ({ page }) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ data: { items: state.searches } })
+        body: JSON.stringify({ data: state.searches, meta: { apiVersion: "v1", nextCursor: null, hasMore: false } })
       });
       return;
     }
     if (request.method() === "GET" && path === "searches/7") {
-      expect(requestUrl.searchParams.get("offset")).toBe("0");
+      await route.fulfill({ json: { data: state.searches[0], meta: { apiVersion: "v1" } } });
+      return;
+    }
+    if (request.method() === "GET" && path === "searches/7/results") {
       expect(requestUrl.searchParams.get("limit")).toBe("100");
-      expect(requestUrl.searchParams.get("exactTotal")).toBe("true");
       expect(requestUrl.searchParams.get("sort")).toBe("sources");
       expect(requestUrl.searchParams.get("order")).toBe("desc");
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: {
-            ...state.searches[0],
-            total: 1,
-            offset: 0,
-            limit: 100,
-            items: [{
-              hash: "00112233445566778899AABBCCDDEEFF",
-              displayName: "Synthetic Archive.bin",
-              sizeBytes: 4096,
-              sources: 3,
-              fileType: "arc"
-            }]
-          }
-        })
-      });
+      await route.fulfill({ json: { data: [{ id: "13", searchId: "7", hash: "00112233445566778899aabbccddeeff",
+        displayName: "Synthetic Archive.bin", sizeBytes: 4096, sources: 3, fileType: "arc" }],
+        meta: { apiVersion: "v1", nextCursor: null, hasMore: false } } });
       return;
     }
     await fallback(route);
@@ -373,6 +360,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   state.kad = { enabled: true, running: false, connected: false, firewalled: null, contactCount: 0 };
   state.searches = [{
     id: "1",
+    parentSearchId: null,
     query: "older search",
     requestedMethod: "server",
     resolvedMethod: "server",
@@ -408,7 +396,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     }
     if (method === "GET" && path === "searches") {
       record();
-      await fulfill({ items: state.searches });
+      await route.fulfill({ json: { data: [...state.searches].reverse(), meta: { apiVersion: "v1", nextCursor: null, hasMore: false } } });
       return;
     }
     if (method === "POST" && path === "servers/operations/import-met-url") {
@@ -461,6 +449,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       record();
       const search = {
         id: "2",
+        parentSearchId: request.postDataJSON()?.parentSearchId ?? null,
         query: "linux",
         requestedMethod: "automatic",
         resolvedMethod: "global",
@@ -469,19 +458,20 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
         criteria: { extension: "pdf", maxSizeBytes: 5_242_879 }
       };
       state.searches = [...state.searches, search];
-      await fulfill({ ...search, total: 0, offset: 0, limit: 100, items: [] });
+      await route.fulfill({ status: 201, json: { data: { ...search, status: "queued", resultCount: 0 }, meta: { apiVersion: "v1" } } });
       return;
     }
     if (method === "GET" && /^searches\/\d+$/.test(path)) {
       record();
+      await fulfill(state.searches.find((candidate: any) => candidate.id === path.split("/")[1]));
+      return;
+    }
+    if (method === "GET" && /^searches\/\d+\/results$/.test(path)) {
+      record();
       const searchId = path.split("/")[1];
-      const search = state.searches.find((candidate: any) => candidate.id === searchId);
-      await fulfill({
-        ...search,
-        total: 1,
-        offset: 0,
-        limit: 250,
-        items: searchId === "2"
+      await route.fulfill({ json: {
+        meta: { apiVersion: "v1", nextCursor: null, hasMore: false },
+        data: searchId === "2"
           ? [{
               id: "13",
               hash: resultHash,
@@ -492,13 +482,26 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
               rating: 4,
               fileType: "doc",
               media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" },
-              observations: [
-                { origin: "server", rawName: "Linux Guide.pdf", normalizedName: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 3, completeSources: 1, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 4, aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", complete: false, directory: "", observedAt: "2026-10-06T12:00:00Z" },
-                { origin: "global", rawName: "Linux Manual.pdf", normalizedName: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Manual", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 3, aichHash: null, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
-              ]
+
             }]
           : [{ id: "14", hash: "00112233445566778899AABBCCDDEEFF", displayName: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
-      });
+      } });
+      return;
+    }
+    if (method === "GET" && path === "searches/2/results/13/observations") {
+      record();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: ["server", "global"].map((origin, index) => ({
+          id: String(index + 1), origin, reporterEndpoint: index ? "192.0.2.10:4661" : null,
+          rawName: index ? "Linux Manual.pdf" : "Linux Guide.pdf",
+          normalizedName: index ? "Linux Manual.pdf" : "Linux Guide.pdf",
+          sizeBytes: 1_048_576, sources: index ? 5 : 3, completeSources: index ? 2 : 1,
+          sourceClientId: null, sourceClientPort: null, fileType: "doc",
+          media: { artist: "Example Author", album: null, title: index ? "Linux Manual" : "Linux Guide", lengthSeconds: null, bitrateKbps: null, codec: "PDF" },
+          rating: index ? 3 : 4, aichHash: null, complete: null, directory: null,
+          firstSeenAt: 1_791_288_000, lastSeenAt: 1_791_288_001, observationCount: 1,
+        })), meta: { apiVersion: "v1", nextCursor: null, hasMore: false },
+      }) });
       return;
     }
     if (method === "DELETE" && /^searches\/\d+$/.test(path)) {
@@ -606,8 +609,13 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(searchPanel.getByText("Extension: .pdf")).toBeVisible();
   await expect(resultRow).toContainText("2 complete");
   await expect(resultRow).toContainText("4/5");
-  await expect(resultRow).toContainText("server, global");
-  await expect(resultRow).toContainText("Linux Manual.pdf");
+  await resultRow.getByRole("button", { name: "Observations", exact: true }).click();
+  const observations = page.getByRole("region", { name: "Search result observations", exact: true });
+  await expect(observations.getByRole("cell", { name: "Linux Manual.pdf", exact: true })).toBeVisible();
+  await expect(observations.getByRole("cell", { name: "global 192.0.2.10:4661", exact: true })).toBeVisible();
+  await expect(observations.getByRole("button", { name: "Next observations page" })).toBeDisabled();
+  await observations.getByRole("button", { name: "Close observations" }).click();
+  await expect(observations).toHaveCount(0);
   await expect(resultRow).toContainText("Title: Linux Guide");
   await expect(resultRow).toContainText("Artist: Example Author");
   await expect(resultRow).toContainText("Codec: PDF");
@@ -615,7 +623,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await searchPanel.getByRole("combobox", { name: "Sort search results" }).selectOption("rating:desc");
   await expect.poll(() => requests.some((request) =>
     request.method === "GET" &&
-    request.path === "searches/2" &&
+    request.path === "searches/2/results" &&
     new URLSearchParams(request.query).get("sort") === "rating" &&
     new URLSearchParams(request.query).get("order") === "desc"
   )).toBe(true);
@@ -667,7 +675,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) =>
     request.method === "GET" &&
-    request.path === "searches/2" &&
+    request.path === "searches/2/results" &&
     new URLSearchParams(request.query).get("sort") === "sources" &&
     new URLSearchParams(request.query).get("order") === "desc"
   )).toBe(true);

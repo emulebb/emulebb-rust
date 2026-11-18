@@ -173,7 +173,10 @@ fn presentation_bounds_and_incomplete_source_pairs_fail_before_writing_raw_facts
                 .is_err()
         );
     }
-    assert!(store.load_searches().unwrap()[0].results.is_empty());
+    assert_eq!(
+        store.search_headers_page(None, 1).unwrap().items[0].result_count,
+        0
+    );
     assert_eq!(
         store
             .connection()

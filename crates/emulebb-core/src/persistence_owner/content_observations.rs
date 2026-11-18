@@ -82,7 +82,6 @@ fn result_bytes(result: &crate::SearchResult) -> Option<usize> {
 }
 
 struct PreparedProjection {
-    result: crate::SearchResult,
     name_votes: Vec<emulebb_metadata::MetadataSearchNameVote>,
     fields: Vec<emulebb_metadata::MetadataSearchResultFields>,
 }
@@ -103,6 +102,7 @@ async fn prepare_projection(
     if !matches!(search.status.as_str(), "queued" | "running") {
         return Ok(None);
     }
+    drop(state);
     let vote_bytes = result
         .observations
         .iter()
@@ -116,32 +116,7 @@ async fn prepare_projection(
     // Reserve the bounded SQL summary receipt before admitting its allocation.
     permit.extend(512 * 1024)?;
     let fields = crate::search_state::result_fields(&result);
-    if let Some(existing) = search
-        .results
-        .iter()
-        .find(|r| r.hash == result.hash && r.size_bytes == result.size_bytes)
-    {
-        // WHY: retained observations can outgrow a single packet. Reserve the
-        // candidate and aggregation work before copying existing result state.
-        permit.extend(
-            result_bytes(existing)
-                .and_then(|n| n.checked_mul(6))
-                .ok_or(PersistenceError::TooLarge)?,
-        )?;
-        let mut candidate = existing.clone();
-        candidate.merge_observations(result);
-        Ok(Some(PreparedProjection {
-            result: candidate,
-            name_votes,
-            fields,
-        }))
-    } else {
-        Ok(Some(PreparedProjection {
-            result,
-            name_votes,
-            fields,
-        }))
-    }
+    Ok(Some(PreparedProjection { name_votes, fields }))
 }
 
 fn media_bytes(media: &crate::SearchResultMedia) -> Option<usize> {
@@ -295,36 +270,13 @@ pub(super) async fn process(
         gate.entered.notify_one();
         gate.release.notified().await;
     }
-    // WHY: the admitted request owns publication after SQL. A disconnected
-    // producer must not strand durable evidence outside its collecting session.
-    if let (Some(publication), Some(prepared), Some(committed)) =
-        (publication, candidate.take(), committed)
+    // WHY: the admitted request owns activity publication after SQL. A caller
+    // disconnect must not leave runtime activity metadata stale after commit.
+    if committed.is_some()
+        && let Some(publication) = publication
     {
-        let mut result = prepared.result;
-        result.id = committed.claim_id.to_string();
-        let summary = committed.summary;
-        result.name = summary.name;
-        result.sources = summary.source_count;
-        result.complete_sources = summary.complete_source_count;
-        result.source_client_id = summary.source_client_id;
-        result.source_client_port = summary.source_client_port;
-        result.file_type = summary.file_type;
-        result.media.artist = summary.media_artist;
-        result.media.album = summary.media_album;
-        result.media.title = summary.media_title;
-        result.media.length_seconds = summary.media_length_seconds;
-        result.media.bitrate_kbps = summary.media_bitrate_kbps;
-        result.media.codec = summary.media_codec;
-        result.rating = summary.rating;
-        result.aich_hash = summary.aich_hash;
-        result.complete = summary.complete;
-        result.directory = summary.directory;
-        crate::search_state::publish_observation(
-            &publication.state,
-            &publication.search_id,
-            result,
-        )
-        .await;
+        crate::search_state::publish_search_activity(&publication.state, &publication.search_id)
+            .await;
     }
     Ok(Response::ContentObserved(Ok(())))
 }
