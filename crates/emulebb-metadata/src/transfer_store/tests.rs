@@ -2880,7 +2880,7 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
                 directory: String::new(),
                 observations: vec![crate::MetadataSearchResultObservation {
                     origin: "local_index".to_string(),
-                    server_endpoint: None,
+                    reporter_endpoint: None,
                     name: "Scenario.File.bin".to_string(),
                     size_bytes: 1,
                     source_count: 1,

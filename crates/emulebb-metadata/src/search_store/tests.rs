@@ -100,7 +100,7 @@ fn search_state_roundtrips_unicode_results() {
     assert_eq!(data.results[0].media_codec, "AV1");
     assert_eq!(data.results[0].observations[0].origin, "server");
     assert_eq!(
-        data.results[0].observations[0].server_endpoint.as_deref(),
+        data.results[0].observations[0].reporter_endpoint.as_deref(),
         Some("192.0.2.10:4661")
     );
     assert_eq!(data.results[0].observations[0].media_album, "Example Album");
@@ -241,7 +241,7 @@ fn sample_search() -> MetadataSearchData {
             directory: String::new(),
             observations: vec![MetadataSearchResultObservation {
                 origin: "server".to_string(),
-                server_endpoint: Some("192.0.2.10:4661".to_string()),
+                reporter_endpoint: Some("192.0.2.10:4661".to_string()),
                 name: "Zażółć Sample.bin".to_string(),
                 size_bytes: 123,
                 source_count: 4,

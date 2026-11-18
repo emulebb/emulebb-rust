@@ -61,7 +61,7 @@ pub struct MetadataSearchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchResultObservation {
     pub origin: String,
-    pub server_endpoint: Option<String>,
+    pub reporter_endpoint: Option<String>,
     pub name: String,
     pub size_bytes: u64,
     pub source_count: u32,

@@ -138,7 +138,7 @@ pub struct MetadataTransferFileNameObservation {
     pub user_hash: Option<String>,
     pub client_software: String,
     pub origin: String,
-    pub server_endpoint: Option<String>,
+    pub reporter_endpoint: Option<String>,
     pub raw_name: String,
     pub normalized_name: String,
     pub observed_at_s: i64,

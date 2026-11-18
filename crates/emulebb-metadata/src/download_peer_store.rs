@@ -78,12 +78,12 @@ const SOURCE_NAME_WINDOW: usize = 16;
 // the existing eight-MiB work budget. This is a projection cap, not retention.
 const SOURCE_NAMES_PAGE_BYTES: usize = 512 * 1024;
 const SOURCE_HASH_NAMES_SQL: &str = "SELECT id,source_ip,source_tcp_port,user_hash,
-    client_software,origin,server_endpoint,raw_name,normalized_name,observed_at_s
+    client_software,origin,reporter_endpoint,raw_name,normalized_name,observed_at_s
     FROM download_job_file_name_observations INDEXED BY download_job_names_hash_window_idx
     WHERE job_id=?1 AND user_hash=?2 AND user_hash IS NOT NULL
     ORDER BY observed_at_s DESC,id DESC LIMIT 17";
 const SOURCE_ENDPOINT_NAMES_SQL: &str = "SELECT id,source_ip,source_tcp_port,user_hash,
-    client_software,origin,server_endpoint,raw_name,normalized_name,observed_at_s
+    client_software,origin,reporter_endpoint,raw_name,normalized_name,observed_at_s
     FROM download_job_file_name_observations INDEXED BY download_job_names_endpoint_window_idx
     WHERE job_id=?1 AND source_ip=?2 AND source_tcp_port=?3 AND user_hash IS NULL
     ORDER BY observed_at_s DESC,id DESC LIMIT 17";
@@ -122,7 +122,7 @@ fn source_name_from_row(row: &rusqlite::Row<'_>) -> Result<MetadataTransferFileN
         user_hash: row.get::<_, Option<Vec<u8>>>(3)?.map(hex::encode),
         client_software: row.get(4)?,
         origin: row.get(5)?,
-        server_endpoint: row.get(6)?,
+        reporter_endpoint: row.get(6)?,
         raw_name: row.get(7)?,
         normalized_name: row.get(8)?,
         observed_at_s: row.get(9)?,
@@ -214,7 +214,7 @@ fn observation_bytes(value: &MetadataTransferFileNameObservation) -> Result<usiz
             && value.client_software.len() <= 65_536
             && value.origin.len() <= 64
             && value
-                .server_endpoint
+                .reporter_endpoint
                 .as_ref()
                 .is_none_or(|v| v.len() <= 256)
             && value.observed_at_s >= 0
@@ -234,7 +234,7 @@ fn observation_bytes(value: &MetadataTransferFileNameObservation) -> Result<usiz
         + value.origin.capacity()
         + value.source_ip.as_ref().map_or(0, String::capacity)
         + value.user_hash.as_ref().map_or(0, String::capacity)
-        + value.server_endpoint.as_ref().map_or(0, String::capacity))
+        + value.reporter_endpoint.as_ref().map_or(0, String::capacity))
 }
 
 /// Source hints and diagnostic names committed with a newly admitted job.
@@ -353,10 +353,10 @@ fn insert_observation(
         .map(|hash| crate::store::decode_fixed_hex(hash, 16, "source user hash"))
         .transpose()?;
     conn.execute("INSERT INTO download_job_file_name_observations(job_id,position,source_ip,source_tcp_port,user_hash,
-                    client_software,origin,server_endpoint,raw_name,normalized_name,observed_at_s)
+                    client_software,origin,reporter_endpoint,raw_name,normalized_name,observed_at_s)
                     VALUES(?1,(SELECT coalesce(max(position)+1,0) FROM download_job_file_name_observations WHERE job_id=?1),?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                     params![token.job_id,value.source_ip,value.source_tcp_port,hash,value.client_software,value.origin,
-                        value.server_endpoint,value.raw_name,value.normalized_name,value.observed_at_s])?;
+                        value.reporter_endpoint,value.raw_name,value.normalized_name,value.observed_at_s])?;
     // Diagnostic history keeps the existing latest 512-observation
     // window in SQL; it is never an automatic name-selection policy.
     conn.execute("DELETE FROM download_job_file_name_observations WHERE job_id=?1 AND id<(
@@ -656,7 +656,7 @@ impl MetadataStore {
         );
         let conn = self.connection()?;
         let mut stmt = conn.prepare_cached("SELECT n.id,n.source_ip,n.source_tcp_port,n.user_hash,n.client_software,
-            n.origin,n.server_endpoint,n.raw_name,n.normalized_name,n.observed_at_s
+            n.origin,n.reporter_endpoint,n.raw_name,n.normalized_name,n.observed_at_s
             FROM download_job_file_name_observations n JOIN download_jobs j ON j.id=n.job_id
             WHERE n.job_id=?1 AND n.id>?2 AND j.execution_generation=?3 AND j.removed_at_s IS NULL ORDER BY n.id LIMIT ?4")?;
         let mut rows = stmt.query(params![
@@ -697,7 +697,7 @@ impl MetadataStore {
                     user_hash: row.get::<_, Option<Vec<u8>>>(3)?.map(hex::encode),
                     client_software: row.get(4)?,
                     origin: row.get(5)?,
-                    server_endpoint: row.get(6)?,
+                    reporter_endpoint: row.get(6)?,
                     raw_name: row.get(7)?,
                     normalized_name: row.get(8)?,
                     observed_at_s: row.get(9)?,

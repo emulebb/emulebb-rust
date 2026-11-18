@@ -1,7 +1,7 @@
 use emulebb_kad_proto::{
     Ed2kHash, NodeId, Tag, TagName, TagValue, constants::KAD_VERSION_AICH_KEYWORD_PUBLISH, tag_name,
 };
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 /// Highest plausible Kad keyword availability accepted by stock eMule.
 /// Larger values are treated as poisoned observations and reset to zero.
@@ -191,6 +191,8 @@ pub struct KadAichCandidate {
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub hash: Ed2kHash,
+    /// Actual queried contact that reported this entry; not a download peer.
+    pub reporter_endpoint: Option<SocketAddrV4>,
     pub names: Vec<String>,
     pub size: Option<u64>,
     pub file_type: Option<String>,
@@ -290,6 +292,7 @@ impl SearchResult {
 
         SearchResult {
             hash,
+            reporter_endpoint: None,
             names,
             size,
             file_type,
@@ -308,11 +311,12 @@ impl SearchResult {
     pub(crate) fn from_observation(
         hash: Ed2kHash,
         tags: Vec<Tag>,
-        responder_ip: Ipv4Addr,
+        reporter_endpoint: SocketAddrV4,
         responder_version: u8,
     ) -> Self {
-        let candidate = kad_aich_candidate(&tags, responder_ip, responder_version);
+        let candidate = kad_aich_candidate(&tags, *reporter_endpoint.ip(), responder_version);
         let mut result = Self::from_tags(hash, tags);
+        result.reporter_endpoint = Some(reporter_endpoint);
         result.aich_candidate = candidate;
         result
     }
@@ -756,7 +760,16 @@ mod tests {
         };
         payload.extend_from_slice(&[0xFE, 0xED]);
 
-        let result = SearchResult::from_observation(hash, tags.clone(), responder, 9);
+        let result = SearchResult::from_observation(
+            hash,
+            tags.clone(),
+            SocketAddrV4::new(responder, 4665),
+            9,
+        );
+        assert_eq!(
+            result.reporter_endpoint,
+            Some(SocketAddrV4::new(responder, 4665))
+        );
         assert_eq!(
             result.aich_candidate,
             Some(KadAichCandidate {
@@ -765,12 +778,38 @@ mod tests {
             })
         );
         assert_eq!(
-            SearchResult::from_observation(hash, tags.clone(), responder, 8).aich_candidate,
+            SearchResult::from_observation(
+                hash,
+                tags.clone(),
+                SocketAddrV4::new(responder, 4665),
+                8
+            )
+            .aich_candidate,
             None
         );
         assert_eq!(
-            SearchResult::from_observation(hash, tags, responder, 0).aich_candidate,
+            SearchResult::from_observation(hash, tags, SocketAddrV4::new(responder, 4665), 0)
+                .aich_candidate,
             None
+        );
+    }
+
+    #[test]
+    fn keyword_reporter_is_retained_without_aich_metadata() {
+        let hash = Ed2kHash::from_bytes([4; 16]);
+        let endpoint = "192.0.2.7:4672".parse().unwrap();
+        let result = SearchResult::from_observation(
+            hash,
+            vec![Tag::filename("sample.bin"), Tag::filesize(123)],
+            endpoint,
+            0,
+        );
+        assert_eq!(result.reporter_endpoint, Some(endpoint));
+        assert!(result.aich_candidate.is_none());
+        assert!(
+            SearchResult::from_tags(hash, Vec::new())
+                .reporter_endpoint
+                .is_none()
         );
     }
 
@@ -782,7 +821,7 @@ mod tests {
             SearchResult::from_observation(
                 hash,
                 aich_result_tags(4, &[(2, [0xAA; 20]), (2, [0xBB; 20])]),
-                responder,
+                SocketAddrV4::new(responder, 4665),
                 9,
             )
             .aich_candidate
@@ -793,7 +832,7 @@ mod tests {
                 SearchResult::from_observation(
                     hash,
                     aich_result_tags(publishers, &[(popularity, [0xAA; 20])]),
-                    responder,
+                    SocketAddrV4::new(responder, 4665),
                     9,
                 )
                 .aich_candidate
@@ -805,7 +844,7 @@ mod tests {
             SearchResult::from_observation(
                 hash,
                 aich_result_tags(7, &[(2, [0xAA; 20])]),
-                responder,
+                SocketAddrV4::new(responder, 4665),
                 9,
             )
             .aich_candidate
@@ -830,7 +869,8 @@ mod tests {
                 Tag::new_short(tag_name::PUBLISHINFO, TagValue::U32(0x0102_03E8)),
                 Tag::new_short(tag_name::KADAICHHASHRESULT, TagValue::SmallBlob(payload)),
             ];
-            let result = SearchResult::from_observation(hash, tags, responder, 9);
+            let result =
+                SearchResult::from_observation(hash, tags, SocketAddrV4::new(responder, 4665), 9);
             assert_eq!(result.names, vec!["still-usable.iso"]);
             assert_eq!(result.size, Some(123));
             assert!(result.aich_candidate.is_none());

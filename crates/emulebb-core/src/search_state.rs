@@ -73,7 +73,7 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
     let observations = if result.observations.is_empty() {
         vec![MetadataSearchResultObservation {
             origin: "unknown".to_string(),
-            server_endpoint: None,
+            reporter_endpoint: None,
             name: result.name.clone(),
             size_bytes: result.size_bytes,
             source_count: result.sources,
@@ -99,7 +99,7 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
             .iter()
             .map(|observation| MetadataSearchResultObservation {
                 origin: observation.origin.clone(),
-                server_endpoint: observation.server_endpoint.clone(),
+                reporter_endpoint: observation.reporter_endpoint.clone(),
                 name: observation.name.clone(),
                 size_bytes: observation.size_bytes,
                 source_count: observation.sources,
@@ -209,7 +209,7 @@ fn search_result_from_metadata(
         .map(|observation| {
             Ok(SearchResultObservation {
                 origin: observation.origin,
-                server_endpoint: observation.server_endpoint,
+                reporter_endpoint: observation.reporter_endpoint,
                 name: observation.name,
                 size_bytes: observation.size_bytes,
                 sources: observation.source_count,
@@ -302,7 +302,7 @@ mod tests {
             "00112233445566778899aabbccddeeff".to_string(),
             SearchResultObservation {
                 origin: "kad".to_string(),
-                server_endpoint: None,
+                reporter_endpoint: None,
                 name: "Example Track.flac".to_string(),
                 size_bytes: 8_192,
                 sources: 12,

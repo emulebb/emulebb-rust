@@ -450,7 +450,7 @@ pub(crate) fn search_result_response_with_options(
         .map(|observation| {
             json!({
                 "origin": observation.origin,
-                "serverEndpoint": observation.server_endpoint,
+                "reporterEndpoint": observation.reporter_endpoint,
                 "rawName": observation.name,
                 "normalizedName": normalize_ed2k_file_name(&observation.name),
                 "sizeBytes": observation.size_bytes,
@@ -812,7 +812,7 @@ mod tests {
         };
         result.observations.push(SearchResultObservation {
             origin: "global".to_string(),
-            server_endpoint: Some("192.0.2.10:4661".to_string()),
+            reporter_endpoint: Some("192.0.2.10:4661".to_string()),
             name: result.name.clone(),
             size_bytes: result.size_bytes,
             sources: result.sources,
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(complete["aichHash"], "A".repeat(32));
         assert_eq!(complete["observations"][0]["aichHash"], "A".repeat(32));
         assert_eq!(
-            complete["observations"][0]["serverEndpoint"],
+            complete["observations"][0]["reporterEndpoint"],
             "192.0.2.10:4661"
         );
         assert!(complete.get("method").is_none());

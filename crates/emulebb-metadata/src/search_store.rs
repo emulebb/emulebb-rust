@@ -211,7 +211,7 @@ impl super::MetadataStore {
                 tx.execute(
                     r#"
                     INSERT INTO search_result_observations(
-                        result_id, origin, server_endpoint, name, size_bytes, source_count,
+                        result_id, origin, reporter_endpoint, name, size_bytes, source_count,
                         complete_source_count, source_client_id, source_client_port,
                         file_type, media_artist, media_album, media_title,
                         media_length_seconds, media_bitrate_kbps, media_codec,
@@ -225,7 +225,7 @@ impl super::MetadataStore {
                     params![
                         result_id,
                         observation.origin,
-                        observation.server_endpoint,
+                        observation.reporter_endpoint,
                         observation.name,
                         i64::try_from(observation.size_bytes)?,
                         i64::from(observation.source_count),
@@ -380,7 +380,7 @@ fn load_search_results(
         .map(|(position, (id, _))| (*id, position))
         .collect::<std::collections::HashMap<_, _>>();
     let mut observations = conn.prepare(
-        "SELECT o.origin, o.server_endpoint, o.name, o.size_bytes, o.source_count, o.complete_source_count,
+        "SELECT o.origin, o.reporter_endpoint, o.name, o.size_bytes, o.source_count, o.complete_source_count,
                 o.source_client_id, o.source_client_port, o.file_type, o.media_artist,
                 o.media_album, o.media_title, o.media_length_seconds, o.media_bitrate_kbps,
                 o.media_codec, o.rating, o.aich_root, o.complete, o.directory, o.observed_at_ms, o.result_id
@@ -405,7 +405,7 @@ fn load_search_result_observations(
 ) -> Result<Vec<MetadataSearchResultObservation>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT origin, server_endpoint, name, size_bytes, source_count, complete_source_count,
+        SELECT origin, reporter_endpoint, name, size_bytes, source_count, complete_source_count,
                source_client_id, source_client_port, file_type, media_artist,
                media_album, media_title, media_length_seconds,
                media_bitrate_kbps, media_codec, rating, aich_root, complete,
@@ -425,7 +425,7 @@ fn search_observation_from_row(
 ) -> rusqlite::Result<MetadataSearchResultObservation> {
     Ok(MetadataSearchResultObservation {
         origin: row.get(0)?,
-        server_endpoint: row.get(1)?,
+        reporter_endpoint: row.get(1)?,
         name: row.get(2)?,
         size_bytes: crate::sql_value::unsigned::<u64>(row, 3)?,
         source_count: row.get::<_, u32>(4)?,

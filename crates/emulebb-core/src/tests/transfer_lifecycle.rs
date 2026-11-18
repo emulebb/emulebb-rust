@@ -457,6 +457,7 @@ fn kad_search_result_exposes_exact_hash_metadata() {
             media_bitrate_kbps: None,
             media_codec: None,
             aich_candidate: None,
+            reporter_endpoint: None,
             tags: Vec::new(),
         },
         exact_hash,

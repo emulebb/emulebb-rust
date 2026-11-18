@@ -152,7 +152,7 @@ pub(crate) fn search_result_from_passive_cache(
     let file_type = refined_result_file_type(&file.content_type, &file.name);
     let observation = SearchResultObservation {
         origin: "passive_cache".to_string(),
-        server_endpoint: None,
+        reporter_endpoint: None,
         name: file.name,
         size_bytes: file.size_bytes,
         sources: file.availability_score.max(0) as u32,
@@ -179,7 +179,7 @@ pub(crate) fn search_result_from_ed2k(
     search_id: &str,
     request: &SearchCreate,
     origin: &str,
-    server_endpoint: Option<SocketAddr>,
+    reporter_endpoint: Option<SocketAddr>,
     file: Ed2kSearchFile,
 ) -> SearchResult {
     let name = file
@@ -191,7 +191,7 @@ pub(crate) fn search_result_from_ed2k(
     let source_client_port = (file.client_port != 0).then_some(file.client_port);
     let observation = SearchResultObservation {
         origin: origin.to_string(),
-        server_endpoint: server_endpoint.map(|endpoint| endpoint.to_string()),
+        reporter_endpoint: reporter_endpoint.map(|endpoint| endpoint.to_string()),
         name,
         size_bytes: file.file_size.unwrap_or_default(),
         sources: file.source_count.unwrap_or_default(),
@@ -250,9 +250,12 @@ pub(crate) fn search_result_from_kad(
         codec: result.media_codec.unwrap_or_default(),
     };
     let observed_at = Utc::now();
+    let reporter_endpoint = result
+        .reporter_endpoint
+        .map(|endpoint| endpoint.to_string());
     let observation = |name| SearchResultObservation {
         origin: "kad".to_string(),
-        server_endpoint: None,
+        reporter_endpoint: reporter_endpoint.clone(),
         name,
         size_bytes,
         sources,
@@ -294,7 +297,7 @@ mod tests {
             "00112233445566778899aabbccddeeff".to_string(),
             SearchResultObservation {
                 origin: "unknown".to_string(),
-                server_endpoint: None,
+                reporter_endpoint: None,
                 name: name.to_string(),
                 size_bytes,
                 sources,
@@ -512,7 +515,7 @@ mod tests {
             |origin: &str, endpoint: Option<&str>, name: &str, sources, complete_sources| {
                 let mut observed = result(name, 4_096, sources);
                 observed.observations[0].origin = origin.to_string();
-                observed.observations[0].server_endpoint = endpoint.map(str::to_string);
+                observed.observations[0].reporter_endpoint = endpoint.map(str::to_string);
                 observed.observations[0].complete_sources = complete_sources;
                 observed
             };
@@ -584,6 +587,37 @@ mod tests {
     }
 
     #[test]
+    fn kad_reporters_remain_distinct_without_becoming_download_peers() {
+        let observed = |endpoint: &str| {
+            let mut entry = KadSearchResult::from_tags(
+                Ed2kHash::from_bytes([0x11; 16]),
+                vec![
+                    emulebb_kad_proto::Tag::filename("sample.bin"),
+                    emulebb_kad_proto::Tag::filesize(123),
+                ],
+            );
+            entry.reporter_endpoint = Some(endpoint.parse().unwrap());
+            search_result_from_kad("1", &request(), entry)
+        };
+        let mut first = observed("192.0.2.7:4672");
+        let second = observed("192.0.2.7:4673");
+        first.merge_observations(second.clone());
+        first.merge_observations(second);
+        assert_eq!(first.observations.len(), 2);
+        assert_ne!(
+            first.observations[0].reporter_endpoint,
+            first.observations[1].reporter_endpoint
+        );
+        assert!(
+            first
+                .observations
+                .iter()
+                .all(|observation| observation.source_client_id.is_none()
+                    && observation.source_client_port.is_none())
+        );
+    }
+
+    #[test]
     fn kad_result_maps_to_rest_search_result() {
         let req = request();
         let file_hash = Ed2kHash::from_bytes([0x11; 16]);
@@ -592,6 +626,7 @@ mod tests {
             &req,
             KadSearchResult {
                 hash: file_hash,
+                reporter_endpoint: Some("203.0.113.9:4665".parse().unwrap()),
                 names: vec![
                     "Sample File.bin".to_string(),
                     "Alternate File.bin".to_string(),
@@ -630,6 +665,9 @@ mod tests {
         assert_eq!(result.media.codec, "MP3");
         assert_eq!(result.aich_hash, hex::encode([0xAB; 20]));
         assert_eq!(result.observations.len(), 2);
+        assert!(result.observations.iter().all(|observation| {
+            observation.reporter_endpoint.as_deref() == Some("203.0.113.9:4665")
+        }));
         assert!(
             result
                 .observations
@@ -701,7 +739,7 @@ mod tests {
         assert_eq!(result.directory, "Synthetic Folder");
         assert_eq!(result.observations[0].origin, "global");
         assert_eq!(
-            result.observations[0].server_endpoint.as_deref(),
+            result.observations[0].reporter_endpoint.as_deref(),
             Some("192.0.2.10:4661")
         );
     }
