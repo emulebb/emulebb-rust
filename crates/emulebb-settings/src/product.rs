@@ -14,8 +14,10 @@ use std::{
 #[macro_use]
 mod groups;
 mod catalog;
+mod patch;
 mod revision;
 pub use catalog::*;
+pub use patch::{SettingsPatch, json_size};
 pub use revision::{SettingsRevision, SettingsRevisionError};
 
 pub const MAX_SAVED_BYTES: usize = 131_072;

@@ -33,7 +33,9 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 mod bind_config;
+mod offline_settings;
 pub use bind_config::NetworkStartupError;
+pub use offline_settings::{OfflineSettingsOperation, run_offline_settings};
 mod discovery_bootstrap;
 pub mod host_bootstrap;
 pub mod logging;
