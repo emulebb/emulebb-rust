@@ -244,3 +244,10 @@ pub struct MetadataSearchResultsQuery {
     pub order: MetadataSearchSortOrder,
     pub limit: usize,
 }
+
+/// A committed header transition and its session-local incoming vote membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchTransitionReceipt {
+    pub result_count: u64,
+    pub accepted_hashes: Vec<String>,
+}

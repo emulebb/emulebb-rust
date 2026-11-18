@@ -1,7 +1,7 @@
 //! Header-only search transitions owned through SQL and derived publication.
 use super::*;
 use crate::{KadAichSearchVotes, SearchProgress};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Phase {
@@ -127,11 +127,19 @@ pub(super) async fn process(
     let id = command.id.parse().map_err(|_| PersistenceError::Worker)?;
     let (response, receive) = oneshot::channel();
     db.send(DbRequest {
-        command: DbCommand::SearchUpdate(id, header),
+        command: DbCommand::SearchUpdate(
+            id,
+            header,
+            command
+                .votes
+                .as_ref()
+                .map(|votes| votes.keys().cloned().collect())
+                .unwrap_or_default(),
+        ),
         response,
     })
     .map_err(|_| PersistenceError::Worker)?;
-    let DbResponse::SearchUpdated = receive
+    let DbResponse::SearchUpdated(receipt) = receive
         .await
         .map_err(|_| PersistenceError::CommitUnknown)??
     else {
@@ -171,28 +179,16 @@ pub(super) async fn process(
             &command.id,
             &current.spec.query,
             command.method_token,
-            current.results.len(),
+            usize::try_from(receipt.result_count).unwrap_or(usize::MAX),
             &current.status,
             current.status_reason.as_deref(),
         );
-        // Bound the temporary set by incoming vote keys, rather than all results.
-        let accepted = command.votes.as_ref().map(|votes| {
-            current
-                .results
-                .iter()
-                .filter(|result| votes.contains_key(&result.hash))
-                .map(|result| result.hash.clone())
-                .collect::<HashSet<_>>()
-        });
         state
             .kad_aich_search_votes
             .retain(|(_, id), _| id != &command.id);
-        if let Some(votes) = command.votes {
-            for (hash, votes) in votes {
-                if accepted
-                    .as_ref()
-                    .is_some_and(|accepted| accepted.contains(&hash))
-                {
+        if let Some(mut votes) = command.votes {
+            for hash in receipt.accepted_hashes {
+                if let Some(votes) = votes.remove(&hash) {
                     state
                         .kad_aich_search_votes
                         .insert((hash, command.id.clone()), votes);

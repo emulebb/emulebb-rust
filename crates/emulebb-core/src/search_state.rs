@@ -22,10 +22,13 @@ pub(crate) fn load_searches(metadata: &MetadataStore) -> Result<HashMap<String, 
 
 #[cfg(test)]
 pub(crate) fn persist_search(metadata: &MetadataStore, search: &Search) -> Result<()> {
-    metadata.update_search(
-        search.id.parse().context("invalid search identity")?,
-        &search_to_metadata(search),
-    )
+    metadata
+        .transition_search(
+            search.id.parse().context("invalid search identity")?,
+            &search_to_metadata(search),
+            &[],
+        )
+        .map(|_| ())
 }
 
 #[cfg(test)]

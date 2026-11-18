@@ -252,7 +252,7 @@ fn votes_are_scoped_to_session_and_size_claim_and_terminal_membership_stays_froz
     assert_ne!(zero.claim_id, alpha.claim_id);
     let mut terminal = sample_search();
     terminal.status = "completed".into();
-    store.update_search(first, &terminal).unwrap();
+    store.transition_search(first, &terminal, &[]).unwrap();
     assert!(
         store
             .ingest_search_observations(

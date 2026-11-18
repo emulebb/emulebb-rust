@@ -139,7 +139,7 @@ pub use search_model::{
     MetadataSearchProjection, MetadataSearchPublication, MetadataSearchResult,
     MetadataSearchResultFields, MetadataSearchResultHeader, MetadataSearchResultObservation,
     MetadataSearchResultSort, MetadataSearchResultSummary, MetadataSearchResultsQuery,
-    MetadataSearchSortOrder, MetadataSearchSpec,
+    MetadataSearchSortOrder, MetadataSearchSpec, MetadataSearchTransitionReceipt,
 };
 pub use search_store::normalized_search_query;
 pub use shared_membership_store::ObservedRootChanged;

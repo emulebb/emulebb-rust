@@ -10,6 +10,15 @@ async fn transition_after_disconnect(phase: Phase) {
         .await
         .unwrap();
     let id = publication.search_id.clone();
+    // Completion must use durable membership, independently of runtime rows.
+    state
+        .lock()
+        .await
+        .searches
+        .get_mut(&id)
+        .unwrap()
+        .results
+        .clear();
     let cancel = CancellationToken::new();
     state
         .lock()
@@ -53,7 +62,7 @@ async fn transition_after_disconnect(phase: Phase) {
     wait_for_slots(&owner, 0).await;
     let snapshot = state.lock().await;
     assert_eq!(snapshot.searches[&id].status, expected);
-    assert_eq!(snapshot.searches[&id].results.len(), 1);
+    assert!(snapshot.searches[&id].results.is_empty());
     assert_eq!(
         snapshot.searches[&id].status_reason.as_deref(),
         Some("test-reason")

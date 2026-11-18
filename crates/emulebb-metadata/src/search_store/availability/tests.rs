@@ -208,7 +208,7 @@ fn claims_sessions_terminal_state_and_deletion_keep_availability_scoped() {
     let mut header = sample_search();
     header.status = "completed".into();
     header.completed_at_s = Some(101);
-    store.update_search(id, &header).unwrap();
+    store.transition_search(id, &header, &[]).unwrap();
     assert!(
         store
             .ingest_search_observations(

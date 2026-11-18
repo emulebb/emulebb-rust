@@ -96,6 +96,45 @@ pub(super) fn project(store: &MetadataStore, id: i64, size: Option<u64>, name: &
 }
 
 #[test]
+fn header_transition_resolves_only_session_vote_hashes_and_rolls_back_on_error() {
+    let store = MetadataStore::in_memory().unwrap();
+    let session = store.create_search(&sample_search()).unwrap();
+    let empty_session = store.create_search(&sample_search()).unwrap();
+    for size in [None, Some(0), Some(u64::MAX)] {
+        project(&store, session, size, "Sample.bin");
+    }
+    let hash = "42".repeat(16);
+    let incoming = vec!["ff".repeat(16), hash.clone()];
+    let mut completed = sample_search();
+    completed.status = "completed".into();
+    let receipt = store
+        .transition_search(session, &completed, &incoming)
+        .unwrap();
+    assert_eq!(receipt.result_count, 3);
+    assert_eq!(receipt.accepted_hashes, [hash.clone()]);
+    let receipt = store
+        .transition_search(empty_session, &completed, &incoming)
+        .unwrap();
+    assert_eq!(receipt.result_count, 0);
+    assert!(receipt.accepted_hashes.is_empty());
+    let mut failed = completed.clone();
+    failed.status = "error".into();
+    assert!(
+        store
+            .transition_search(session, &failed, &[hash, "invalid".into()])
+            .is_err()
+    );
+    assert_eq!(
+        store.search_header(session).unwrap().unwrap().data.status,
+        "completed"
+    );
+    assert_eq!(
+        store.search_header(session).unwrap().unwrap().result_count,
+        3
+    );
+}
+
+#[test]
 fn session_results_reference_distinct_unknown_zero_conflicting_and_full_unsigned_claims() {
     let store = MetadataStore::in_memory().unwrap();
     let id = store.create_search(&sample_search()).unwrap();
@@ -123,7 +162,9 @@ fn header_writes_never_replay_results_and_membership_counts_are_session_local() 
     let first = store.create_search(&sample_search()).unwrap();
     let second = store.create_search(&sample_search()).unwrap();
     let claim = project(&store, first, Some(12), "Sample.bin");
-    store.update_search(first, &sample_search()).unwrap();
+    store
+        .transition_search(first, &sample_search(), &[])
+        .unwrap();
     assert_eq!(
         store.content_observations_page(claim, 0, 10).unwrap().items[0]
             .receipt
@@ -152,7 +193,7 @@ fn terminal_or_missing_sessions_freeze_membership_but_keep_valid_corpus_events()
     header.status = "completed".into();
     header.completed_at_s = Some(200);
     header.updated_at_s = 200;
-    store.update_search(id, &header).unwrap();
+    store.transition_search(id, &header, &[]).unwrap();
     let projection = MetadataSearchProjection {
         session_id: id,
         fields: vec![fields()],
@@ -277,7 +318,7 @@ fn unicode_and_binary_roots_roundtrip_and_filter_sizes_keep_unsigned_order() {
             .unwrap()
     );
     header.spec.min_size_bytes = Some(257);
-    assert!(store.update_search(id, &header).is_err());
+    assert!(store.transition_search(id, &header, &[]).is_err());
     assert_eq!(
         store.load_searches().unwrap()[0].data.spec.min_size_bytes,
         Some(255)
@@ -294,7 +335,11 @@ fn deleted_and_cleared_session_ids_are_not_reused_after_reopen() {
     let store = super::super::MetadataStore::open(&path).unwrap();
     let first = store.create_search(&sample_search()).unwrap();
     assert!(store.delete_search(first).unwrap());
-    assert!(store.update_search(first, &sample_search()).is_err());
+    assert!(
+        store
+            .transition_search(first, &sample_search(), &[])
+            .is_err()
+    );
     drop(store);
     let store = super::super::MetadataStore::open(&path).unwrap();
     let second = store.create_search(&sample_search()).unwrap();
@@ -304,7 +349,11 @@ fn deleted_and_cleared_session_ids_are_not_reused_after_reopen() {
     let store = super::super::MetadataStore::open(path).unwrap();
     let third = store.create_search(&sample_search()).unwrap();
     assert!(third > second);
-    assert!(store.update_search(second, &sample_search()).is_err());
+    assert!(
+        store
+            .transition_search(second, &sample_search(), &[])
+            .is_err()
+    );
     assert_eq!(store.load_searches().unwrap()[0].id, third);
 }
 
@@ -325,7 +374,7 @@ fn session_ids_use_full_positive_i64_space_and_fail_at_exhaustion() {
         let id = store.create_search(&sample_search()).unwrap();
         assert_eq!(id, previous + 1);
         assert_eq!(store.load_searches().unwrap()[0].id, id);
-        store.update_search(id, &sample_search()).unwrap();
+        store.transition_search(id, &sample_search(), &[]).unwrap();
         if id == i64::MAX {
             assert!(store.create_search(&sample_search()).is_err());
             assert_eq!(store.load_searches().unwrap().len(), 1);

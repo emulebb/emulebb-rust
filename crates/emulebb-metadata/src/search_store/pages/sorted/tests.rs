@@ -141,9 +141,26 @@ fn every_late_sort_seek_uses_its_index_without_scanning_or_sorting_one_hundred_t
         SELECT i,zeroblob(16),CAST(printf('%08d',i) AS BLOB),1,1 FROM n;",
     )
     .unwrap();
-    conn.execute("INSERT INTO search_results(session_id,claim_id,size_sort_key,name,file_type,media_artist,media_album,media_title,
+    conn.execute("INSERT INTO search_results(session_id,claim_id,size_sort_key,ed2k_hash,name,file_type,media_artist,media_album,media_title,
         media_length_seconds,media_bitrate_kbps,media_codec,rating,complete,directory)
-        SELECT ?1,id,size_sort_key,'same','doc','same','same','same',1,1,'same',1,0,'' FROM content_claims",[session]).unwrap();
+        SELECT ?1,id,size_sort_key,ed2k_hash,'same','doc','same','same','same',1,1,'same',1,0,'' FROM content_claims",[session]).unwrap();
+    // Membership must remain a point seek even with 100k conflicting sizes
+    // for one hash, or when that entire hash is absent from another session.
+    for (id, hash, expected) in [
+        (session, [0u8; 16], true),
+        (session + 1, [0u8; 16], false),
+        (session, [0xff; 16], false),
+    ] {
+        let mut probe = conn
+            .prepare(crate::search_store::SESSION_HASH_MEMBERSHIP_SQL)
+            .unwrap();
+        let present: bool = probe
+            .query_row(params![id, hash.as_slice()], |row| row.get(0))
+            .unwrap();
+        assert_eq!(present, expected);
+        assert_eq!(probe.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        assert!(probe.get_status(rusqlite::StatementStatus::VmStep) < 100);
+    }
     for sort in SORTS {
         for order in [Order::Asc, Order::Desc] {
             let mut q = query(session, sort, order);
@@ -201,6 +218,13 @@ fn size_sort_keys_cannot_contradict_the_claim_and_missing_boundaries_stay_bounde
     let session = store.create_search(&sample_search()).unwrap();
     let claim = crate::search_store::tests::project(&store, session, None, "Sample.bin");
     let conn = store.connection().unwrap();
+    assert!(
+        conn.execute(
+            "UPDATE search_results SET ed2k_hash=zeroblob(16) WHERE session_id=?1 AND claim_id=?2",
+            params![session, claim]
+        )
+        .is_err()
+    );
     assert!(conn.execute("UPDATE search_results SET size_sort_key=x'010000000000000000' WHERE session_id=?1 AND claim_id=?2",params![session,claim]).is_err());
     let key: Vec<u8> = conn
         .query_row(

@@ -11,7 +11,9 @@ fn stored_counts_track_claim_membership_without_counting_packets_or_overwriting_
     project(&store, first, None, "sample.bin");
     project(&store, first, Some(0), "sample.bin");
     project(&store, first, Some(u64::MAX), "sample.bin");
-    store.update_search(first, &sample_search()).unwrap();
+    store
+        .transition_search(first, &sample_search(), &[])
+        .unwrap();
     assert_eq!(store.search_header(first).unwrap().unwrap().result_count, 3);
     store
         .connection()
@@ -250,9 +252,9 @@ fn late_pages_seek_indexes_with_one_hundred_thousand_sessions_results_and_varian
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
         INSERT INTO content_claims(id,ed2k_hash,size_bytes,first_seen_at_s,last_seen_at_s)
         SELECT i,zeroblob(16),CAST(printf('%08d',i) AS BLOB),1,1 FROM n;
-        INSERT INTO search_results(session_id,claim_id,size_sort_key,name,ed2k_source_count,ed2k_complete_source_count,source_client_id,source_client_port,
+        INSERT INTO search_results(session_id,claim_id,size_sort_key,ed2k_hash,name,ed2k_source_count,ed2k_complete_source_count,source_client_id,source_client_port,
             file_type,media_artist,media_album,media_title,media_length_seconds,media_bitrate_kbps,media_codec,rating,aich_root,complete,directory)
-        SELECT 100000,id,size_sort_key,'sample.bin',1,0,NULL,NULL,'pro','','','',0,0,'',0,NULL,0,'' FROM content_claims;
+        SELECT 100000,id,size_sort_key,ed2k_hash,'sample.bin',1,0,NULL,NULL,'pro','','','',0,0,'',0,NULL,0,'' FROM content_claims;
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
         INSERT INTO content_claim_observations(id,claim_id,fingerprint,origin,first_seen_at_s,last_seen_at_s,observation_count,name)
         SELECT i,1,CAST(printf('%032d',i) AS BLOB),'server',1,1,1,'sample.bin' FROM n;

@@ -308,7 +308,7 @@ impl Drop for Permit {
 enum DbCommand {
     SearchRead(search_read::Query),
     SearchCreate(emulebb_metadata::MetadataSearchData),
-    SearchUpdate(i64, emulebb_metadata::MetadataSearchData),
+    SearchUpdate(i64, emulebb_metadata::MetadataSearchData, Vec<String>),
     SearchRemove(Option<i64>),
     Add(Friend),
     Delete(Friend),
@@ -347,7 +347,7 @@ enum KadMergeOutcome {
 enum DbResponse {
     SearchRead(search_read::Value),
     SearchCreated(i64),
-    SearchUpdated,
+    SearchUpdated(emulebb_metadata::MetadataSearchTransitionReceipt),
     SearchRemoved(bool),
     ContentObserved(Option<emulebb_metadata::MetadataSearchPublication>),
     Friend(Friend, bool),
@@ -513,10 +513,10 @@ impl PersistenceOwner {
                         let _ = request.response.send(result);
                         continue;
                     }
-                    if let DbCommand::SearchUpdate(id, header) = &request.command {
-                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.update_search(*id, header)));
+                    if let DbCommand::SearchUpdate(id, header, hashes) = &request.command {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.transition_search(*id, header, hashes)));
                         let result = match outcome {
-                            Ok(Ok(())) => Ok(DbResponse::SearchUpdated),
+                            Ok(Ok(receipt)) => Ok(DbResponse::SearchUpdated(receipt)),
                             Ok(Err(error)) => {
                                 tracing::warn!(%error, "search status SQL failed");
                                 Err(PersistenceError::Storage("database operation failed".into()))
@@ -1286,7 +1286,7 @@ async fn process(
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
             DbResponse::SearchRead(_)
-            | DbResponse::SearchUpdated
+            | DbResponse::SearchUpdated(_)
             | DbResponse::SearchCreated(_)
             | DbResponse::SearchRemoved(_)
             | DbResponse::ContentObserved(_)

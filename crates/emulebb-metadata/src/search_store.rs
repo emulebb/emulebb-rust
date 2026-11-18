@@ -18,27 +18,39 @@ pub(super) const INTERRUPT_COLLECTING_SQL: &str =
                 updated_at_s=max(updated_at_s,?1),completed_at_s=NULL
              WHERE status IN ('queued','running')";
 
+pub(super) const SESSION_HASH_MEMBERSHIP_SQL: &str = "SELECT EXISTS(SELECT 1 FROM search_results INDEXED BY search_results_hash_idx WHERE session_id=?1 AND ed2k_hash=?2)";
+
 impl super::MetadataStore {
     /// Allocate a never-reused session identity and commit its initial contents.
     /// Failed transactions publish neither the record nor its identity.
     pub fn create_search(&self, search: &MetadataSearchData) -> Result<i64> {
-        self.write_search(None, search)
+        Ok(self.write_search(None, search, &[])?.0)
     }
 
-    /// Update an existing session without resurrecting a deleted identity.
-    pub fn update_search(&self, id: i64, search: &MetadataSearchData) -> Result<()> {
+    /// Commit a header transition and resolve only the supplied vote hashes.
+    /// Membership and cardinality use the same transaction as the status write.
+    pub fn transition_search(
+        &self,
+        id: i64,
+        search: &MetadataSearchData,
+        incoming_hashes: &[String],
+    ) -> Result<crate::MetadataSearchTransitionReceipt> {
         ensure!(id > 0, "search id must be positive");
-        self.write_search(Some(id), search)?;
-        Ok(())
+        Ok(self.write_search(Some(id), search, incoming_hashes)?.1)
     }
 
-    fn write_search(&self, id: Option<i64>, search: &MetadataSearchData) -> Result<i64> {
+    fn write_search(
+        &self,
+        id: Option<i64>,
+        search: &MetadataSearchData,
+        incoming_hashes: &[String],
+    ) -> Result<(i64, crate::MetadataSearchTransitionReceipt)> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         // WHY: allocation and updates share the body writer, but a missing
         // update ID must never recreate a deleted session. The statement's
         // existence predicate and mutation belong to one SQLite snapshot.
-        let session_id: i64 = tx
+        let (session_id, result_count): (i64, i64) = tx
             .query_row(
                 r#"
             INSERT INTO search_sessions(
@@ -74,7 +86,7 @@ impl super::MetadataStore {
                 status_reason = excluded.status_reason,
                 updated_at_s = excluded.updated_at_s,
                 completed_at_s = excluded.completed_at_s
-            RETURNING id
+            RETURNING id,result_count
             "#,
                 params![
                     id,
@@ -100,12 +112,32 @@ impl super::MetadataStore {
                     search.updated_at_s,
                     search.completed_at_s,
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .context("search no longer exists")?;
+        let mut accepted_hashes = Vec::new();
+        {
+            let mut statement = tx.prepare_cached(SESSION_HASH_MEMBERSHIP_SQL)?;
+            for hash in incoming_hashes {
+                ensure!(hash.len() == 32, "invalid vote hash length");
+                let bytes = data_encoding::HEXLOWER_PERMISSIVE.decode(hash.as_bytes())?;
+                let accepted: bool =
+                    statement.query_row(params![session_id, bytes], |row| row.get(0))?;
+                if accepted {
+                    accepted_hashes.push(hash.clone());
+                }
+            }
+        }
+        let result_count = result_count.try_into()?;
         tx.commit()?;
-        Ok(session_id)
+        Ok((
+            session_id,
+            crate::MetadataSearchTransitionReceipt {
+                result_count,
+                accepted_hashes,
+            },
+        ))
     }
 
     /// End collecting sessions once at process startup, without loading history.
@@ -281,9 +313,9 @@ pub(crate) fn persist_projection(
         receipts.iter().all(|r| r.claim_id == claim_id),
         "search projection contains distinct claims"
     );
-    tx.execute("INSERT INTO search_results(session_id,claim_id,size_sort_key,name,source_client_id,source_client_port,
+    tx.execute("INSERT INTO search_results(session_id,claim_id,size_sort_key,ed2k_hash,name,source_client_id,source_client_port,
         file_type,media_artist,media_album,media_title,media_length_seconds,media_bitrate_kbps,media_codec,
-        rating,aich_root,complete,directory) SELECT ?1,id,size_sort_key,'',NULL,NULL,'Unknown','','','',0,0,'',0,NULL,0,'' FROM content_claims WHERE id=?2
+        rating,aich_root,complete,directory) SELECT ?1,id,size_sort_key,ed2k_hash,'',NULL,NULL,'Unknown','','','',0,0,'',0,NULL,0,'' FROM content_claims WHERE id=?2
         ON CONFLICT(session_id,claim_id) DO NOTHING",params![projection.session_id,claim_id])?;
     fields::apply(tx, projection.session_id, claim_id, &projection.fields)?;
     for (receipt, event) in receipts.iter().zip(events) {
