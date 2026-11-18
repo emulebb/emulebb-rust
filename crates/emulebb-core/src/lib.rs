@@ -296,7 +296,7 @@ use local_search_response::send_local_search_response;
 use local_search_response::split_stock_search_responses;
 pub use network_binding::NetworkBindingStatus;
 use network_status_defaults::{ed2k_starting_status, ed2k_stopped_status, kad_starting_status};
-use search_query::{SearchNetworkMethod, apply_search_filters, search_criteria_from_request};
+use search_query::{SearchNetworkMethod, search_criteria_from_request};
 use search_queue::{SearchQueue, SearchQueueLane};
 use search_queue_runtime::Ed2kServerSearchOutcome;
 use source_publish::{
@@ -668,7 +668,7 @@ impl EmulebbCore {
                 root
             })
             .collect::<Vec<_>>();
-        let mut core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
+        let core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
         let passive_replay_enabled = ed2k_network
             .as_ref()
             .is_some_and(|network| network.kad_passive_replay_enabled);
