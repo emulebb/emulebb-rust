@@ -378,7 +378,7 @@ export type Friend = {
 };
 
 export type Upload = {
-  clientId?: string;
+  id: string;
   userName?: string;
   userHash?: string | null;
   clientSoftware?: string;

@@ -77,7 +77,7 @@ const snapshot = {
   kad: { enabled: true, connected: true, firewalled: false },
   uploads: [
     {
-      clientId: "active-upload-peer",
+      id: "12345678-1234-4234-8234-123456789abc",
       userName: "Active Upload Peer",
       uploadState: "uploading",
       uploading: true,
@@ -86,7 +86,7 @@ const snapshot = {
   ],
   uploadQueue: [
     {
-      clientId: "waiting-upload-peer",
+      id: "12345678-1234-4234-8234-123456789abd",
       userName: "Waiting Upload Peer",
       uploadState: "queued",
       waitingQueue: true,
