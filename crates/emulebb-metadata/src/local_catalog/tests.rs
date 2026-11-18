@@ -130,6 +130,17 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         .unwrap();
     assert_eq!(next.total, 100_000);
     assert_eq!(next.entries[0].display_name, "sample-000003.bin");
+    {
+        let conn = store.connection().unwrap();
+        let mut count = conn.prepare(CATALOG_COUNT_SQL).unwrap();
+        assert_eq!(
+            count.query_row([], |row| row.get::<_, i64>(0)).unwrap(),
+            100_000
+        );
+        assert_eq!(count.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        assert_eq!(count.get_status(rusqlite::StatementStatus::Sort), 0);
+        assert!(count.get_status(rusqlite::StatementStatus::VmStep) < 20);
+    }
     assert_eq!(
         store
             .active_local_catalog_entry(&first.entries[0].file_hash)
