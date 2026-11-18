@@ -596,7 +596,7 @@ async fn cached_client_session_demand_survives_rejected_sql_write() {
     runtime.note_file_upload_request(&hash).await;
     runtime.add_file_all_time_uploaded(&hash, 7).unwrap();
     runtime.add_peer_credit_delta([0x4E; 16], 3, 0).unwrap();
-    runtime.flush_parked_credit().await;
+    assert!(runtime.checkpoint_upload_accounting().await.is_err());
     assert_eq!(
         runtime
             .file_upload_statistics(&hash)

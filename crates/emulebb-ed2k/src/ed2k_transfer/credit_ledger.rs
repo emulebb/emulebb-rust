@@ -108,12 +108,12 @@ impl ParkedCreditLedger {
 /// drained deltas on failure. Runs on the blocking pool; the flush gate is
 /// held across drain+commit so credit writes that need a settled ledger
 /// (secure-ident wipe, absolute seed) can serialize against it.
-fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) {
+fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) -> anyhow::Result<()> {
     let _gate = runtime_parts.flush_gate.lock();
     let (peers, files) = {
         let mut ledger = runtime_parts.ledger.lock();
         if ledger.is_empty() {
-            return;
+            return Ok(());
         }
         ledger.drain()
     };
@@ -136,9 +136,10 @@ fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) {
         .metadata
         .apply_credit_deltas(&peer_rows, &file_rows)
     {
-        tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
         runtime_parts.ledger.lock().restore(peers, files);
+        return Err(error);
     }
+    Ok(())
 }
 
 /// The runtime pieces a flush needs, cloneable into blocking-pool tasks.
@@ -355,10 +356,14 @@ impl Ed2kTransferRuntime {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn_blocking(move || {
                 let reservation = reservation;
-                flush_parked_credit_blocking(&reservation.0);
+                if let Err(error) = flush_parked_credit_blocking(&reservation.0) {
+                    tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
+                }
             });
         } else {
-            flush_parked_credit_blocking(&reservation.0);
+            if let Err(error) = flush_parked_credit_blocking(&reservation.0) {
+                tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
+            }
         }
     }
 
@@ -366,11 +371,16 @@ impl Ed2kTransferRuntime {
     /// release and tests use this so the tail is durable, mirroring the
     /// catalog counter's release-time flush.
     pub(crate) async fn flush_parked_credit(&self) {
-        let parts = self.parked_credit_flush_parts();
-        let flush = tokio::task::spawn_blocking(move || flush_parked_credit_blocking(&parts));
-        if let Err(error) = flush.await {
-            tracing::warn!("parked credit flush task panicked: {error:#}");
+        if let Err(error) = self.checkpoint_upload_accounting().await {
+            tracing::warn!("parked credit flush failed: {error:#}");
         }
+    }
+
+    /// Commit captured upload/credit facts after producers stop. Required
+    /// shutdown callers receive an error; failed deltas stay owned for retry.
+    pub async fn checkpoint_upload_accounting(&self) -> anyhow::Result<()> {
+        let parts = self.parked_credit_flush_parts();
+        tokio::task::spawn_blocking(move || flush_parked_credit_blocking(&parts)).await?
     }
 }
 
@@ -392,7 +402,7 @@ mod tests {
         }
         drop(first);
         let next = BackgroundCreditFlush::reserve(runtime.parked_credit_flush_parts()).unwrap();
-        flush_parked_credit_blocking(&next.0);
+        flush_parked_credit_blocking(&next.0).unwrap();
         drop(next);
         assert_eq!(runtime.parked_peer_credit_delta([0x43; 16]), (0, 0));
         assert!(BackgroundCreditFlush::reserve(runtime.parked_credit_flush_parts()).is_some());
