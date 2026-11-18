@@ -1076,6 +1076,13 @@ fn spawn_regular_diagnostic_summary(core: Arc<EmulebbCore>) {
 
 async fn log_regular_diagnostic_summary(core: &EmulebbCore) {
     let status = core.status().await;
+    let transfers = match core.transfer_stats().await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "regular diagnostic summary could not read persisted download counts");
+            return;
+        }
+    };
     let upload_policy = core.upload_policy_metrics().await;
     let throughput = core.transfer_throughput_stats();
     let shared_hashing_count = core.shared_directories().await.hashing_count;
@@ -1096,9 +1103,9 @@ async fn log_regular_diagnostic_summary(core: &EmulebbCore) {
         waiting_uploads = upload_policy.waiting_sessions,
         upload_speed_kibps = upload_policy.upload_rate_bytes_per_sec as f64 / 1024.0,
         session_uploaded_bytes = throughput.session_uploaded_bytes,
-        active_downloads = status.transfers.active,
-        completed_downloads = status.transfers.completed,
-        total_downloads = status.transfers.total,
+        active_downloads = transfers.active,
+        completed_downloads = transfers.completed,
+        total_downloads = transfers.total,
         download_speed_kibps = throughput.download_rate_bytes_per_sec as f64 / 1024.0,
         session_downloaded_bytes = throughput.session_downloaded_bytes,
         shared_hashing_count,
