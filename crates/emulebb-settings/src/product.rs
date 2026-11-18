@@ -16,9 +16,11 @@ mod groups;
 mod catalog;
 mod patch;
 mod revision;
+mod schema;
 pub use catalog::*;
 pub use patch::{SettingsPatch, json_size};
 pub use revision::{SettingsRevision, SettingsRevisionError};
+pub use schema::settings_schemas;
 
 pub const MAX_SAVED_BYTES: usize = 131_072;
 pub const MAX_PATCH_BYTES: usize = 262_144;
@@ -126,6 +128,17 @@ pub enum Rule {
     NatBackends,
     Ipv4Cidrs,
     VpnMode,
+}
+
+impl Rule {
+    fn list_bounds(self) -> Option<(usize, usize)> {
+        match self {
+            Self::NatBackends => Some((1, 2)),
+            Self::DnsServers => Some((0, 8)),
+            Self::Ipv4Cidrs => Some((0, 256)),
+            _ => None,
+        }
+    }
 }
 
 trait SettingType: Clone + Eq + Serialize + DeserializeOwned {
@@ -272,11 +285,7 @@ fn validate_field<T: SettingType>(
                 issue(issues, key, "invalid-value", "Expected a typed list.");
                 return;
             };
-            let (min, max) = match rule {
-                Rule::NatBackends => (1, 2),
-                Rule::DnsServers => (0, 8),
-                _ => (0, 256),
-            };
+            let (min, max) = rule.list_bounds().expect("list rule has bounds");
             let mut seen = HashSet::new();
             items.len() >= min
                 && items.len() <= max

@@ -17,6 +17,12 @@ macro_rules! setting_group {
         #[serde(default,deny_unknown_fields)]
         pub struct $partial { $(#[serde(rename=$wire,skip_serializing_if="PartialValue::is_unchanged")] pub $field:PartialValue<$ty>,)* $(#[serde(rename=$group_wire)] pub $group:$partial_child,)* }
         impl $values {
+            pub(super) fn schema()->Value {
+                schema::object_schema([
+                    $(($wire,schema::leaf_schema::<$ty>($rule)),)*
+                    $(($group_wire,$child::schema()),)*
+                ],true)
+            }
             /// Serialize only the selected canonical leaf for keyed consumers.
             pub fn value_json(&self,key:SettingKey)->Result<Option<Value>,SettingsError> {
                 $(if key.as_str()==concat!($prefix,".",$wire) {return serde_json::to_value(&self.$field).map(Some).map_err(|_|SettingsError::InvalidValue);})*
@@ -45,6 +51,12 @@ macro_rules! setting_group {
             }
         }
         impl $saved {
+            pub(super) fn schema()->Value {
+                schema::object_schema([
+                    $(($wire,schema::saved_leaf_schema::<$ty>($rule)),)*
+                    $(($group_wire,$saved_child::schema()),)*
+                ],true)
+            }
             pub(super) fn from_defaults(defaults:&$values)->Self { Self {$($field:SavedValue::from_default(&defaults.$field),)* $($group:$saved_child::from_defaults(&defaults.$group),)*} }
             pub(super) fn resolve_with(&mut self,defaults:&$values) { $(self.$field.resolve(&defaults.$field);)* $(self.$group.resolve_with(&defaults.$group);)* }
             pub fn values(&self)->$values { $values {$($field:self.$field.value.clone(),)* $($group:self.$group.values(),)*} }
@@ -65,6 +77,12 @@ macro_rules! setting_group {
             }
         }
         impl $partial {
+            pub(super) fn schema()->Value {
+                schema::object_schema([
+                    $(($wire,schema::leaf_schema::<$ty>($rule)),)*
+                    $(($group_wire,$partial_child::schema()),)*
+                ],false)
+            }
             pub(super) fn set_key(&mut self,key:SettingKey,value:&Value)->Result<bool,SettingsError> {
                 $(if key.as_str()==concat!($prefix,".",$wire) {
                     self.$field=PartialValue::Set(serde_json::from_value(value.clone()).map_err(|_|SettingsError::InvalidValue)?);return Ok(true);
