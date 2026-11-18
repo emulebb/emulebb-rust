@@ -24,11 +24,9 @@ fn exclusion_path(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn is_excluded(conn: &Connection, path: &Path) -> Result<bool> {
-    let any: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions)",
-        [],
-        |row| row.get(0),
-    )?;
+    let any: bool = conn
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions)")?
+        .query_row([], |row| row.get(0))?;
     if !any {
         return Ok(false);
     }
@@ -40,8 +38,10 @@ pub(crate) fn is_excluded(conn: &Connection, path: &Path) -> Result<bool> {
     };
     let native = NativePath::from(normalized.as_path());
     Ok(conn
-        .query_row(
+        .prepare_cached(
             "SELECT 1 FROM download_delivery_exclusions WHERE platform = ?1 AND native_path = ?2",
+        )?
+        .query_row(
             params![NativePath::platform(), native.storage_bytes()],
             |_| Ok(()),
         )
@@ -297,8 +297,8 @@ pub(crate) fn identity_is_excluded(
     conn: &Connection,
     identity: crate::NativeFileIdentity,
 ) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE output_identity=?1 OR secondary_identity=?1)",
+    Ok(conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE output_identity=?1 OR secondary_identity=?1)")?.query_row(
         [identity.storage_bytes()],
         |row| row.get(0),
     )?)
@@ -308,7 +308,7 @@ pub(crate) fn evidence_is_excluded(
     conn: &Connection,
     evidence: crate::NativeFileIdentityEvidence,
 ) -> Result<bool> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE output_identity IN (?1,?2) OR secondary_identity IN (?1,?2))",
+    Ok(conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions WHERE output_identity IN (?1,?2) OR secondary_identity IN (?1,?2))")?.query_row(
         params![evidence.primary().storage_bytes(),evidence.secondary().map(|identity|identity.storage_bytes())],|row|row.get(0))?)
 }
 

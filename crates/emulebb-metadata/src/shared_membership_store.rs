@@ -368,11 +368,13 @@ impl MetadataStore {
                 "shared member must have a safe relative path"
             );
             let native_path = NativePath::from(path.as_path());
-            let cached: (i64, Vec<u8>,Option<crate::NativeFileIdentity>) = match tx.query_row(
+            // WHY: one atomic scan repeats these point operations for every
+            // path. Reuse compiled statements while holding the metadata lock.
+            let cached: (i64, Vec<u8>,Option<crate::NativeFileIdentity>) = match tx.prepare_cached(
                 "SELECT local_file_instances.path_id, local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
                  FROM local_file_instances
                  JOIN local_paths ON local_paths.id = local_file_instances.path_id
-                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2",
+                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2")?.query_row(
                 params![NativePath::platform(), native_path.storage_bytes()],
                 |row| Ok((row.get(0)?, row.get(1)?,crate::native_file::optional_identity_from_row(row,2)?)),
             ) {
@@ -393,18 +395,16 @@ impl MetadataStore {
                 continue;
             }
             let path_id = cached.0;
-            tx.execute(
-                "INSERT OR IGNORE INTO temp.scanned_membership_paths VALUES(?1)",
-                [path_id],
-            )?;
-            tx.execute(
+            tx.prepare_cached("INSERT OR IGNORE INTO temp.scanned_membership_paths VALUES(?1)")?
+                .execute([path_id])?;
+            tx.prepare_cached(
                 "INSERT INTO shared_file_memberships(
                     root_id, path_id, known_file_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
                  ) VALUES (?1, ?2, (SELECT known_file_id FROM local_file_instances WHERE path_id=?2), ?3, ?4, ?4, NULL)
                  ON CONFLICT(root_id, path_id) DO UPDATE SET
                     relative_path = excluded.relative_path,
                     last_seen_at_ms = excluded.last_seen_at_ms,
-                    removed_at_ms = NULL",
+                    removed_at_ms = NULL")?.execute(
                 params![
                     root_id,
                     path_id,
@@ -412,11 +412,11 @@ impl MetadataStore {
                     now
                 ],
             )?;
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
                  VALUES (?1, ?2)
                  ON CONFLICT(path_id) DO UPDATE SET verified_fingerprint = excluded.verified_fingerprint
-                 WHERE session_verified_local_paths.verified_fingerprint IS NOT excluded.verified_fingerprint",
+                 WHERE session_verified_local_paths.verified_fingerprint IS NOT excluded.verified_fingerprint")?.execute(
                 params![path_id, cached.1],
             )?;
         }

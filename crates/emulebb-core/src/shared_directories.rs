@@ -1071,7 +1071,7 @@ pub(crate) struct SharedScanResult {
     skipped_intake_count: usize,
 }
 
-async fn admit_scanned_roots(
+async fn persist_scanned_roots(
     core: &EmulebbCore,
     root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
 ) -> Result<()> {
@@ -1093,12 +1093,6 @@ async fn admit_scanned_roots(
         })
         .await??;
     }
-    // WHY: A full scan is the authority for removed paths. Rebuild offers once
-    // after its memberships commit; per-hash refresh before this point reads
-    // stale membership and grows linearly with every removed file.
-    core.ed2k_transfers
-        .refresh_complete_shared_catalog()
-        .await?;
     Ok(())
 }
 
@@ -1924,7 +1918,12 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
             .await;
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
-    admit_scanned_roots(core, root_files).await?;
+    persist_scanned_roots(core, root_files).await?;
+    // A synchronous caller receives the catalog only after its memberships and
+    // complete offer projection agree, including removal of vanished copies.
+    core.ed2k_transfers
+        .refresh_complete_shared_catalog()
+        .await?;
     // WHY: a verified path can be reusable before it has active membership.
     // Resolve the result after admission so those files cannot disappear from
     // a successful synchronous reload, and propagate catalog read failures.
@@ -2468,7 +2467,16 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     if core.lifecycle_state_name() != "running" {
         return Ok(());
     }
-    admit_scanned_roots(&core, root_files).await?;
+    persist_scanned_roots(&core, root_files).await?;
+    // WHY: shutdown must join the durable root transaction, but starting a full
+    // catalog rebuild afterward delays profile release for an unused cache.
+    // Startup revalidates the committed memberships before offering them.
+    if core.lifecycle_state_name() != "running" {
+        return Ok(());
+    }
+    core.ed2k_transfers
+        .refresh_complete_shared_catalog()
+        .await?;
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.active.clear();
