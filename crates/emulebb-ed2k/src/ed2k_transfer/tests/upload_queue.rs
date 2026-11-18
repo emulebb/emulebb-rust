@@ -276,6 +276,40 @@ async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
     assert_eq!(snapshot[1].phase, Ed2kUploadSessionPhaseSnapshot::Waiting);
     assert_eq!(snapshot[1].queue_rank, Some(1));
     assert_eq!(snapshot[1].file_hash, file_hash.to_string());
+
+    let active = runtime
+        .upload_client_snapshot(&hex::encode([0x11; 16]), false)
+        .await
+        .unwrap();
+    let waiting = runtime
+        .upload_client_snapshot(&hex::encode([0x22; 16]), true)
+        .await
+        .unwrap();
+    assert_eq!(active.phase, snapshot[0].phase);
+    assert_eq!(active.user_hash, snapshot[0].user_hash);
+    assert_eq!(active.file_hash, snapshot[0].file_hash);
+    assert_eq!(waiting.phase, snapshot[1].phase);
+    assert_eq!(waiting.queue_rank, snapshot[1].queue_rank);
+    assert_eq!(waiting.user_hash, snapshot[1].user_hash);
+    assert_eq!(waiting.file_hash, snapshot[1].file_hash);
+    assert!(
+        runtime
+            .upload_client_snapshot(&hex::encode([0x11; 16]), true)
+            .await
+            .is_none()
+    );
+    assert!(
+        runtime
+            .upload_client_snapshot(&hex::encode([0x22; 16]), false)
+            .await
+            .is_none()
+    );
+    assert!(
+        runtime
+            .upload_client_snapshot(&hex::encode([0x44; 16]), true)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

@@ -775,7 +775,8 @@ impl Ed2kTransferRuntime {
             (IndexedSharedCatalog::default(), true)
         } else {
             (
-                transfer_sql::completed_catalog_from_metadata_store(&metadata)?,
+                transfer_sql::completed_catalog_from_metadata_store(&metadata, &|| true)?
+                    .expect("initial catalog construction is not cancelled"),
                 false,
             )
         };

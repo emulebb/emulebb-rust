@@ -1765,51 +1765,87 @@ impl Ed2kUploadQueueState {
         let mut entries = self
             .sessions
             .iter()
-            .map(|(key, session)| Ed2kUploadQueueSnapshotEntry {
-                ip: key.peer.ip,
-                tcp_port: key.peer.tcp_port,
-                udp_port: key.peer.udp_port,
-                udp_version: key.peer.udp_version,
-                should_crypt: key.peer.should_crypt,
-                user_hash: key.peer.user_hash,
-                client_id: key.peer.client_id,
-                friend_slot: key.peer.friend_slot,
-                file_hash: key.file_hash.clone(),
-                connected: session.connected,
-                phase: phase_snapshot(session.phase),
-                queue_rank: (session.phase == Ed2kUploadSessionPhase::Waiting)
-                    .then(|| self.rank_for_key(key, now)),
-                wait_time_ms: now
-                    .saturating_duration_since(session.queued_at)
-                    .as_millis()
-                    .try_into()
-                    .unwrap_or(u64::MAX),
-                uploaded_bytes: session.uploaded_bytes,
-                upload_speed_bytes_per_sec: upload_speed_bytes_per_sec(session, now),
-                score: self.waiting_score(key, session, now),
-                file_priority_score: session.file_priority_score,
-                credit_score_permille: session.credit_score_permille,
-                low_ratio_applied: session.score_modifiers.low_ratio_bonus,
-                low_ratio_bonus: score::low_ratio_bonus_value(
-                    session.score_modifiers.low_ratio_bonus,
-                ),
-                low_id_penalty_applied: session.score_modifiers.low_id,
-                low_id_divisor: score::low_id_divisor_value(session.score_modifiers.low_id),
-                old_client_penalty_applied: session.score_modifiers.old_client,
-                client_software: key.peer.client_software.clone(),
-                requester_part_status: session.requester_part_status.clone(),
-                requester_complete_source_count: session.requester_complete_source_count,
-            })
+            .map(|(key, session)| self.snapshot_entry(key, session, now))
             .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            upload_snapshot_sort_key(left)
-                .cmp(&upload_snapshot_sort_key(right))
-                .then_with(|| left.client_id.cmp(&right.client_id))
-                .then_with(|| left.ip.cmp(&right.ip))
-                .then_with(|| left.tcp_port.cmp(&right.tcp_port))
-                .then_with(|| left.file_hash.cmp(&right.file_hash))
-        });
+        entries.sort_by(Self::compare_snapshot_entries);
         entries
+    }
+
+    pub(super) fn client_snapshot(
+        &mut self,
+        client_id: &str,
+        waiting_queue: bool,
+        now: Instant,
+    ) -> Option<Ed2kUploadQueueSnapshotEntry> {
+        self.reap_expired_sessions(now);
+        // WHY: detail reads must not clone the whole queue or hydrate unrelated
+        // file manifests. Preserve list ordering when a peer has several entries.
+        self.sessions
+            .iter()
+            .filter(|(key, session)| {
+                (session.phase == Ed2kUploadSessionPhase::Waiting) == waiting_queue
+                    && key
+                        .peer
+                        .user_hash
+                        .map(hex::encode)
+                        .unwrap_or_else(|| format!("{}:{}", key.peer.ip, key.peer.tcp_port))
+                        == client_id
+            })
+            .map(|(key, session)| self.snapshot_entry(key, session, now))
+            .min_by(Self::compare_snapshot_entries)
+    }
+
+    fn snapshot_entry(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        session: &Ed2kUploadSessionEntry,
+        now: Instant,
+    ) -> Ed2kUploadQueueSnapshotEntry {
+        Ed2kUploadQueueSnapshotEntry {
+            ip: key.peer.ip,
+            tcp_port: key.peer.tcp_port,
+            udp_port: key.peer.udp_port,
+            udp_version: key.peer.udp_version,
+            should_crypt: key.peer.should_crypt,
+            user_hash: key.peer.user_hash,
+            client_id: key.peer.client_id,
+            friend_slot: key.peer.friend_slot,
+            file_hash: key.file_hash.clone(),
+            connected: session.connected,
+            phase: phase_snapshot(session.phase),
+            queue_rank: (session.phase == Ed2kUploadSessionPhase::Waiting)
+                .then(|| self.rank_for_key(key, now)),
+            wait_time_ms: now
+                .saturating_duration_since(session.queued_at)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            uploaded_bytes: session.uploaded_bytes,
+            upload_speed_bytes_per_sec: upload_speed_bytes_per_sec(session, now),
+            score: self.waiting_score(key, session, now),
+            file_priority_score: session.file_priority_score,
+            credit_score_permille: session.credit_score_permille,
+            low_ratio_applied: session.score_modifiers.low_ratio_bonus,
+            low_ratio_bonus: score::low_ratio_bonus_value(session.score_modifiers.low_ratio_bonus),
+            low_id_penalty_applied: session.score_modifiers.low_id,
+            low_id_divisor: score::low_id_divisor_value(session.score_modifiers.low_id),
+            old_client_penalty_applied: session.score_modifiers.old_client,
+            client_software: key.peer.client_software.clone(),
+            requester_part_status: session.requester_part_status.clone(),
+            requester_complete_source_count: session.requester_complete_source_count,
+        }
+    }
+
+    fn compare_snapshot_entries(
+        left: &Ed2kUploadQueueSnapshotEntry,
+        right: &Ed2kUploadQueueSnapshotEntry,
+    ) -> std::cmp::Ordering {
+        upload_snapshot_sort_key(left)
+            .cmp(&upload_snapshot_sort_key(right))
+            .then_with(|| left.client_id.cmp(&right.client_id))
+            .then_with(|| left.ip.cmp(&right.ip))
+            .then_with(|| left.tcp_port.cmp(&right.tcp_port))
+            .then_with(|| left.file_hash.cmp(&right.file_hash))
     }
 
     pub(super) fn update_file_priority(&mut self, file_hash: &str, file_priority_score: i128) {

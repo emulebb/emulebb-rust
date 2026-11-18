@@ -584,6 +584,18 @@ impl Ed2kTransferRuntime {
         self.upload_queue.lock().await.snapshot(Instant::now())
     }
 
+    /// Return one management entry without materializing the full upload queue.
+    pub async fn upload_client_snapshot(
+        &self,
+        client_id: &str,
+        waiting_queue: bool,
+    ) -> Option<Ed2kUploadQueueSnapshotEntry> {
+        self.upload_queue
+            .lock()
+            .await
+            .client_snapshot(client_id, waiting_queue, Instant::now())
+    }
+
     pub(crate) fn record_peer_credit_totals(
         &self,
         user_hash: [u8; 16],

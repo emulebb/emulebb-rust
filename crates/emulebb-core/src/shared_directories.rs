@@ -1071,7 +1071,7 @@ pub(crate) struct SharedScanResult {
     skipped_intake_count: usize,
 }
 
-async fn admit_scanned_roots(
+async fn persist_scanned_roots(
     core: &EmulebbCore,
     root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
 ) -> Result<()> {
@@ -1093,12 +1093,6 @@ async fn admit_scanned_roots(
         })
         .await??;
     }
-    // WHY: A full scan is the authority for removed paths. Rebuild offers once
-    // after its memberships commit; per-hash refresh before this point reads
-    // stale membership and grows linearly with every removed file.
-    core.ed2k_transfers
-        .refresh_complete_shared_catalog()
-        .await?;
     Ok(())
 }
 
@@ -1924,7 +1918,12 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
             .await;
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
-    admit_scanned_roots(core, root_files).await?;
+    persist_scanned_roots(core, root_files).await?;
+    // A synchronous caller receives the catalog only after its memberships and
+    // complete offer projection agree, including removal of vanished copies.
+    core.ed2k_transfers
+        .refresh_complete_shared_catalog()
+        .await?;
     // WHY: a verified path can be reusable before it has active membership.
     // Resolve the result after admission so those files cannot disappear from
     // a successful synchronous reload, and propagate catalog read failures.
@@ -2468,7 +2467,24 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     if core.lifecycle_state_name() != "running" {
         return Ok(());
     }
-    admit_scanned_roots(&core, root_files).await?;
+    persist_scanned_roots(&core, root_files).await?;
+    // WHY: shutdown must join the durable root transaction, but starting a full
+    // catalog rebuild afterward delays profile release for an unused cache.
+    // Startup revalidates the committed memberships before offering them.
+    if core.lifecycle_state_name() != "running" {
+        return Ok(());
+    }
+    let background_core = core.clone();
+    if core
+        .ed2k_transfers
+        .refresh_complete_shared_catalog_while(move || {
+            background_core.lifecycle_state_name() == "running"
+        })
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.active.clear();
@@ -2485,11 +2501,36 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         if let Some(bootstrap) = bootstrap.as_ref() {
             merge_initial_publish_progress(diagnostics, bootstrap);
         }
+        // WHY: a queued reload can immediately replace the live counters.
+        // Retain completion facts in the existing structured log without paths.
+        tracing::info!(
+            scannedCount = diagnostics.scanned_count,
+            plannedHashCount = diagnostics.planned_hash_count,
+            hashedCount = diagnostics.hashed_count,
+            reusedCount = diagnostics.reused_count,
+            newCount = diagnostics.new_count,
+            changedCount = diagnostics.changed_count,
+            failedHashCount = diagnostics.failed_hash_count,
+            missingFingerprintCount = diagnostics.missing_fingerprint_count,
+            statFailedCount = diagnostics.stat_failed_count,
+            skippedFailedCount = diagnostics.skipped_failed_count,
+            skippedIntakeCount = diagnostics.skipped_intake_count,
+            prunedCount = diagnostics.pruned_count,
+            staleHashCount = diagnostics.stale_hash_count,
+            diskCount = diagnostics.disk_count,
+            activeHashCount = diagnostics.active_hash_count,
+            plannedHashBytes = diagnostics.planned_hash_bytes,
+            completedHashBytes = diagnostics.completed_hash_bytes,
+            plannedReadBytes = diagnostics.planned_read_bytes,
+            completedReadBytes = diagnostics.completed_read_bytes,
+            startedAtMs = diagnostics.started_at_ms.unwrap_or(0),
+            updatedAtMs = diagnostics.updated_at_ms.unwrap_or(0),
+            "shared-directory reload completed"
+        );
     });
     // A reused-only reload does not pass through `share_local_file`, so queue a
     // final server offer refresh explicitly once the catalog is known complete.
     core.queue_ed2k_shared_catalog_publish();
-    tracing::info!("background shared-directory reload finished hashing the library");
     Ok(())
 }
 

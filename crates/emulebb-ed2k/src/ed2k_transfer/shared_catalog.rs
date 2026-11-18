@@ -259,20 +259,46 @@ impl Ed2kTransferRuntime {
     /// Rebuild complete offers after a root scan changes membership. Verified
     /// in-progress download entries and compatibility hints stay in the catalog.
     pub async fn refresh_complete_shared_catalog(&self) -> anyhow::Result<usize> {
+        Ok(self
+            .refresh_complete_shared_catalog_while(|| true)
+            .await?
+            .expect("foreground catalog rebuild is not cancelled"))
+    }
+
+    /// Stop a background rebuild between bounded pages and join its blocking
+    /// worker without publishing a partial catalog. None means cancelled;
+    /// durable memberships remain authoritative for the next startup.
+    pub async fn refresh_complete_shared_catalog_while(
+        &self,
+        keep_running: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> anyhow::Result<Option<usize>> {
+        let keep_running = Arc::new(keep_running);
         loop {
+            if !keep_running() {
+                return Ok(None);
+            }
             let root_epoch = self.stable_category_root_epoch().await;
             let Some(stripes) = self.share_eligibility.full_rebuild_snapshot()? else {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 continue;
             };
             let metadata = self.metadata.clone();
-            let mut rebuilt = tokio::task::spawn_blocking(move || {
-                let mut rebuilt =
-                    super::transfer_sql::completed_catalog_from_metadata_store(&metadata)?;
+            let worker_running = Arc::clone(&keep_running);
+            let rebuilt = tokio::task::spawn_blocking(move || {
+                let Some(mut rebuilt) = super::transfer_sql::completed_catalog_from_metadata_store(
+                    &metadata,
+                    &*worker_running,
+                )?
+                else {
+                    return Ok(None);
+                };
                 // The full catalog rebuild remains a separate scale target;
                 // it must never hydrate all historical execution manifests.
                 let mut after = None;
                 loop {
+                    if !worker_running() {
+                        return Ok(None);
+                    }
                     let page = metadata.download_publish_entries_after(after.as_deref(), 200)?;
                     if page.is_empty() {
                         break;
@@ -289,11 +315,17 @@ impl Ed2kTransferRuntime {
                     }
                     after = page.last().map(|entry| entry.file_hash.clone());
                 }
-                Ok::<_, anyhow::Error>(rebuilt)
+                Ok::<_, anyhow::Error>(Some(rebuilt))
             })
             .await??;
+            let Some(mut rebuilt) = rebuilt else {
+                return Ok(None);
+            };
             let mut after_job = None;
             loop {
+                if !keep_running() {
+                    return Ok(None);
+                }
                 let page = self
                     .payload_catalog_page(after_job, super::STARTUP_SHARED_CATALOG_BATCH)
                     .await?;
@@ -316,6 +348,9 @@ impl Ed2kTransferRuntime {
             }
             let count = rebuilt.completed_verified_len();
             let mut catalog = self.shared_catalog.write().await;
+            if !keep_running() {
+                return Ok(None);
+            }
             if self.category_root_epoch.load(Ordering::Acquire) != root_epoch {
                 drop(catalog);
                 continue;
@@ -331,7 +366,7 @@ impl Ed2kTransferRuntime {
             drop(catalog);
             self.note_shared_catalog_entries_changed();
             self.notify_shared_publish_demand_changed();
-            return Ok(count);
+            return Ok(Some(count));
         }
     }
 
