@@ -1897,3 +1897,114 @@ fn significant_words_repeated_first_token_shifts_primary_keyword() {
     assert_eq!(keyword_target("love song love"), keyword_target("song"));
     assert_ne!(keyword_target("love song love"), keyword_target("love"));
 }
+
+#[tokio::test]
+async fn raw_search_evidence_counts_once_survives_filters_and_freezes_terminal_membership() {
+    let root = unique_runtime_dir("search-corpus-ingestion");
+    let network = test_network_config_with_store(
+        &root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(root.join("metadata.sqlite")).unwrap(),
+        root.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+    let request = SearchCreate {
+        query: "sample query".into(),
+        method: "server".into(),
+        min_size_bytes: Some(1024),
+        ..Default::default()
+    };
+    let search = core.create_search(request.clone()).await.unwrap();
+    let reporter = "192.0.2.4:4661".parse().unwrap();
+    let mut raw = crate::search_observations::tests::raw_file();
+    raw.file_size = Some(2048);
+    let update = |raw: &emulebb_ed2k::ed2k_server::Ed2kSearchFile| {
+        let mapped = crate::search_query::search_result_from_ed2k(
+            &search.id,
+            &request,
+            "server",
+            Some(reporter),
+            raw.clone(),
+        );
+        crate::search_observations::ed2k(
+            mapped,
+            emulebb_metadata::MetadataObservationOrigin::Server,
+            Some(reporter),
+            raw,
+        )
+    };
+    core.apply_search_live_update(&search.id, &request, update(&raw))
+        .await
+        .unwrap();
+    core.apply_search_live_update(&search.id, &request, update(&raw))
+        .await
+        .unwrap();
+    assert_eq!(core.search(&search.id).await.unwrap().results.len(), 1);
+    let page = core
+        .metadata_store
+        .content_observations_page(1, 0, 100)
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].receipt.observation_count, 2);
+    let mut filtered = raw.clone();
+    filtered.file_hash.0 = [0x99; 16];
+    filtered.file_size = Some(1);
+    core.apply_search_live_update(&search.id, &request, update(&filtered))
+        .await
+        .unwrap();
+    assert_eq!(core.search(&search.id).await.unwrap().results.len(), 1);
+    assert_eq!(
+        core.metadata_store.table_count("content_claims").unwrap(),
+        2
+    );
+    core.complete_search_with_results(&search.id, &request, "server", None, None)
+        .await;
+    assert_eq!(
+        core.metadata_store
+            .content_observations_page(1, 0, 100)
+            .unwrap()
+            .items[0]
+            .receipt
+            .observation_count,
+        2
+    );
+    raw.file_name = Some("Alternate.bin".into());
+    core.apply_search_live_update(&search.id, &request, update(&raw))
+        .await
+        .unwrap();
+    let completed = core.search(&search.id).await.unwrap();
+    assert_eq!(completed.results[0].name, "Sample.bin");
+    assert_eq!(
+        core.metadata_store
+            .content_observations_page(1, 0, 100)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    core.delete_search(&search.id).await.unwrap();
+    raw.file_hash.0 = [0x56; 16];
+    raw.file_size = None;
+    core.apply_search_live_update(&search.id, &request, update(&raw))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.metadata_store.table_count("content_claims").unwrap(),
+        3
+    );
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
+    core.persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap()
+        .close_and_drain()
+        .await
+        .unwrap();
+}

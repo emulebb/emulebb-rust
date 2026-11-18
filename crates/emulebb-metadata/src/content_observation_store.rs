@@ -126,7 +126,9 @@ impl MetadataStore {
             )?;
             receipts.push(receipt);
         }
-        tx.commit()?;
+        tx.commit().map_err(|error| {
+            anyhow::Error::new(error).context(crate::MetadataObservationCommitUncertain)
+        })?;
         Ok(receipts)
     }
 

@@ -5,7 +5,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use tokio::{sync::RwLock, time::Instant as TokioInstant};
+use tokio::{
+    sync::{RwLock, mpsc},
+    time::Instant as TokioInstant,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -53,7 +56,7 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
     pub criteria: &'a SearchCriteria,
     /// Optional live-result sink. The terminal return value remains the full
     /// result set; this sink lets callers present pages during a long sweep.
-    pub result_sink: Option<&'a (dyn Fn(Ed2kServerSearchObservation) + Send + Sync + 'a)>,
+    pub result_sink: Option<&'a mpsc::Sender<Ed2kServerSearchObservation>>,
     /// Optional `(completed, total)` server-walk progress sink.
     pub progress_sink: Option<&'a (dyn Fn(usize, usize) + Send + Sync + 'a)>,
     pub cancel: &'a CancellationToken,
@@ -111,7 +114,7 @@ async fn drain_keyword_udp_responses(
     queried_servers: &[ResolvedServerEntry],
     mut deadline: TokioInstant,
     response_quiet_grace: Option<Duration>,
-    result_sink: Option<&(dyn Fn(Ed2kServerSearchObservation) + Send + Sync + '_)>,
+    result_sink: Option<&mpsc::Sender<Ed2kServerSearchObservation>>,
     results: &mut Vec<Ed2kServerSearchObservation>,
     cancel: &CancellationToken,
 ) -> Option<anyhow::Error> {
@@ -154,7 +157,11 @@ async fn drain_keyword_udp_responses(
                             file,
                         };
                         if let Some(result_sink) = result_sink {
-                            result_sink(observation.clone());
+                            if result_sink.send(observation.clone()).await.is_err() {
+                                return Some(anyhow::anyhow!(
+                                    "keyword search result consumer closed"
+                                ));
+                            }
                         }
                         results.push(observation);
                     }
@@ -766,7 +773,11 @@ mod tests {
         let mut results = Vec::new();
         let cancel = CancellationToken::new();
         let cancel_on_result = cancel.clone();
-        let result_sink = move |_| cancel_on_result.cancel();
+        let (result_sink, mut observed) = tokio::sync::mpsc::channel(1);
+        let consumer = tokio::spawn(async move {
+            observed.recv().await.unwrap();
+            cancel_on_result.cancel();
+        });
         // WHY: a 100 ms socket deadline races OS scheduling in the parallel
         // workspace suite. Stop on the observed reply instead of waiting out
         // the generous failure deadline; production response timers stay intact.
@@ -786,6 +797,7 @@ mod tests {
         assert_eq!(results[0].file.file_hash.0, [0x44; 16]);
         assert_eq!(results[0].file.client_id, 0x0102_0304);
         assert_eq!(results[0].file.client_port, 4662);
+        consumer.await.unwrap();
         sender_task.await.unwrap();
     }
 
@@ -824,13 +836,18 @@ mod tests {
         let mut results = Vec::new();
         let cancel = CancellationToken::new();
         let cancel_on_result = cancel.clone();
-        let result_sink = move |observation: super::Ed2kServerSearchObservation| {
-            if observation.file.file_hash.0 == [0x66; 16] {
-                cancel_on_result.cancel();
-            } else {
-                reply_observed.send(()).unwrap();
+        let (result_sink, mut observed) =
+            tokio::sync::mpsc::channel::<super::Ed2kServerSearchObservation>(1);
+        let consumer = tokio::spawn(async move {
+            while let Some(observation) = observed.recv().await {
+                if observation.file.file_hash.0 == [0x66; 16] {
+                    cancel_on_result.cancel();
+                    break;
+                } else {
+                    reply_observed.send(()).unwrap();
+                }
             }
-        };
+        });
         // WHY: acknowledgements anchor each delayed send to an actual received
         // reply. The second reply exceeds the initial deadline, and the third
         // exceeds the first extension, proving that every reply renews it.
@@ -845,6 +862,7 @@ mod tests {
         )
         .await;
 
+        consumer.await.unwrap();
         assert!(error.is_none());
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].file.file_hash.0, [0x44; 16]);

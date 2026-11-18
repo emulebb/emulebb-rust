@@ -268,6 +268,7 @@ async fn background_search_channel_round_trips_results() {
         Default::default(),
         Duration::from_secs(1),
         &cancel,
+        None,
     )
     .await
     .unwrap();
@@ -291,6 +292,7 @@ async fn cancelled_background_keyword_search_is_not_dispatched() {
         Default::default(),
         Duration::from_secs(1),
         &cancel,
+        None,
     )
     .await
     .unwrap();
@@ -315,6 +317,7 @@ async fn background_keyword_wrapper_waits_for_the_session_owned_deadline() {
             Default::default(),
             Duration::from_millis(10),
             &CancellationToken::new(),
+            None,
         )
         .await
     });
@@ -558,6 +561,7 @@ async fn background_udp_source_search_preserves_responding_server() {
         0,
         None,
     )
+    .await
     .unwrap();
 
     let sources = receive_response.await.unwrap().unwrap();
@@ -565,8 +569,8 @@ async fn background_udp_source_search_preserves_responding_server() {
     assert_eq!(sources[0].source_server, Some(server.base_endpoint()));
 }
 
-#[test]
-fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
+#[tokio::test]
+async fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
     let mut server = test_udp_obfuscated_server();
     let (response, _receive_response) = tokio::sync::oneshot::channel();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -576,6 +580,7 @@ fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
         results: Vec::new(),
         page_count: 0,
         cancel: CancellationToken::new(),
+        result_sink: None,
         response,
     });
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
@@ -595,6 +600,7 @@ fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
         0,
         None,
     )
+    .await
     .unwrap();
 
     match pending {
@@ -612,8 +618,8 @@ fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
     }
 }
 
-#[test]
-fn background_udp_source_search_keeps_pending_after_malformed_reply() {
+#[tokio::test]
+async fn background_udp_source_search_keeps_pending_after_malformed_reply() {
     let mut server = test_udp_obfuscated_server();
     let file_hash = Ed2kHash([0x73; 16]);
     let (response, _receive_response) = tokio::sync::oneshot::channel();
@@ -640,6 +646,7 @@ fn background_udp_source_search_keeps_pending_after_malformed_reply() {
         0,
         None,
     )
+    .await
     .unwrap();
 
     match pending {
@@ -686,8 +693,8 @@ fn extended_server_status_payload(challenge: u32, udp_flags: u32, udp_key: u32) 
     payload
 }
 
-#[test]
-fn server_status_matching_challenge_records_users_files_and_udp_flags() {
+#[tokio::test]
+async fn server_status_matching_challenge_records_users_files_and_udp_flags() {
     let mut server = test_udp_obfuscated_server();
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let challenge = 0x55AA_BEEF;
@@ -709,9 +716,10 @@ fn server_status_matching_challenge_records_users_files_and_udp_flags() {
         41,
         None,
     )
+    .await
     .unwrap();
 
-    let guard = state.blocking_read();
+    let guard = state.read().await;
     assert_eq!(guard.server_users, Some(4242));
     assert_eq!(guard.server_files, Some(99000));
     assert_eq!(guard.server_ping_ms, Some(41));
@@ -720,8 +728,8 @@ fn server_status_matching_challenge_records_users_files_and_udp_flags() {
     assert_eq!(outstanding, None);
 }
 
-#[test]
-fn server_status_mismatched_challenge_is_discarded() {
+#[tokio::test]
+async fn server_status_mismatched_challenge_is_discarded() {
     let mut server = test_udp_obfuscated_server();
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let mut outstanding = Some(0x55AA_0001);
@@ -744,9 +752,10 @@ fn server_status_mismatched_challenge_is_discarded() {
         0,
         Some(&events),
     )
+    .await
     .unwrap();
 
-    let guard = state.blocking_read();
+    let guard = state.read().await;
     assert_eq!(guard.server_users, None);
     assert_eq!(guard.server_files, None);
     // The outstanding challenge stays armed until the right reply arrives.
@@ -757,8 +766,8 @@ fn server_status_mismatched_challenge_is_discarded() {
     );
 }
 
-#[test]
-fn server_status_refreshes_key_binding_ports_and_persistence_event() {
+#[tokio::test]
+async fn server_status_refreshes_key_binding_ports_and_persistence_event() {
     let mut server = test_server(0, 0);
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let challenge = 0x1357_2468;
@@ -784,6 +793,7 @@ fn server_status_refreshes_key_binding_ports_and_persistence_event() {
         37,
         Some(&events),
     )
+    .await
     .unwrap();
 
     assert_eq!(server.entry.udp_flags, udp_flags);
@@ -791,7 +801,7 @@ fn server_status_refreshes_key_binding_ports_and_persistence_event() {
     assert_eq!(server.entry.udp_key_ip, public_client_id);
     assert_eq!(server.entry.obfuscation_port_tcp, 4665);
     assert_eq!(server.entry.obfuscation_port_udp, 4675);
-    let guard = state.blocking_read();
+    let guard = state.read().await;
     assert_eq!(guard.server_udp_key, Some(udp_key));
     assert_eq!(guard.server_udp_key_ip, Some(public_client_id));
     assert_eq!(guard.server_max_users, Some(5000));
@@ -1736,6 +1746,7 @@ async fn reject_does_not_complete_or_disconnect_pending_background_search() {
             Default::default(),
             Duration::from_secs(1),
             &cancel,
+            None,
         )
         .await;
         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1800,6 +1811,7 @@ async fn silent_server_returns_timed_out_and_keeps_the_session_connected() {
             Default::default(),
             Duration::from_millis(50),
             &cancel,
+            None,
         )
         .await
         .unwrap();
@@ -2075,12 +2087,14 @@ async fn malformed_typed_replies_preserve_pending_request_and_session() {
         .await
         .expect("background session should accept login");
 
+        let (result_sink, mut observations) = tokio::sync::mpsc::channel(1);
         let keyword_results = search_keyword_via_background_session(
             &handle,
             "malformed result",
             Default::default(),
             Duration::from_secs(1),
             &cancel,
+            Some(result_sink),
         )
         .await
         .expect("valid final page must complete the original keyword request");
@@ -2089,6 +2103,10 @@ async fn malformed_typed_replies_preserve_pending_request_and_session() {
         };
         assert_eq!(keyword_results.len(), 1);
         assert_eq!(keyword_results[0].file_hash, result_hash);
+        let observed = observations.try_recv().unwrap();
+        assert_eq!(observed.server_endpoint, endpoint);
+        assert_eq!(observed.file.file_hash, result_hash);
+        assert!(observations.try_recv().is_err());
 
         let results = search_source_via_background_session(
             &handle,

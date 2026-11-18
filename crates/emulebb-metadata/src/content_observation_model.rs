@@ -8,6 +8,15 @@ pub const CONTENT_OBSERVATION_BATCH_ITEMS: usize = 128;
 pub const CONTENT_OBSERVATION_BATCH_BYTES: usize = 256 * 1024;
 pub(crate) const OBSERVATION_BYTES: usize = 64 * 1024;
 
+#[derive(Debug)]
+pub struct MetadataObservationCommitUncertain;
+impl std::fmt::Display for MetadataObservationCommitUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("content observation commit outcome is uncertain")
+    }
+}
+impl std::error::Error for MetadataObservationCommitUncertain {}
+
 /// Unknown size is its own claim, distinct from a known zero-byte file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MetadataContentClaim {
@@ -24,7 +33,7 @@ pub enum MetadataObservationOrigin {
 }
 
 impl MetadataObservationOrigin {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Server => "server",
             Self::Global => "global",

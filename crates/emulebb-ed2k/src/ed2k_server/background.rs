@@ -16,10 +16,10 @@ use tracing::{debug, warn};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    Ed2kFoundSource, Ed2kSearchFile, Ed2kServerState, Ed2kServerUdpStatusEvidence,
-    OP_CALLBACKREQUEST, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES,
-    OP_SEARCHREQUEST, OfferFilesPublishStats, ResolvedServerEntry, SERVER_TCP_FLAG_LARGEFILES,
-    SearchCriteria, ServerSession, ServerSessionPhase, ServerUdpPacket,
+    Ed2kFoundSource, Ed2kSearchFile, Ed2kServerSearchObservation, Ed2kServerState,
+    Ed2kServerUdpStatusEvidence, OP_CALLBACKREQUEST, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES,
+    OP_GLOBSERVSTATRES, OP_SEARCHREQUEST, OfferFilesPublishStats, ResolvedServerEntry,
+    SERVER_TCP_FLAG_LARGEFILES, SearchCriteria, ServerSession, ServerSessionPhase, ServerUdpPacket,
     decode_udp_found_source_sets, decode_udp_search_result_pages,
     encode_search_request_with_criteria, encode_source_request, is_low_id, merge_found_sources,
     send_due_offer_files_advertisement, source_request_opcode, validate_found_sources,
@@ -181,6 +181,7 @@ pub(super) enum BackgroundServerSearchRequest {
         criteria: Box<SearchCriteria>,
         timeout: Duration,
         cancel: CancellationToken,
+        result_sink: Option<mpsc::Sender<Ed2kServerSearchObservation>>,
         response: oneshot::Sender<BackgroundKeywordSearchResponse>,
     },
     Source {
@@ -232,6 +233,7 @@ pub(super) enum PendingBackgroundServerSearch {
         results: Vec<Ed2kSearchFile>,
         page_count: u32,
         cancel: CancellationToken,
+        result_sink: Option<mpsc::Sender<Ed2kServerSearchObservation>>,
         response: oneshot::Sender<BackgroundKeywordSearchResponse>,
     },
     Source {
@@ -271,6 +273,7 @@ pub async fn search_keyword_via_background_session(
     criteria: SearchCriteria,
     timeout: Duration,
     cancel: &CancellationToken,
+    result_sink: Option<mpsc::Sender<Ed2kServerSearchObservation>>,
 ) -> Result<Ed2kBackgroundKeywordSearchOutcome> {
     if cancel.is_cancelled() {
         return Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new()));
@@ -281,6 +284,7 @@ pub async fn search_keyword_via_background_session(
         criteria: Box::new(criteria),
         timeout,
         cancel: cancel.clone(),
+        result_sink,
         response,
     };
     tokio::select! {
@@ -494,7 +498,7 @@ pub async fn publish_shared_catalog_via_background_session(
     clippy::too_many_arguments,
     reason = "packet dispatch keeps mutable protocol state explicit"
 )]
-pub(super) fn handle_background_udp_packet(
+pub(super) async fn handle_background_udp_packet(
     server: &mut ResolvedServerEntry,
     packet: &ServerUdpPacket,
     pending_background_search: &mut Option<PendingBackgroundServerSearch>,
@@ -515,6 +519,7 @@ pub(super) fn handle_background_udp_packet(
                 mut results,
                 page_count,
                 cancel,
+                result_sink,
                 response,
             }) = pending_background_search.take()
             else {
@@ -535,6 +540,7 @@ pub(super) fn handle_background_udp_packet(
                         deadline,
                         results,
                         cancel,
+                        result_sink,
                         response,
                         page_count,
                     });
@@ -543,6 +549,12 @@ pub(super) fn handle_background_udp_packet(
             };
             for page in pages {
                 log_search_result_page(server.base_endpoint(), &page.files);
+                emit_keyword_observations(
+                    result_sink.as_ref(),
+                    server.base_endpoint(),
+                    &page.files,
+                )
+                .await;
                 results.extend(page.files);
             }
             debug!(
@@ -800,6 +812,7 @@ pub(super) async fn start_background_server_search(
             criteria,
             timeout,
             cancel,
+            result_sink,
             response,
         } => {
             if cancel.is_cancelled() {
@@ -837,6 +850,7 @@ pub(super) async fn start_background_server_search(
                 results: Vec::new(),
                 page_count: 0,
                 cancel,
+                result_sink,
                 response,
             }))
         }
@@ -1250,5 +1264,27 @@ mod callback_dispatch_tests {
             )
             .is_none()
         );
+    }
+}
+
+/// Emit each decoded page before aggregation or a later terminal failure.
+pub(super) async fn emit_keyword_observations(
+    sink: Option<&mpsc::Sender<Ed2kServerSearchObservation>>,
+    server_endpoint: SocketAddr,
+    files: &[Ed2kSearchFile],
+) {
+    if let Some(sink) = sink {
+        for file in files {
+            if sink
+                .send(Ed2kServerSearchObservation {
+                    server_endpoint,
+                    file: file.clone(),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     }
 }

@@ -9,7 +9,8 @@ mod content_observation_store;
 pub use content_observation_model::{
     CONTENT_OBSERVATION_BATCH_BYTES, CONTENT_OBSERVATION_BATCH_ITEMS, MetadataContentClaim,
     MetadataContentMetadata, MetadataContentObservation, MetadataContentObservationEvent,
-    MetadataContentObservationPage, MetadataContentObservationReceipt, MetadataObservationOrigin,
+    MetadataContentObservationPage, MetadataContentObservationReceipt,
+    MetadataObservationCommitUncertain, MetadataObservationOrigin,
 };
 mod download_availability;
 pub use download_availability::{

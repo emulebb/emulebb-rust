@@ -23,7 +23,10 @@ use crate::{
 };
 
 pub(crate) enum SearchLiveUpdate {
-    Result(Box<SearchResult>),
+    Result {
+        result: Box<SearchResult>,
+        observations: Vec<emulebb_metadata::MetadataContentObservationEvent>,
+    },
     Progress(SearchProgress),
 }
 
@@ -39,10 +42,7 @@ pub(crate) enum Ed2kServerSearchOutcome {
     NotConnected,
     /// The search ran on a live session. `status_reason` preserves a missing
     /// connected-server reply without changing the MFC-compatible completed status.
-    Completed {
-        results: Vec<SearchResult>,
-        status_reason: Option<&'static str>,
-    },
+    Completed { status_reason: Option<&'static str> },
 }
 
 impl EmulebbCore {
@@ -178,7 +178,7 @@ impl EmulebbCore {
             SearchProgress::new("connected-server", 0, Some(1), "servers"),
         )
         .await;
-        let (incremental_tx, incremental_rx) = mpsc::unbounded_channel();
+        let (incremental_tx, incremental_rx) = mpsc::channel(16);
         let outcome = self
             .await_with_incremental_results(
                 &entry.search_id,
@@ -194,16 +194,12 @@ impl EmulebbCore {
             )
             .await;
         match outcome {
-            Ok(Ed2kServerSearchOutcome::Completed {
-                results,
-                status_reason,
-            }) => {
+            Ok(Ed2kServerSearchOutcome::Completed { status_reason }) => {
                 self.search_queue.lock().finish(lane);
                 self.complete_search_with_results(
                     &entry.search_id,
                     &entry.request,
                     method_token,
-                    Some(results),
                     status_reason,
                     None,
                 )
@@ -271,7 +267,7 @@ impl EmulebbCore {
             SearchProgress::new("kad-traversal", 0, None, ""),
         )
         .await;
-        let (incremental_tx, incremental_rx) = mpsc::unbounded_channel();
+        let (incremental_tx, incremental_rx) = mpsc::channel(16);
         let outcome = match dht {
             Some(dht) => {
                 self.await_with_incremental_results(
@@ -316,7 +312,6 @@ impl EmulebbCore {
                     &entry.search_id,
                     &entry.request,
                     "kad",
-                    Some(outcome.results),
                     None,
                     Some(outcome.aich_votes),
                 )
@@ -343,35 +338,48 @@ impl EmulebbCore {
         &self,
         search_id: &str,
         request: &SearchCreate,
-        mut incremental_rx: mpsc::UnboundedReceiver<SearchLiveUpdate>,
-        operation: impl Future<Output = T>,
-    ) -> T {
+        mut incremental_rx: mpsc::Receiver<SearchLiveUpdate>,
+        operation: impl Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
         tokio::pin!(operation);
         loop {
             tokio::select! {
                 output = &mut operation => {
                     while let Ok(update) = incremental_rx.try_recv() {
-                        self.apply_search_live_update(search_id, request, update).await;
+                        self.apply_search_live_update(search_id, request, update).await?;
                     }
                     return output;
                 }
                 update = incremental_rx.recv() => {
                     if let Some(update) = update {
-                        self.apply_search_live_update(search_id, request, update).await;
+                        self.apply_search_live_update(search_id, request, update).await?;
                     }
                 }
             }
         }
     }
 
-    async fn apply_search_live_update(
+    pub(crate) async fn apply_search_live_update(
         &self,
         search_id: &str,
         request: &SearchCreate,
         update: SearchLiveUpdate,
-    ) {
+    ) -> anyhow::Result<()> {
         match update {
-            SearchLiveUpdate::Result(result) => {
+            SearchLiveUpdate::Result {
+                result,
+                observations,
+            } => {
+                let owner = self
+                    .persistence_owner
+                    .owner(&self.metadata_store, &self.state)?;
+                // The corpus is independent of session existence and filtering.
+                // Only this raw-event path increments observation counts.
+                for observation in observations {
+                    owner
+                        .observe_content(std::slice::from_ref(&observation))
+                        .await?;
+                }
                 self.merge_incremental_search_result(search_id, request, *result)
                     .await;
             }
@@ -379,6 +387,7 @@ impl EmulebbCore {
                 self.update_search_progress(search_id, progress).await;
             }
         }
+        Ok(())
     }
 
     async fn update_search_progress(&self, search_id: &str, progress: SearchProgress) {
@@ -386,14 +395,15 @@ impl EmulebbCore {
         let Some(search) = state.searches.get_mut(search_id) else {
             return;
         };
+        if !matches!(search.status.as_str(), "queued" | "running") {
+            return;
+        }
         search.progress = progress;
         search.updated_at = Utc::now();
     }
 
-    /// Makes accepted network observations visible to REST/UI polling while a
-    /// long Kad traversal or global server sweep is still active. Durability
-    /// remains a terminal checkpoint in complete/fail, avoiding a full SQLite
-    /// rewrite for every wire result.
+    /// Publish an already durable raw observation into a collecting session.
+    /// Session result snapshots remain separate from permanent corpus evidence.
     pub(crate) async fn merge_incremental_search_result(
         &self,
         search_id: &str,
@@ -409,6 +419,9 @@ impl EmulebbCore {
         let Some(search) = state.searches.get_mut(search_id) else {
             return;
         };
+        if !matches!(search.status.as_str(), "queued" | "running") {
+            return;
+        }
         if let Some(existing) = search
             .results
             .iter_mut()
@@ -514,24 +527,27 @@ impl EmulebbCore {
         }
     }
 
-    /// Marks a search completed, merging network results (deduped by hash)
-    /// over the local-index results captured at create time. Shared by the
-    /// queued path and the legacy immediate path.
+    /// Settle terminal status and integrity votes without replaying results.
+    /// Every decoded network observation already passed through live ingestion.
     pub(crate) async fn complete_search_with_results(
         &self,
         search_id: &str,
         request: &SearchCreate,
         method_token: &'static str,
-        network_results: Option<Vec<SearchResult>>,
         status_reason: Option<&str>,
         kad_aich_votes: Option<std::collections::HashMap<String, crate::KadAichSearchVotes>>,
     ) {
         let snapshot = {
             let mut state = self.state.lock().await;
             state.search_cancels.remove(search_id);
-            let mut network_results = network_results.unwrap_or_default();
-            crate::search_query::apply_search_filters(&mut network_results, request);
-            let accepted_hashes = network_results
+            let Some(current) = state.searches.get(search_id) else {
+                return;
+            };
+            if !matches!(current.status.as_str(), "queued" | "running") {
+                return;
+            }
+            let accepted_hashes = current
+                .results
                 .iter()
                 .map(|result| result.hash.clone())
                 .collect::<std::collections::HashSet<_>>();
@@ -539,17 +555,6 @@ impl EmulebbCore {
                 let Some(search) = state.searches.get_mut(search_id) else {
                     return;
                 };
-                for result in network_results {
-                    if let Some(existing) = search
-                        .results
-                        .iter_mut()
-                        .find(|existing| existing.hash == result.hash)
-                    {
-                        existing.merge_observations(result);
-                    } else {
-                        search.results.push(result);
-                    }
-                }
                 search.status = "completed".to_string();
                 search.status_reason = status_reason.map(str::to_string);
                 search.resolved_method = concrete_method(method_token).map(str::to_string);
@@ -598,7 +603,9 @@ impl EmulebbCore {
     ) {
         let snapshot = {
             let mut state = self.state.lock().await;
-            state.search_cancels.remove(search_id);
+            if let Some(cancel) = state.search_cancels.remove(search_id) {
+                cancel.cancel();
+            }
             let Some(search) = state.searches.get_mut(search_id) else {
                 return;
             };

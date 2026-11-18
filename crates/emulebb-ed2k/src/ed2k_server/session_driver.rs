@@ -607,6 +607,7 @@ pub(super) async fn run_one_server_session(
                             mut results,
                             mut page_count,
                             cancel,
+                            result_sink,
                             response,
                         }) => {
                             let page = match decode_search_result_page(&packet.payload) {
@@ -623,12 +624,16 @@ pub(super) async fn run_one_server_session(
                                             results,
                                             page_count,
                                             cancel,
+                                            result_sink,
                                             response,
                                         });
                                     continue;
                                 }
                             };
                             log_search_result_page(session.endpoint, &page.files);
+                            super::background::emit_keyword_observations(
+                                result_sink.as_ref(), session.endpoint, &page.files,
+                            ).await;
                             page_count += 1;
                             results.extend(page.files);
                             if page.more_results_available {
@@ -646,6 +651,7 @@ pub(super) async fn run_one_server_session(
                                     results,
                                     page_count,
                                     cancel,
+                                    result_sink,
                                     response,
                                 });
                                 continue;
@@ -946,7 +952,7 @@ pub(super) async fn run_one_server_session(
                                 .map(|ip| u32::from_le_bytes(ip.octets())),
                             status_ping_ms,
                             context.server_list_events.as_ref(),
-                        )?;
+                        ).await?;
                         if server_status_challenge.is_none() {
                             server_crypt_ping_fallback_deadline = None;
                         }
