@@ -638,7 +638,7 @@ async fn download_search_result_honors_corroborated_kad_aich() {
         .lock()
         .await
         .kad_aich_search_votes
-        .insert((file_hash.to_string(), search.id.clone()), votes);
+        .insert(file_hash, &search.id, votes);
 
     let result_id = core
         .metadata_store

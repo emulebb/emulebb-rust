@@ -72,9 +72,7 @@ pub(super) async fn process(
                 true
             });
             let cached = state.searches.remove(&id).is_some();
-            state
-                .kad_aich_search_votes
-                .retain(|(_, search_id), _| search_id != &id);
+            state.kad_aich_search_votes.remove_session(&id);
             persisted || queued || cancelled || cached
         }
         None => {

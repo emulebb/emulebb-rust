@@ -59,7 +59,7 @@ pub(crate) fn load_core_state(
         // Startup durably ends interrupted collection; no cancellation handles survive.
         search_cancels: HashMap::new(),
         // Network trust votes apply only to evidence received in this process.
-        kad_aich_search_votes: std::collections::BTreeMap::new(),
+        kad_aich_search_votes: Default::default(),
         transfers: HashMap::new(),
         core_settings,
         categories,

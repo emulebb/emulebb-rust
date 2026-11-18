@@ -4,7 +4,6 @@ use crate::download_attempts::AdmissionDenied;
 use crate::{EmulebbCore, Transfer, download_attempts::DownloadAttemptGuard};
 use anyhow::{Context, Result};
 use emulebb_metadata::DownloadIntent;
-use std::collections::BTreeMap;
 
 impl EmulebbCore {
     /// Reserve a live slot before storage/hydration. A stale stopped/faulted
@@ -104,26 +103,9 @@ impl EmulebbCore {
             state
                 .transfers
                 .insert(transfer.hash.clone(), transfer.clone());
-            // Hash-leading ordered seeks avoid unrelated search history. Replay
-            // only bounded, genuine live evidence; persisted AICH strings never vote.
-            let mut votes = BTreeMap::new();
-            for ((_, _), evidence) in state
+            state
                 .kad_aich_search_votes
-                .range((transfer.hash.clone(), String::new())..)
-                .take_while(|((candidate, _), _)| candidate == &transfer.hash)
-                .take(4)
-            {
-                for (root, ip) in evidence.observations() {
-                    if votes.len() == 64 {
-                        break;
-                    }
-                    votes.entry(ip).or_insert(root);
-                }
-            }
-            votes
-                .into_iter()
-                .map(|(ip, root)| (root, ip))
-                .collect::<Vec<_>>()
+                .observations_for_hash(&transfer.hash)
         };
         if !observations.is_empty() {
             self.ed2k_transfers

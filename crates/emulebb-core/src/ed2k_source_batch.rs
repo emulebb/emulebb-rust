@@ -366,7 +366,7 @@ mod tests {
         CoreState {
             searches: HashMap::new(),
             search_cancels: HashMap::new(),
-            kad_aich_search_votes: std::collections::BTreeMap::new(),
+            kad_aich_search_votes: Default::default(),
             transfers,
             core_settings: default_core_settings(),
             categories: BTreeMap::new(),

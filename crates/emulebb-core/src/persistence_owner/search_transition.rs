@@ -183,15 +183,13 @@ pub(super) async fn process(
             &current.status,
             current.status_reason.as_deref(),
         );
-        state
-            .kad_aich_search_votes
-            .retain(|(_, id), _| id != &command.id);
+        state.kad_aich_search_votes.remove_session(&command.id);
         if let Some(mut votes) = command.votes {
             for hash in receipt.accepted_hashes {
                 if let Some(votes) = votes.remove(&hash) {
                     state
                         .kad_aich_search_votes
-                        .insert((hash, command.id.clone()), votes);
+                        .insert(&hash, &command.id, votes);
                 }
             }
         }
