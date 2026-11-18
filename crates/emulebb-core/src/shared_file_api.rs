@@ -178,7 +178,9 @@ impl EmulebbCore {
         &self,
         query: SharedFileListQuery,
     ) -> Result<SharedFileListPage> {
+        tracing::debug!(phase = "publicationContextWait", "shared-file read");
         let context = self.shared_file_publication_context().await;
+        tracing::debug!(phase = "metadataWait", "shared-file read");
         let page = self
             .ed2k_transfers
             .query_share_entries(MetadataSharedFileQuery {
@@ -189,6 +191,7 @@ impl EmulebbCore {
                 count_total: true,
             })
             .await?;
+        tracing::debug!(phase = "metadataReady", "shared-file read");
         Ok(SharedFileListPage {
             items: page
                 .entries
@@ -576,7 +579,9 @@ impl EmulebbCore {
         &self,
         edit: ExplicitRootEdit,
     ) -> Result<SharedDirectories> {
+        tracing::debug!(phase = "implicitSync", "explicit root replacement");
         shared_directories::sync_implicit_shared_directory_roots(self).await?;
+        tracing::debug!(phase = "preparation", "explicit root replacement");
         loop {
             let expected = self.state.lock().await.shared_directories.clone();
             let roots = match &edit {
@@ -633,6 +638,7 @@ impl EmulebbCore {
             let owner = self
                 .persistence_owner
                 .owner(&self.metadata_store, &self.state)?;
+            tracing::debug!(phase = "ownerCommit", "explicit root replacement");
             if owner
                 .replace_explicit_roots(
                     crate::persistence_owner::category::CategoryCommand::ReplaceRoots {
@@ -646,6 +652,7 @@ impl EmulebbCore {
                 )
                 .await?
             {
+                tracing::debug!(phase = "completed", "explicit root replacement");
                 return Ok(self.shared_directories().await);
             }
         }

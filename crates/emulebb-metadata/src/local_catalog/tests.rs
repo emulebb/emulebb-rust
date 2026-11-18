@@ -263,6 +263,26 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
             )
             .unwrap()
     );
+    // A full unchanged scan uses the root writer, not the single-copy writer.
+    // It must preserve the same physical projection under the guard above.
+    let current = NativeFileFingerprint::from_storage_bytes(&fingerprint).unwrap();
+    assert!(
+        store
+            .admit_local_path_to_root(
+                &root,
+                &restored.entries[0].path,
+                restored.entries[0].path.strip_prefix(&root).unwrap(),
+                &current,
+            )
+            .unwrap()
+    );
+    let scanned = (1..=100_000)
+        .map(|n| {
+            let relative = std::path::PathBuf::from(format!("sample-{n:06}.bin"));
+            (root.join(&relative), relative, current.clone())
+        })
+        .collect::<Vec<_>>();
+    store.replace_root_memberships(&root, &scanned).unwrap();
     assert_eq!(
         store
             .query_active_local_share_entries(&MetadataSharedFileQuery {

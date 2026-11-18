@@ -40,10 +40,14 @@ pub(crate) fn initialize(conn: &Connection) -> Result<()> {
         } else {
             ""
         };
+        // WHY: an outer UPSERT can override a trigger's OR IGNORE policy.
+        // Give this deduplication its own conflict clause for changed evidence.
         conn.execute_batch(&format!(
             "CREATE TEMP TRIGGER session_library_verified_{event}
              AFTER {event} ON session_verified_local_paths {changed}
-             BEGIN INSERT OR IGNORE INTO session_library_pending {select}; END;"
+             BEGIN INSERT INTO session_library_pending
+             SELECT known_file_id FROM ({select}) WHERE true
+             ON CONFLICT(known_file_id) DO NOTHING; END;"
         ))?;
     }
     Ok(())

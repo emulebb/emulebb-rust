@@ -296,10 +296,14 @@ pub(super) fn stream_execution_from_metadata(
 /// before advancing, rather than collecting a second library-sized entry list.
 pub(super) fn completed_catalog_from_metadata_store(
     metadata: &MetadataStore,
-) -> Result<super::IndexedSharedCatalog> {
+    keep_running: &dyn Fn() -> bool,
+) -> Result<Option<super::IndexedSharedCatalog>> {
     let mut catalog = super::IndexedSharedCatalog::default();
     let mut after = None;
     loop {
+        if !keep_running() {
+            return Ok(None);
+        }
         let page = completed_catalog_page_from_metadata_store(
             metadata,
             after.as_deref(),
@@ -314,7 +318,7 @@ pub(super) fn completed_catalog_from_metadata_store(
         anyhow::ensure!(page.cursor > after, "catalog page did not advance");
         after = page.cursor;
     }
-    Ok(catalog)
+    Ok(Some(catalog))
 }
 
 /// A keyset page whose cursor also advances across rejected stale candidates.

@@ -242,9 +242,16 @@ impl MetadataStore {
             "ingest job snapshot does not cover exactly the affected content"
         );
         let mut recovery_error = None;
+        let started = std::time::Instant::now();
         // Only a transaction-wide optional-cache abort gets one fallback.
         for with_recovery in [true, false] {
+            tracing::debug!(phase = "connectionWait", with_recovery, "ingest binding");
             let mut conn = self.connection()?;
+            tracing::debug!(
+                phase = "connectionAcquired",
+                elapsed_ms = started.elapsed().as_millis(),
+                "ingest binding"
+            );
             let mut tx = conn.transaction()?;
             check_binding(&tx, content, expected)?;
             for job in expected_jobs {
@@ -258,6 +265,11 @@ impl MetadataStore {
                 ObservedRootChanged
             );
             Self::upsert_verified_local_content_tx(&tx, content, crate::store::unix_ms())?;
+            tracing::debug!(
+                phase = "contentBound",
+                elapsed_ms = started.elapsed().as_millis(),
+                "ingest binding"
+            );
             Self::update_transfer_media_on_connection(&tx, &content.file_hash, media)?;
             for root in roots {
                 ensure!(
@@ -315,6 +327,11 @@ impl MetadataStore {
                 }
             }
             let mut projections = Vec::with_capacity(2);
+            tracing::debug!(
+                phase = "projecting",
+                elapsed_ms = started.elapsed().as_millis(),
+                "ingest binding"
+            );
             if let Some(old) = expected.filter(|old| old.file_hash != content.file_hash) {
                 projections.push(project(&tx, &old.file_hash)?);
             }
@@ -326,6 +343,11 @@ impl MetadataStore {
             tx.commit().map_err(|error| {
                 anyhow::Error::new(error).context(MetadataIngestCommitUncertain)
             })?;
+            tracing::debug!(
+                phase = "committed",
+                elapsed_ms = started.elapsed().as_millis(),
+                "ingest binding"
+            );
             return Ok(MetadataIngestCommit {
                 projections,
                 recovery_error,

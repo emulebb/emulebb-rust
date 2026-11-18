@@ -36,10 +36,21 @@ impl EmulebbCore {
     }
 
     pub async fn upload(&self, client_id: &str, waiting_queue: bool) -> Option<Upload> {
-        self.uploads_by_queue_state(waiting_queue)
-            .await
-            .into_iter()
-            .find(|upload| upload.client_id == client_id)
+        let entry = self
+            .ed2k_transfers
+            .upload_client_snapshot(client_id, waiting_queue)
+            .await?;
+        let view = match self.ed2k_transfers.serving_view(&entry.file_hash).await {
+            Ok(view) => Some(view),
+            Err(error) => {
+                tracing::warn!(
+                    hash = %entry.file_hash,
+                    "failed to hydrate ED2K manifest for upload snapshot: {error}"
+                );
+                None
+            }
+        };
+        Some(upload_from_snapshot(entry, view.as_ref()))
     }
 
     pub async fn add_upload_client_friend(&self, client_id: &str) -> Result<Option<Friend>> {

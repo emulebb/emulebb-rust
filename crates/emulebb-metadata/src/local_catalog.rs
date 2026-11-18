@@ -241,9 +241,21 @@ impl MetadataStore {
             WHERE (?3 IS NULL OR instr(local_paths.file_name_search_key, ?3) > 0
                   OR instr(cache.sort_key, ?3) > 0 OR instr(lower(hex(cache.ed2k_hash)), ?3) > 0)
               AND (?4 IS NULL OR verified_local_content.upload_priority = ?4)";
+        let started = std::time::Instant::now();
+        tracing::debug!(phase = "connectionWait", "catalog read");
         let mut guard = self.connection()?;
+        tracing::debug!(
+            phase = "connectionAcquired",
+            elapsed_ms = started.elapsed().as_millis(),
+            "catalog read"
+        );
         let tx = guard.transaction()?;
         crate::library_projection::refresh(&tx)?;
+        tracing::debug!(
+            phase = "projectionRefreshed",
+            elapsed_ms = started.elapsed().as_millis(),
+            "catalog read"
+        );
         let conn = &tx;
         let total = if !query.count_total {
             0
@@ -272,6 +284,11 @@ impl MetadataStore {
             AND cache.sort_key >= ?1
             AND (cache.sort_key, cache.ed2k_hash) > (?1, ?2)
             ORDER BY cache.sort_key, cache.ed2k_hash LIMIT ?5"
+        );
+        tracing::debug!(
+            phase = "counted",
+            elapsed_ms = started.elapsed().as_millis(),
+            "catalog read"
         );
         let mut stmt = conn.prepare(&sql)?;
         let limit = i64::try_from(query.limit.saturating_add(1)).unwrap_or(i64::MAX);
