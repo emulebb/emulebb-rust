@@ -363,3 +363,34 @@ mod tests {
         assert_eq!(reloaded.progress.total_units, None);
     }
 }
+
+/// Publish durable evidence only into an existing collecting session.
+pub(crate) async fn publish_observation(
+    state: &std::sync::Arc<tokio::sync::Mutex<crate::CoreState>>,
+    search_id: &str,
+    request: &crate::SearchCreate,
+    result: SearchResult,
+) {
+    let mut accepted = vec![result];
+    crate::search_query::apply_search_filters(&mut accepted, request);
+    let Some(result) = accepted.pop() else {
+        return;
+    };
+    let mut state = state.lock().await;
+    let Some(search) = state.searches.get_mut(search_id) else {
+        return;
+    };
+    if !matches!(search.status.as_str(), "queued" | "running") {
+        return;
+    }
+    if let Some(existing) = search
+        .results
+        .iter_mut()
+        .find(|existing| existing.hash == result.hash)
+    {
+        existing.merge_observations(result);
+    } else {
+        search.results.push(result);
+    }
+    search.updated_at = Utc::now();
+}

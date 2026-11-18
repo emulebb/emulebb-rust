@@ -678,7 +678,8 @@ async fn deleting_searches_cancels_pending_network_work() {
         )
     };
 
-    core.merge_incremental_search_result(
+    crate::search_state::publish_observation(
+        &core.state,
         &first.id,
         &first_request,
         SearchResult {

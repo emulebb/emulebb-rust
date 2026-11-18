@@ -373,15 +373,16 @@ impl EmulebbCore {
                 let owner = self
                     .persistence_owner
                     .owner(&self.metadata_store, &self.state)?;
-                // The corpus is independent of session existence and filtering.
-                // Only this raw-event path increments observation counts.
-                for observation in observations {
-                    owner
-                        .observe_content(std::slice::from_ref(&observation))
-                        .await?;
-                }
-                self.merge_incremental_search_result(search_id, request, *result)
-                    .await;
+                let publication =
+                    crate::persistence_owner::content_observations::SearchPublication {
+                        state: std::sync::Arc::clone(&self.state),
+                        search_id: search_id.to_owned(),
+                        request: request.clone(),
+                        result: *result,
+                    };
+                owner
+                    .observe_content(&observations, Some(&publication))
+                    .await?;
             }
             SearchLiveUpdate::Progress(progress) => {
                 self.update_search_progress(search_id, progress).await;
@@ -399,38 +400,6 @@ impl EmulebbCore {
             return;
         }
         search.progress = progress;
-        search.updated_at = Utc::now();
-    }
-
-    /// Publish an already durable raw observation into a collecting session.
-    /// Session result snapshots remain separate from permanent corpus evidence.
-    pub(crate) async fn merge_incremental_search_result(
-        &self,
-        search_id: &str,
-        request: &SearchCreate,
-        result: SearchResult,
-    ) {
-        let mut accepted = vec![result];
-        crate::search_query::apply_search_filters(&mut accepted, request);
-        let Some(result) = accepted.pop() else {
-            return;
-        };
-        let mut state = self.state.lock().await;
-        let Some(search) = state.searches.get_mut(search_id) else {
-            return;
-        };
-        if !matches!(search.status.as_str(), "queued" | "running") {
-            return;
-        }
-        if let Some(existing) = search
-            .results
-            .iter_mut()
-            .find(|existing| existing.hash == result.hash)
-        {
-            existing.merge_observations(result);
-        } else {
-            search.results.push(result);
-        }
         search.updated_at = Utc::now();
     }
 

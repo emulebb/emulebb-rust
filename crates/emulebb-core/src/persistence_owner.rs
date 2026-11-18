@@ -16,7 +16,7 @@ use emulebb_metadata::{
 };
 
 pub(crate) mod category;
-mod content_observations;
+pub(crate) mod content_observations;
 mod download;
 mod download_create;
 pub(crate) use download_create::DownloadCreateCommand;
@@ -105,7 +105,7 @@ enum Command {
     Add { hash: String, name: String },
     Delete { hash: String },
     Category(category::CategoryCommand),
-    ContentObservations(Vec<emulebb_metadata::MetadataContentObservationEvent>),
+    ContentObservations(content_observations::ObservationCommand),
     LibraryTags(crate::LibraryTagRequest),
     LibrarySharing(library_sharing::SharingCommand),
     Downloads(download::DownloadCommand),
