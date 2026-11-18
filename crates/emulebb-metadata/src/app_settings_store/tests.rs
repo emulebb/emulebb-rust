@@ -44,6 +44,52 @@ fn fresh_document_is_complete_and_reads_do_not_advance_revision() {
 }
 
 #[test]
+fn explicit_reset_can_restore_validity_after_default_resolution() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut saved = SavedSettings::default();
+    saved.network.hostname_lookup.enabled = SavedValue {
+        mode: ValueMode::Custom,
+        value: true,
+    };
+    saved.network.hostname_lookup.dns_servers.value = vec!["192.0.2.1:53".parse().unwrap()];
+    assert!(saved.values().validate().is_empty());
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE app_settings SET document_json=?1",
+            [String::from_utf8(saved.to_json_bytes().unwrap()).unwrap()],
+        )
+        .unwrap();
+    let before = raw(&store);
+    let error = store.load_app_settings().unwrap_err();
+    assert!(format!("{error:#}").contains("network.hostnameLookup.dnsServers"));
+    assert_eq!(
+        raw(&store),
+        before,
+        "a read never repairs the saved document"
+    );
+    let edit = SettingsEdit {
+        reset: vec![
+            emulebb_settings::product::SettingKey::parse("network.hostnameLookup.enabled").unwrap(),
+        ],
+        ..SettingsEdit::default()
+    };
+    let fixed = store.edit_app_settings(&edit).unwrap();
+    assert_eq!(fixed.revision.get(), 2);
+    assert!(!fixed.saved.network.hostname_lookup.enabled.value);
+    assert!(
+        fixed
+            .saved
+            .network
+            .hostname_lookup
+            .dns_servers
+            .value
+            .is_empty()
+    );
+}
+
+#[test]
 fn explicit_unchanged_writes_advance_and_stale_cas_changes_nothing() {
     let store = MetadataStore::in_memory().unwrap();
     let first = store

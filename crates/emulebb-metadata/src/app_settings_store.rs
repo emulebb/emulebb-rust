@@ -42,6 +42,15 @@ pub(crate) fn seed(conn: &Connection, saved: &SavedSettings) -> Result<()> {
 }
 
 fn read(conn: &Connection) -> Result<MetadataAppSettings> {
+    let mut snapshot = read_document(conn)?;
+    snapshot.saved = snapshot
+        .saved
+        .resolved()
+        .context("invalid resolved settings document")?;
+    Ok(snapshot)
+}
+
+fn read_document(conn: &Connection) -> Result<MetadataAppSettings> {
     let (revision, document) = conn.query_row(
         "SELECT revision,document_json FROM app_settings WHERE id=1",
         [],
@@ -49,7 +58,7 @@ fn read(conn: &Connection) -> Result<MetadataAppSettings> {
     )?;
     Ok(MetadataAppSettings {
         revision: SettingsRevision::from_i64(revision)?,
-        saved: SavedSettings::from_json_bytes(document.as_bytes())
+        saved: SavedSettings::decode(document.as_bytes())
             .context("invalid saved settings document")?,
     })
 }
@@ -85,7 +94,9 @@ impl crate::MetadataStore {
         edit: &SettingsEdit,
     ) -> Result<MetadataAppSettings> {
         let mut conn = self.connection()?;
-        let current = read(&conn)?;
+        // The stored shape must be complete and typed, but its current resolved
+        // values need not already validate: an explicit edit can restore them.
+        let current = read_document(&conn)?;
         if expected.is_some_and(|expected| expected != current.revision) {
             return Err(MetadataSettingsWriteError::Conflict {
                 actual: current.revision,

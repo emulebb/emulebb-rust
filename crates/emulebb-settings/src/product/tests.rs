@@ -61,6 +61,17 @@ fn startup_resolves_only_default_modes_before_validation() {
 }
 
 #[test]
+fn validation_diagnostics_name_all_fields_without_echoing_input_values() {
+    let mut values = SettingsValues::default();
+    values.network.nickname = "Private Sample Value\n".into();
+    values.network.hostname_lookup.enabled = true;
+    let message = SettingsError::Validation(values.validate()).to_string();
+    assert!(message.contains("network.nickname [invalid-value]"));
+    assert!(message.contains("network.hostnameLookup.dnsServers [required]"));
+    assert!(!message.contains("Private Sample Value"));
+}
+
+#[test]
 fn custom_values_and_null_keep_their_modes_across_default_changes() {
     let mut saved = SavedSettings::default();
     saved.network.nickname = SavedValue {

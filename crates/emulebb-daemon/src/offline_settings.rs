@@ -1,6 +1,6 @@
 //! Stopped-profile single-key commands use the canonical typed settings store.
 use crate::DaemonProfile;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use emulebb_settings::product::{SettingKey, SettingsEdit};
 use std::path::PathBuf;
 
@@ -21,7 +21,13 @@ pub fn run_offline_settings(
         OfflineSettingsOperation::Get { key } => (SettingKey::parse(key)?, None),
         OfflineSettingsOperation::Set { key, value } => {
             let key = SettingKey::parse(key)?;
-            (key, Some(SettingsEdit::setting_text(key, value)?))
+            (
+                key,
+                Some(
+                    SettingsEdit::setting_text(key, value)
+                        .with_context(|| format!("invalid value for {}", key.as_str()))?,
+                ),
+            )
         }
         OfflineSettingsOperation::Reset { key } => {
             let key = SettingKey::parse(key)?;

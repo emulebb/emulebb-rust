@@ -305,7 +305,7 @@ fn validate_field<T: SettingType>(
             match rule {
                 Rule::Integer { .. } => "Value is outside the supported integer range or step.",
                 Rule::Text { .. } => {
-                    "Text is outside the supported UTF-8 byte bounds or contains NUL."
+                    "Text is outside the supported UTF-8 byte bounds or contains forbidden control characters."
                 }
                 Rule::Path => "Path must be nonempty UTF-8 without NUL.",
                 Rule::Ipv4 => "Address must be unicast IPv4.",
@@ -341,7 +341,13 @@ impl fmt::Display for SettingsError {
             Self::OverlappingEdit => "A key cannot be set and reset together.",
             Self::DocumentTooLarge => "Settings document exceeds its serialized byte limit.",
             Self::InvalidDocument => "Settings document is invalid.",
-            Self::Validation(_) => "Settings validation failed.",
+            Self::Validation(issues) => {
+                f.write_str("Settings validation failed:")?;
+                for issue in issues {
+                    write!(f, "\n{} [{}]: {}", issue.key, issue.code, issue.message)?;
+                }
+                return Ok(());
+            }
         })
     }
 }
@@ -475,12 +481,16 @@ impl SavedSettings {
         Ok(candidate)
     }
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, SettingsError> {
+        Self::decode(bytes)?.resolved()
+    }
+    /// Decode only the current complete typed shape. Explicit edit callers must
+    /// validate their resulting candidate, so they can fix a combination made
+    /// invalid by default resolution. Runtime readers use from_json_bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self, SettingsError> {
         if bytes.len() > MAX_SAVED_BYTES {
             return Err(SettingsError::DocumentTooLarge);
         }
-        let saved: Self =
-            serde_json::from_slice(bytes).map_err(|_| SettingsError::InvalidDocument)?;
-        saved.resolved()
+        serde_json::from_slice(bytes).map_err(|_| SettingsError::InvalidDocument)
     }
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, SettingsError> {
         let mut writer = LimitedJson {
