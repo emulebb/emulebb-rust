@@ -147,6 +147,12 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       return;
     }
 
+    if (request.method() === "GET" && path === "library/tags") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: [{ name: "Alpha" }], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false }
+      }) });
+      return;
+    }
     if (request.method() === "GET" && (path === "downloads" || /^downloads\/1\/(sources|parts|comments)$/.test(path))) {
       const data = path === "downloads"
         ? url.searchParams.get("view") === "completed" ? [] : mockDownloadFixture()

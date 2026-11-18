@@ -1,3 +1,9 @@
+/** Shared public-name rules for immutable categories and library tags. */
+export function identityNameError(value: string): string | undefined {
+  // WHY: JavaScript's $ also matches before a final newline; names must match in full.
+  return value && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}(?![\s\S])/.test(value) ? "Use 1–64 ASCII letters, digits or hyphens, starting with a letter or digit." : undefined;
+}
+
 export function formatProgress(download: { progress: number | null }): string {
   if (download.progress === null) return "Unknown";
   return `${(Math.min(1, Math.max(0, download.progress)) * 100).toFixed(1)}%`;

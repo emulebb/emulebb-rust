@@ -1,6 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { SearchObservations } from "./searchObservations";
+import { LibraryTags } from "./libraryTags";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
@@ -65,10 +66,11 @@ import {
   RestError,
   encodeSegment
 } from "./api";
-import { Action, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll } from "./components";
+import { Action, CursorControls, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll } from "./components";
 import {
   boolField,
   errorMessage,
+  identityNameError,
   firewallLabel,
   formatBytes,
   formatDurationMs,
@@ -225,13 +227,6 @@ function ProgressLine(props: { label: string; completed?: number; total?: number
       </div>
     </div>
   );
-}
-
-function CursorControls(props: { cursor: string | null; nextCursor: string | null; loading: boolean; change: (cursor: string | null) => void }) {
-  return <div class="row-actions">
-    <button class="btn" type="button" disabled={props.loading || props.cursor === null} onClick={() => props.change(null)}>First page</button>
-    <button class="btn" type="button" disabled={props.loading || !props.nextCursor} onClick={() => props.change(props.nextCursor)}>Next page</button>
-  </div>;
 }
 
 /** One independently paged evidence resource; refresh replaces its current page. */
@@ -960,6 +955,8 @@ export function SharingView(props: {
           </table>
         </TableScroll>
       </section>
+
+      <LibraryTags client={props.client} />
 
       <section class="panel card wide progress-panel">
         <div class="section-title">
@@ -2430,7 +2427,7 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
   const [tempDir, setTempDir] = useState("");
   const [destinationDir, setDestinationDir] = useState("");
   const [comment, setComment] = useState("");
-  const nameError = categoryNameError(name);
+  const nameError = identityNameError(name);
   const create = async () => {
     await props.client.post("categories", { name, tempDir: optionalString(tempDir), destinationDir: optionalString(destinationDir), comment });
     setName(""); setTempDir(""); setDestinationDir(""); setComment("");
@@ -3786,10 +3783,7 @@ function friendNameError(value: string): string | undefined {
   return value.length <= 128 ? undefined : "Friend name must be at most 128 characters.";
 }
 
-function categoryNameError(value: string): string | undefined {
-  // WHY: JavaScript's $ also matches before a final newline, but category names must match in full.
-  return value && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}(?![\s\S])/.test(value) ? "Use 1–64 ASCII letters, digits or hyphens, starting with a letter or digit." : undefined;
-}
+
 
 
 

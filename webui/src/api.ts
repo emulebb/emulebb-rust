@@ -147,6 +147,8 @@ export type CursorPage<T> = {
   meta: { apiVersion: string; nextCursor: string | null; hasMore: boolean };
 };
 
+export type LibraryTag = { name: string };
+
 export type DownloadBatchItem = {
   id: string;
   status: "accepted" | "unchanged" | "failed";
