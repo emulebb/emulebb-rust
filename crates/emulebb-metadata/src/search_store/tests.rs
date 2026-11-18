@@ -560,3 +560,70 @@ fn startup_interruption_seeks_collecting_index_among_one_hundred_thousand_termin
         "error"
     );
 }
+
+#[test]
+fn stop_preserves_results_is_idempotent_and_rolls_back_before_publication() {
+    let store = MetadataStore::in_memory().unwrap();
+    let id = store.create_search(&sample_search()).unwrap();
+    let claim = project(&store, id, Some(12), "Sample.bin");
+    store.connection().unwrap().execute_batch("CREATE TRIGGER fail_stop BEFORE UPDATE OF status ON search_sessions WHEN new.status='stopped' BEGIN SELECT RAISE(ABORT,'injected stop failure'); END;").unwrap();
+    assert!(store.stop_search(id, 200).is_err());
+    assert_eq!(
+        store.search_header(id).unwrap().unwrap().data.status,
+        "running"
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_stop;")
+        .unwrap();
+    assert!(store.stop_search(id, 200).unwrap());
+    let stopped = store.search_header(id).unwrap().unwrap();
+    assert_eq!(stopped.data.status, "stopped");
+    assert_eq!(stopped.data.updated_at_s, 200);
+    assert_eq!(stopped.data.completed_at_s, None);
+    assert_eq!(stopped.result_count, 1);
+    assert!(store.stop_search(id, 300).unwrap());
+    assert_eq!(store.search_header(id).unwrap().unwrap(), stopped);
+    assert!(!store.stop_search(id + 1, 300).unwrap());
+    assert_eq!(
+        store
+            .search_result_header(id, claim)
+            .unwrap()
+            .unwrap()
+            .summary
+            .name,
+        "Sample.bin"
+    );
+    assert!(
+        store
+            .ingest_search_observations(
+                &[event(Some(12), "Later.bin")],
+                &MetadataSearchProjection {
+                    session_id: id,
+                    fields: vec![fields()],
+                    name_votes: vec![name_vote("Later.bin")]
+                }
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.search_header(id).unwrap().unwrap(), stopped);
+    assert_eq!(
+        store
+            .search_result_observations_page(id, claim, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .content_observations_page(claim, 0, 10)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+}

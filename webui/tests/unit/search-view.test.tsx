@@ -224,3 +224,31 @@ describe("SearchView", () => {
     confirm.mockRestore();
   });
 });
+
+
+describe("SearchView collection control", () => {
+  it("stops active collection and keeps retained results visible", async () => {
+    const client = new RestClient();
+    const post = vi.spyOn(client, "post").mockResolvedValue(undefined);
+    const onDeleted = vi.fn();
+    const search: SearchItem = { id:"9007199254740993",query:"sample",status:"running",resultCount:1 };
+    const page: CursorPage<SearchResult> = {data:[{id:"11",hash:"11".repeat(16),displayName:"Sample.bin",sizeBytes:4096}],meta:{apiVersion:"v1",nextCursor:null,hasMore:false}};
+    const props = {
+      searches:[search],selectedSearch:search,selectedSearchId:search.id,
+      resultPage:page,resultCursor:null,sessionCursor:null,sessionNextCursor:null,
+      selectSearchSessionsPage:vi.fn(),categories:[],client,
+      run:async (operation:()=>Promise<unknown>)=>{await operation();},selectSearch:vi.fn(),
+      searchSort:"sources",searchOrder:"desc",selectSearchSort:vi.fn(),selectSearchPage:vi.fn(),
+      onSearchCreated:vi.fn(),onSearchDeleted:onDeleted,onSearchesCleared:vi.fn()
+    };
+    const view=render(<SearchView {...props} />);
+    fireEvent.click(screen.getByRole("button",{name:"Stop search"}));
+    await waitFor(()=>expect(post).toHaveBeenCalledWith(`searches/${search.id}/stop`));
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(screen.getByText("Sample.bin")).toBeTruthy();
+    const stopped: SearchItem = {...search,status:"stopped"};
+    view.rerender(<SearchView {...props} searches={[stopped]} selectedSearch={stopped} />);
+    expect((screen.getByRole("button",{name:"Stop search"}) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Sample.bin")).toBeTruthy();
+  });
+});

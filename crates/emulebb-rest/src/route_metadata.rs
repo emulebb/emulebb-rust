@@ -326,7 +326,9 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             }
         }
         ("DELETE", ["friends", user_hash]) => validate_lowercase_md4_hex(user_hash, "userHash")?,
-        ("GET" | "DELETE", ["searches", search_id]) => validate_search_id(search_id)?,
+        ("GET" | "DELETE", ["searches", search_id]) | ("POST", ["searches", search_id, "stop"]) => {
+            validate_search_id(search_id)?
+        }
         ("GET", ["searches", search_id, "results"]) => validate_search_id(search_id)?,
         ("GET", ["searches", search_id, "results", result_id]) => {
             validate_search_id(search_id)?;
@@ -665,6 +667,7 @@ fn route_query_fields_for_parameterized(
             Some(NONE)
         }
         ("GET", ["searches", _]) | ("GET", ["searches", _, "results", _]) => Some(NONE),
+        ("POST", ["searches", _, "stop"]) => Some(NONE),
         ("GET", ["searches", _, "results"]) => Some(SEARCH_RESULTS),
         ("GET", ["searches", _, "results", _, "observations"]) => Some(SEARCH_OBSERVATIONS),
         _ => None,

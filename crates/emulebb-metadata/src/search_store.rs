@@ -149,6 +149,32 @@ impl super::MetadataStore {
             .execute(INTERRUPT_COLLECTING_SQL, [now_s])?)
     }
 
+    /// Freeze collection while preserving retained results. Terminal sessions
+    /// are idempotent successes; an absent identity returns false.
+    pub fn stop_search(&self, id: i64, now_s: i64) -> Result<bool> {
+        ensure!(
+            id > 0 && now_s >= 0,
+            "invalid search stop identity or timestamp"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM search_sessions WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            return Ok(false);
+        };
+        if matches!(status.as_str(), "queued" | "running") {
+            tx.execute("UPDATE search_sessions SET status='stopped',status_reason=NULL,updated_at_s=max(updated_at_s,?2),completed_at_s=NULL WHERE id=?1",params![id,now_s])?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn delete_search(&self, id: i64) -> Result<bool> {
         ensure!(id > 0, "search id must be positive");
         let deleted = self

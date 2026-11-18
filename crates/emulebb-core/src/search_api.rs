@@ -210,6 +210,19 @@ impl EmulebbCore {
             .filter(|search| matches!(search.status.as_str(), "queued" | "running"))
             .map(|search| search.progress.clone())
     }
+    /// Stop collection durably before releasing queued or running execution.
+    pub async fn stop_search(&self, search_id: &str) -> Result<bool> {
+        let id: i64 = search_id.parse().context("invalid search identity")?;
+        ensure!(
+            id > 0 && id.to_string() == search_id,
+            "invalid search identity"
+        );
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.stop_search_session(id, &self.search_queue).await?)
+    }
+
     pub async fn delete_search(&self, search_id: &str) -> Result<bool> {
         let id: i64 = search_id.parse().context("invalid search identity")?;
         ensure!(

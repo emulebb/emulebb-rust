@@ -315,6 +315,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         }
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
         ("PATCH", ["categories", _]) => Some(CATEGORY_PATCH),
+        ("POST", ["searches", _, "stop"]) => Some(EMPTY),
         ("POST", ["searches", _, "results", _, "download"]) => Some(SEARCH_RESULT_DOWNLOAD),
         _ => None,
     }

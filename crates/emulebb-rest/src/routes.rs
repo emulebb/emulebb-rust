@@ -145,6 +145,7 @@ pub fn router_with_shutdown(
             "/api/v1/searches/{searchId}",
             get(search).delete(delete_search),
         )
+        .route("/api/v1/searches/{searchId}/stop", post(stop_search))
         .route("/api/v1/searches/{searchId}/results", get(search_results))
         .route(
             "/api/v1/searches/{searchId}/results/{resultId}",

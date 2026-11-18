@@ -443,11 +443,7 @@ export function SearchView(props: {
         ? "Waiting"
         : "—";
   const resolvedMethodLabel = displayedSearch?.resolvedMethod
-    ?? (displayedStatus === "completed"
-      ? "none (local only)"
-      : displayedStatus === "queued" || displayedStatus === "running"
-        ? "pending"
-        : "none");
+    ?? (displayedStatus === "queued" || displayedStatus === "running" ? "pending" : "none");
   const criteria = displayedSearch?.criteria;
   const criteriaRows = [
     criteria?.extension ? ["Extension", `.${criteria.extension.replace(/^\./, "")}`] : null,
@@ -552,6 +548,11 @@ export function SearchView(props: {
             ))}
           </select>
           {displayedSearch && <StatusPill value={displayedStatus} />}
+          <button class="btn btn-outline-secondary" type="button"
+            disabled={!displayedSearch || !["queued", "running"].includes(displayedStatus)}
+            onClick={() => { void props.run(() => props.client.post(`searches/${displayedSearch!.id}/stop`), "Search stopped"); }}>
+            Stop search
+          </button>
           <button
             class="btn btn-outline-secondary"
             type="button"

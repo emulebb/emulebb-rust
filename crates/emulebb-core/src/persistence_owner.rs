@@ -126,7 +126,7 @@ enum Command {
 
 enum Response {
     ContentObserved(Result<(), PersistenceError>),
-    SearchRemoved(bool),
+    SearchMutated(bool),
     SearchCreated(anyhow::Result<crate::Search>),
     SearchTransitioned,
     SearchRead(crate::LibraryReply<search_read::Value>),
@@ -310,6 +310,7 @@ enum DbCommand {
     SearchCreate(emulebb_metadata::MetadataSearchData),
     SearchUpdate(i64, emulebb_metadata::MetadataSearchData, Vec<String>),
     SearchRemove(Option<i64>),
+    SearchStop(i64),
     Add(Friend),
     Delete(Friend),
     Category(category::CategoryDbCommand),
@@ -348,7 +349,7 @@ enum DbResponse {
     SearchRead(search_read::Value),
     SearchCreated(i64),
     SearchUpdated(emulebb_metadata::MetadataSearchTransitionReceipt),
-    SearchRemoved(bool),
+    SearchMutated(bool),
     ContentObserved(Option<emulebb_metadata::MetadataSearchPublication>),
     Friend(Friend, bool),
     Category(category::CategoryWrite),
@@ -539,6 +540,19 @@ impl PersistenceOwner {
                         let _ = request.response.send(result);
                         continue;
                     }
+                    if let DbCommand::SearchStop(id) = &request.command {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.stop_search(*id, chrono::Utc::now().timestamp())));
+                        let result = match outcome {
+                            Ok(Ok(found)) => Ok(DbResponse::SearchMutated(found)),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "search stop SQL failed");
+                                Err(PersistenceError::Storage("database operation failed".into()))
+                            }
+                            Err(_) => Err(PersistenceError::CommitUnknown),
+                        };
+                        let _ = request.response.send(result);
+                        continue;
+                    }
                     if let DbCommand::SearchRemove(id) = &request.command {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             match id {
@@ -547,7 +561,7 @@ impl PersistenceOwner {
                             }
                         }));
                         let result = match result {
-                            Ok(Ok(removed)) => Ok(DbResponse::SearchRemoved(removed)),
+                            Ok(Ok(removed)) => Ok(DbResponse::SearchMutated(removed)),
                             Ok(Err(error)) => {
                                 tracing::warn!(%error, "search removal SQL failed");
                                 Err(PersistenceError::Storage("database operation failed".into()))
@@ -706,6 +720,7 @@ impl PersistenceOwner {
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
+                            | DbCommand::SearchStop(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
@@ -756,6 +771,7 @@ impl PersistenceOwner {
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
+                            | DbCommand::SearchStop(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                                 | DbCommand::KadLoad
@@ -787,6 +803,7 @@ impl PersistenceOwner {
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
+                            | DbCommand::SearchStop(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
@@ -1288,7 +1305,7 @@ async fn process(
             DbResponse::SearchRead(_)
             | DbResponse::SearchUpdated(_)
             | DbResponse::SearchCreated(_)
-            | DbResponse::SearchRemoved(_)
+            | DbResponse::SearchMutated(_)
             | DbResponse::ContentObserved(_)
             | DbResponse::Friend(..)
             | DbResponse::Category(..)

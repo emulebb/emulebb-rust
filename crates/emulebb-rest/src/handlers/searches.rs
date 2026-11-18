@@ -40,6 +40,19 @@ pub(crate) async fn create_search(
     }
 }
 
+pub(crate) async fn stop_search(
+    State(state): State<RestState>,
+    Path(search_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.stop_search(&search_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
+        }
+        Err(error) => super::persistence::persistence_error(error),
+    }
+}
+
 pub(crate) async fn delete_search(
     State(state): State<RestState>,
     Path(search_id): Path<String>,

@@ -259,7 +259,7 @@ export type SearchProgress = {
 export type SearchItem = {
   id: string;
   query?: string;
-  status?: "queued" | "running" | "completed" | "error";
+  status?: "queued" | "running" | "completed" | "error" | "stopped";
   statusReason?: string | null;
   requestedMethod?: string;
   resolvedMethod?: string | null;

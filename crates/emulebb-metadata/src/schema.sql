@@ -971,7 +971,7 @@ CREATE TABLE search_sessions (
     title_filter TEXT NOT NULL DEFAULT '',
     album_filter TEXT NOT NULL DEFAULT '',
     artist_filter TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'error')),
+    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'error', 'stopped')),
     status_reason TEXT CHECK(status_reason IS NULL OR length(status_reason) > 0),
     created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
     updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),

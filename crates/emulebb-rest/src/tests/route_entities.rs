@@ -940,3 +940,61 @@ async fn search_creation_returns_committed_metadata_and_its_location() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(metadata["data"]["id"], body["data"]["id"]);
 }
+
+#[tokio::test]
+async fn stop_search_preserves_collected_results_and_returns_no_content() {
+    let core = test_search_core(&[]);
+    let created = core
+        .create_search(
+            serde_json::from_value(json!({"query":"stop proof", "method":"server"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let path = format!("/api/v1/searches/{}/stop", created.id);
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(&path)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let (_, metadata) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/searches/{}", created.id),
+        None,
+    )
+    .await;
+    assert_eq!(metadata["data"]["status"], "stopped");
+    assert_eq!(metadata["data"]["resultCount"], 0);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/searches/9223372036854775807/stop",
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
