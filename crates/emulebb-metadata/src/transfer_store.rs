@@ -730,13 +730,6 @@ impl super::MetadataStore {
         transfer_counts_from_connection(&conn)
     }
 
-    pub fn try_transfer_counts(&self) -> Result<Option<MetadataTransferCounts>> {
-        let Some(conn) = self.try_connection()? else {
-            return Ok(None);
-        };
-        transfer_counts_from_connection(&conn).map(Some)
-    }
-
     pub fn download_publish_entries_after(
         &self,
         after_hash: Option<&str>,

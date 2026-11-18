@@ -40,7 +40,6 @@ pub struct Status {
     pub kad: NetworkStatus,
     pub ed2k: NetworkStatus,
     pub indexing: IndexingStatus,
-    pub transfers: TransferStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

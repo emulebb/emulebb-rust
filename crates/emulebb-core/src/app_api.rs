@@ -136,33 +136,9 @@ impl EmulebbCore {
         Ok(())
     }
 
+    /// Network/lifecycle state never waits for SQLite, including VPN monitoring.
     pub async fn status(&self) -> Status {
-        let transfer_counts = self.ed2k_transfers.try_transfer_counts();
-        let state = self.state.lock().await;
-        let kad_running = state.kad_running;
-        let transfer_counts = transfer_counts.unwrap_or_else(|error| {
-            tracing::warn!("failed to read persisted ED2K transfer counts: {error}");
-            None
-        });
-        let transfer_counts = transfer_counts.unwrap_or_else(|| {
-            tracing::debug!("metadata transfer counts are busy; using in-memory status counts");
-            let total = state.transfers.len();
-            let mut active = 0;
-            let mut completed = 0;
-            for transfer in state.transfers.values() {
-                match transfer.state.as_str() {
-                    "downloading" | "queued" => active += 1,
-                    "completed" => completed += 1,
-                    _ => {}
-                }
-            }
-            MetadataTransferCounts {
-                active,
-                completed,
-                total,
-            }
-        });
-        drop(state);
+        let kad_running = self.state.lock().await.kad_running;
 
         Status {
             lifecycle: AppLifecycle {
@@ -175,12 +151,25 @@ impl EmulebbCore {
                 enabled: true,
                 backend: "sqlite-fts5".to_string(),
             },
-            transfers: TransferStats {
-                active: transfer_counts.active,
-                completed: transfer_counts.completed,
-                total: transfer_counts.total,
-            },
         }
+    }
+
+    /// WHY: the bounded runtime cohort is not retained download history. Await
+    /// canonical counts under contention and propagate failures rather than
+    /// publishing an empty cohort as a successful zero-count response.
+    pub async fn transfer_stats(
+        &self,
+    ) -> Result<emulebb_ed2k::ed2k_transfer::RetainedRead<TransferStats>> {
+        self.persistence_owner.check_coherent_state()?;
+        let counts = self.ed2k_transfers.transfer_counts().await?;
+        self.persistence_owner.check_coherent_state()?;
+        counts.try_project(4096, |counts| {
+            Ok(TransferStats {
+                active: counts.active,
+                completed: counts.completed,
+                total: counts.total,
+            })
+        })
     }
 }
 

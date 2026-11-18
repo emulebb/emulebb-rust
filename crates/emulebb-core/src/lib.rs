@@ -95,8 +95,7 @@ use emulebb_kad_proto::{
 };
 use emulebb_metadata::{
     MetadataKadOutboundPublish, MetadataKadOutboundPublishKind, MetadataLocalShareEntry,
-    MetadataSharedFileCursor, MetadataSharedFileQuery, MetadataStore, MetadataTransferCounts,
-    MetadataTransferPublishEntry,
+    MetadataSharedFileCursor, MetadataSharedFileQuery, MetadataStore, MetadataTransferPublishEntry,
 };
 pub use http_client::http_client_builder;
 pub use persistence_owner::PersistenceError;
