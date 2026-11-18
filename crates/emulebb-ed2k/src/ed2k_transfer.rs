@@ -48,6 +48,8 @@ mod completion_rehash;
 pub use completed_verification::CompletedOutputVerification;
 mod corruption_blackbox;
 mod credit_ledger;
+mod file_accounting;
+pub use file_accounting::Ed2kFileUploadStatistics;
 mod deliver;
 mod delivery_tombstone;
 pub(crate) mod diag_bad_peer;
@@ -366,18 +368,6 @@ pub struct Ed2kTransferRuntime {
     /// hash) -> (count, first-seen) for MFC repeat_file_request parity. Bounded and
     /// window-pruned; observe-only.
     upload_file_churn: UploadFileChurnLedger,
-    /// Per-file accumulator of served-upload bytes still awaiting a shared-catalog
-    /// demand-counter flush (RUST-PAR-025 Note-1), keyed by file-hash hex. The
-    /// per-fragment catalog credit uses a NON-blocking `try_write` so a busy
-    /// catalog write lock (e.g. a publish-rank build holding the read lock) can
-    /// never stall the upload hot path (preserving the REST-starvation fix). When
-    /// that `try_write` cannot be taken the fragment's bytes are parked here
-    /// instead of being dropped, and the WHOLE parked amount is flushed on the
-    /// next successful `try_write` (per fragment) and unconditionally at session
-    /// release -- so the demand counter under-counts no served byte while the hot
-    /// path stays non-blocking. A tiny `std` Mutex held only for instant map ops
-    /// plus a non-blocking catalog `try_write`; never held across an `.await`.
-    pending_catalog_upload: Arc<StdMutex<HashMap<String, u64>>>,
     /// Parked peer-credit / file all-time-uploaded deltas awaiting the batched
     /// SQLite flush (see `credit_ledger`): the per-fragment/per-block credit
     /// commits (each a WAL fsync) are parked here instead, matching eMule's
@@ -659,6 +649,11 @@ impl Drop for Ed2kSharedSourceInvalidationLease {
 }
 
 impl Ed2kSharedPublishDemandSignal {
+    pub(super) fn publish(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+
     #[must_use]
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
@@ -801,6 +796,12 @@ impl Ed2kTransferRuntime {
         ));
         let mut initial_catalog = initial_catalog;
         initial_catalog.set_eligibility(Arc::clone(&share_eligibility));
+        let parked_credit = Arc::new(parking_lot::Mutex::new(
+            credit_ledger::ParkedCreditLedger::new(),
+        ));
+        initial_catalog.set_accounting(file_accounting::SharedFileAccounting(Arc::clone(
+            &parked_credit,
+        )));
         let shared_catalog = Arc::new(RwLock::new(initial_catalog));
         // The ban store is built before the upload queue so the queue state can
         // hand a no-request repeat-offender straight to the shared ban list
@@ -848,10 +849,7 @@ impl Ed2kTransferRuntime {
                 download_abuse::DownloadAbuseTracker::default(),
             )),
             upload_file_churn: Arc::new(StdMutex::new(HashMap::new())),
-            pending_catalog_upload: Arc::new(StdMutex::new(HashMap::new())),
-            parked_credit: Arc::new(parking_lot::Mutex::new(
-                credit_ledger::ParkedCreditLedger::new(),
-            )),
+            parked_credit,
             credit_flush_gate: Arc::new(parking_lot::Mutex::new(())),
             upload_queue: Arc::new(Mutex::new(upload_queue_state)),
             #[cfg(feature = "packet-diagnostics")]

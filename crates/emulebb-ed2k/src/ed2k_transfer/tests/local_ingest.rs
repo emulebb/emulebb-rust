@@ -267,13 +267,10 @@ async fn same_path_rebind_preserves_independent_complete_copy_and_live_partial_p
                 .copy_manifest(&manifest)
                 .unwrap(),
         );
-        {
-            let mut catalog = runtime.shared_catalog.write().await;
-            let mut entry = catalog.entry_by_hash(&old_hash).unwrap().clone();
-            entry.publish.session_request_count = 17;
-            entry.all_time_uploaded_bytes = 31;
-            catalog.upsert_verified(old_hash, Some(entry));
+        for _ in 0..17 {
+            runtime.note_file_upload_request(&old_hash).await;
         }
+        runtime.add_file_all_time_uploaded(&old_hash, 31).unwrap();
         fs::write(root.join("changing.bin"), b"different new local content").unwrap();
         let new = share(&runtime, &root, "changing.bin").await.unwrap();
         assert_ne!(old.file_hash, new.file_hash);

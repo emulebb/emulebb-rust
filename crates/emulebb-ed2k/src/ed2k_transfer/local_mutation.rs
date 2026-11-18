@@ -16,6 +16,7 @@ mod ingest;
 mod job_aich;
 mod job_control;
 mod storage_inspection;
+mod upload_demand;
 pub use storage_inspection::StorageSpaceReservation;
 mod job_delivery;
 mod job_hash;

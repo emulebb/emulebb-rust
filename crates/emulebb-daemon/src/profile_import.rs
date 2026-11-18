@@ -77,7 +77,7 @@ struct ProfileImportKnownFile {
     all_time_uploaded_bytes: u64,
     all_time_upload_requests: u64,
     all_time_upload_accepts: u64,
-    last_upload_request_ms: i64,
+    last_upload_requested_at_seconds: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -458,7 +458,7 @@ fn validate_manifest(manifest: ProfileImportManifest) -> Result<ValidatedImport>
             all_time_uploaded_bytes: file.all_time_uploaded_bytes,
             all_time_upload_requests: file.all_time_upload_requests,
             all_time_upload_accepts: file.all_time_upload_accepts,
-            last_upload_request_ms: file.last_upload_request_ms,
+            last_upload_requested_at_s: file.last_upload_requested_at_seconds,
         });
     }
 
@@ -576,7 +576,8 @@ fn validate_known_file(file: &ProfileImportKnownFile) -> Result<()> {
     i64::try_from(file.all_time_upload_accepts)
         .context("upload-accept total exceeds SQLite range")?;
     ensure!(
-        file.last_upload_request_ms >= 0,
+        file.last_upload_requested_at_seconds
+            .is_none_or(|at| at >= 0),
         "last upload request timestamp must not be negative"
     );
     Ok(())
@@ -634,7 +635,7 @@ mod tests {
         let mut source = rusqlite::Connection::open(&artifact).unwrap();
         source.execute_batch("CREATE TABLE file_paths(path TEXT PRIMARY KEY,known_file_id INTEGER); CREATE TABLE header(value TEXT); CREATE TABLE known_files(id INTEGER PRIMARY KEY,record TEXT,md4 BLOB,aich BLOB); CREATE TABLE recovery_sets(root BLOB,size_bytes INTEGER); CREATE TABLE recovery_parts(root BLOB,size_bytes INTEGER,part_index INTEGER,leaves BLOB);").unwrap();
         source.execute("INSERT INTO header VALUES (?1)",[serde_json::json!({"schema":MANIFEST_SCHEMA,"targetPlatform":NativePath::platform(),"source":{},"sharedRoots":[]}).to_string()]).unwrap();
-        let mut record = serde_json::json!({"fileHash":"11".repeat(16),"displayName":"Sample.bin","fileSize":1024,"modifiedS":1700000000i64,"aichRoot":null,"uploadPriority":"normal","autoUploadPriority":false,"allTimeUploadedBytes":0,"allTimeUploadRequests":0,"allTimeUploadAccepts":0,"lastUploadRequestMs":0});
+        let mut record = serde_json::json!({"fileHash":"11".repeat(16),"displayName":"Sample.bin","fileSize":1024,"modifiedS":1700000000i64,"aichRoot":null,"uploadPriority":"normal","autoUploadPriority":false,"allTimeUploadedBytes":0,"allTimeUploadRequests":0,"allTimeUploadAccepts":0,"lastUploadRequestedAtSeconds":null});
         let tx = source.transaction().unwrap();
         {
             let mut insert = tx
@@ -692,7 +693,7 @@ mod tests {
         source
             .execute("INSERT INTO header VALUES (?1)", [header.to_string()])
             .unwrap();
-        let record = serde_json::json!({"fileHash":"11".repeat(16),"displayName":"Sample.bin","fileSize":1024,"modifiedS":1700000000i64,"aichRoot":master,"uploadPriority":"normal","autoUploadPriority":false,"allTimeUploadedBytes":0,"allTimeUploadRequests":0,"allTimeUploadAccepts":0,"lastUploadRequestMs":0});
+        let record = serde_json::json!({"fileHash":"11".repeat(16),"displayName":"Sample.bin","fileSize":1024,"modifiedS":1700000000i64,"aichRoot":master,"uploadPriority":"normal","autoUploadPriority":false,"allTimeUploadedBytes":0,"allTimeUploadRequests":0,"allTimeUploadAccepts":0,"lastUploadRequestedAtSeconds":null});
         source
             .execute(
                 "INSERT INTO known_files VALUES(1,?1,X'',X'')",
@@ -765,7 +766,7 @@ mod tests {
             all_time_uploaded_bytes: 0,
             all_time_upload_requests: 0,
             all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
+            last_upload_requested_at_seconds: None,
         }
     }
 
@@ -898,7 +899,7 @@ mod tests {
             all_time_uploaded_bytes: 0,
             all_time_upload_requests: 0,
             all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
+            last_upload_requested_at_seconds: None,
         };
 
         assert!(validate_known_file(&file).is_err());

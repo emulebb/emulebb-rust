@@ -289,6 +289,24 @@ impl EmulebbCore {
     }
 
     pub(crate) fn local_share_from_entry(&self, entry: MetadataLocalShareEntry) -> LocalShare {
+        // WHY: SQLite checkpoints may lag captured service. Merge only the
+        // selected row's scalar facts with the owner; never hydrate the catalog
+        // or query storage again to make a live read current.
+        let totals = self
+            .ed2k_transfers
+            .observe_file_upload_statistics(
+                &entry
+                    .file_hash
+                    .parse::<Ed2kHash>()
+                    .expect("metadata hash is valid"),
+                emulebb_metadata::MetadataFileUploadTotals {
+                    uploaded_bytes: entry.all_time_uploaded_bytes,
+                    upload_requests: entry.all_time_upload_requests,
+                    accepted_sessions: entry.all_time_upload_accepts,
+                    ..Default::default()
+                },
+            )
+            .lifetime;
         LocalShare {
             hash: entry.file_hash.clone(),
             name: entry.display_name.clone(),
@@ -304,9 +322,9 @@ impl EmulebbCore {
             path: normal_path_display(&entry.path),
             priority: entry.upload_priority.clone(),
             auto_upload_priority: entry.auto_upload_priority,
-            all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
-            all_time_upload_requests: entry.all_time_upload_requests,
-            all_time_upload_accepts: entry.all_time_upload_accepts,
+            all_time_uploaded_bytes: totals.uploaded_bytes,
+            all_time_upload_requests: totals.upload_requests,
+            all_time_upload_accepts: totals.accepted_sessions,
             comment: entry.comment.clone(),
             rating: entry.rating,
         }

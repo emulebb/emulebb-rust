@@ -629,7 +629,11 @@ pub(super) fn ranked_offer_files(
                 all_time_accept_count: entry.publish.all_time_accept_count,
                 all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
                 session_uploaded_bytes: entry.publish.session_uploaded_bytes,
-                last_request_unix_ms: entry.publish.last_request_unix_ms,
+                last_request_unix_ms: entry
+                    .publish
+                    .last_upload_requested_at_s
+                    .map(|s| s.saturating_mul(1000))
+                    .unwrap_or_default(),
                 last_publish_unix_ms: entry.publish.last_ed2k_publish_unix_ms,
                 sequence,
                 now_unix_ms,
