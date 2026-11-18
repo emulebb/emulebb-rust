@@ -6,6 +6,23 @@ use crate::{
     store::{decode_fixed_hex, unix_ms},
 };
 
+/// Committed upload facts for one known hash; optional times use Unix seconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataFileUploadTotals {
+    pub uploaded_bytes: u64,
+    pub upload_requests: u64,
+    pub accepted_sessions: u64,
+    pub last_requested_at_s: Option<i64>,
+    pub last_uploaded_at_s: Option<i64>,
+}
+
+/// Demand facts distinguish client content from passive/index observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetadataFileUploadRequest {
+    pub totals: MetadataFileUploadTotals,
+    pub known_client: bool,
+}
+
 /// Retained file accounting deltas committed with the existing credit batch.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataFileUploadDelta {

@@ -120,6 +120,27 @@ fn unknown_and_passive_observations_differ_from_copyless_library_content() {
             MetadataIndexedFileOrigin::PassiveCache,
         )
         .unwrap();
+    let passive_demand = store
+        .add_file_upload_request(&passive, 1_700_000_000)
+        .unwrap()
+        .unwrap();
+    assert!(!passive_demand.known_client);
+    let client_demand = store
+        .add_file_upload_request(HASH, 1_700_000_001)
+        .unwrap()
+        .unwrap();
+    assert!(client_demand.known_client);
+    assert_eq!(client_demand.totals.upload_requests, 1);
+    assert_eq!(
+        client_demand.totals.last_requested_at_s,
+        Some(1_700_000_001)
+    );
+    assert!(
+        store
+            .add_file_upload_request(&"33".repeat(16), 1_700_000_001)
+            .unwrap()
+            .is_none()
+    );
     assert!(
         store
             .library_locations(&passive, 0, 2, LIBRARY_READ_MAX_BYTES)

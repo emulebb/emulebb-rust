@@ -339,14 +339,16 @@ async fn root_change_after_admission_restores_live_uncheckpointed_partial_and_co
             .copy_manifest(&manifest)
             .unwrap(),
     );
-    let mut entry = Ed2kSharedEntry::from_manifest(&manifest);
-    entry.publish.session_request_count = 17;
-    entry.all_time_uploaded_bytes = 31;
+    let entry = Ed2kSharedEntry::from_manifest(&manifest);
     runtime
         .shared_catalog
         .write()
         .await
         .upsert_verified(hash, Some(entry));
+    for _ in 0..17 {
+        runtime.note_file_upload_request(&hash).await;
+    }
+    runtime.add_file_all_time_uploaded(&hash, 31).unwrap();
     assert!(
         runtime
             .metadata
@@ -408,14 +410,10 @@ async fn overlapping_root_change_keeps_an_independent_complete_copy() {
     configure_roots(&runtime, &[&root, &sibling_root]);
     assert!(admit(&runtime, &sibling_root, &sibling).await.unwrap());
     let hash: Ed2kHash = first.hash.parse().unwrap();
-    runtime
-        .shared_catalog
-        .write()
-        .await
-        .update_by_hash(&hash, |entry| {
-            entry.publish.session_request_count = 23;
-            entry.all_time_uploaded_bytes = 47;
-        });
+    for _ in 0..23 {
+        runtime.note_file_upload_request(&hash).await;
+    }
+    runtime.add_file_all_time_uploaded(&hash, 47).unwrap();
     let (started, ready) = tokio::sync::oneshot::channel();
     let (release, gate) = std::sync::mpsc::channel();
     runtime

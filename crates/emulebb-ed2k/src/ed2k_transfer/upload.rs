@@ -404,21 +404,18 @@ impl Ed2kTransferRuntime {
     /// Record one inbound OP_REQUESTPARTS demand signal for a shared file.
     pub(crate) async fn note_file_upload_request(&self, file_hash: &Ed2kHash) {
         let now = unix_time_s();
-        let _ = self
+        let captured = self.capture_cached_file_request(file_hash, now);
+        let changed = match self
             .metadata
-            .add_file_upload_request(&file_hash.to_string(), now);
-        self.update_shared_publish_stats(file_hash, |entry| {
-            entry.publish.session_request_count =
-                entry.publish.session_request_count.saturating_add(1);
-            entry.publish.all_time_request_count =
-                entry.publish.all_time_request_count.saturating_add(1);
-            entry.publish.last_request_unix_ms = entry
-                .publish
-                .last_request_unix_ms
-                .max(now.saturating_mul(1000));
-        })
-        .await;
-        self.notify_shared_publish_demand_changed();
+            .add_file_upload_request(&file_hash.to_string(), now)
+        {
+            Ok(Some(demand)) => self.note_known_file_request(file_hash, demand, captured),
+            _ => captured || self.capture_cached_file_request(file_hash, now),
+        };
+        if changed {
+            self.try_publish_file_accounting(file_hash);
+            self.notify_shared_publish_demand_changed();
+        }
     }
 
     /// Record the first admitted payload request in an upload stint. Queue
@@ -432,13 +429,7 @@ impl Ed2kTransferRuntime {
             return;
         }
         self.park_file_upload_accept(file_hash);
-        self.update_shared_publish_stats(file_hash, |entry| {
-            entry.publish.session_accept_count =
-                entry.publish.session_accept_count.saturating_add(1);
-            entry.publish.all_time_accept_count =
-                entry.publish.all_time_accept_count.saturating_add(1);
-        })
-        .await;
+        self.try_publish_file_accounting(file_hash);
         self.notify_shared_publish_demand_changed();
     }
 
@@ -504,7 +495,7 @@ impl Ed2kTransferRuntime {
         // hot path, so this final flush may block briefly on the catalog write lock
         // to guarantee the tail is credited rather than orphaned.
         if let Ok(file_hash) = handle.file_hash_hex().parse::<Ed2kHash>() {
-            self.flush_pending_catalog_upload(&file_hash).await;
+            self.publish_file_accounting(&file_hash).await;
         }
         // Same rationale for the parked credit/all-time counters: session
         // release is off the hot path, so commit the tail durably here rather
@@ -749,95 +740,17 @@ impl Ed2kTransferRuntime {
         }
     }
 
-    /// Add `delta` to the file's pending demand-upload bucket, then make ONE
-    /// non-blocking attempt to flush the entire pending into the shared catalog.
-    ///
-    /// Correctness (all under the instant, await-free `pending_catalog_upload`
-    /// std Mutex, so no add/flush can interleave):
-    /// - No loss: the fragment lands in `pending` first; if the `try_write` fails
-    ///   (catalog write lock contended) the bytes remain parked for a later flush.
-    /// - No double-count: on a successful `try_write` the parked amount is applied
-    ///   to the catalog exactly once and the bucket is removed atomically, so a
-    ///   concurrent add starts a fresh bucket and a concurrent flush finds none.
-    /// - Non-blocking: the catalog is only ever taken via `try_write`; the side-map
-    ///   lock is held solely for O(1) map ops + that non-blocking probe.
-    pub(super) fn accumulate_and_try_flush_catalog_upload(&self, file_hash: &Ed2kHash, delta: u64) {
-        let key = file_hash.to_string();
-        let mut pending = self.pending_catalog_upload.lock().unwrap();
-        let amount = {
-            let slot = pending.entry(key.clone()).or_insert(0);
-            *slot = slot.saturating_add(delta);
-            *slot
-        };
-        if amount == 0 {
-            return;
-        }
+    /// Project the latest owned counters without waiting on a catalog reader.
+    pub(super) fn try_publish_file_accounting(&self, hash: &Ed2kHash) {
         if let Ok(mut catalog) = self.shared_catalog.try_write() {
-            catalog.update_stats_by_hash(file_hash, |entry| {
-                entry.all_time_uploaded_bytes =
-                    entry.all_time_uploaded_bytes.saturating_add(amount);
-                entry.publish.session_uploaded_bytes =
-                    entry.publish.session_uploaded_bytes.saturating_add(amount);
-            });
-            // The write lock was taken: the pending is resolved. If the file has a
-            // catalog entry the whole amount landed in it; if it has none there is
-            // nothing to credit (the pre-fix `try_write` path was a no-op too), so
-            // either way the bucket is cleared, keeping the side map bounded.
-            pending.remove(&key);
+            catalog.sync_accounting(hash);
         }
     }
 
-    /// Guaranteed (blocking) flush of a file's parked demand-upload bytes into the
-    /// shared catalog. Called at session release -- OFF the per-fragment hot path
-    /// -- so blocking on the catalog write lock is safe here and guarantees a tail
-    /// parked during a publish tick is never orphaned.
-    ///
-    /// Lock ordering: this takes the catalog write lock FIRST, then the side-map
-    /// lock. That is the reverse of the per-fragment path, but the per-fragment
-    /// path only ever probes the catalog with a NON-blocking `try_write` while
-    /// holding the side-map lock, so it never waits on the catalog -- no thread can
-    /// hold the side-map lock while blocked on the catalog, so no circular wait
-    /// (deadlock) is possible.
-    async fn flush_pending_catalog_upload(&self, file_hash: &Ed2kHash) {
-        let key = file_hash.to_string();
-        // Cheap pre-check: skip taking the catalog write lock when the continuous
-        // per-fragment flushes already drained this file (the common case).
-        let has_pending = self
-            .pending_catalog_upload
-            .lock()
-            .unwrap()
-            .get(&key)
-            .copied()
-            .unwrap_or(0)
-            > 0;
-        if !has_pending {
-            return;
-        }
-        let mut catalog = self.shared_catalog.write().await;
-        let mut pending = self.pending_catalog_upload.lock().unwrap();
-        // Re-read under the final lock: a concurrent per-fragment flush may have
-        // drained (or grown) the bucket since the pre-check.
-        if let Some(amount) = pending.remove(&key)
-            && amount > 0
-        {
-            catalog.update_stats_by_hash(file_hash, |entry| {
-                entry.all_time_uploaded_bytes =
-                    entry.all_time_uploaded_bytes.saturating_add(amount);
-                entry.publish.session_uploaded_bytes =
-                    entry.publish.session_uploaded_bytes.saturating_add(amount);
-            });
-        }
-    }
-
-    async fn update_shared_publish_stats(
-        &self,
-        file_hash: &Ed2kHash,
-        update: impl FnOnce(&mut super::Ed2kSharedEntry),
-    ) {
-        // O(1) by-hash resolution of the unique non-hint entry, replacing the
-        // former write-lock + full linear scan on every request/accept.
-        let mut catalog = self.shared_catalog.write().await;
-        catalog.update_stats_by_hash(file_hash, update);
+    /// Release and explicit refresh paths wait for one scalar projection. The
+    /// accounting owner retains newer totals even when a serving row is absent.
+    async fn publish_file_accounting(&self, hash: &Ed2kHash) {
+        self.shared_catalog.write().await.sync_accounting(hash);
     }
 
     /// Enable/disable the credit system live (eMule `thePrefs.GetCreditSystem()`).

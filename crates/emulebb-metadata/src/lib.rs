@@ -116,7 +116,9 @@ pub use native_file::{
 };
 pub use native_path::NativePath;
 pub use peer_model::MetadataPeerCredit;
-pub use peer_store::MetadataFileUploadDelta;
+pub use peer_store::{
+    MetadataFileUploadDelta, MetadataFileUploadRequest, MetadataFileUploadTotals,
+};
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use profile_ownership::ProfileLeaseGuard;
 pub use profile_store::{FriendWriteTiming, valid_category_name};

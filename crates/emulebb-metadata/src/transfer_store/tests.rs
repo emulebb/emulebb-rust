@@ -1541,11 +1541,14 @@ fn upload_demand_counters_persist_on_known_files() {
         store
             .add_file_upload_request(&manifest.file_hash, 1_700_000_001)
             .unwrap()
+            .unwrap()
+            .known_client
     );
     assert!(
         store
             .add_file_upload_request(&manifest.file_hash, 1_700_000_000)
             .unwrap()
+            .is_some()
     );
     store
         .apply_credit_deltas(

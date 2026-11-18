@@ -200,7 +200,7 @@ fn kad_publish_entry_from_shared_catalog_preserves_live_rank_inputs() {
     entry.publish.session_accept_count = 2;
     entry.publish.all_time_request_count = 7;
     entry.publish.all_time_accept_count = 4;
-    entry.publish.last_request_unix_ms = 1_700_000_000_000;
+    entry.publish.last_upload_requested_at_s = Some(1_700_000_000);
 
     let publish = kad_publish_entry_from_shared_entry(&entry);
 

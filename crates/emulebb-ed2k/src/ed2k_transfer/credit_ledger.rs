@@ -53,6 +53,7 @@ pub(super) struct ParkedCreditLedger {
     peers: ParkedPeerDeltas,
     /// File hash -> byte and accepted-session deltas not yet in SQLite.
     files: ParkedFileDeltas,
+    pub(super) file_statistics: HashMap<[u8; 16], super::file_accounting::Ed2kFileUploadStatistics>,
     last_flush_started: Instant,
 }
 
@@ -61,6 +62,7 @@ impl ParkedCreditLedger {
         Self {
             peers: HashMap::new(),
             files: HashMap::new(),
+            file_statistics: HashMap::new(),
             last_flush_started: Instant::now(),
         }
     }
@@ -186,12 +188,16 @@ impl Ed2kTransferRuntime {
             let mut ledger = self.parked_credit.lock();
             let slot = ledger.files.entry(file_hash.to_string()).or_default();
             slot.uploaded_bytes = slot.uploaded_bytes.saturating_add(delta);
-            slot.last_uploaded_at_s = slot
-                .last_uploaded_at_s
-                .max(Some(super::upload::unix_time_s()));
+            let at = super::upload::unix_time_s();
+            slot.last_uploaded_at_s = slot.last_uploaded_at_s.max(Some(at));
+            ledger
+                .file_statistics
+                .entry(file_hash.0)
+                .or_default()
+                .note_bytes(delta, at);
             ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
         };
-        self.accumulate_and_try_flush_catalog_upload(file_hash, delta);
+        self.try_publish_file_accounting(file_hash);
         if flush_due {
             self.spawn_parked_credit_flush();
         }
@@ -204,6 +210,11 @@ impl Ed2kTransferRuntime {
             let mut ledger = self.parked_credit.lock();
             let slot = ledger.files.entry(file_hash.to_string()).or_default();
             slot.accepted_sessions = slot.accepted_sessions.saturating_add(1);
+            ledger
+                .file_statistics
+                .entry(file_hash.0)
+                .or_default()
+                .note_accept();
             ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
         };
         if flush_due {

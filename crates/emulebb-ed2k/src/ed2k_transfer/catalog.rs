@@ -446,9 +446,8 @@ impl SharedEligibility {
 /// `entries` is the ordered source of truth. `by_hash` is an ADDITIONAL lookup
 /// structure mapping the raw 16-byte MD4 file hash to the index of the unique
 /// non-compatibility-hint entry carrying that hash - the exact entry every by-hash
-/// hot-path lookup targets (`update_shared_publish_stats`,
-/// `add_file_all_time_uploaded`, and the reask serve check all filter to the
-/// verified/servable entry, never a bare hint). Compatibility hints are
+/// serving/publication lookups select the verified entry, never a bare hint.
+/// Its upload counters are projections of the process accounting owner. Compatibility hints are
 /// intentionally excluded from the index: after dedupe there is at most one
 /// non-hint entry per hash, so the map is unambiguous, and a hint is never a
 /// serve/credit target.
@@ -469,6 +468,7 @@ pub struct IndexedSharedCatalog {
     category_watch: Option<([u8; 16], u64)>,
     category_watch_sequence: Option<u64>,
     eligibility: Option<Arc<SharedEligibility>>,
+    accounting: Option<super::file_accounting::SharedFileAccounting>,
 }
 
 impl Default for IndexedSharedCatalog {
@@ -480,11 +480,34 @@ impl Default for IndexedSharedCatalog {
             category_watch: None,
             category_watch_sequence: Some(0),
             eligibility: None,
+            accounting: None,
         }
     }
 }
 
 impl IndexedSharedCatalog {
+    pub(super) fn set_accounting(
+        &mut self,
+        accounting: super::file_accounting::SharedFileAccounting,
+    ) {
+        self.accounting = Some(accounting);
+        self.project_accounting();
+    }
+
+    fn project_accounting(&mut self) {
+        if let Some(accounting) = &self.accounting {
+            for entry in &mut self.entries {
+                accounting.project(entry);
+            }
+        }
+    }
+
+    pub(super) fn sync_accounting(&mut self, hash: &Ed2kHash) {
+        if let Some(accounting) = self.accounting.clone() {
+            self.update_by_hash_inner(hash, |entry| accounting.project(entry));
+        }
+    }
+
     pub(crate) fn set_eligibility(&mut self, eligibility: Arc<SharedEligibility>) {
         self.eligibility = Some(eligibility);
     }
@@ -569,6 +592,7 @@ impl IndexedSharedCatalog {
             category_watch: None,
             category_watch_sequence: Some(0),
             eligibility: None,
+            accounting: None,
         };
         catalog.rebuild_index();
         catalog
@@ -585,6 +609,7 @@ impl IndexedSharedCatalog {
     /// First occurrence wins (matching the previous `iter().find()` first-match
     /// semantics); only non-compatibility-hint entries are indexed.
     fn rebuild_index(&mut self) {
+        self.project_accounting();
         self.by_hash.clear();
         self.by_hash.reserve(self.entries.len());
         self.completed_verified_count = 0;
@@ -623,7 +648,10 @@ impl IndexedSharedCatalog {
     /// Append an entry, keeping the by-hash index in sync. A non-hint entry is
     /// indexed at its new tail position, first-occurrence-wins so an earlier
     /// duplicate keeps ownership (matching the old first-match scan).
-    pub fn push(&mut self, entry: Ed2kSharedEntry) {
+    pub fn push(&mut self, mut entry: Ed2kSharedEntry) {
+        if let Some(accounting) = &self.accounting {
+            accounting.project(&mut entry);
+        }
         self.invalidate_category_watch(Self::entry_hash_key(&entry));
         let idx = self.entries.len();
         if !entry.compatibility_hint && entry.verified_complete {
@@ -683,6 +711,7 @@ impl IndexedSharedCatalog {
         self.by_hash = std::mem::take(&mut rebuilt.by_hash);
         self.completed_verified_count = rebuilt.completed_verified_count;
         rebuilt.completed_verified_count = 0;
+        self.project_accounting();
     }
 
     /// Upsert a verified entry in place: drop the entries `keep` rejects, append
@@ -777,6 +806,12 @@ impl IndexedSharedCatalog {
     /// can append. Removal uses `swap_remove` and repairs only the moved entry's
     /// index. Compatibility hints are deliberately untouched.
     pub fn upsert_verified(&mut self, hash: Ed2kHash, new_entry: Option<Ed2kSharedEntry>) {
+        let new_entry = new_entry.map(|mut entry| {
+            if let Some(accounting) = &self.accounting {
+                accounting.project(&mut entry);
+            }
+            entry
+        });
         self.invalidate_category_watch(Some(hash.0));
         if let Some(entry) = new_entry.as_ref() {
             debug_assert!(!entry.compatibility_hint);
@@ -979,7 +1014,7 @@ pub struct Ed2kSharedPublishStats {
     #[serde(default)]
     pub all_time_accept_count: u64,
     #[serde(default)]
-    pub last_request_unix_ms: i64,
+    pub last_upload_requested_at_s: Option<i64>,
     #[serde(default)]
     pub last_ed2k_publish_unix_ms: i64,
 }
