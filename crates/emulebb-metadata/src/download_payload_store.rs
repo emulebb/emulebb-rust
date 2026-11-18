@@ -43,7 +43,7 @@ fn read(conn: &Connection, id: JobId, allowance: usize) -> Result<PayloadRead> {
         j.expected_size_bytes,j.part_size_bytes,j.part_count,lower(hex(j.aich_root)),
         j.upload_priority,j.auto_upload_priority,j.comment,j.rating,
         p.platform,p.native_path,j.storage_directory_marker_id,j.storage_directory_identity,j.payload_fingerprint,
-        k.all_time_uploaded_bytes,k.all_time_upload_requests,k.all_time_upload_accepts,k.last_upload_requested_at_ms,
+        k.all_time_uploaded_bytes,k.all_time_upload_requests,k.all_time_upload_accepts,k.last_upload_requested_at_s,
         k.media_artist,k.media_album,k.media_title,k.media_length_seconds,k.media_bitrate_kbps,k.media_codec,k.media_extractor_version
         FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id JOIN local_paths p ON p.id=j.storage_path_id
         WHERE j.id=?1 AND {ELIGIBLE}");
@@ -117,7 +117,7 @@ fn read(conn: &Connection, id: JobId, allowance: usize) -> Result<PayloadRead> {
             all_time_uploaded_bytes: crate::sql_value::unsigned(row, 16)?,
             all_time_upload_requests: crate::sql_value::unsigned(row, 17)?,
             all_time_upload_accepts: crate::sql_value::unsigned(row, 18)?,
-            last_upload_request_ms: row.get(19)?,
+            last_upload_requested_at_s: row.get(19)?,
             media_path: None,
             media: MetadataTransferMediaMetadata {
                 artist: row.get(20)?,

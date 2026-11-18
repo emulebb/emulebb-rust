@@ -293,7 +293,6 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         );
         return Ok(UploadPayloadOutcome::Close);
     };
-    transfer_runtime.note_file_upload_accept(&requested).await;
     let verified_reader_open_start = Instant::now();
     let Some((shared, mut verified_reader)) = upload_queue
         .take_verified_reader(transfer_runtime, &requested)
@@ -452,6 +451,11 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 request_diag.note_skip("unverifiedRange");
                 break;
             };
+            // Count an accepted stint only when verified payload is ready;
+            // empty, rejected and unavailable ranges remain request demand.
+            transfer_runtime
+                .note_file_upload_accept(&requested, &work_guard)
+                .await;
             let fragment_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             let replies = build_upload_part_packets(
                 &requested,

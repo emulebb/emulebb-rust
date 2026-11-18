@@ -845,7 +845,7 @@ async fn incremental_reload_accepts_unique_stock_hash_without_payload_reads() {
         all_time_uploaded_bytes: 1234,
         all_time_upload_requests: 9,
         all_time_upload_accepts: 4,
-        last_upload_request_ms: 1_700_000_001_000,
+        last_upload_requested_at_s: Some(1_700_000_001),
     };
     core.metadata_store
         .accept_imported_local_files(&[(
@@ -913,7 +913,7 @@ async fn added_path_reuses_accepted_live_identity_without_stock_lookup_or_payloa
                 all_time_uploaded_bytes: 0,
                 all_time_upload_requests: 0,
                 all_time_upload_accepts: 0,
-                last_upload_request_ms: 0,
+                last_upload_requested_at_s: None,
             },
             key,
             fp.clone(),
@@ -959,7 +959,7 @@ async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart(
                 all_time_uploaded_bytes: 1234,
                 all_time_upload_requests: 9,
                 all_time_upload_accepts: 4,
-                last_upload_request_ms: 1_700_000_001_000,
+                last_upload_requested_at_s: Some(1_700_000_001),
             },
             emulebb_ed2k::long_path::long_path(&source),
             fingerprint.clone().unwrap(),

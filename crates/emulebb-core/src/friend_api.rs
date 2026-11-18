@@ -44,6 +44,10 @@ impl EmulebbCore {
         let local = self.ed2k_transfers.drain_local_mutations().await;
         let root = crate::shared_dir_monitor::drain_root_sql(self).await;
         let reads = self.ed2k_transfers.drain_shared_eligibility().await;
+        // WHY: refused requests have no upload-session release to flush their
+        // tail. The daemon drains here after stopping network producers, before
+        // releasing the profile; required accounting errors must surface.
+        let accounting = self.ed2k_transfers.checkpoint_upload_accounting().await;
         admission?;
         monitor?;
         owner?;
@@ -51,6 +55,7 @@ impl EmulebbCore {
         local?;
         root?;
         reads?;
+        accounting?;
         Ok(())
     }
 }

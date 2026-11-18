@@ -491,7 +491,7 @@ mod tests {
             all_time_uploaded_bytes: 0,
             all_time_upload_requests: 0,
             all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
+            last_upload_requested_at_s: None,
             media_path: Some(path),
             media: emulebb_metadata::MetadataTransferMediaMetadata {
                 artist: "a".repeat(65_536),
