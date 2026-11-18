@@ -162,6 +162,7 @@ describe("SearchView", () => {
         observations: [
           {
             origin: "server",
+            reporterEndpoint: null,
             rawName: "Primary.flac",
             normalizedName: "Primary.flac",
             sizeBytes: 4096,
@@ -179,7 +180,7 @@ describe("SearchView", () => {
           },
           {
             origin: "global",
-            serverEndpoint: "192.0.2.10:4661",
+            reporterEndpoint: "192.0.2.10:4661",
             rawName: "Alternate.flac",
             normalizedName: "Alternate.flac",
             sizeBytes: 4096,
@@ -232,7 +233,7 @@ describe("SearchView", () => {
     expect(screen.getByText("server, global")).toBeInTheDocument();
     expect(screen.getAllByText("00112233445566778899aabbccddeeff").length).toBeGreaterThan(0);
     expect(screen.getByText(/4.0 KiB · type audio · 8 sources \/ 3 complete · client 16909060:4662 · complete file · folder Audio/)).toBeInTheDocument();
-    expect(screen.getByText(/12 sources \/ 5 complete · server 192.0.2.10:4661/)).toBeInTheDocument();
+    expect(screen.getByText(/12 sources \/ 5 complete · reporter 192.0.2.10:4661/)).toBeInTheDocument();
 
     fireEvent.input(screen.getByRole("combobox", { name: "Sort search results" }), {
       target: { value: "bitrateKbps:desc" }

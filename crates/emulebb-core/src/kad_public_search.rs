@@ -11,13 +11,12 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    KadAichSearchVotes, SearchCreate, SearchResult,
+    KadAichSearchVotes, SearchCreate,
     search_query::{search_criteria_from_request, search_result_from_kad},
 };
 
 const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
 pub(crate) struct KadKeywordSearchOutcome {
-    pub(crate) results: Vec<SearchResult>,
     pub(crate) aich_votes: HashMap<String, KadAichSearchVotes>,
 }
 
@@ -35,7 +34,7 @@ pub(crate) async fn search_kad_keywords(
     request: &SearchCreate,
     cancel: &CancellationToken,
     incremental_results: Option<
-        &tokio::sync::mpsc::UnboundedSender<crate::search_queue_runtime::SearchLiveUpdate>,
+        &tokio::sync::mpsc::Sender<crate::search_queue_runtime::SearchLiveUpdate>,
     >,
 ) -> Result<KadKeywordSearchDispatchOutcome> {
     if !dht.is_bootstrapped() {
@@ -79,8 +78,6 @@ pub(crate) async fn search_kad_keywords(
         crate::diag_kad_event::KAD_SEARCH_KIND_KEYWORD,
         Some(&target_hex),
     );
-    let mut results = Vec::<SearchResult>::new();
-    let mut result_indexes = HashMap::<String, usize>::new();
     let mut aich_votes = HashMap::<String, KadAichSearchVotes>::new();
 
     while let Some(result) = stream.next().await {
@@ -98,13 +95,12 @@ pub(crate) async fn search_kad_keywords(
                 .or_default()
                 .record(candidate.responder_ip, candidate.root);
         }
-        let mapped = search_result_from_kad(search_id, request, result);
+        let mapped = search_result_from_kad(search_id, request, result.clone());
         if let Some(incremental_results) = incremental_results {
-            let _ = incremental_results.send(
-                crate::search_queue_runtime::SearchLiveUpdate::Result(Box::new(mapped.clone())),
-            );
+            let _ = incremental_results
+                .send(crate::search_observations::kad(mapped, &result))
+                .await;
         }
-        merge_kad_search_result(&mut results, &mut result_indexes, hash, mapped);
     }
     let completion = stream
         .completion()
@@ -125,29 +121,8 @@ pub(crate) async fn search_kad_keywords(
         });
     }
     Ok(KadKeywordSearchDispatchOutcome::Completed(
-        KadKeywordSearchOutcome {
-            results,
-            aich_votes,
-        },
+        KadKeywordSearchOutcome { aich_votes },
     ))
-}
-
-fn merge_kad_search_result(
-    results: &mut Vec<SearchResult>,
-    result_indexes: &mut HashMap<String, usize>,
-    hash: String,
-    mapped: SearchResult,
-) {
-    if let Some(index) = result_indexes.get(&hash).copied() {
-        results[index].merge_observations(mapped);
-    } else {
-        // The DHT stream owns the configured result budget. Do not impose a
-        // second, smaller presentation cap here: doing so silently discarded
-        // valid hashes after the first 200 even though the Rust-native stream
-        // was configured to harvest substantially more.
-        result_indexes.insert(hash, results.len());
-        results.push(mapped);
-    }
 }
 
 fn kad_public_search_request(request: &SearchCreate) -> Result<SearchKeyReq> {
@@ -230,8 +205,6 @@ fn keyword_hash_target(first_word: &str) -> NodeId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SearchResultMedia, SearchResultObservation};
-    use chrono::Utc;
 
     fn request(query: &str) -> SearchCreate {
         SearchCreate {
@@ -343,45 +316,5 @@ mod tests {
             names,
             vec!["alpha beta.mp3".to_string(), "ALPHA BETA.MP3".to_string()]
         );
-    }
-
-    #[test]
-    fn public_collector_does_not_recap_the_dht_result_stream() {
-        let mut results = Vec::new();
-        let mut indexes = HashMap::new();
-
-        // eMuleBB-MFC accepts 750 keyword answers by default. The public
-        // collector must preserve at least that many distinct hashes when the
-        // authoritative DHT stream budget permits them.
-        for index in 0_u32..750 {
-            let hash = format!("{index:032x}");
-            let observation = SearchResultObservation {
-                origin: "kad".to_string(),
-                server_endpoint: None,
-                name: format!("result-{index}.bin"),
-                size_bytes: u64::from(index) + 1,
-                sources: 1,
-                complete_sources: 0,
-                source_client_id: None,
-                source_client_port: None,
-                file_type: "unknown".to_string(),
-                media: SearchResultMedia::default(),
-                rating: 0,
-                aich_hash: String::new(),
-                complete: false,
-                directory: String::new(),
-                observed_at: Utc::now(),
-            };
-            let mapped = SearchResult::from_observation(
-                "1".to_string(),
-                String::new(),
-                hash.clone(),
-                observation,
-            );
-            merge_kad_search_result(&mut results, &mut indexes, hash, mapped);
-        }
-
-        assert_eq!(results.len(), 750);
-        assert_eq!(indexes.len(), 750);
     }
 }

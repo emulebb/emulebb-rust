@@ -194,6 +194,7 @@ pub use persistence_owner::CategoryNameConflict;
 mod physical_disk;
 mod profile_state;
 mod search_api;
+mod search_observations;
 mod search_query;
 mod search_queue;
 mod search_queue_runtime;
@@ -295,10 +296,7 @@ use local_search_response::send_local_search_response;
 use local_search_response::split_stock_search_responses;
 pub use network_binding::NetworkBindingStatus;
 use network_status_defaults::{ed2k_starting_status, ed2k_stopped_status, kad_starting_status};
-use search_query::{
-    SearchNetworkMethod, apply_search_filters, search_criteria_from_request,
-    search_result_from_ed2k, search_result_from_passive_cache,
-};
+use search_query::{SearchNetworkMethod, apply_search_filters, search_criteria_from_request};
 use search_queue::{SearchQueue, SearchQueueLane};
 use search_queue_runtime::Ed2kServerSearchOutcome;
 use source_publish::{
@@ -674,13 +672,6 @@ impl EmulebbCore {
         let passive_replay_enabled = ed2k_network
             .as_ref()
             .is_some_and(|network| network.kad_passive_replay_enabled);
-        if !passive_replay_enabled {
-            for search in core_state.searches.values_mut() {
-                search
-                    .results
-                    .retain_mut(|result| result.remove_observation_origin("passive_cache"));
-            }
-        }
         let upload_queue_policy = initial_ed2k_upload_queue_policy(
             ed2k_network
                 .as_ref()
@@ -933,7 +924,7 @@ impl EmulebbCore {
         network_method: Option<SearchNetworkMethod>,
         cancel: &CancellationToken,
         incremental_results: Option<
-            &tokio::sync::mpsc::UnboundedSender<search_queue_runtime::SearchLiveUpdate>,
+            &tokio::sync::mpsc::Sender<search_queue_runtime::SearchLiveUpdate>,
         >,
     ) -> Result<Ed2kServerSearchOutcome> {
         if !matches!(
@@ -962,14 +953,23 @@ impl EmulebbCore {
         let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
         let timeout = connected_server_keyword_search_timeout(&config);
         let criteria = search_criteria_from_request(request);
-        let mut files = Vec::new();
         let mut status_reason = None;
-        match search_keyword_via_background_session(
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(16);
+        let operation = search_keyword_via_background_session(
             &handle,
             &request.query,
             criteria.clone(),
             timeout,
             cancel,
+            Some(raw_tx),
+        );
+        match search_observations::forward_ed2k(
+            search_id,
+            request,
+            emulebb_metadata::MetadataObservationOrigin::Server,
+            incremental_results,
+            raw_rx,
+            operation,
         )
         .await
         {
@@ -979,22 +979,6 @@ impl EmulebbCore {
                         "ED2K background keyword search received an empty result page query={:?}",
                         request.query
                     );
-                } else {
-                    for file in background_files {
-                        if let Some(incremental_results) = incremental_results {
-                            let mapped = search_result_from_ed2k(
-                                search_id,
-                                request,
-                                "server",
-                                connected_server_endpoint,
-                                file.clone(),
-                            );
-                            let _ = incremental_results.send(
-                                search_queue_runtime::SearchLiveUpdate::Result(Box::new(mapped)),
-                            );
-                        }
-                        files.push(("server", connected_server_endpoint, file));
-                    }
                 }
             }
             Ok(Ed2kBackgroundKeywordSearchOutcome::TimedOut) => {
@@ -1020,29 +1004,15 @@ impl EmulebbCore {
             ),
         }
         if let Some(incremental_results) = incremental_results {
-            let _ = incremental_results.send(search_queue_runtime::SearchLiveUpdate::Progress(
+            let _ = incremental_results.try_send(search_queue_runtime::SearchLiveUpdate::Progress(
                 SearchProgress::new("connected-server", 1, Some(1), "servers"),
             ));
         }
         if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
-            let global_result_sink =
-                |observation: emulebb_ed2k::ed2k_server::Ed2kServerSearchObservation| {
-                    if let Some(incremental_results) = incremental_results {
-                        let mapped = search_result_from_ed2k(
-                            search_id,
-                            request,
-                            "global",
-                            Some(observation.server_endpoint),
-                            observation.file,
-                        );
-                        let _ = incremental_results.send(
-                            search_queue_runtime::SearchLiveUpdate::Result(Box::new(mapped)),
-                        );
-                    }
-                };
+            let (global_result_sink, raw_rx) = tokio::sync::mpsc::channel(16);
             let global_progress_sink = |completed: usize, total: usize| {
                 if let Some(incremental_results) = incremental_results {
-                    let _ = incremental_results.send(
+                    let _ = incremental_results.try_send(
                         search_queue_runtime::SearchLiveUpdate::Progress(SearchProgress::new(
                             "global-server-sweep",
                             completed,
@@ -1055,43 +1025,37 @@ impl EmulebbCore {
             let dead_server_endpoints = self
                 .ed2k_dead_server_endpoints(config.dead_server_retries)
                 .await;
-            match search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
+            let operation = search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
                 bind_ip: network.bind_ip,
                 config: &config,
                 excluded_endpoint: connected_server_endpoint,
                 dead_server_endpoints: &dead_server_endpoints,
                 query: &request.query,
                 criteria: &criteria,
-                result_sink: incremental_results.is_some().then_some(&global_result_sink),
+                result_sink: Some(global_result_sink),
                 progress_sink: incremental_results
                     .is_some()
                     .then_some(&global_progress_sink),
                 cancel,
-            })
+            });
+            match search_observations::forward_ed2k(
+                search_id,
+                request,
+                emulebb_metadata::MetadataObservationOrigin::Global,
+                incremental_results,
+                raw_rx,
+                operation,
+            )
             .await
             {
-                Ok(global_files) => files.extend(global_files.into_iter().map(|observation| {
-                    (
-                        "global",
-                        Some(observation.server_endpoint),
-                        observation.file,
-                    )
-                })),
+                Ok(_) => {}
                 Err(error) => tracing::warn!(
                     "ED2K global UDP keyword search failed query={:?} error={error}",
                     request.query
                 ),
             }
         }
-        Ok(Ed2kServerSearchOutcome::Completed {
-            results: files
-                .into_iter()
-                .map(|(origin, server_endpoint, file)| {
-                    search_result_from_ed2k(search_id, request, origin, server_endpoint, file)
-                })
-                .collect(),
-            status_reason,
-        })
+        Ok(Ed2kServerSearchOutcome::Completed { status_reason })
     }
 
     #[expect(
@@ -2429,6 +2393,7 @@ impl EmulebbCore {
                 SearchCriteria::default(),
                 timeout,
                 cancel,
+                None,
             )
             .await
             {

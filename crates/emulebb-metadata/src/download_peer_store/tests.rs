@@ -134,7 +134,7 @@ fn observation(name: String) -> MetadataTransferFileNameObservation {
         user_hash: None,
         client_software: String::new(),
         origin: "peer".into(),
-        server_endpoint: None,
+        reporter_endpoint: None,
         normalized_name: name.clone(),
         raw_name: name,
         observed_at_s: 1,
@@ -150,11 +150,13 @@ fn peer_deltas_preserve_chosen_name_and_verified_checkpoint_cannot_replay_old_na
         .unwrap()
         .unwrap();
     for _ in 0..4 {
+        let mut observed = observation("peer-proposed.bin".into());
+        observed.reporter_endpoint = Some("192.0.2.7:4672".into());
         store
             .apply_download_peer_delta(
                 current.token,
                 &MetadataDownloadPeerDelta::ObserveName {
-                    observation: observation("peer-proposed.bin".into()),
+                    observation: observed,
                     source: Some(source(1, String::new())),
                 },
             )
@@ -182,6 +184,14 @@ fn peer_deltas_preserve_chosen_name_and_verified_checkpoint_cannot_replay_old_na
             .unwrap()
             .len(),
         4
+    );
+    let names = store
+        .download_job_names_after(current.token, 0, 256)
+        .unwrap();
+    assert!(
+        names
+            .iter()
+            .all(|entry| entry.observation.reporter_endpoint.as_deref() == Some("192.0.2.7:4672"))
     );
     assert!(store.stop_download_job(current.token).unwrap());
     assert!(
@@ -408,7 +418,7 @@ fn nested_source_windows_share_the_page_budget_without_hiding_later_sources() {
                     + name.user_hash.as_ref().map_or(0, String::capacity)
                     + name.client_software.capacity()
                     + name.origin.capacity()
-                    + name.server_endpoint.as_ref().map_or(0, String::capacity)
+                    + name.reporter_endpoint.as_ref().map_or(0, String::capacity)
                     + name.raw_name.capacity()
                     + name.normalized_name.capacity();
             }

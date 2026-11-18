@@ -816,7 +816,7 @@ function searchResultObservationEvidence(observation: SearchResultObservation): 
     observation.sizeBytes > 0 ? formatBytes(observation.sizeBytes) : "",
     observation.fileType && observation.fileType !== "unknown" ? `type ${observation.fileType}` : "",
     `${observation.sources} sources / ${observation.completeSources} complete`,
-    observation.serverEndpoint ? `server ${observation.serverEndpoint}` : "",
+    observation.reporterEndpoint ? `reporter ${observation.reporterEndpoint}` : "",
     sourceEndpoint,
     observation.complete ? "complete file" : "",
     observation.directory ? `folder ${observation.directory}` : "",

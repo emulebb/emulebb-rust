@@ -65,7 +65,6 @@ pub(crate) struct CoreState {
     /// public search id. Terminal settlement and deletion remove the handle.
     pub(crate) search_cancels: HashMap<String, CancellationToken>,
     pub(crate) kad_aich_search_votes: BTreeMap<(String, String), KadAichSearchVotes>,
-    pub(crate) next_search_id: u32,
     pub(crate) transfers: HashMap<String, Transfer>,
     pub(crate) core_settings: CoreSettings,
     pub(crate) categories: BTreeMap<i64, Category>,

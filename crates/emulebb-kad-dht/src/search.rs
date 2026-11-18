@@ -180,13 +180,13 @@ pub(crate) fn search_keywords_by_request(
                 break;
             };
             raw_entry_count += 1;
-            let std::net::IpAddr::V4(responder_ip) = observation.responder_addr.ip() else {
+            let std::net::SocketAddr::V4(reporter_endpoint) = observation.responder_addr else {
                 continue;
             };
             let mut result = SearchResult::from_observation(
                 observation.entry_id,
                 observation.tags,
-                responder_ip,
+                reporter_endpoint,
                 observation.responder_version,
             );
             if result.names.is_empty() {

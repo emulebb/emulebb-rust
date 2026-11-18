@@ -95,7 +95,7 @@ impl EmulebbCore {
                     user_hash: None,
                     client_software: String::new(),
                     origin: observation.origin,
-                    server_endpoint: observation.server_endpoint,
+                    reporter_endpoint: observation.reporter_endpoint,
                     normalized_name: emulebb_ed2k::normalize_ed2k_file_name(&observation.name),
                     raw_name: observation.name,
                     observed_at_s: observation.observed_at.timestamp(),
@@ -310,7 +310,7 @@ mod tests {
         .into_iter()
         .map(|(ip, port)| SearchResultObservation {
             origin: "global".to_string(),
-            server_endpoint: None,
+            reporter_endpoint: None,
             name: result.name.clone(),
             size_bytes: result.size_bytes,
             sources: 1,

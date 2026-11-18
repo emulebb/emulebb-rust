@@ -463,10 +463,10 @@ pub struct SearchResultObservation {
     /// `global`, or `kad`). A later transport-specific locator can refine this
     /// without changing the hash-level result identity.
     pub origin: String,
-    /// ED2K server base endpoint that supplied this observation. Absent for
-    /// Kad, local-index, and legacy persisted observations.
+    /// Endpoint of the server or Kad node that reported this observation.
+    /// Absent when no reporting endpoint was captured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_endpoint: Option<String>,
+    pub reporter_endpoint: Option<String>,
     pub name: String,
     pub size_bytes: u64,
     pub sources: u32,
@@ -553,24 +553,13 @@ impl SearchResult {
         self.recompute_observation_aggregate();
     }
 
-    pub(crate) fn remove_observation_origin(&mut self, origin: &str) -> bool {
-        self.ensure_aggregate_observation();
-        self.observations
-            .retain(|observation| observation.origin != origin);
-        if self.observations.is_empty() {
-            return false;
-        }
-        self.recompute_observation_aggregate();
-        true
-    }
-
     fn ensure_aggregate_observation(&mut self) {
         if !self.observations.is_empty() {
             return;
         }
         self.observations.push(SearchResultObservation {
             origin: "unknown".to_string(),
-            server_endpoint: None,
+            reporter_endpoint: None,
             name: self.name.clone(),
             size_bytes: self.size_bytes,
             sources: self.sources,
@@ -740,7 +729,7 @@ fn aggregate_observation_count(
             // from the same server. Legacy rows without provenance retain one
             // conservative bucket per origin rather than being summed blindly.
             let key = observation
-                .server_endpoint
+                .reporter_endpoint
                 .as_deref()
                 .map_or((false, observation.origin.as_str()), |endpoint| {
                     (true, endpoint)
@@ -790,7 +779,7 @@ fn observations_are_equivalent(
     right: &SearchResultObservation,
 ) -> bool {
     left.origin == right.origin
-        && left.server_endpoint == right.server_endpoint
+        && left.reporter_endpoint == right.reporter_endpoint
         && left.name == right.name
         && left.size_bytes == right.size_bytes
         && left.sources == right.sources
@@ -813,7 +802,7 @@ mod search_result_name_tests {
     fn observation(name: &str, origin: &str) -> SearchResultObservation {
         SearchResultObservation {
             origin: origin.to_string(),
-            server_endpoint: None,
+            reporter_endpoint: None,
             name: name.to_string(),
             size_bytes: 1024,
             sources: 1,
@@ -1176,7 +1165,7 @@ pub struct DownloadFileNameObservation {
     pub raw_name: String,
     pub normalized_name: String,
     pub origin: String,
-    pub server_endpoint: Option<String>,
+    pub reporter_endpoint: Option<String>,
     pub observed_at: i64,
 }
 

@@ -191,7 +191,7 @@ pub(crate) fn download_source_from_record(
             raw_name: name.raw_name,
             normalized_name: name.normalized_name,
             origin: name.origin,
-            server_endpoint: name.server_endpoint,
+            reporter_endpoint: name.reporter_endpoint,
             observed_at: name.observed_at_s,
         })
         .collect();

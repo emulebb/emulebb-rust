@@ -572,6 +572,7 @@ async fn passive_keyword_result_indexes_searchable_file_metadata() {
             media_bitrate_kbps: None,
             media_codec: None,
             aich_candidate: None,
+            reporter_endpoint: None,
             tags: vec![],
         },
     )

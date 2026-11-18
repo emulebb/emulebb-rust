@@ -4,6 +4,14 @@ mod aich_recovery_store;
 mod app_settings_store;
 pub use app_settings_store::{MetadataAppSettings, MetadataSettingsWriteError};
 mod content_identity;
+mod content_observation_model;
+mod content_observation_store;
+pub use content_observation_model::{
+    CONTENT_OBSERVATION_BATCH_BYTES, CONTENT_OBSERVATION_BATCH_ITEMS, MetadataContentClaim,
+    MetadataContentMetadata, MetadataContentObservation, MetadataContentObservationEvent,
+    MetadataContentObservationPage, MetadataContentObservationReceipt,
+    MetadataObservationCommitUncertain, MetadataObservationOrigin,
+};
 mod download_availability;
 pub use download_availability::{
     AvailabilitySource, DownloadAvailabilityAdmission, LocalContentAvailability,
@@ -126,7 +134,8 @@ pub use profile_ownership::ProfileLeaseGuard;
 pub use profile_store::{FriendWriteTiming, valid_category_name};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
-    MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,
+    MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultObservation,
+    MetadataSearchSpec,
 };
 pub use search_store::normalized_search_query;
 pub use shared_membership_store::ObservedRootChanged;

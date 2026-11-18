@@ -13,9 +13,7 @@ pub(crate) use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, LocalShareCreate, 
 use emulebb_ed2k::{
     NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter,
 };
-pub(crate) use emulebb_index::{
-    FileIndex, IndexedFile, IndexedFileOrigin, KadLocalStoreConfig, SnoopQueueConfig,
-};
+pub(crate) use emulebb_index::{FileIndex, IndexedFile, KadLocalStoreConfig, SnoopQueueConfig};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tokio::sync::watch;
 pub(crate) use tower::ServiceExt;
@@ -46,11 +44,9 @@ pub(crate) fn test_search_router() -> Router {
 
 pub(crate) fn test_search_core(files: &[IndexedFile]) -> Arc<EmulebbCore> {
     let runtime_dir = unique_test_dir("search-core");
-    let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
-    for file in files {
-        index
-            .upsert_file(file, IndexedFileOrigin::PassiveCache)
-            .unwrap();
+    let index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
+    if !files.is_empty() {
+        seed_recorded_search(&index.metadata_store(), files);
     }
     Arc::new(
         EmulebbCore::new_with_network(
@@ -277,4 +273,88 @@ pub(crate) async fn known_library_hash(app: &Router, byte: u8) -> String {
     }))).await;
     assert_eq!(status, StatusCode::CREATED);
     hash
+}
+
+/// Persist recorded server evidence for browsing/download route tests. Live
+/// search creation remains empty and never consults these fixture results.
+fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[IndexedFile]) {
+    use emulebb_metadata::{
+        MetadataSearchData, MetadataSearchResult, MetadataSearchResultObservation,
+        MetadataSearchSpec,
+    };
+    let results = files
+        .iter()
+        .map(|file| {
+            let sources = u32::try_from(file.availability_score).unwrap();
+            let observation = MetadataSearchResultObservation {
+                origin: "server".into(),
+                reporter_endpoint: Some("192.0.2.4:4661".into()),
+                name: file.name.clone(),
+                size_bytes: file.size_bytes,
+                source_count: sources,
+                complete_source_count: 0,
+                source_client_id: None,
+                source_client_port: None,
+                file_type: file.content_type.clone(),
+                media_artist: String::new(),
+                media_album: String::new(),
+                media_title: String::new(),
+                media_length_seconds: 0,
+                media_bitrate_kbps: 0,
+                media_codec: String::new(),
+                rating: 0,
+                aich_hash: String::new(),
+                complete: false,
+                directory: String::new(),
+                observed_at_ms: 1,
+            };
+            MetadataSearchResult {
+                file_hash: file.ed2k_hash.clone(),
+                name: file.name.clone(),
+                size_bytes: file.size_bytes,
+                source_count: sources,
+                complete_source_count: 0,
+                file_type: file.content_type.clone(),
+                media_artist: String::new(),
+                media_album: String::new(),
+                media_title: String::new(),
+                media_length_seconds: 0,
+                media_bitrate_kbps: 0,
+                media_codec: String::new(),
+                rating: 0,
+                aich_hash: String::new(),
+                complete: false,
+                directory: String::new(),
+                observations: vec![observation],
+            }
+        })
+        .collect();
+    store
+        .create_search(&MetadataSearchData {
+            normalized_query: "paged result".into(),
+            spec: MetadataSearchSpec {
+                query: "paged result".into(),
+                method: "automatic".into(),
+                file_type: String::new(),
+                extension: "iso".into(),
+                min_size_bytes: Some(1),
+                max_size_bytes: Some(1000),
+                min_availability: Some(2),
+                min_complete_sources: None,
+                min_bitrate_kbps: None,
+                min_length_seconds: None,
+                codec: String::new(),
+                title: String::new(),
+                album: String::new(),
+                artist: String::new(),
+            },
+            resolved_method: Some("server".into()),
+            status: "completed".into(),
+            status_reason: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            completed_at_ms: Some(1),
+            results,
+        })
+        .unwrap();
 }

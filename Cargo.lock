@@ -803,6 +803,10 @@ dependencies = [
  "libc",
  "rand 0.10.3",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "unicode-normalization",
  "uuid",
 ]
@@ -850,6 +854,7 @@ dependencies = [
  "emulebb-diagnostics",
  "emulebb-ed2k",
  "emulebb-index",
+ "emulebb-metadata",
  "futures-util",
  "hex",
  "http-body-util",

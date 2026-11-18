@@ -1,6 +1,13 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearch {
-    pub public_id: String,
+    pub id: i64,
+    pub data: MetadataSearchData,
+}
+
+/// Search attributes accepted by both creation and updates; identity is allocated
+/// separately by SQLite and cannot be supplied by a creator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchData {
     pub normalized_query: String,
     pub spec: MetadataSearchSpec,
     pub resolved_method: Option<String>,
@@ -54,7 +61,7 @@ pub struct MetadataSearchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchResultObservation {
     pub origin: String,
-    pub server_endpoint: Option<String>,
+    pub reporter_endpoint: Option<String>,
     pub name: String,
     pub size_bytes: u64,
     pub source_count: u32,

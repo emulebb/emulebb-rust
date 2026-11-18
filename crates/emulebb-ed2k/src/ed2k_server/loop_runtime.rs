@@ -1643,6 +1643,7 @@ mod tests {
                 Default::default(),
                 Duration::from_secs(10),
                 &CancellationToken::new(),
+                None,
             )
             .await
         });

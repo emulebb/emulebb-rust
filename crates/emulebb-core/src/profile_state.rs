@@ -53,7 +53,6 @@ pub(crate) fn load_core_state(
     }
 
     let searches = crate::search_state::load_searches(metadata)?;
-    let next_search_id = crate::search_state::next_numeric_search_id(&searches);
 
     Ok(CoreState {
         searches,
@@ -63,7 +62,6 @@ pub(crate) fn load_core_state(
         // Search-result responder provenance is session-local. A restored
         // display row must never become a fresh network trust vote.
         kad_aich_search_votes: std::collections::BTreeMap::new(),
-        next_search_id,
         transfers: HashMap::new(),
         core_settings,
         categories,
