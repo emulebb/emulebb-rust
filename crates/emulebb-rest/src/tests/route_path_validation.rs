@@ -43,22 +43,22 @@ async fn category_path_uses_name_validation() {
 }
 
 #[tokio::test]
-async fn search_id_path_uses_canonical_unsigned_validation() {
+async fn search_id_path_uses_positive_exact_i64_validation() {
     let cases = [
         (
             "GET",
-            "/api/v1/searches/search-1",
-            "searchId must be an unsigned decimal string",
+            "/api/v1/searches/0",
+            "searchId must be a positive decimal i64 string",
         ),
         (
             "DELETE",
-            "/api/v1/searches/-1",
-            "searchId must be an unsigned decimal string",
+            "/api/v1/searches/01",
+            "searchId must be a positive decimal i64 string",
         ),
         (
             "POST",
-            "/api/v1/searches/4294967296/results/00112233445566778899aabbccddeeff/operations/download",
-            "searchId is out of range",
+            "/api/v1/searches/9223372036854775808/results/00112233445566778899aabbccddeeff/operations/download",
+            "searchId must be a positive decimal i64 string",
         ),
     ];
     for (method, uri, expected_message) in cases {
@@ -67,6 +67,14 @@ async fn search_id_path_uses_canonical_unsigned_validation() {
         assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
         assert_eq!(value["error"]["message"], expected_message);
         assert_eq!(value["error"]["details"], json!({}));
+    }
+}
+
+#[tokio::test]
+async fn full_i64_search_ids_reach_resource_lookup_without_number_rounding() {
+    for id in ["4294967296", "9007199254740993", "9223372036854775807"] {
+        let (status, _) = path_error_value("GET", &format!("/api/v1/searches/{id}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
 

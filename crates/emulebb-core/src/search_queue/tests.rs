@@ -384,12 +384,7 @@ fn prepared_enqueue_is_rollback_safe_and_recovery_keeps_fifo_and_one_drain() {
     let mut queue = SearchQueue::new();
 
     let failed = queue
-        .prepare_enqueue(
-            "1".to_string(),
-            request("failed persistence"),
-            SearchQueueLane::Server,
-            now,
-        )
+        .prepare_enqueue(request("failed persistence"), SearchQueueLane::Server, now)
         .expect("preflight succeeds");
     drop(failed);
 
@@ -398,9 +393,9 @@ fn prepared_enqueue_is_rollback_safe_and_recovery_keeps_fifo_and_one_drain() {
 
     for (id, query) in [("1", "first durable"), ("2", "second durable")] {
         let prepared = queue
-            .prepare_enqueue(id.to_string(), request(query), SearchQueueLane::Server, now)
+            .prepare_enqueue(request(query), SearchQueueLane::Server, now)
             .expect("recovery enqueue preflight succeeds");
-        queue.commit_enqueue(prepared);
+        queue.commit_enqueue(prepared, id.to_string());
     }
     assert!(queue.claim_drain_task());
     assert!(!queue.claim_drain_task(), "only one drain owns the queue");

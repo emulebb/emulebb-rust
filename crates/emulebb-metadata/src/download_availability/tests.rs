@@ -340,7 +340,7 @@ fn initial_peers_are_atomic_for_stopped_jobs_and_duplicates_are_unchanged() {
             user_hash: None,
             client_software: String::new(),
             origin: "ed2k".into(),
-            server_endpoint: None,
+            reporter_endpoint: None,
             raw_name: "sample.bin".into(),
             normalized_name: "sample.bin".into(),
             observed_at_s: 1,

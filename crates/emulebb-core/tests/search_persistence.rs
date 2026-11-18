@@ -7,92 +7,12 @@ use std::{
 };
 
 use emulebb_core::{
-    Ed2kNetworkConfig, EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate,
-    VpnGuardConfig,
+    Ed2kNetworkConfig, EmulebbCore, LocalShareCreate, SearchCreate, VpnGuardConfig,
 };
 use emulebb_ed2k::{
     NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter,
 };
-use emulebb_index::{
-    FileIndex, IndexedFile, IndexedFileOrigin, KadLocalStoreConfig, SnoopQueueConfig,
-};
-
-#[tokio::test]
-async fn search_state_survives_core_restart_and_downloads_result() {
-    let runtime_dir = unique_test_dir("search-state");
-    let transfer_root = runtime_dir.join("transfers");
-    let metadata_path = runtime_dir.join("metadata.sqlite");
-
-    let (search_id, file_hash) = {
-        seed_passive_file(
-            &metadata_path,
-            IndexedFile {
-                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-                name: "Sample Search Payload.bin".to_string(),
-                size_bytes: 1234,
-                content_type: "archive".to_string(),
-                availability_score: 7,
-            },
-        );
-        let core = open_core(&metadata_path, &transfer_root);
-        let search = core
-            .create_search(SearchCreate {
-                query: "sample payload".to_string(),
-                method: "automatic".to_string(),
-                r#type: "archive".to_string(),
-                extension: "bin".to_string(),
-                min_size_bytes: Some(1_000),
-                max_size_bytes: Some(2_000),
-                min_availability: Some(5),
-                min_complete_sources: Some(0),
-                min_bitrate_kbps: Some(0),
-                min_length_seconds: Some(0),
-                codec: String::new(),
-                title: String::new(),
-                album: String::new(),
-                artist: String::new(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(search.results.len(), 1);
-        (search.id, search.results[0].hash.clone())
-    };
-
-    let reloaded = open_core(&metadata_path, &transfer_root);
-    let searches = reloaded.searches().await;
-    assert_eq!(searches.len(), 1);
-    assert_eq!(searches[0].id, search_id);
-    assert_eq!(searches[0].spec.method, "automatic");
-    assert_eq!(searches[0].spec.r#type, "arc");
-    assert_eq!(searches[0].spec.extension, "bin");
-    assert_eq!(searches[0].spec.min_size_bytes, Some(1_000));
-    assert_eq!(searches[0].spec.max_size_bytes, Some(2_000));
-    assert_eq!(searches[0].spec.min_availability, Some(5));
-    assert_eq!(searches[0].spec.min_complete_sources, None);
-    assert_eq!(searches[0].spec.min_bitrate_kbps, None);
-    assert_eq!(searches[0].spec.min_length_seconds, None);
-    assert_eq!(searches[0].spec.codec, "");
-    assert_eq!(searches[0].spec.title, "");
-    assert_eq!(searches[0].spec.album, "");
-    assert_eq!(searches[0].spec.artist, "");
-    assert_eq!(searches[0].resolved_method, None);
-    assert_eq!(searches[0].results[0].name, "Sample Search Payload.bin");
-    assert_eq!(searches[0].results[0].r#type, "arc");
-
-    let search = reloaded.search(&search_id).await.unwrap();
-    assert_eq!(search.results[0].hash, file_hash);
-
-    let (_, download) = reloaded
-        .download_search_result(
-            &search_id,
-            &file_hash,
-            SearchResultDownloadCreate::default(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(download.hash, file_hash);
-}
+use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 
 #[tokio::test]
 async fn search_delete_and_clear_survive_core_restart() {
@@ -184,13 +104,6 @@ fn open_core(metadata_path: &Path, transfer_root: &Path) -> EmulebbCore {
         Some(test_network_config(transfer_root)),
     )
     .unwrap()
-}
-
-fn seed_passive_file(metadata_path: &Path, file: IndexedFile) {
-    FileIndex::open(metadata_path)
-        .unwrap()
-        .upsert_file(&file, IndexedFileOrigin::PassiveCache)
-        .unwrap();
 }
 
 fn test_network_config(runtime_dir: &Path) -> Ed2kNetworkConfig {

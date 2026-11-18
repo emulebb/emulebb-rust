@@ -474,6 +474,7 @@ async fn search_results_use_canonical_paging_query() {
             availability_score: 4,
         },
     ]);
+    let observed_search_id = core.searches().await.into_iter().next().unwrap().id;
     let app = router(
         core,
         RestServerSettings {
@@ -519,7 +520,24 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(value["data"]["progress"]["completedUnits"], 0);
     assert!(value["data"]["progress"].get("totalUnits").is_none());
     assert_eq!(value["data"]["progress"]["unit"], "");
-    let search_id = value["data"]["id"].as_str().unwrap();
+    let created_id = value["data"]["id"].as_str().unwrap();
+    let empty = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/searches/{created_id}"))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::OK);
+    let empty: Value =
+        serde_json::from_slice(&to_bytes(empty.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(empty["data"]["total"], 0);
+    assert_eq!(empty["data"]["items"], json!([]));
+    let search_id = observed_search_id.as_str();
 
     let response = app
         .clone()
@@ -539,7 +557,7 @@ async fn search_results_use_canonical_paging_query() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["id"], search_id);
     assert_eq!(value["data"]["requestedMethod"], "automatic");
-    assert_eq!(value["data"]["resolvedMethod"], Value::Null);
+    assert_eq!(value["data"]["resolvedMethod"], "server");
     assert!(value["data"].get("method").is_none());
     assert_eq!(value["data"]["criteria"]["extension"], "iso");
     assert_eq!(value["data"]["criteria"]["artist"], "");
@@ -617,7 +635,7 @@ async fn search_results_use_canonical_paging_query() {
 }
 
 #[tokio::test]
-async fn search_to_download_flow_uses_passive_cache_observation() {
+async fn search_to_download_flow_uses_recorded_network_observation() {
     let core = test_search_core(&[IndexedFile {
         ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
         name: "Indexed.Result.iso".to_string(),
@@ -625,6 +643,7 @@ async fn search_to_download_flow_uses_passive_cache_observation() {
         content_type: "iso".to_string(),
         availability_score: 2,
     }]);
+    let observed_search_id = core.searches().await.into_iter().next().unwrap().id;
     let app = router(
         core,
         RestServerSettings {
@@ -636,13 +655,11 @@ async fn search_to_download_flow_uses_passive_cache_observation() {
         .clone()
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/api/v1/searches")
+                .method("GET")
+                .uri(format!("/api/v1/searches/{observed_search_id}"))
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"query":"indexed result","method":"automatic","type":""}"#,
-                ))
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
@@ -651,9 +668,7 @@ async fn search_to_download_flow_uses_passive_cache_observation() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     let search_id = value["data"]["id"].as_str().unwrap();
-    // search/start returns an empty first page; the seeded index result is
-    // still recorded on the search and downloadable by hash.
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
 
     let download_uri = format!(
         "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"
@@ -706,6 +721,7 @@ async fn search_result_download_accepts_stopped_intent() {
         content_type: "iso".to_string(),
         availability_score: 2,
     }]);
+    let observed_search_id = core.searches().await.into_iter().next().unwrap().id;
     let app = router(
         core,
         RestServerSettings {
@@ -717,13 +733,11 @@ async fn search_result_download_accepts_stopped_intent() {
         .clone()
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/api/v1/searches")
+                .method("GET")
+                .uri(format!("/api/v1/searches/{observed_search_id}"))
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"query":"stopped indexed","method":"automatic","type":""}"#,
-                ))
+                .body(Body::empty())
                 .unwrap(),
         )
         .await

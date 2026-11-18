@@ -163,13 +163,13 @@ impl Ed2kTransferRuntime {
         raw_name: &str,
         client_software: Option<&str>,
         origin: &str,
-        server_endpoint: Option<&str>,
+        reporter_endpoint: Option<&str>,
     ) -> Result<()> {
         ensure!(
             raw_name.len() <= 65_536
                 && client_software.is_none_or(|value| value.len() <= 65_536)
                 && origin.len() <= 64
-                && server_endpoint.is_none_or(|value| value.len() <= 256),
+                && reporter_endpoint.is_none_or(|value| value.len() <= 256),
             "source filename observation exceeds command allowance"
         );
         ensure!(
@@ -190,7 +190,7 @@ impl Ed2kTransferRuntime {
             user_hash: source.as_ref().and_then(|value| value.user_hash.clone()),
             client_software: client_software.unwrap_or_default().to_owned(),
             origin: if origin.is_empty() { "peer" } else { origin }.to_owned(),
-            server_endpoint: server_endpoint.map(str::to_owned),
+            reporter_endpoint: reporter_endpoint.map(str::to_owned),
             raw_name: raw_name.to_owned(),
             normalized_name,
             observed_at_s: Utc::now().timestamp(),

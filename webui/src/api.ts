@@ -176,7 +176,7 @@ export type DownloadSource = {
     rawName: string;
     normalizedName: string;
     origin: string;
-    serverEndpoint?: string | null;
+    reporterEndpoint: string | null;
     observedAt: number;
   }>;
   reportedFileNamesHasMore?: boolean;
@@ -188,7 +188,7 @@ export type DownloadSource = {
 
 export type SearchResultObservation = {
   origin: string;
-  serverEndpoint?: string | null;
+  reporterEndpoint: string | null;
   rawName: string;
   normalizedName: string;
   sizeBytes: number;

@@ -367,7 +367,6 @@ mod tests {
             searches: HashMap::new(),
             search_cancels: HashMap::new(),
             kad_aich_search_votes: std::collections::BTreeMap::new(),
-            next_search_id: 1,
             transfers,
             core_settings: default_core_settings(),
             categories: BTreeMap::new(),

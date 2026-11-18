@@ -207,7 +207,12 @@ pub(crate) struct SearchQueueTick {
 /// this entry only when persistence succeeds. Dropping a prepared entry is the
 /// rollback path: it leaves queue membership and drain ownership unchanged.
 #[derive(Debug)]
-pub(crate) struct PreparedQueuedSearch(QueuedSearch);
+pub(crate) struct PreparedQueuedSearch {
+    request: SearchCreate,
+    fingerprint: SearchQueueFingerprint,
+    lane: SearchQueueLane,
+    enqueued_at: Instant,
+}
 
 /// Connection-aware search queue: FIFO within each lane, single in-flight
 /// search per concrete lane, [`SEARCH_QUEUE_DRAIN_SLOT`] spacing between
@@ -269,8 +274,8 @@ impl SearchQueue {
         lane: SearchQueueLane,
         now: Instant,
     ) -> Result<(), SearchEnqueueError> {
-        let prepared = self.prepare_enqueue(search_id, request, lane, now)?;
-        self.commit_enqueue(prepared);
+        let prepared = self.prepare_enqueue(request, lane, now)?;
+        self.commit_enqueue(prepared, search_id);
         Ok(())
     }
 
@@ -281,7 +286,6 @@ impl SearchQueue {
     /// with the core state lock; the drain may only remove entries meanwhile.
     pub(crate) fn prepare_enqueue(
         &self,
-        search_id: String,
         request: SearchCreate,
         lane: SearchQueueLane,
         now: Instant,
@@ -297,19 +301,24 @@ impl SearchQueue {
         {
             return Err(SearchEnqueueError::DuplicateQueued);
         }
-        Ok(PreparedQueuedSearch(QueuedSearch {
-            search_id,
+        Ok(PreparedQueuedSearch {
             request,
             fingerprint,
             lane,
             enqueued_at: now,
-            send_attempts: 0,
-        }))
+        })
     }
 
     /// Makes a previously validated search visible to the queue drain.
-    pub(crate) fn commit_enqueue(&mut self, prepared: PreparedQueuedSearch) {
-        self.pending.push_back(prepared.0);
+    pub(crate) fn commit_enqueue(&mut self, prepared: PreparedQueuedSearch, search_id: String) {
+        self.pending.push_back(QueuedSearch {
+            search_id,
+            request: prepared.request,
+            fingerprint: prepared.fingerprint,
+            lane: prepared.lane,
+            enqueued_at: prepared.enqueued_at,
+            send_attempts: 0,
+        });
     }
 
     /// Claims the single drain-task slot; the caller that receives `true`

@@ -2837,8 +2837,7 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
     store.upsert_transfer_manifest(&manifest).unwrap();
     store.add_file_all_time_uploaded(hash, 23).unwrap();
     store
-        .upsert_search(&crate::MetadataSearch {
-            public_id: "search-one".to_string(),
+        .create_search(&crate::MetadataSearchData {
             normalized_query: "scenario file".to_string(),
             spec: crate::MetadataSearchSpec {
                 query: "scenario file".to_string(),
@@ -2881,7 +2880,7 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
                 directory: String::new(),
                 observations: vec![crate::MetadataSearchResultObservation {
                     origin: "local_index".to_string(),
-                    server_endpoint: None,
+                    reporter_endpoint: None,
                     name: "Scenario.File.bin".to_string(),
                     size_bytes: 1,
                     source_count: 1,
