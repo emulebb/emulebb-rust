@@ -649,6 +649,11 @@ impl Drop for Ed2kSharedSourceInvalidationLease {
 }
 
 impl Ed2kSharedPublishDemandSignal {
+    pub(super) fn publish(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+
     #[must_use]
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)

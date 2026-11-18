@@ -143,7 +143,8 @@ fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) -> anyho
 }
 
 /// The runtime pieces a flush needs, cloneable into blocking-pool tasks.
-struct ParkedCreditFlushParts {
+#[derive(Clone)]
+pub(super) struct ParkedCreditFlushParts {
     ledger: std::sync::Arc<Mutex<ParkedCreditLedger>>,
     flush_gate: std::sync::Arc<Mutex<()>>,
     metadata: MetadataStore,
@@ -172,8 +173,84 @@ impl Drop for BackgroundCreditFlush {
     }
 }
 
+/// Capture under the ledger lock; scheduling happens after releasing it.
+fn park_file_upload_request(
+    ledger: &Mutex<ParkedCreditLedger>,
+    hash: &Ed2kHash,
+    at_s: i64,
+    snapshot: Option<emulebb_metadata::MetadataFileUploadSnapshot>,
+) -> Option<bool> {
+    let key = hash.to_string();
+    let flush_due = {
+        let mut ledger = ledger.lock();
+        if let Some(snapshot) = snapshot {
+            if snapshot.known_client || ledger.file_statistics.contains_key(&hash.0) {
+                ledger
+                    .file_statistics
+                    .entry(hash.0)
+                    .or_default()
+                    .observe(snapshot.totals);
+            }
+        } else if !ledger.file_statistics.contains_key(&hash.0) && !ledger.files.contains_key(&key)
+        {
+            return None;
+        }
+        if let Some(stats) = ledger.file_statistics.get_mut(&hash.0) {
+            stats.session_upload_requests = stats.session_upload_requests.saturating_add(1);
+            stats.lifetime.upload_requests = stats.lifetime.upload_requests.saturating_add(1);
+            stats.lifetime.last_requested_at_s = stats.lifetime.last_requested_at_s.max(Some(at_s));
+        }
+        let slot = ledger.files.entry(key).or_default();
+        slot.upload_requests = slot.upload_requests.saturating_add(1);
+        slot.last_requested_at_s = slot.last_requested_at_s.max(Some(at_s));
+        ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
+    };
+    Some(flush_due)
+}
+
+/// Admit at most one scheduled or executing background checkpoint.
+fn spawn_parked_credit_flush(parts: ParkedCreditFlushParts) {
+    // WHY: the interval is observed by multiple producers before a queued
+    // flush drains anything. Reserve once so bursts cannot fill the blocking
+    // pool with tasks waiting for the same flush gate.
+    let Some(reservation) = BackgroundCreditFlush::reserve(parts) else {
+        return;
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn_blocking(move || {
+            let reservation = reservation;
+            if let Err(error) = flush_parked_credit_blocking(&reservation.0) {
+                tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
+            }
+        });
+    } else {
+        if let Err(error) = flush_parked_credit_blocking(&reservation.0) {
+            tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
+        }
+    }
+}
+
+impl ParkedCreditFlushParts {
+    /// The retained caller owns lookup and capture together, including after
+    /// receipt cancellation. Unknown hashes still allocate no counter record.
+    pub(super) fn classify_and_capture_file_request(
+        &self,
+        hash: &Ed2kHash,
+        at_s: i64,
+    ) -> anyhow::Result<bool> {
+        let snapshot = self.metadata.file_upload_snapshot(&hash.to_string())?;
+        let Some(flush_due) = park_file_upload_request(&self.ledger, hash, at_s, snapshot) else {
+            return Ok(false);
+        };
+        if flush_due {
+            spawn_parked_credit_flush(self.clone());
+        }
+        Ok(true)
+    }
+}
+
 impl Ed2kTransferRuntime {
-    fn parked_credit_flush_parts(&self) -> ParkedCreditFlushParts {
+    pub(super) fn parked_credit_flush_parts(&self) -> ParkedCreditFlushParts {
         ParkedCreditFlushParts {
             ledger: std::sync::Arc::clone(&self.parked_credit),
             flush_gate: std::sync::Arc::clone(&self.credit_flush_gate),
@@ -205,41 +282,16 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
-    /// Capture one known-hash demand event in the existing checkpoint ledger.
-    /// Cold lookups may seed client facts, but passive records live only while
-    /// dirty and unknown requests never allocate an accounting record.
+    /// Capture registered demand without cloning the runtime's capabilities.
     pub(super) fn park_file_upload_request(
         &self,
         hash: &Ed2kHash,
         at_s: i64,
         snapshot: Option<emulebb_metadata::MetadataFileUploadSnapshot>,
     ) -> bool {
-        let key = hash.to_string();
-        let flush_due = {
-            let mut ledger = self.parked_credit.lock();
-            if let Some(snapshot) = snapshot {
-                if snapshot.known_client || ledger.file_statistics.contains_key(&hash.0) {
-                    ledger
-                        .file_statistics
-                        .entry(hash.0)
-                        .or_default()
-                        .observe(snapshot.totals);
-                }
-            } else if !ledger.file_statistics.contains_key(&hash.0)
-                && !ledger.files.contains_key(&key)
-            {
-                return false;
-            }
-            if let Some(stats) = ledger.file_statistics.get_mut(&hash.0) {
-                stats.session_upload_requests = stats.session_upload_requests.saturating_add(1);
-                stats.lifetime.upload_requests = stats.lifetime.upload_requests.saturating_add(1);
-                stats.lifetime.last_requested_at_s =
-                    stats.lifetime.last_requested_at_s.max(Some(at_s));
-            }
-            let slot = ledger.files.entry(key).or_default();
-            slot.upload_requests = slot.upload_requests.saturating_add(1);
-            slot.last_requested_at_s = slot.last_requested_at_s.max(Some(at_s));
-            ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
+        let Some(flush_due) = park_file_upload_request(&self.parked_credit, hash, at_s, snapshot)
+        else {
+            return false;
         };
         if flush_due {
             self.spawn_parked_credit_flush();
@@ -344,27 +396,9 @@ impl Ed2kTransferRuntime {
         self.parked_credit.lock().peers.remove(&user_hash);
     }
 
-    /// Fire-and-forget background flush of the whole ledger.
+    /// Schedule the existing ledger's single-flight checkpoint.
     fn spawn_parked_credit_flush(&self) {
-        // WHY: the interval is observed by multiple producers before a queued
-        // flush drains anything. Reserve once so bursts cannot fill the blocking
-        // pool with tasks waiting for the same flush gate.
-        let Some(reservation) = BackgroundCreditFlush::reserve(self.parked_credit_flush_parts())
-        else {
-            return;
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn_blocking(move || {
-                let reservation = reservation;
-                if let Err(error) = flush_parked_credit_blocking(&reservation.0) {
-                    tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
-                }
-            });
-        } else {
-            if let Err(error) = flush_parked_credit_blocking(&reservation.0) {
-                tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
-            }
-        }
+        spawn_parked_credit_flush(self.parked_credit_flush_parts());
     }
 
     /// Flush every parked delta and wait for the commit â€” upload-session
