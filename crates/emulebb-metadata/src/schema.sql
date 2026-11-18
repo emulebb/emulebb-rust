@@ -35,6 +35,16 @@ CREATE TABLE local_identities (
     )
 ) STRICT;
 
+CREATE TABLE app_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    document_json TEXT NOT NULL CHECK(
+        json_valid(document_json)
+        AND json_type(document_json) = 'object'
+        AND length(CAST(document_json AS BLOB)) <= 131072
+    )
+) STRICT;
+
 CREATE TABLE settings (
     section TEXT NOT NULL,
     key TEXT NOT NULL,

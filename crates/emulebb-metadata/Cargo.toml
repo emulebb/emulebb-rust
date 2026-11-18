@@ -11,6 +11,7 @@ description = "SQLite metadata store for emulebb-rust"
 workspace = true
 
 [dependencies]
+emulebb-settings = { path = "../emulebb-settings" }
 anyhow.workspace = true
 data-encoding.workspace = true
 hex.workspace = true

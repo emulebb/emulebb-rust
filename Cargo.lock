@@ -798,6 +798,7 @@ version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
  "data-encoding",
+ "emulebb-settings",
  "hex",
  "libc",
  "rand 0.10.3",

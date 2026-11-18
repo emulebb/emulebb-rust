@@ -14,7 +14,9 @@ use std::{
 #[macro_use]
 mod groups;
 mod catalog;
+mod revision;
 pub use catalog::*;
+pub use revision::{SettingsRevision, SettingsRevisionError};
 
 pub const MAX_SAVED_BYTES: usize = 131_072;
 pub const MAX_PATCH_BYTES: usize = 262_144;
