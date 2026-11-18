@@ -31,9 +31,8 @@ pub(super) fn sample_search() -> MetadataSearchData {
         completed_at_s: None,
     }
 }
-pub(super) fn summary(name: &str) -> MetadataSearchResultSummary {
-    MetadataSearchResultSummary {
-        name: name.into(),
+pub(super) fn fields() -> crate::MetadataSearchResultFields {
+    crate::MetadataSearchResultFields {
         source_count: 3,
         complete_source_count: 0,
         source_client_id: None,
@@ -51,6 +50,20 @@ pub(super) fn summary(name: &str) -> MetadataSearchResultSummary {
         directory: String::new(),
     }
 }
+pub(super) fn name_vote(name: &str) -> crate::MetadataSearchNameVote {
+    crate::MetadataSearchNameVote {
+        normalized_name: name.into(),
+        reporter_endpoint: Some("192.0.2.4:4672".parse().unwrap()),
+        origin: MetadataObservationOrigin::Kad,
+        quality: crate::MetadataSearchNameQuality {
+            useful: true,
+            sources: 3,
+            complete_sources: 0,
+            rating: 0,
+        },
+    }
+}
+
 pub(super) fn event(size: Option<u64>, name: &str) -> MetadataContentObservationEvent {
     MetadataContentObservationEvent {
         claim: MetadataContentClaim {
@@ -74,11 +87,13 @@ pub(super) fn project(store: &MetadataStore, id: i64, size: Option<u64>, name: &
             &[event(size, name)],
             &MetadataSearchProjection {
                 session_id: id,
-                summary: summary(name),
+                fields: fields(),
+                name_votes: vec![name_vote(name)],
             },
         )
         .unwrap()
         .unwrap()
+        .claim_id
 }
 
 #[test]
@@ -141,7 +156,8 @@ fn terminal_or_missing_sessions_freeze_membership_but_keep_valid_corpus_events()
     store.update_search(id, &header).unwrap();
     let projection = MetadataSearchProjection {
         session_id: id,
-        summary: summary("Later.bin"),
+        fields: fields(),
+        name_votes: vec![name_vote("Later.bin")],
     };
     assert!(
         store
@@ -195,7 +211,8 @@ fn membership_failure_rolls_back_corpus_and_projection_together() {
                 &[event(None, "Sample.bin")],
                 &MetadataSearchProjection {
                     session_id: id,
-                    summary: summary("Sample.bin")
+                    fields: fields(),
+                    name_votes: vec![name_vote("Sample.bin")]
                 }
             )
             .is_err()

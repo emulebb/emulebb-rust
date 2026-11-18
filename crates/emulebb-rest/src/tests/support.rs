@@ -281,7 +281,7 @@ fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[Indexe
     use emulebb_metadata::{
         MetadataContentClaim, MetadataContentMetadata, MetadataContentObservationEvent,
         MetadataObservationOrigin, MetadataSearchData, MetadataSearchProjection,
-        MetadataSearchResultSummary, MetadataSearchSpec,
+        MetadataSearchResultFields, MetadataSearchSpec,
     };
     let mut header = MetadataSearchData {
         normalized_query: "paged result".into(),
@@ -331,8 +331,18 @@ fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[Indexe
                 }],
                 &MetadataSearchProjection {
                     session_id,
-                    summary: MetadataSearchResultSummary {
-                        name: file.name.clone(),
+                    name_votes: vec![emulebb_metadata::MetadataSearchNameVote {
+                        normalized_name: file.name.clone(),
+                        origin: MetadataObservationOrigin::Server,
+                        reporter_endpoint: Some("192.0.2.4:4661".parse().unwrap()),
+                        quality: emulebb_metadata::MetadataSearchNameQuality {
+                            useful: true,
+                            sources,
+                            complete_sources: 0,
+                            rating: 0,
+                        },
+                    }],
+                    fields: MetadataSearchResultFields {
                         source_count: sources,
                         complete_source_count: 0,
                         source_client_id: None,

@@ -1023,6 +1023,37 @@ CREATE TABLE search_result_observations (
     FOREIGN KEY(claim_id, observation_id) REFERENCES content_claim_observations(claim_id, id)
 ) STRICT, WITHOUT ROWID;
 
+-- Presentation votes are independent of raw metadata-variant and packet counts.
+CREATE TABLE search_name_reporters (
+    session_id INTEGER NOT NULL,
+    claim_id INTEGER NOT NULL,
+    normalized_name TEXT NOT NULL CHECK(length(normalized_name)>0),
+    reporter_endpoint TEXT NOT NULL,
+    unknown_origin TEXT NOT NULL,
+    quality_useful INTEGER NOT NULL CHECK(quality_useful IN (0,1)),
+    quality_sources INTEGER NOT NULL CHECK(quality_sources BETWEEN 0 AND 4294967295),
+    quality_complete_sources INTEGER NOT NULL CHECK(quality_complete_sources BETWEEN 0 AND 4294967295),
+    quality_rating INTEGER NOT NULL CHECK(quality_rating BETWEEN 0 AND 5),
+    PRIMARY KEY(session_id,claim_id,normalized_name,reporter_endpoint,unknown_origin),
+    FOREIGN KEY(session_id,claim_id) REFERENCES search_results(session_id,claim_id) ON DELETE CASCADE,
+    CHECK((reporter_endpoint!='' AND unknown_origin='') OR
+          (reporter_endpoint='' AND unknown_origin IN ('server','global','kad')))
+) STRICT, WITHOUT ROWID;
+CREATE TABLE search_name_totals (
+    session_id INTEGER NOT NULL,
+    claim_id INTEGER NOT NULL,
+    normalized_name TEXT NOT NULL CHECK(length(normalized_name)>0),
+    vote_count INTEGER NOT NULL CHECK(vote_count>0),
+    quality_useful INTEGER NOT NULL CHECK(quality_useful IN (0,1)),
+    quality_sources INTEGER NOT NULL CHECK(quality_sources BETWEEN 0 AND 4294967295),
+    quality_complete_sources INTEGER NOT NULL CHECK(quality_complete_sources BETWEEN 0 AND 4294967295),
+    quality_rating INTEGER NOT NULL CHECK(quality_rating BETWEEN 0 AND 5),
+    PRIMARY KEY(session_id,claim_id,normalized_name),
+    FOREIGN KEY(session_id,claim_id) REFERENCES search_results(session_id,claim_id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+CREATE INDEX search_name_totals_winner_idx
+ON search_name_totals(session_id,claim_id,vote_count DESC,quality_useful DESC,quality_sources DESC,quality_complete_sources DESC,quality_rating DESC,normalized_name COLLATE BINARY);
+
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_path_content_idx ON shared_file_memberships(path_id, known_file_id);
 CREATE INDEX download_jobs_pending_delete_idx

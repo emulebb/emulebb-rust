@@ -81,10 +81,15 @@ fn result_bytes(result: &crate::SearchResult) -> Option<usize> {
     Some(bytes)
 }
 
+struct PreparedProjection {
+    result: crate::SearchResult,
+    name_votes: Vec<emulebb_metadata::MetadataSearchNameVote>,
+}
+
 async fn prepare_projection(
     publication: &SearchPublication,
     permit: &mut Permit,
-) -> Result<Option<crate::SearchResult>, PersistenceError> {
+) -> Result<Option<PreparedProjection>, PersistenceError> {
     let mut accepted = vec![publication.result.clone()];
     crate::search_query::apply_search_filters(&mut accepted, &publication.request);
     let Some(result) = accepted.pop() else {
@@ -97,6 +102,16 @@ async fn prepare_projection(
     if !matches!(search.status.as_str(), "queued" | "running") {
         return Ok(None);
     }
+    let vote_bytes = result
+        .observations
+        .iter()
+        .try_fold(0usize, |bytes, observation| {
+            bytes.checked_add(observation.name.len().checked_mul(6)?.checked_add(256)?)
+        })
+        .ok_or(PersistenceError::TooLarge)?;
+    permit.extend(vote_bytes)?;
+    let name_votes = crate::search_state::projection_name_votes(&result)
+        .map_err(|_| PersistenceError::Worker)?;
     if let Some(existing) = search
         .results
         .iter()
@@ -111,9 +126,12 @@ async fn prepare_projection(
         )?;
         let mut candidate = existing.clone();
         candidate.merge_observations(result);
-        Ok(Some(candidate))
+        Ok(Some(PreparedProjection {
+            result: candidate,
+            name_votes,
+        }))
     } else {
-        Ok(Some(result))
+        Ok(Some(PreparedProjection { result, name_votes }))
     }
 }
 
@@ -192,7 +210,7 @@ pub(super) fn execute(
     store: &MetadataStore,
     events: &[MetadataContentObservationEvent],
     projection: Option<&emulebb_metadata::MetadataSearchProjection>,
-) -> Result<Option<i64>, PersistenceError> {
+) -> Result<Option<emulebb_metadata::MetadataSearchPublication>, PersistenceError> {
     let result = match projection {
         Some(projection) => store.ingest_search_observations(events, projection),
         None => store.ingest_content_observations(events).map(|_| None),
@@ -236,14 +254,15 @@ pub(super) async fn process(
     };
     let projection = publication
         .as_ref()
-        .zip(candidate.as_ref())
-        .map(|(publication, result)| {
+        .zip(candidate.as_mut())
+        .map(|(publication, prepared)| {
             Ok::<_, PersistenceError>(emulebb_metadata::MetadataSearchProjection {
                 session_id: publication
                     .search_id
                     .parse()
                     .map_err(|_| PersistenceError::Worker)?,
-                summary: crate::search_state::result_summary(result),
+                fields: crate::search_state::result_fields(&prepared.result),
+                name_votes: std::mem::take(&mut prepared.name_votes),
             })
         })
         .transpose()?;
@@ -253,11 +272,11 @@ pub(super) async fn process(
         response,
     })
     .map_err(|_| PersistenceError::Worker)?;
-    let claim_id = match receive
+    let committed = match receive
         .await
         .map_err(|_| PersistenceError::CommitUnknown)??
     {
-        DbResponse::ContentObserved(claim_id) => claim_id,
+        DbResponse::ContentObserved(committed) => committed,
         _ => return Err(PersistenceError::Worker),
     };
     #[cfg(test)]
@@ -269,10 +288,12 @@ pub(super) async fn process(
     }
     // WHY: the admitted request owns publication after SQL. A disconnected
     // producer must not strand durable evidence outside its collecting session.
-    if let (Some(publication), Some(mut result), Some(claim_id)) =
-        (publication, candidate.take(), claim_id)
+    if let (Some(publication), Some(prepared), Some(committed)) =
+        (publication, candidate.take(), committed)
     {
-        result.id = claim_id.to_string();
+        let mut result = prepared.result;
+        result.id = committed.claim_id.to_string();
+        result.name = committed.name;
         crate::search_state::publish_observation(
             &publication.state,
             &publication.search_id,

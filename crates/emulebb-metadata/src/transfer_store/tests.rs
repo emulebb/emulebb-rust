@@ -2882,8 +2882,18 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
             }],
             &crate::MetadataSearchProjection {
                 session_id,
-                summary: crate::MetadataSearchResultSummary {
-                    name: "Scenario.File.bin".into(),
+                name_votes: vec![crate::MetadataSearchNameVote {
+                    normalized_name: "Scenario.File.bin".into(),
+                    origin: crate::MetadataObservationOrigin::Server,
+                    reporter_endpoint: Some("192.0.2.9:4661".parse().unwrap()),
+                    quality: crate::MetadataSearchNameQuality {
+                        useful: true,
+                        sources: 1,
+                        complete_sources: 1,
+                        rating: 0,
+                    },
+                }],
+                fields: crate::MetadataSearchResultFields {
                     source_count: 1,
                     complete_source_count: 1,
                     source_client_id: None,

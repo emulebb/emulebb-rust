@@ -352,7 +352,7 @@ enum DbResponse {
     SearchCreated(i64),
     SearchUpdated,
     SearchRemoved(bool),
-    ContentObserved(Option<i64>),
+    ContentObserved(Option<emulebb_metadata::MetadataSearchPublication>),
     Friend(Friend, bool),
     Category(category::CategoryWrite),
     LibraryTags(library_tags::Outcome),

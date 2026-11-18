@@ -239,3 +239,66 @@ async fn same_hash_different_sizes_publish_distinct_claim_ids() {
     assert_eq!(store.load_searches().unwrap()[0].results.len(), 4);
     owner.close_and_drain().await.unwrap();
 }
+
+#[tokio::test]
+async fn name_consensus_counts_each_reporter_once_across_changing_metadata() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    let id = publication.search_id.clone();
+    for (name, reporter, sources) in [
+        ("Alpha.bin", "192.0.2.1:4661", 3),
+        ("Beta.bin", "192.0.2.2:4661", 1),
+        ("Beta.bin", "192.0.2.3:4661", 1),
+    ]
+    .into_iter()
+    .chain((100..120).map(|sources| ("Alpha.bin", "192.0.2.1:4661", sources)))
+    {
+        publication.result.name = name.into();
+        publication.result.sources = sources;
+        publication.result.observations[0].name = name.into();
+        publication.result.observations[0].sources = sources;
+        publication.result.observations[0].reporter_endpoint = Some(reporter.into());
+        events[0].metadata.name = Some(name.into());
+        events[0].metadata.source_count = Some(sources);
+        events[0].reporter_endpoint = Some(reporter.parse().unwrap());
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+    }
+    let snapshot = state.lock().await;
+    assert_eq!(snapshot.searches[&id].results[0].name, "Beta.bin");
+    let claim = snapshot.searches[&id].results[0].id.parse().unwrap();
+    drop(snapshot);
+    assert_eq!(
+        store
+            .search_result_header(id.parse().unwrap(), claim)
+            .unwrap()
+            .unwrap()
+            .summary
+            .name,
+        "Beta.bin"
+    );
+    assert_eq!(store.table_count("search_name_reporters").unwrap(), 3);
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_raw_occurrence_does_not_consult_removed_session_presentation() {
+    let (store, state, owner, mut publication, events) = search_fixture().await;
+    let queue = Arc::new(parking_lot::Mutex::new(
+        crate::search_queue::SearchQueue::new(),
+    ));
+    owner
+        .remove_search_sessions(Some(publication.search_id.parse().unwrap()), &queue)
+        .await
+        .unwrap();
+    publication.result.observations[0].origin = "unused-after-session-removal".into();
+    owner
+        .observe_content(&events, Some(&publication))
+        .await
+        .unwrap();
+    assert!(state.lock().await.searches.is_empty());
+    assert_eq!(store.table_count("search_name_reporters").unwrap(), 0);
+    assert_eq!(store.table_count("content_claim_observations").unwrap(), 1);
+    owner.close_and_drain().await.unwrap();
+}

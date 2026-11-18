@@ -1,3 +1,4 @@
+mod name_votes;
 mod pages;
 use crate::{
     MetadataContentObservationReceipt,
@@ -250,12 +251,12 @@ pub(crate) fn persist_projection(
     projection: &MetadataSearchProjection,
     receipts: &[MetadataContentObservationReceipt],
     observed_at: &[i64],
-) -> Result<bool> {
+) -> Result<Option<String>> {
     let collecting: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM search_sessions WHERE id=?1 AND status IN ('queued','running'))",
         [projection.session_id], |row| row.get(0))?;
     if !collecting {
-        return Ok(false);
+        return Ok(None);
     }
     let claim_id = receipts
         .first()
@@ -265,7 +266,7 @@ pub(crate) fn persist_projection(
         receipts.iter().all(|r| r.claim_id == claim_id),
         "search projection contains distinct claims"
     );
-    let s = &projection.summary;
+    let s = &projection.fields;
     tx.execute(
         "INSERT INTO search_results(session_id,claim_id,name,source_count,complete_source_count,
             source_client_id,source_client_port,file_type,media_artist,media_album,media_title,
@@ -279,7 +280,7 @@ pub(crate) fn persist_projection(
             media_length_seconds=excluded.media_length_seconds,media_bitrate_kbps=excluded.media_bitrate_kbps,
             media_codec=excluded.media_codec,rating=excluded.rating,aich_root=excluded.aich_root,
             complete=excluded.complete,directory=excluded.directory",
-        params![projection.session_id,claim_id,s.name,i64::from(s.source_count),i64::from(s.complete_source_count),
+        params![projection.session_id,claim_id,"",i64::from(s.source_count),i64::from(s.complete_source_count),
             s.source_client_id.map(i64::from),s.source_client_port.map(i64::from),s.file_type,
             s.media_artist,s.media_album,s.media_title,i64::from(s.media_length_seconds),
             i64::from(s.media_bitrate_kbps),s.media_codec,i64::from(s.rating),encode_aich_root(&s.aich_hash)?,
@@ -301,13 +302,18 @@ pub(crate) fn persist_projection(
             ],
         )?;
     }
+    let name = name_votes::apply(tx, projection.session_id, claim_id, &projection.name_votes)?;
+    tx.execute(
+        "UPDATE search_results SET name=?3 WHERE session_id=?1 AND claim_id=?2",
+        params![projection.session_id, claim_id, name],
+    )?;
     if let Some(last) = observed_at.iter().max() {
         tx.execute(
             "UPDATE search_sessions SET updated_at_s=max(updated_at_s,?2) WHERE id=?1",
             params![projection.session_id, last],
         )?;
     }
-    Ok(true)
+    Ok(Some(name))
 }
 
 pub(crate) fn encode_aich_root(value: &str) -> Result<Option<Vec<u8>>> {

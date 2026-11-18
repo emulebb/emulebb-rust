@@ -37,21 +37,49 @@ impl MetadataStore {
         &self,
         events: &[MetadataContentObservationEvent],
         projection: &crate::MetadataSearchProjection,
-    ) -> Result<Option<i64>> {
+    ) -> Result<Option<crate::MetadataSearchPublication>> {
         ensure!(projection.session_id > 0, "invalid search identity");
         ensure!(
             !events.is_empty(),
             "search projection requires observations"
         );
+        ensure!(
+            !projection.name_votes.is_empty()
+                && projection.name_votes.len() <= CONTENT_OBSERVATION_BATCH_ITEMS,
+            "search projection requires bounded filename votes"
+        );
+        let mut bytes = 0usize;
+        for vote in &projection.name_votes {
+            ensure!(
+                !vote.normalized_name.is_empty() && vote.quality.rating <= 5,
+                "invalid filename vote"
+            );
+            let charge = vote
+                .payload_bytes()
+                .context("filename vote size overflow")?;
+            ensure!(charge <= OBSERVATION_BYTES, "filename vote is too large");
+            bytes = bytes
+                .checked_add(charge)
+                .context("filename vote size overflow")?;
+        }
+        ensure!(
+            bytes <= CONTENT_OBSERVATION_BATCH_BYTES,
+            "filename votes exceed batch bound"
+        );
         self.write_content_observations(events, Some(projection))
-            .map(|(receipts, member)| member.then(|| receipts[0].claim_id))
+            .map(|(receipts, name)| {
+                name.map(|name| crate::MetadataSearchPublication {
+                    claim_id: receipts[0].claim_id,
+                    name,
+                })
+            })
     }
 
     fn write_content_observations(
         &self,
         events: &[MetadataContentObservationEvent],
         projection: Option<&crate::MetadataSearchProjection>,
-    ) -> Result<(Vec<MetadataContentObservationReceipt>, bool)> {
+    ) -> Result<(Vec<MetadataContentObservationReceipt>, Option<String>)> {
         ensure!(
             events.len() <= CONTENT_OBSERVATION_BATCH_ITEMS,
             "too many content observations"
@@ -159,7 +187,7 @@ impl MetadataStore {
                 &receipts,
                 &events.iter().map(|e| e.observed_at_s).collect::<Vec<_>>(),
             )?,
-            None => false,
+            None => None,
         };
         tx.commit().map_err(|error| {
             anyhow::Error::new(error).context(crate::MetadataObservationCommitUncertain)

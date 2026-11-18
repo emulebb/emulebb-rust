@@ -58,6 +58,54 @@ pub struct MetadataSearchResultSummary {
     pub directory: String,
 }
 
+/// Presentation fields supplied by ingress; the database selects the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchResultFields {
+    pub source_count: u32,
+    pub complete_source_count: u32,
+    pub source_client_id: Option<u32>,
+    pub source_client_port: Option<u16>,
+    pub file_type: String,
+    pub media_artist: String,
+    pub media_album: String,
+    pub media_title: String,
+    pub media_length_seconds: u32,
+    pub media_bitrate_kbps: u32,
+    pub media_codec: String,
+    pub rating: u8,
+    pub aich_hash: String,
+    pub complete: bool,
+    pub directory: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataSearchNameQuality {
+    pub useful: bool,
+    pub sources: u32,
+    pub complete_sources: u32,
+    pub rating: u8,
+}
+
+/// A bounded, filtered presentation name; raw metadata remains independent.
+#[derive(Debug, Clone)]
+pub struct MetadataSearchNameVote {
+    pub normalized_name: String,
+    pub reporter_endpoint: Option<std::net::SocketAddrV4>,
+    pub origin: crate::MetadataObservationOrigin,
+    pub quality: MetadataSearchNameQuality,
+}
+impl MetadataSearchNameVote {
+    pub fn payload_bytes(&self) -> Option<usize> {
+        self.normalized_name.len().checked_mul(6)?.checked_add(256)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchPublication {
+    pub claim_id: i64,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchResult {
     pub claim_id: i64,
@@ -72,7 +120,8 @@ pub struct MetadataSearchResult {
 #[derive(Debug, Clone)]
 pub struct MetadataSearchProjection {
     pub session_id: i64,
-    pub summary: MetadataSearchResultSummary,
+    pub fields: MetadataSearchResultFields,
+    pub name_votes: Vec<MetadataSearchNameVote>,
 }
 
 /// Session-local occurrence accounting alongside immutable corpus references.

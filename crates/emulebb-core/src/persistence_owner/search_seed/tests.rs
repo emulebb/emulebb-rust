@@ -7,7 +7,7 @@ use emulebb_metadata::MetadataSearchProjection;
 async fn selected_download_seed_is_byte_bounded_and_keeps_its_reply_charge() {
     let (store, state, owner, publication, mut observations) = search_fixture().await;
     let id: i64 = publication.search_id.parse().unwrap();
-    let summary = crate::search_state::result_summary(&publication.result);
+    let fields = crate::search_state::result_fields(&publication.result);
     let mut claim_id = 0;
     for index in 0..220 {
         observations[0].metadata.name = Some(format!("{index:03}{}", "x".repeat(5000)));
@@ -16,11 +16,23 @@ async fn selected_download_seed_is_byte_bounded_and_keeps_its_reply_charge() {
                 &observations,
                 &MetadataSearchProjection {
                     session_id: id,
-                    summary: summary.clone(),
+                    fields: fields.clone(),
+                    name_votes: vec![emulebb_metadata::MetadataSearchNameVote {
+                        normalized_name: observations[0].metadata.name.clone().unwrap(),
+                        reporter_endpoint: observations[0].reporter_endpoint,
+                        origin: observations[0].origin,
+                        quality: emulebb_metadata::MetadataSearchNameQuality {
+                            useful: true,
+                            sources: 3,
+                            complete_sources: 0,
+                            rating: 0,
+                        },
+                    }],
                 },
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .claim_id;
     }
     state.lock().await.searches.clear();
     let seed = owner.search_download_seed(id, claim_id).await.unwrap();

@@ -1,5 +1,5 @@
 use super::*;
-use crate::search_store::tests::{event, project, sample_search, summary};
+use crate::search_store::tests::{event, fields, name_vote, project, sample_search};
 use crate::{MetadataSearchProjection, MetadataStore};
 
 #[test]
@@ -231,7 +231,8 @@ fn count_trigger_failure_rolls_back_corpus_and_membership_atomically() {
                 &[event(Some(12), "sample.bin")],
                 &MetadataSearchProjection {
                     session_id: id,
-                    summary: summary("sample.bin")
+                    fields: fields(),
+                    name_votes: vec![name_vote("sample.bin")]
                 }
             )
             .is_err()
@@ -327,15 +328,14 @@ fn late_pages_seek_indexes_with_one_hundred_thousand_sessions_results_and_varian
 fn result_summary_can_combine_independently_bounded_packet_fields() {
     let store = MetadataStore::in_memory().unwrap();
     let id = store.create_search(&sample_search()).unwrap();
-    let long = "x".repeat(9000);
-    let mut aggregate = summary("sample.bin");
+    let long = "x".repeat(5000);
+    let mut aggregate = fields();
     let mut claim = 0;
     for index in 0..7 {
-        let mut packet = event(Some(12), "sample.bin");
+        let mut packet = event(Some(12), &long);
         match index {
             0 => {
                 packet.metadata.name = Some(long.clone());
-                aggregate.name.clone_from(&long);
             }
             1 => {
                 packet.metadata.file_type = Some(long.clone());
@@ -367,11 +367,13 @@ fn result_summary_can_combine_independently_bounded_packet_fields() {
                 &[packet],
                 &MetadataSearchProjection {
                     session_id: id,
-                    summary: aggregate.clone(),
+                    fields: aggregate.clone(),
+                    name_votes: vec![name_vote(&long)],
                 },
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .claim_id;
     }
     let page = store
         .search_result_headers_page(id, 0, 100)
@@ -379,15 +381,23 @@ fn result_summary_can_combine_independently_bounded_packet_fields() {
         .unwrap();
     assert_eq!(page.items.len(), 1);
     assert!(!page.has_more);
-    assert_eq!(page.items[0].summary, aggregate);
-    assert_eq!(
-        store
-            .search_result_header(id, claim)
-            .unwrap()
-            .unwrap()
-            .summary,
-        aggregate
-    );
+    let stored = store
+        .search_result_header(id, claim)
+        .unwrap()
+        .unwrap()
+        .summary;
+    assert_eq!(page.items[0].summary, stored);
+    for text in [
+        &stored.name,
+        &stored.file_type,
+        &stored.media_artist,
+        &stored.media_album,
+        &stored.media_title,
+        &stored.media_codec,
+        &stored.directory,
+    ] {
+        assert_eq!(text, &long);
+    }
     let seed = store.search_download_seed(id, claim).unwrap().unwrap();
     assert_eq!(seed.name, long);
     assert_eq!(seed.size_bytes, Some(12));

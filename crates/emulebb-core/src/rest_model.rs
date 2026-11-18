@@ -501,7 +501,7 @@ impl SearchResult {
             search_id,
             r#type,
             hash,
-            name: observation.name.clone(),
+            name: normalize_ed2k_file_name(&observation.name),
             size_bytes: observation.size_bytes,
             sources: observation.sources,
             complete_sources: observation.complete_sources,
@@ -683,21 +683,28 @@ fn majority_observation_name(
     observations: &[SearchResultObservation],
     hash: &str,
 ) -> Option<String> {
-    let mut candidates = HashMap::<String, (usize, (bool, u32, u32, bool, u8))>::new();
+    type Candidate<'a> = (
+        std::collections::HashSet<(Option<&'a str>, Option<&'a str>)>,
+        (bool, u32, u32, bool, u8),
+    );
+    let mut candidates = HashMap::<String, Candidate<'_>>::new();
     for observation in observations {
         let normalized = normalize_ed2k_file_name(&observation.name);
         if normalized.is_empty() {
             continue;
         }
+        let reporter = observation.reporter_endpoint.as_deref();
+        let unknown_origin = reporter.is_none().then_some(observation.origin.as_str());
         let candidate = candidates.entry(normalized).or_default();
-        candidate.0 += 1;
+        candidate.0.insert((reporter, unknown_origin));
         candidate.1 = candidate.1.max(observation_quality(observation, hash));
     }
     candidates
         .into_iter()
         .max_by(|(left_name, left), (right_name, right)| {
             left.0
-                .cmp(&right.0)
+                .len()
+                .cmp(&right.0.len())
                 .then_with(|| left.1.cmp(&right.1))
                 .then_with(|| right_name.cmp(left_name))
         })
@@ -756,7 +763,7 @@ fn best_media_observation<'a>(
         .max_by_key(|observation| observation_quality(observation, hash))
 }
 
-fn observation_quality(
+pub(crate) fn observation_quality(
     observation: &SearchResultObservation,
     hash: &str,
 ) -> (bool, u32, u32, bool, u8) {

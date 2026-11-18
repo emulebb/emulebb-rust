@@ -4,7 +4,7 @@ use crate::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use emulebb_metadata::{
-    MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultSummary,
+    MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultFields,
     MetadataSearchSpec, MetadataStore, normalized_search_query,
 };
 use std::collections::HashMap;
@@ -63,10 +63,9 @@ pub(crate) fn search_to_metadata(search: &Search) -> MetadataSearchData {
     }
 }
 
-pub(crate) fn result_summary(result: &SearchResult) -> MetadataSearchResultSummary {
+pub(crate) fn result_fields(result: &SearchResult) -> MetadataSearchResultFields {
     let source = result.source_client_id.zip(result.source_client_port);
-    MetadataSearchResultSummary {
-        name: result.name.clone(),
+    MetadataSearchResultFields {
         source_count: result.sources,
         complete_source_count: result.complete_sources,
         source_client_id: source.map(|(id, _)| id),
@@ -83,6 +82,43 @@ pub(crate) fn result_summary(result: &SearchResult) -> MetadataSearchResultSumma
         complete: result.complete,
         directory: result.directory.clone(),
     }
+}
+
+pub(crate) fn projection_name_votes(
+    result: &SearchResult,
+) -> Result<Vec<emulebb_metadata::MetadataSearchNameVote>> {
+    use emulebb_metadata::{
+        MetadataObservationOrigin, MetadataSearchNameQuality, MetadataSearchNameVote,
+    };
+    result
+        .observations
+        .iter()
+        .map(|observation| {
+            let origin = match observation.origin.as_str() {
+                "server" => MetadataObservationOrigin::Server,
+                "global" => MetadataObservationOrigin::Global,
+                "kad" => MetadataObservationOrigin::Kad,
+                _ => anyhow::bail!("invalid search presentation origin"),
+            };
+            let (useful, sources, complete_sources, _, rating) =
+                crate::rest_model::observation_quality(observation, &result.hash);
+            Ok(MetadataSearchNameVote {
+                normalized_name: emulebb_ed2k::normalize_ed2k_file_name(&observation.name),
+                reporter_endpoint: observation
+                    .reporter_endpoint
+                    .as_ref()
+                    .map(|v| v.parse())
+                    .transpose()?,
+                origin,
+                quality: MetadataSearchNameQuality {
+                    useful,
+                    sources,
+                    complete_sources,
+                    rating,
+                },
+            })
+        })
+        .collect()
 }
 
 fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
@@ -310,12 +346,13 @@ mod tests {
                 }],
                 &emulebb_metadata::MetadataSearchProjection {
                     session_id: search.id.parse().unwrap(),
-                    summary: result_summary(&search.results[0]),
+                    fields: result_fields(&search.results[0]),
+                    name_votes: projection_name_votes(&search.results[0]).unwrap(),
                 },
             )
             .unwrap()
             .unwrap();
-        search.results[0].id = claim_id.to_string();
+        search.results[0].id = claim_id.claim_id.to_string();
         search.status = "error".into();
         persist_search(&metadata, &search).unwrap();
         let searches = load_searches(&metadata).unwrap();
