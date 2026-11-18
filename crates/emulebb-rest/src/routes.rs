@@ -321,12 +321,16 @@ fn protocol_fixture_router() -> Router<RestState> {
     Router::new()
 }
 
-async fn health(State(state): State<RestState>) -> StatusCode {
-    if state.core.app_info().lifecycle.state == "running" {
+async fn health(State(state): State<RestState>) -> impl IntoResponse {
+    let status = if state.core.app_info().lifecycle.state == "running" {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::SERVICE_UNAVAILABLE
-    }
+    };
+    (
+        status,
+        [("x-emulebb-instance", state.core.instance_id().to_owned())],
+    )
 }
 
 async fn require_api_key(

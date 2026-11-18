@@ -38,6 +38,7 @@ pub use bind_config::NetworkStartupError;
 pub use offline_settings::{OfflineSettingsOperation, run_offline_settings};
 mod discovery_bootstrap;
 pub mod host_bootstrap;
+mod listener_receipt;
 pub mod logging;
 mod profile_import;
 mod profile_ownership;
@@ -840,6 +841,11 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     );
     let listener = rest_listener::bind(rest_bind_addr).await?;
     let bound_addr = listener.local_addr()?;
+    let _listener_receipt = listener_receipt::ListenerReceipt::publish(
+        profile.profile_io_dir(),
+        bound_addr,
+        core.instance_id(),
+    )?;
     let host_shutdown = if let Some(host) = host {
         if host.shutdown.is_requested() {
             return Ok(());
