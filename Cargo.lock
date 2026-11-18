@@ -803,6 +803,7 @@ dependencies = [
  "libc",
  "rand 0.10.3",
  "rusqlite",
+ "tempfile",
  "unicode-normalization",
  "uuid",
 ]

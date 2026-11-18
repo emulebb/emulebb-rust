@@ -1,34 +1,52 @@
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
     search_model::{
-        MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,
+        MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultObservation,
+        MetadataSearchSpec,
     },
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     text::normalize_search_text,
 };
 
 impl super::MetadataStore {
-    pub fn upsert_search(&self, search: &MetadataSearch) -> Result<()> {
+    /// Allocate a never-reused session identity and commit its initial contents.
+    /// Failed transactions publish neither the record nor its identity.
+    pub fn create_search(&self, search: &MetadataSearchData) -> Result<i64> {
+        self.write_search(None, search)
+    }
+
+    /// Update an existing session without resurrecting a deleted identity.
+    pub fn update_search(&self, id: i64, search: &MetadataSearchData) -> Result<()> {
+        ensure!(id > 0, "search id must be positive");
+        self.write_search(Some(id), search)?;
+        Ok(())
+    }
+
+    fn write_search(&self, id: Option<i64>, search: &MetadataSearchData) -> Result<i64> {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        tx.execute(
-            r#"
+        // WHY: allocation and updates share the body writer, but a missing
+        // update ID must never recreate a deleted session. The statement's
+        // existence predicate and mutation belong to one SQLite snapshot.
+        let session_id: i64 = tx
+            .query_row(
+                r#"
             INSERT INTO search_sessions(
-                public_id, query, normalized_query, requested_method, resolved_method,
+                id, query, normalized_query, requested_method, resolved_method,
                 file_type_filter, extension_filter, min_size_bytes, max_size_bytes,
                 min_availability, min_complete_sources, min_bitrate_kbps,
                 min_length_seconds, codec_filter, title_filter, album_filter,
                 artist_filter, status, status_reason, created_at_ms, updated_at_ms,
                 completed_at_ms
             )
-            VALUES (
+            SELECT
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
-            )
-            ON CONFLICT(public_id) DO UPDATE SET
+            WHERE ?1 IS NULL OR EXISTS (SELECT 1 FROM search_sessions WHERE id = ?1)
+            ON CONFLICT(id) DO UPDATE SET
                 query = excluded.query,
                 normalized_query = excluded.normalized_query,
                 requested_method = excluded.requested_method,
@@ -49,37 +67,36 @@ impl super::MetadataStore {
                 status_reason = excluded.status_reason,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms
+            RETURNING id
             "#,
-            params![
-                search.public_id,
-                search.spec.query,
-                search.normalized_query,
-                search.spec.method,
-                search.resolved_method,
-                search.spec.file_type,
-                search.spec.extension,
-                encode_optional_u64(search.spec.min_size_bytes),
-                encode_optional_u64(search.spec.max_size_bytes),
-                search.spec.min_availability.map(i64::from),
-                search.spec.min_complete_sources.map(i64::from),
-                search.spec.min_bitrate_kbps.map(i64::from),
-                search.spec.min_length_seconds.map(i64::from),
-                search.spec.codec,
-                search.spec.title,
-                search.spec.album,
-                search.spec.artist,
-                search.status,
-                search.status_reason,
-                search.created_at_ms,
-                search.updated_at_ms,
-                search.completed_at_ms,
-            ],
-        )?;
-        let session_id: i64 = tx.query_row(
-            "SELECT id FROM search_sessions WHERE public_id = ?1",
-            params![search.public_id],
-            |row| row.get(0),
-        )?;
+                params![
+                    id,
+                    search.spec.query,
+                    search.normalized_query,
+                    search.spec.method,
+                    search.resolved_method,
+                    search.spec.file_type,
+                    search.spec.extension,
+                    encode_optional_u64(search.spec.min_size_bytes),
+                    encode_optional_u64(search.spec.max_size_bytes),
+                    search.spec.min_availability.map(i64::from),
+                    search.spec.min_complete_sources.map(i64::from),
+                    search.spec.min_bitrate_kbps.map(i64::from),
+                    search.spec.min_length_seconds.map(i64::from),
+                    search.spec.codec,
+                    search.spec.title,
+                    search.spec.album,
+                    search.spec.artist,
+                    search.status,
+                    search.status_reason,
+                    search.created_at_ms,
+                    search.updated_at_ms,
+                    search.completed_at_ms,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("search no longer exists")?;
         tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS incoming_search_result_ids(id INTEGER PRIMARY KEY);
             DELETE FROM temp.incoming_search_result_ids;",
@@ -242,14 +259,14 @@ impl super::MetadataStore {
         )?;
         tx.execute("DELETE FROM temp.incoming_search_result_ids", [])?;
         tx.commit()?;
-        Ok(())
+        Ok(session_id)
     }
 
     pub fn load_searches(&self) -> Result<Vec<MetadataSearch>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, public_id, query, normalized_query, requested_method,
+            SELECT id, query, normalized_query, requested_method,
                    resolved_method, file_type_filter, extension_filter,
                    min_size_bytes, max_size_bytes, min_availability,
                    min_complete_sources, min_bitrate_kbps, min_length_seconds,
@@ -262,51 +279,50 @@ impl super::MetadataStore {
         )?;
         let sessions = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    MetadataSearch {
-                        public_id: row.get(1)?,
-                        normalized_query: row.get(3)?,
+                Ok(MetadataSearch {
+                    id: row.get(0)?,
+                    data: MetadataSearchData {
+                        normalized_query: row.get(2)?,
                         spec: MetadataSearchSpec {
-                            query: row.get(2)?,
-                            method: row.get(4)?,
-                            file_type: row.get(6)?,
-                            extension: row.get(7)?,
-                            min_size_bytes: decode_optional_u64(row.get(8)?, 8)?,
-                            max_size_bytes: decode_optional_u64(row.get(9)?, 9)?,
-                            min_availability: decode_optional_u32(row.get(10)?, 10)?,
-                            min_complete_sources: decode_optional_u32(row.get(11)?, 11)?,
-                            min_bitrate_kbps: decode_optional_u32(row.get(12)?, 12)?,
-                            min_length_seconds: decode_optional_u32(row.get(13)?, 13)?,
-                            codec: row.get(14)?,
-                            title: row.get(15)?,
-                            album: row.get(16)?,
-                            artist: row.get(17)?,
+                            query: row.get(1)?,
+                            method: row.get(3)?,
+                            file_type: row.get(5)?,
+                            extension: row.get(6)?,
+                            min_size_bytes: decode_optional_u64(row.get(7)?, 7)?,
+                            max_size_bytes: decode_optional_u64(row.get(8)?, 8)?,
+                            min_availability: decode_optional_u32(row.get(9)?, 9)?,
+                            min_complete_sources: decode_optional_u32(row.get(10)?, 10)?,
+                            min_bitrate_kbps: decode_optional_u32(row.get(11)?, 11)?,
+                            min_length_seconds: decode_optional_u32(row.get(12)?, 12)?,
+                            codec: row.get(13)?,
+                            title: row.get(14)?,
+                            album: row.get(15)?,
+                            artist: row.get(16)?,
                         },
-                        resolved_method: row.get(5)?,
-                        status: row.get(18)?,
-                        status_reason: row.get(19)?,
-                        created_at_ms: row.get(20)?,
-                        updated_at_ms: row.get(21)?,
-                        completed_at_ms: row.get(22)?,
+                        resolved_method: row.get(4)?,
+                        status: row.get(17)?,
+                        status_reason: row.get(18)?,
+                        created_at_ms: row.get(19)?,
+                        updated_at_ms: row.get(20)?,
+                        completed_at_ms: row.get(21)?,
                         results: Vec::new(),
                     },
-                ))
+                })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut searches = Vec::with_capacity(sessions.len());
-        for (session_id, mut search) in sessions {
-            search.results = load_search_results(&conn, session_id)?;
+        for mut search in sessions {
+            search.data.results = load_search_results(&conn, search.id)?;
             searches.push(search);
         }
         Ok(searches)
     }
 
-    pub fn delete_search(&self, public_id: &str) -> Result<bool> {
-        let deleted = self.connection()?.execute(
-            "DELETE FROM search_sessions WHERE public_id = ?1",
-            params![public_id],
-        )?;
+    pub fn delete_search(&self, id: i64) -> Result<bool> {
+        ensure!(id > 0, "search id must be positive");
+        let deleted = self
+            .connection()?
+            .execute("DELETE FROM search_sessions WHERE id = ?1", params![id])?;
         Ok(deleted != 0)
     }
 

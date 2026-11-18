@@ -909,8 +909,7 @@ CREATE TABLE kad_outbound_publish_schedule (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE search_sessions (
-    id INTEGER PRIMARY KEY,
-    public_id TEXT NOT NULL UNIQUE,
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
     query TEXT NOT NULL,
     normalized_query TEXT NOT NULL,
     requested_method TEXT NOT NULL CHECK(requested_method IN ('automatic', 'server', 'global', 'kad')),

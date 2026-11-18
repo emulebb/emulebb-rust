@@ -712,6 +712,8 @@ async fn deleting_searches_cancels_pending_network_work() {
     assert_eq!(core.search_queue.lock().pending_len(), 0);
     assert!(core.searches().await.is_empty());
     assert!(second_cancel.is_cancelled());
+    let next = core.create_search(first_request).await.unwrap();
+    assert!(next.id.parse::<i64>().unwrap() > second.id.parse::<i64>().unwrap());
 }
 
 #[tokio::test]

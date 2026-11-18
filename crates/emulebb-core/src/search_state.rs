@@ -3,40 +3,13 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use emulebb_metadata::{
-    MetadataSearch, MetadataSearchResult, MetadataSearchResultObservation, MetadataSearchSpec,
-    MetadataStore, normalized_search_query,
+    MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultObservation,
+    MetadataSearchSpec, MetadataStore, normalized_search_query,
 };
 
 use crate::{
     Search, SearchProgress, SearchResult, SearchResultMedia, SearchResultObservation, SearchSpec,
 };
-
-pub(crate) fn next_numeric_search_id(searches: &HashMap<String, Search>) -> u32 {
-    searches
-        .keys()
-        .filter_map(|id| id.parse::<u32>().ok())
-        .max()
-        .unwrap_or_default()
-        .saturating_add(1)
-        .max(1)
-}
-
-pub(crate) fn allocate_search_id(
-    searches: &HashMap<String, Search>,
-    next_search_id: u32,
-) -> Result<(String, u32)> {
-    let mut candidate = next_search_id.max(1);
-    loop {
-        let search_id = candidate.to_string();
-        if !searches.contains_key(&search_id) {
-            let next_search_id = candidate.checked_add(1).unwrap_or(1).max(1);
-            return Ok((search_id, next_search_id));
-        }
-        candidate = candidate
-            .checked_add(1)
-            .context("search id space exhausted")?;
-    }
-}
 
 pub(crate) fn load_searches(metadata: &MetadataStore) -> Result<HashMap<String, Search>> {
     metadata
@@ -50,13 +23,21 @@ pub(crate) fn load_searches(metadata: &MetadataStore) -> Result<HashMap<String, 
 }
 
 pub(crate) fn persist_search(metadata: &MetadataStore, search: &Search) -> Result<()> {
-    metadata.upsert_search(&search_to_metadata(search))
+    metadata.update_search(
+        search.id.parse().context("invalid search identity")?,
+        &search_to_metadata(search),
+    )
 }
 
-fn search_to_metadata(search: &Search) -> MetadataSearch {
+pub(crate) fn create_search(metadata: &MetadataStore, search: &Search) -> Result<String> {
+    Ok(metadata
+        .create_search(&search_to_metadata(search))?
+        .to_string())
+}
+
+fn search_to_metadata(search: &Search) -> MetadataSearchData {
     let updated_at_ms = search.updated_at.timestamp_millis();
-    MetadataSearch {
-        public_id: search.id.clone(),
+    MetadataSearchData {
         normalized_query: normalized_search_query(&search.spec.query),
         spec: MetadataSearchSpec {
             query: search.spec.query.clone(),
@@ -162,6 +143,8 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
 }
 
 fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
+    let search_id = search.id.to_string();
+    let search = search.data;
     let created_at = timestamp_ms(search.created_at_ms, "search created_at_ms")?;
     let updated_at = timestamp_ms(search.updated_at_ms, "search updated_at_ms")?;
     // WHY: a persisted "queued"/"running" search has no queue entry or
@@ -199,7 +182,7 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
         _ => "interrupted",
     };
     Ok(Search {
-        id: search.public_id.clone(),
+        id: search_id.clone(),
         spec,
         resolved_method: search.resolved_method,
         status,
@@ -210,7 +193,7 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
         results: search
             .results
             .into_iter()
-            .map(|result| search_result_from_metadata(&search.public_id, &file_type_filter, result))
+            .map(|result| search_result_from_metadata(&search_id, &file_type_filter, result))
             .collect::<Result<Vec<_>>>()?,
     })
 }
@@ -314,7 +297,7 @@ mod tests {
         };
         let now = Utc::now();
         let result = SearchResult::from_observation(
-            "91".to_string(),
+            String::new(),
             "audio".to_string(),
             "00112233445566778899aabbccddeeff".to_string(),
             SearchResultObservation {
@@ -342,8 +325,8 @@ mod tests {
                 observed_at: now,
             },
         );
-        let search = Search {
-            id: "91".to_string(),
+        let mut search = Search {
+            id: String::new(),
             spec: spec.clone(),
             resolved_method: Some("global".to_string()),
             status: "error".to_string(),
@@ -354,12 +337,15 @@ mod tests {
             results: vec![result],
         };
 
+        search.id = create_search(&metadata, &search).unwrap();
+        search.results[0].search_id.clone_from(&search.id);
         persist_search(&metadata, &search).unwrap();
         let searches = load_searches(&metadata).unwrap();
 
         assert_eq!(searches.len(), 1);
-        let reloaded = searches.get("91").unwrap();
+        let reloaded = searches.get(&search.id).unwrap();
         assert_eq!(reloaded.spec, spec);
+        assert_eq!(reloaded.results[0].search_id, search.id);
         assert_eq!(reloaded.resolved_method.as_deref(), Some("global"));
         assert_eq!(reloaded.results.len(), 1);
         assert_eq!(reloaded.results[0].media.artist, "Example Artist");

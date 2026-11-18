@@ -338,9 +338,7 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             }
         }
         ("DELETE", ["friends", user_hash]) => validate_lowercase_md4_hex(user_hash, "userHash")?,
-        ("GET" | "DELETE", ["searches", search_id]) => {
-            validate_bounded_path_uint(search_id, u32::MAX as u64, "searchId")?
-        }
+        ("GET" | "DELETE", ["searches", search_id]) => validate_search_id(search_id)?,
         ("GET" | "PATCH" | "DELETE", ["servers", server_id])
         | ("POST", ["servers", server_id, "operations", "connect"]) => {
             let server_id = decode_path_parameter(server_id, "serverId")?;
@@ -397,7 +395,7 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
                 "download",
             ],
         ) => {
-            validate_bounded_path_uint(search_id, u32::MAX as u64, "searchId")?;
+            validate_search_id(search_id)?;
             validate_lowercase_md4_hex(hash, "hash")?;
         }
         _ => {}
@@ -421,42 +419,22 @@ fn decode_path_parameter(value: &str, field: &'static str) -> Result<String, Box
         })
 }
 
-fn validate_bounded_path_uint(
-    value: &str,
-    max: u64,
-    field: &'static str,
-) -> Result<(), Box<Response>> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(Box::new(
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                format!("{field} must be an unsigned decimal string"),
-            )
-            .into_response(),
-        ));
+fn validate_search_id(value: &str) -> Result<(), Box<Response>> {
+    let value = decode_path_parameter(value, "searchId")?;
+    if value
+        .parse::<i64>()
+        .is_ok_and(|id| id > 0 && id.to_string() == value)
+    {
+        return Ok(());
     }
-    let value = value.parse::<u64>().map_err(|_| {
-        Box::new(
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                format!("{field} must be an unsigned decimal string"),
-            )
-            .into_response(),
+    Err(Box::new(
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "searchId must be a positive decimal i64 string",
         )
-    })?;
-    if value > max {
-        return Err(Box::new(
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                format!("{field} is out of range"),
-            )
-            .into_response(),
-        ));
-    }
-    Ok(())
+        .into_response(),
+    ))
 }
 
 fn validate_lowercase_md4_hex(value: &str, field: &'static str) -> Result<(), Box<Response>> {

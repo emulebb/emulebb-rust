@@ -2,7 +2,7 @@ use super::*;
 
 impl EmulebbCore {
     pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
-        self.create_search_with_initial_persistence(request, search_state::persist_search)
+        self.create_search_with_initial_persistence(request, search_state::create_search)
             .await
     }
 
@@ -12,7 +12,7 @@ impl EmulebbCore {
         persist: P,
     ) -> Result<Search>
     where
-        P: FnOnce(&MetadataStore, &Search) -> Result<()>,
+        P: FnOnce(&MetadataStore, &Search) -> Result<String>,
     {
         request.canonicalize();
         request.validate()?;
@@ -63,27 +63,19 @@ impl EmulebbCore {
             &request.query,
             &search_criteria_from_request(&request),
         )?;
-        let (search_id, next_search_id) =
-            search_state::allocate_search_id(&state.searches, state.next_search_id)?;
         let mut results = passive_cached
             .into_iter()
-            .map(|file| search_result_from_passive_cache(&search_id, &request, file))
+            .map(|file| search_result_from_passive_cache("", &request, file))
             .collect::<Vec<_>>();
         apply_search_filters(&mut results, &request);
         let prepared_queue_entry = {
             let queue = self.search_queue.lock();
-            match queue.prepare_enqueue(
-                search_id.clone(),
-                request.clone(),
-                queue_lane,
-                Instant::now(),
-            ) {
+            match queue.prepare_enqueue(request.clone(), queue_lane, Instant::now()) {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    // Explicit POST rejection (duplicate / queue full) — the
-                    // candidate id is never published or advanced.
+                    // Queue rejection happens before allocating a durable ID.
                     crate::diag_sched::keyword_search_queue(
-                        &search_id,
+                        "",
                         &request.query,
                         "rejected",
                         &request.method,
@@ -103,8 +95,10 @@ impl EmulebbCore {
         // running->complete lifecycle: controllers (e.g. aMuTorrent) get a
         // prompt POST and poll GET for results; "queued" is an additive state
         // consumers treat like running (poll until "complete").
-        let search = Search {
-            id: search_id.clone(),
+        // The private candidate has no ID until SQLite commits. Queue entries,
+        // results and the public response receive that allocated identity together.
+        let mut search = Search {
+            id: String::new(),
             spec: request.clone(),
             resolved_method: None,
             status: "queued".to_string(),
@@ -114,10 +108,14 @@ impl EmulebbCore {
             updated_at: now,
             results,
         };
-        persist(&self.metadata_store, &search)?;
+        let search_id = persist(&self.metadata_store, &search)?;
+        search.id.clone_from(&search_id);
+        for result in &mut search.results {
+            result.search_id.clone_from(&search_id);
+        }
         let spawn_drain = {
             let mut queue = self.search_queue.lock();
-            queue.commit_enqueue(prepared_queue_entry);
+            queue.commit_enqueue(prepared_queue_entry, search_id.clone());
             let spawn_drain = queue.claim_drain_task();
             crate::diag_sched::keyword_search_queue(
                 &search_id,
@@ -129,7 +127,6 @@ impl EmulebbCore {
             );
             spawn_drain
         };
-        state.next_search_id = next_search_id;
         state
             .search_cancels
             .insert(search_id.clone(), CancellationToken::new());
@@ -154,7 +151,9 @@ impl EmulebbCore {
         // pending wire work, and cached session. The shared lock order is
         // state -> queue; the drain loop never holds both locks at once.
         let mut state = self.state.lock().await;
-        let persisted = self.metadata_store.delete_search(search_id)?;
+        let persisted = self
+            .metadata_store
+            .delete_search(search_id.parse().context("invalid search identity")?)?;
         let queued = self.search_queue.lock().remove_pending(search_id);
         let cancelled = state
             .search_cancels
