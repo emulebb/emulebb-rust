@@ -53,6 +53,7 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
                 if path == "/api/v1/downloads"
                     || path.starts_with("/api/v1/downloads/")
                     || path.starts_with("/api/v1/library/")
+                    || path.starts_with("/api/v1/searches")
                 {
                     200
                 } else {
@@ -80,7 +81,7 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "INVALID_ARGUMENT",
-                "sort must be one of name, sizeBytes, sources, completeSources, rating, fileType, artist, album, title, lengthSeconds, bitrateKbps, codec",
+                "sort must be one of displayName, sizeBytes, sources, completeSources, rating, fileType, artist, album, title, lengthSeconds, bitrateKbps, codec",
             )
             .into_response();
         }
@@ -100,16 +101,6 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             )
             .into_response();
         }
-    }
-    if query_fields.iter().any(|(name, _)| name == "order")
-        && !query_fields.iter().any(|(name, _)| name == "sort")
-    {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            "order requires sort",
-        )
-        .into_response();
     }
     if let Err(response) = validate_destructive_query_confirmation(&method, &path, &query_fields) {
         return *response;
@@ -214,10 +205,7 @@ fn is_search_result_sort(value: &str) -> bool {
 }
 
 fn is_boolean_query_field(name: &str) -> bool {
-    matches!(
-        name,
-        "confirm" | "includeScoreBreakdown" | "includeEvidence" | "exactTotal"
-    )
+    matches!(name, "confirm" | "includeScoreBreakdown")
 }
 
 fn is_boolean_query_value(value: &str) -> bool {
@@ -339,6 +327,11 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         }
         ("DELETE", ["friends", user_hash]) => validate_lowercase_md4_hex(user_hash, "userHash")?,
         ("GET" | "DELETE", ["searches", search_id]) => validate_search_id(search_id)?,
+        ("GET", ["searches", search_id, "results"]) => validate_search_id(search_id)?,
+        ("GET", ["searches", search_id, "results", result_id]) => {
+            validate_search_id(search_id)?;
+            validate_positive_decimal_id(result_id, "resultId")?;
+        }
         ("GET" | "PATCH" | "DELETE", ["servers", server_id])
         | ("POST", ["servers", server_id, "operations", "connect"]) => {
             let server_id = decode_path_parameter(server_id, "serverId")?;
@@ -508,6 +501,7 @@ fn is_endpoint_path_token(value: &str) -> bool {
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {
+    const SEARCH_PAGE: &[&str] = &["limit", "cursor"];
     const NONE: &[&str] = &[];
     const SNAPSHOT: &[&str] = &["limit"];
     const PAGE: &[&str] = &["offset", "limit"];
@@ -581,7 +575,6 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("POST", "/api/v1/servers/operations/connect")
         | ("POST", "/api/v1/servers/operations/disconnect")
         | ("POST", "/api/v1/servers/operations/import-met-url")
-        | ("GET", "/api/v1/searches")
         | ("POST", "/api/v1/searches")
         | ("GET", "/api/v1/shared-directories")
         | ("PATCH", "/api/v1/shared-directories")
@@ -599,6 +592,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
             "/api/v1/upload-queue" if method == "GET" => UPLOAD_QUEUE,
             _ => NONE,
         }),
+        ("GET", "/api/v1/searches") => Some(SEARCH_PAGE),
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
         ("GET", "/api/v1/shared-files") => Some(SHARED_FILES),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
@@ -621,14 +615,7 @@ fn route_query_fields_for_parameterized(
     const NONE: &[&str] = &[];
     const SEARCH_OBSERVATIONS: &[&str] = &["limit", "cursor"];
     const LIBRARY_TAGS: &[&str] = &["limit", "cursor"];
-    const SEARCH: &[&str] = &[
-        "offset",
-        "limit",
-        "includeEvidence",
-        "exactTotal",
-        "sort",
-        "order",
-    ];
+    const SEARCH_RESULTS: &[&str] = &["limit", "cursor", "sort", "order"];
 
     let segments = path
         .strip_prefix("/api/v1/")?
@@ -677,7 +664,8 @@ fn route_query_fields_for_parameterized(
         {
             Some(NONE)
         }
-        ("GET", ["searches", _]) => Some(SEARCH),
+        ("GET", ["searches", _]) | ("GET", ["searches", _, "results", _]) => Some(NONE),
+        ("GET", ["searches", _, "results"]) => Some(SEARCH_RESULTS),
         ("GET", ["searches", _, "results", _, "observations"]) => Some(SEARCH_OBSERVATIONS),
         _ => None,
     }

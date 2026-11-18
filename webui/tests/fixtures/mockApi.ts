@@ -191,7 +191,7 @@ export function installMockApi(requests: RecordedApiRequest[]) {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ data })
+      body: JSON.stringify({ data, ...(path === "searches" ? { meta: { apiVersion: "v1", nextCursor: null, hasMore: false } } : {}) })
     });
   };
 }
@@ -225,7 +225,7 @@ function dataFor(method: string, path: string): unknown {
     case "snapshot":
       return snapshot;
     case "searches":
-      return { items: snapshot.searches };
+      return snapshot.searches;
     case "kad/nodes":
       return { items: [] };
     case "logs":

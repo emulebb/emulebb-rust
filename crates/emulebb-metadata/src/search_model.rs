@@ -184,3 +184,63 @@ pub struct MetadataSearchDownloadSeed {
     pub source_client_port: Option<u16>,
     pub observations: Vec<MetadataSearchResultObservation>,
 }
+
+/// The fixed native global result sorts. Text uses binary ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataSearchResultSort {
+    #[serde(rename = "displayName")]
+    Name,
+    SizeBytes,
+    Sources,
+    CompleteSources,
+    Rating,
+    FileType,
+    Artist,
+    Album,
+    Title,
+    LengthSeconds,
+    BitrateKbps,
+    Codec,
+}
+impl MetadataSearchResultSort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "displayName",
+            Self::SizeBytes => "sizeBytes",
+            Self::Sources => "sources",
+            Self::CompleteSources => "completeSources",
+            Self::Rating => "rating",
+            Self::FileType => "fileType",
+            Self::Artist => "artist",
+            Self::Album => "album",
+            Self::Title => "title",
+            Self::LengthSeconds => "lengthSeconds",
+            Self::BitrateKbps => "bitrateKbps",
+            Self::Codec => "codec",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetadataSearchSortOrder {
+    Asc,
+    Desc,
+}
+impl MetadataSearchSortOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+/// The anchor is a membership identity, never an unbounded text sort key.
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataSearchResultsQuery {
+    pub session_id: i64,
+    pub after_claim_id: Option<i64>,
+    pub sort: MetadataSearchResultSort,
+    pub order: MetadataSearchSortOrder,
+    pub limit: usize,
+}

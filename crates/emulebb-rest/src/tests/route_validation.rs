@@ -676,16 +676,6 @@ async fn boolean_query_values_use_canonical_validation_messages() {
             "/api/v1/upload-queue?includeScoreBreakdown=yes",
             "includeScoreBreakdown must be true or false",
         ),
-        (
-            "GET",
-            "/api/v1/searches/1?includeEvidence=yes",
-            "includeEvidence must be true or false",
-        ),
-        (
-            "GET",
-            "/api/v1/searches/1?exactTotal=yes",
-            "exactTotal must be true or false",
-        ),
     ];
     for (method, uri, expected_message) in cases {
         let response = test_router()

@@ -340,298 +340,166 @@ async fn friends_use_canonical_crud_routes() {
 #[tokio::test]
 async fn search_clear_requires_canonical_query_confirmation() {
     let app = test_search_router();
-
     for query in ["first", "second"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/searches")
-                    .header("X-API-Key", "secret")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"query":"{query}","method":"automatic","type":""}}"#
-                    )))
-                    .unwrap(),
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/v1/searches",
+                Some(json!({"query":query,"method":"automatic"}))
             )
             .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+            .0,
+            StatusCode::CREATED
+        );
     }
-
-    let denied = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/v1/searches")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
-
-    let cleared = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/v1/searches?confirm=true")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(cleared.status(), StatusCode::OK);
-    let body = to_bytes(cleared.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-
-    let list = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/searches")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list.status(), StatusCode::OK);
-    let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        request(&app, "DELETE", "/api/v1/searches", None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(&app, "DELETE", "/api/v1/searches?confirm=true", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, body) = request(&app, "GET", "/api/v1/searches", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn search_delete_uses_canonical_ok_response() {
     let app = test_search_router();
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/searches")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"query":"delete single","method":"automatic","type":""}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    let search_id = value["data"]["id"].as_str().unwrap();
-
-    let deleted = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/api/v1/searches/{search_id}"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(deleted.status(), StatusCode::OK);
-    let body = to_bytes(deleted.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-    assert!(value["data"].get("deleted").is_none());
+    let (status, created) = request(
+        &app,
+        "POST",
+        "/api/v1/searches",
+        Some(json!({"query":"sample query"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["data"]["id"].as_str().unwrap();
+    let (status, deleted) = request(&app, "DELETE", &format!("/api/v1/searches/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["data"]["ok"], true);
+    assert_eq!(
+        request(&app, "GET", &format!("/api/v1/searches/{id}"), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
-async fn search_results_use_canonical_paging_query() {
+async fn search_resources_use_bounded_scoped_cursors_and_all_twelve_global_sorts() {
     let core = test_search_core(&[
         IndexedFile {
-            ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "Paged.Result.One.iso".to_string(),
+            ed2k_hash: "11".repeat(16),
+            name: "Alpha.bin".into(),
             size_bytes: 42,
-            content_type: "iso".to_string(),
+            content_type: "pro".into(),
             availability_score: 2,
         },
         IndexedFile {
-            ed2k_hash: "ffeeddccbbaa99887766554433221100".to_string(),
-            name: "Paged.Result.Two.iso".to_string(),
+            ed2k_hash: "22".repeat(16),
+            name: "Beta.bin".into(),
             size_bytes: 84,
-            content_type: "iso".to_string(),
+            content_type: "pro".into(),
             availability_score: 3,
         },
         IndexedFile {
-            ed2k_hash: "11223344556677889900aabbccddeeff".to_string(),
-            name: "Paged.Result.Three.iso".to_string(),
+            ed2k_hash: "33".repeat(16),
+            name: "Gamma.bin".into(),
             size_bytes: 126,
-            content_type: "iso".to_string(),
+            content_type: "pro".into(),
             availability_score: 4,
         },
     ]);
-    let observed_search_id = core.searches().await.into_iter().next().unwrap().id;
+    let headers = core.search_headers_page(None, 1).await.unwrap();
+    let id = headers.value().items[0].id;
+    drop(headers);
     let app = router(
         core,
         RestServerSettings {
-            api_key: "secret".to_string(),
+            api_key: "secret".into(),
             web_root_dir: None,
         },
     );
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/searches")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"query":"  paged\tresult  ","method":"automatic","type":"","extension":"iso","minSizeBytes":1,"maxSizeBytes":1000,"minAvailability":2,"minCompleteSources":0}"#,
-                ))
-                .unwrap(),
+    let (status, metadata) = request(&app, "GET", &format!("/api/v1/searches/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["data"]["resultCount"], 3);
+    assert_eq!(metadata["data"]["status"], "completed");
+    assert!(metadata["data"]["createdAt"].is_number());
+    let path = format!("/api/v1/searches/{id}/results");
+    let (status, first) = request(
+        &app,
+        "GET",
+        &format!("{path}?sort=displayName&order=asc&limit=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["data"][0]["displayName"], "Alpha.bin");
+    assert_eq!(first["meta"]["hasMore"], true);
+    let cursor = first["meta"]["nextCursor"].as_str().unwrap();
+    assert!(cursor.len() <= 512);
+    let (status, next) = request(
+        &app,
+        "GET",
+        &format!("{path}?sort=displayName&order=asc&limit=1&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(next["data"][0]["displayName"], "Beta.bin");
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            &format!("{path}?sort=sizeBytes&order=asc&cursor={cursor}"),
+            None
         )
         .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["query"], "paged result");
-    assert_eq!(value["data"]["requestedMethod"], "automatic");
-    assert_eq!(value["data"]["resolvedMethod"], Value::Null);
-    assert!(value["data"].get("method").is_none());
-    assert_eq!(value["data"]["criteria"]["extension"], "iso");
-    assert_eq!(value["data"]["criteria"]["minSizeBytes"], 1);
-    assert_eq!(value["data"]["criteria"]["maxSizeBytes"], 1000);
-    assert_eq!(value["data"]["criteria"]["minAvailability"], 2);
-    assert_eq!(value["data"]["criteria"]["minCompleteSources"], Value::Null);
-    assert_eq!(value["data"]["criteria"]["minBitrateKbps"], Value::Null);
-    assert_eq!(value["data"]["criteria"]["minLengthSeconds"], Value::Null);
-    assert_eq!(value["data"]["criteria"]["codec"], "");
-    assert_eq!(value["data"]["criteria"]["title"], "");
-    assert_eq!(value["data"]["criteria"]["album"], "");
-    assert_eq!(value["data"]["criteria"]["artist"], "");
-    assert_eq!(value["data"]["progress"]["phase"], "queued");
-    assert_eq!(value["data"]["progress"]["completedUnits"], 0);
-    assert!(value["data"]["progress"].get("totalUnits").is_none());
-    assert_eq!(value["data"]["progress"]["unit"], "");
-    let created_id = value["data"]["id"].as_str().unwrap();
-    let empty = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/searches/{created_id}"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(empty.status(), StatusCode::OK);
-    let empty: Value =
-        serde_json::from_slice(&to_bytes(empty.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(empty["data"]["total"], 0);
-    assert_eq!(empty["data"]["items"], json!([]));
-    let search_id = observed_search_id.as_str();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/v1/searches/{search_id}?offset=1&limit=1&includeEvidence=false&exactTotal=true"
-                ))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["id"], search_id);
-    assert_eq!(value["data"]["requestedMethod"], "automatic");
-    assert_eq!(value["data"]["resolvedMethod"], "server");
-    assert!(value["data"].get("method").is_none());
-    assert_eq!(value["data"]["criteria"]["extension"], "iso");
-    assert_eq!(value["data"]["criteria"]["artist"], "");
-    assert!(value["data"]["progress"].is_object());
-    // The eMuleBB master returns paged search results under "items" with
-    // total/offset/limit (search/results shares the common page shape).
-    assert_eq!(value["data"]["total"], 3);
-    assert_eq!(value["data"]["offset"], 1);
-    assert_eq!(value["data"]["limit"], 1);
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
-    assert!(value["data"]["items"][0].get("method").is_none());
-    assert!(value["data"]["items"][0].get("knownType").is_none());
-    assert!(value["data"]["items"][0].get("evidence").is_none());
-
-    let sorted = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/v1/searches/{search_id}?sort=sizeBytes&order=desc&offset=0&limit=2"
-                ))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(sorted.status(), StatusCode::OK);
-    let body = to_bytes(sorted.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["sort"], "sizeBytes");
-    assert_eq!(value["data"]["order"], "desc");
-    assert_eq!(value["data"]["items"][0]["sizeBytes"], 126);
-    assert_eq!(value["data"]["items"][1]["sizeBytes"], 84);
-
-    let estimated = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/v1/searches/{search_id}?offset=0&limit=1&exactTotal=false"
-                ))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(estimated.status(), StatusCode::OK);
-    let body = to_bytes(estimated.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["total"], 2);
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
-    assert!(value["data"]["items"][0].get("evidence").is_some());
-
-    // An out-of-range limit is rejected (matching the emulebb master), not
-    // silently clamped, and carries field/constraint details.
-    let rejected = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/searches/{search_id}?limit=5000"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(rejected.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(value["error"]["message"], "limit is out of range");
-    assert_eq!(value["error"]["details"]["field"], "limit");
-    assert_eq!(value["error"]["details"]["constraint"], "1..1000");
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let claim = first["data"][0]["id"].as_str().unwrap();
+    let (status, selected) = request(&app, "GET", &format!("{path}/{claim}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected["data"], first["data"][0]);
+    for sort in [
+        "displayName",
+        "sizeBytes",
+        "sources",
+        "completeSources",
+        "rating",
+        "fileType",
+        "artist",
+        "album",
+        "title",
+        "lengthSeconds",
+        "bitrateKbps",
+        "codec",
+    ] {
+        for order in ["asc", "desc"] {
+            let (status, page) = request(
+                &app,
+                "GET",
+                &format!("{path}?sort={sort}&order={order}&limit=1"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{sort} {order}: {page}");
+            assert_eq!(page["data"].as_array().unwrap().len(), 1);
+        }
+    }
+    assert_eq!(
+        request(&app, "GET", &format!("{path}?limit=201"), None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
@@ -665,7 +533,7 @@ async fn search_to_download_flow_uses_recorded_network_observation() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/api/v1/searches/{observed_search_id}"))
+                .uri(format!("/api/v1/searches/{observed_search_id}/results"))
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::empty())
@@ -676,8 +544,8 @@ async fn search_to_download_flow_uses_recorded_network_observation() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    let search_id = value["data"]["id"].as_str().unwrap();
-    let items = value["data"]["items"].as_array().unwrap();
+    let search_id = &observed_search_id;
+    let items = value["data"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert_ne!(items[0]["id"], items[1]["id"]);
     let result_id = items.iter().find(|item| item["sizeBytes"] == 84).unwrap()["id"]
@@ -748,7 +616,7 @@ async fn search_result_download_accepts_stopped_intent() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/api/v1/searches/{observed_search_id}"))
+                .uri(format!("/api/v1/searches/{observed_search_id}/results"))
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::empty())
@@ -759,8 +627,8 @@ async fn search_result_download_accepts_stopped_intent() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    let search_id = value["data"]["id"].as_str().unwrap();
-    let result_id = value["data"]["items"][0]["id"].as_str().unwrap().to_owned();
+    let search_id = &observed_search_id;
+    let result_id = value["data"][0]["id"].as_str().unwrap().to_owned();
 
     let download_uri = format!("/api/v1/searches/{search_id}/results/{result_id}/download");
     let response = app
@@ -966,4 +834,37 @@ async fn search_mutations_report_closed_admission_and_preserve_sessions() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
     assert_eq!(core.searches().await.len(), 1);
+}
+
+#[tokio::test]
+async fn search_creation_returns_committed_metadata_and_its_location() {
+    let app = test_search_router();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/searches")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"query":"sample query","method":"automatic"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let location = response.headers()["Location"].to_str().unwrap().to_owned();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        location,
+        format!("/api/v1/searches/{}", body["data"]["id"].as_str().unwrap())
+    );
+    assert_eq!(body["data"]["resultCount"], 0);
+    assert!(body["data"]["createdAt"].is_number());
+    let (status, metadata) = request(&app, "GET", &location, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["data"]["id"], body["data"]["id"]);
 }

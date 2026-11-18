@@ -2,7 +2,7 @@
 use super::*;
 use emulebb_metadata::{
     MetadataSearchDownloadSeed, MetadataSearchHeader, MetadataSearchPage,
-    MetadataSearchResultHeader, MetadataSearchResultObservation,
+    MetadataSearchResultHeader, MetadataSearchResultObservation, MetadataSearchResultsQuery,
 };
 
 pub(super) enum Query {
@@ -16,6 +16,7 @@ pub(super) enum Query {
         after: i64,
         limit: usize,
     },
+    SortedResults(MetadataSearchResultsQuery),
     Result {
         session: i64,
         claim: i64,
@@ -42,9 +43,16 @@ pub(super) enum Value {
 impl Query {
     fn bytes(&self) -> usize {
         match self {
-            Self::Results { .. } => 1024 * 1024,
+            Self::Results { .. } | Self::SortedResults(_) => 1024 * 1024,
             Self::Result { .. } | Self::Seed { .. } => 512 * 1024,
             _ => 256 * 1024,
+        }
+    }
+    fn preparation_bytes(&self) -> usize {
+        if matches!(self, Self::SortedResults(_)) {
+            128 * 1024
+        } else {
+            0
         }
     }
     fn valid(&self) -> bool {
@@ -52,6 +60,9 @@ impl Query {
         match self {
             Self::Headers { before, limit } => before.is_none_or(|id| id > 0) && page(0, *limit),
             Self::Header(id) => *id > 0,
+            Self::SortedResults(q) => {
+                q.session_id > 0 && q.after_claim_id.is_none_or(|id| id > 0) && page(0, q.limit)
+            }
             Self::Results {
                 session,
                 after,
@@ -78,7 +89,7 @@ impl PersistenceOwner {
         if !query.valid() {
             return Err(PersistenceError::TooLarge);
         }
-        let bytes = query.bytes();
+        let bytes = query.bytes() + query.preparation_bytes();
         match self
             .submit_reserved(FIXED_CHARGE + bytes, || Ok(Command::SearchRead(query)))
             .await?
@@ -158,6 +169,22 @@ impl PersistenceOwner {
             lease: reply.lease,
         })
     }
+    pub(crate) async fn search_results_page(
+        &self,
+        query: MetadataSearchResultsQuery,
+    ) -> Result<
+        crate::LibraryReply<Option<MetadataSearchPage<MetadataSearchResultHeader>>>,
+        PersistenceError,
+    > {
+        let reply = self.read_search(Query::SortedResults(query)).await?;
+        let Value::Results(value) = reply.value else {
+            return Err(PersistenceError::Worker);
+        };
+        Ok(crate::LibraryReply {
+            value,
+            lease: reply.lease,
+        })
+    }
     pub(crate) async fn search_result_header(
         &self,
         session: i64,
@@ -206,6 +233,7 @@ pub(super) fn load(store: &MetadataStore, query: &Query) -> anyhow::Result<Value
             Value::Headers(store.search_headers_page(*before, *limit)?)
         }
         Query::Header(id) => Value::Header(store.search_header(*id)?),
+        Query::SortedResults(query) => Value::Results(store.search_results_page(query)?),
         Query::Results {
             session,
             after,

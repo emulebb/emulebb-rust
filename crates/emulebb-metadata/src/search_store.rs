@@ -281,9 +281,9 @@ pub(crate) fn persist_projection(
         receipts.iter().all(|r| r.claim_id == claim_id),
         "search projection contains distinct claims"
     );
-    tx.execute("INSERT INTO search_results(session_id,claim_id,name,source_client_id,source_client_port,
+    tx.execute("INSERT INTO search_results(session_id,claim_id,size_sort_key,name,source_client_id,source_client_port,
         file_type,media_artist,media_album,media_title,media_length_seconds,media_bitrate_kbps,media_codec,
-        rating,aich_root,complete,directory) VALUES(?1,?2,'',NULL,NULL,'Unknown','','','',0,0,'',0,NULL,0,'')
+        rating,aich_root,complete,directory) SELECT ?1,id,size_sort_key,'',NULL,NULL,'Unknown','','','',0,0,'',0,NULL,0,'' FROM content_claims WHERE id=?2
         ON CONFLICT(session_id,claim_id) DO NOTHING",params![projection.session_id,claim_id])?;
     fields::apply(tx, projection.session_id, claim_id, &projection.fields)?;
     for (receipt, event) in receipts.iter().zip(events) {

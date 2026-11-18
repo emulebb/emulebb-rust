@@ -58,8 +58,8 @@ pub(crate) use kad::{
 };
 pub(crate) use logs::{clear_logs, logs};
 pub(crate) use searches::{
-    create_search, delete_search, delete_searches, download_search_result, search,
-    search_result_observations, searches,
+    create_search, delete_search, delete_searches, download_search_result, search, search_result,
+    search_result_observations, search_results, searches,
 };
 pub(crate) use servers::{
     connect_server, create_server, delete_server, server, servers, servers_connect,

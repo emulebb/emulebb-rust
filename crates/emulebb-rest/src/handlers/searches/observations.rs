@@ -3,28 +3,16 @@ use super::super::resource;
 use super::*;
 use axum::response::Response;
 use emulebb_metadata::MetadataSearchResultObservation;
-use serde::Deserialize;
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Query {
-    limit: Option<usize>,
-    cursor: Option<String>,
-}
 
 pub(crate) async fn search_result_observations(
     State(state): State<RestState>,
     Path((session, claim)): Path<(String, String)>,
     RawQuery(raw): RawQuery,
 ) -> Response {
-    let query = match parse_optional_query::<Query>(raw.as_deref()) {
+    let query = match parse_optional_query::<super::browse::Paging>(raw.as_deref()) {
         Ok(value) => value,
         Err(error) => return *error,
     };
-    let limit = query.limit.unwrap_or(100);
-    if !(1..=200).contains(&limit) {
-        return out_of_range_response("limit", 1, 200);
-    }
     let identity = |value: &str| {
         value
             .parse::<i64>()
@@ -35,16 +23,11 @@ pub(crate) async fn search_result_observations(
         return resource::invalid("search and result IDs must be positive decimal i64 strings");
     };
     let scope = format!("search-observations:{session}:{claim}");
-    let after = match query.cursor {
-        None => 0,
-        Some(value) => match resource::decode_cursor(&value, &scope) {
-            Ok(value) => match identity(&value) {
-                Some(id) => id,
-                None => return resource::invalid("cursor is invalid for this collection"),
-            },
-            Err(error) => return *error,
-        },
+    let (limit, after) = match query.resolve(&scope) {
+        Ok(value) => value,
+        Err(error) => return *error,
     };
+    let after = after.unwrap_or(0);
     match state
         .core
         .search_result_observations_page(session, claim, after, limit)

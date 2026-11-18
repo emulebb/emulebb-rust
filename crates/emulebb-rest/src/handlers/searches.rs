@@ -1,5 +1,7 @@
 //! Search resources and selected-result actions.
+mod browse;
 mod observations;
+pub(crate) use browse::{search, search_result, search_results, searches};
 pub(crate) use observations::search_result_observations;
 
 use axum::{
@@ -14,18 +16,6 @@ use emulebb_core::{SearchCreate, SearchResultDownloadCreate};
 
 use crate::handlers::prelude::*;
 
-pub(crate) async fn searches(State(state): State<RestState>) -> impl IntoResponse {
-    api_collection(
-        state
-            .core
-            .searches()
-            .await
-            .iter()
-            .map(search_session_response)
-            .collect::<Vec<_>>(),
-    )
-}
-
 pub(crate) async fn create_search(
     State(state): State<RestState>,
     body: Bytes,
@@ -35,26 +25,18 @@ pub(crate) async fn create_search(
         Err(response) => return *response,
     };
     match state.core.create_search(request).await {
-        Ok(search) => api_ok(search_response(&search)).into_response(),
+        Ok(search) => {
+            let mut response =
+                super::resource::item(StatusCode::CREATED, search_created_response(&search));
+            response.headers_mut().insert(
+                axum::http::header::LOCATION,
+                format!("/api/v1/searches/{}", search.id)
+                    .parse()
+                    .expect("allocated search identity is a valid path"),
+            );
+            response
+        }
         Err(error) => super::persistence::persistence_error(error),
-    }
-}
-
-pub(crate) async fn search(
-    State(state): State<RestState>,
-    Path(search_id): Path<String>,
-    RawQuery(raw_query): RawQuery,
-) -> impl IntoResponse {
-    let query = match parse_optional_query::<SearchResultsQuery>(raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(response) => return *response,
-    };
-    match state.core.search(&search_id).await {
-        Some(search) => match search_results_page(search, query) {
-            Ok(page) => api_ok(search_page_response(&page)).into_response(),
-            Err(response) => *response,
-        },
-        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response(),
     }
 }
 

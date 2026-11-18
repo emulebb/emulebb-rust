@@ -322,35 +322,21 @@ test("loads a selected search session from a deep link", async ({ page }) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ data: { items: state.searches } })
+        body: JSON.stringify({ data: state.searches, meta: { apiVersion: "v1", nextCursor: null, hasMore: false } })
       });
       return;
     }
     if (request.method() === "GET" && path === "searches/7") {
-      expect(requestUrl.searchParams.get("offset")).toBe("0");
+      await route.fulfill({ json: { data: state.searches[0], meta: { apiVersion: "v1" } } });
+      return;
+    }
+    if (request.method() === "GET" && path === "searches/7/results") {
       expect(requestUrl.searchParams.get("limit")).toBe("100");
-      expect(requestUrl.searchParams.get("exactTotal")).toBe("true");
       expect(requestUrl.searchParams.get("sort")).toBe("sources");
       expect(requestUrl.searchParams.get("order")).toBe("desc");
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: {
-            ...state.searches[0],
-            total: 1,
-            offset: 0,
-            limit: 100,
-            items: [{
-              hash: "00112233445566778899AABBCCDDEEFF",
-              displayName: "Synthetic Archive.bin",
-              sizeBytes: 4096,
-              sources: 3,
-              fileType: "arc"
-            }]
-          }
-        })
-      });
+      await route.fulfill({ json: { data: [{ id: "13", searchId: "7", hash: "00112233445566778899aabbccddeeff",
+        displayName: "Synthetic Archive.bin", sizeBytes: 4096, sources: 3, fileType: "arc" }],
+        meta: { apiVersion: "v1", nextCursor: null, hasMore: false } } });
       return;
     }
     await fallback(route);
@@ -408,7 +394,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     }
     if (method === "GET" && path === "searches") {
       record();
-      await fulfill({ items: state.searches });
+      await route.fulfill({ json: { data: [...state.searches].reverse(), meta: { apiVersion: "v1", nextCursor: null, hasMore: false } } });
       return;
     }
     if (method === "POST" && path === "servers/operations/import-met-url") {
@@ -474,14 +460,15 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     }
     if (method === "GET" && /^searches\/\d+$/.test(path)) {
       record();
+      await fulfill(state.searches.find((candidate: any) => candidate.id === path.split("/")[1]));
+      return;
+    }
+    if (method === "GET" && /^searches\/\d+\/results$/.test(path)) {
+      record();
       const searchId = path.split("/")[1];
-      const search = state.searches.find((candidate: any) => candidate.id === searchId);
-      await fulfill({
-        ...search,
-        total: 1,
-        offset: 0,
-        limit: 250,
-        items: searchId === "2"
+      await route.fulfill({ json: {
+        meta: { apiVersion: "v1", nextCursor: null, hasMore: false },
+        data: searchId === "2"
           ? [{
               id: "13",
               hash: resultHash,
@@ -495,7 +482,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
 
             }]
           : [{ id: "14", hash: "00112233445566778899AABBCCDDEEFF", displayName: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
-      });
+      } });
       return;
     }
     if (method === "GET" && path === "searches/2/results/13/observations") {
@@ -633,7 +620,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await searchPanel.getByRole("combobox", { name: "Sort search results" }).selectOption("rating:desc");
   await expect.poll(() => requests.some((request) =>
     request.method === "GET" &&
-    request.path === "searches/2" &&
+    request.path === "searches/2/results" &&
     new URLSearchParams(request.query).get("sort") === "rating" &&
     new URLSearchParams(request.query).get("order") === "desc"
   )).toBe(true);
@@ -685,7 +672,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) =>
     request.method === "GET" &&
-    request.path === "searches/2" &&
+    request.path === "searches/2/results" &&
     new URLSearchParams(request.query).get("sort") === "sources" &&
     new URLSearchParams(request.query).get("order") === "desc"
   )).toBe(true);

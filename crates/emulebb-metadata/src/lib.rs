@@ -138,7 +138,8 @@ pub use search_model::{
     MetadataSearchNameQuality, MetadataSearchNameVote, MetadataSearchPage,
     MetadataSearchProjection, MetadataSearchPublication, MetadataSearchResult,
     MetadataSearchResultFields, MetadataSearchResultHeader, MetadataSearchResultObservation,
-    MetadataSearchResultSummary, MetadataSearchSpec,
+    MetadataSearchResultSort, MetadataSearchResultSummary, MetadataSearchResultsQuery,
+    MetadataSearchSortOrder, MetadataSearchSpec,
 };
 pub use search_store::normalized_search_query;
 pub use shared_membership_store::ObservedRootChanged;

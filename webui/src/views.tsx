@@ -47,6 +47,7 @@ import {
   RuntimeDiagnostics,
   SearchItem,
   SearchResultMedia,
+  SearchResult,
   ServerItem,
   SharedDirectories,
   SharedFileIgnores,
@@ -388,6 +389,11 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
 export function SearchView(props: {
   searches: SearchItem[];
   selectedSearch: SearchItem | null;
+  resultPage: CursorPage<SearchResult> | null;
+  resultCursor: string | null;
+  sessionCursor: string | null;
+  sessionNextCursor: string | null;
+  selectSearchSessionsPage: (cursor: string | null) => void;
   selectedSearchId?: string;
   categories: Category[];
   client: RestClient;
@@ -396,7 +402,7 @@ export function SearchView(props: {
   searchSort: string;
   searchOrder: string;
   selectSearchSort: (sort: string, order: string) => void;
-  selectSearchPage: (offset: number) => void;
+  selectSearchPage: (cursor: string | null) => void;
   onSearchCreated: (search: SearchItem) => void;
   onSearchDeleted: (searchId: string) => void;
   onSearchesCleared: () => void;
@@ -418,20 +424,13 @@ export function SearchView(props: {
   const [category, setCategory] = useState("");
   const [paused, setPaused] = useState(false);
   const [observationSelection, setObservationSelection] = useState<{ session: string; claim: string } | null>(null);
-  const orderedSearches = useMemo(
-    () => [...props.searches].sort((left, right) => Number(right.id) - Number(left.id)),
-    [props.searches]
-  );
+  const selectedSearch = props.selectedSearch?.id === props.selectedSearchId ? props.selectedSearch : null;
+  const orderedSearches = props.searches;
   const selectedSummary = props.searches.find((search) => search.id === props.selectedSearchId);
-  const displayedSearch = props.selectedSearch ?? selectedSummary;
-  const results = props.selectedSearch?.items ?? props.selectedSearch?.results ?? [];
-  const resultTotal = props.selectedSearch?.total ?? displayedSearch?.resultCount ?? results.length;
-  const resultOffset = props.selectedSearch?.offset ?? 0;
-  const resultLimit = Math.max(1, (props.selectedSearch?.limit ?? results.length) || 1);
-  const resultPageStart = results.length === 0 ? 0 : resultOffset + 1;
-  const resultPageEnd = Math.min(resultOffset + results.length, resultTotal);
+  const displayedSearch = selectedSearch ?? selectedSummary;
+  const results = props.resultPage?.data ?? [];
   const searchQueryError = searchQueryValidationError(query);
-  const displayedStatus = displayedSearch?.status ?? displayedSearch?.state ?? "unknown";
+  const displayedStatus = displayedSearch?.status ?? "unknown";
   const searchProgress = displayedSearch?.progress;
   const searchPhaseLabel = searchProgress?.phase
     ? searchProgress.phase.replace(/-/g, " ")
@@ -507,7 +506,7 @@ export function SearchView(props: {
     <section class="panel card">
       <div class="section-title">
         <h2>Search</h2>
-        <span>{props.searches.length} sessions</span>
+        <span>{props.searches.length} sessions on this page</span>
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
@@ -548,7 +547,7 @@ export function SearchView(props: {
             {!props.selectedSearchId && <option value="" disabled>Select a search session</option>}
             {orderedSearches.map((search) => (
               <option key={search.id} value={search.id}>
-                #{search.id} {search.query || "Untitled search"} · {search.status ?? search.state ?? "unknown"} · {search.resultCount ?? search.total ?? 0} results
+                #{search.id} {search.query || "Untitled search"} · {search.status ?? "unknown"} · {search.resultCount} results
               </option>
             ))}
           </select>
@@ -659,6 +658,10 @@ export function SearchView(props: {
           <option value="codec:asc">Codec, A–Z</option>
         </select>
       </div>
+      <div class="form-row" role="group" aria-label="Search session pages">
+        <span>Session pages</span><CursorControls cursor={props.sessionCursor} nextCursor={props.sessionNextCursor}
+          loading={false} change={props.selectSearchSessionsPage} />
+      </div>
       <TableScroll label="Search results">
         <table class="table table-vcenter card-table">
           <thead>
@@ -687,12 +690,12 @@ export function SearchView(props: {
                 </td>
                 <td>{result.sizeBytes === null ? "Unknown" : formatBytes(result.sizeBytes)}</td>
                 <td>
-                  {result.sources ?? result.availability ?? 0}
+                  {result.sources ?? 0}
                   <span class="search-complete-sources">{result.completeSources ?? 0} complete</span>
                 </td>
                 <td>{(result.rating ?? 0) > 0 ? `${result.rating}/5` : "—"}</td>
                 <td>{result.fileType ?? ""}</td>
-                <td><button class="btn" type="button" onClick={() => setObservationSelection({ session: props.selectedSearch!.id, claim: result.id })}>Observations</button></td>
+                <td><button class="btn" type="button" onClick={() => setObservationSelection({ session: selectedSearch!.id, claim: result.id })}>Observations</button></td>
                 <td><code class="search-result-hash">{result.hash}</code></td>
                 <td>
                   <button class="btn"
@@ -700,7 +703,7 @@ export function SearchView(props: {
                     title="Download this result"
                     onClick={() => void props.run(
                       () => createDownloadWithChoice((redownload) =>
-                        props.client.post(`searches/${props.selectedSearch?.id}/results/${result.id}/download`, {
+                        props.client.post(`searches/${selectedSearch?.id}/results/${result.id}/download`, {
                           intent: paused ? "stopped" : "started",
                           category: category || null,
                           redownload
@@ -720,34 +723,16 @@ export function SearchView(props: {
           </tbody>
         </table>
       </TableScroll>
-      {observationSelection && observationSelection.session === props.selectedSearch?.id && (
+      {observationSelection && observationSelection.session === selectedSearch?.id && (
         <SearchObservations key={`${observationSelection.session}:${observationSelection.claim}`}
           client={props.client} session={observationSelection.session} claim={observationSelection.claim}
           close={() => setObservationSelection(null)} />
       )}
-      {props.selectedSearch && (
-        <div class="form-row subtle-row search-pagination" aria-label="Search result pages">
-          <span>
-            Showing {resultPageStart.toLocaleString()}–{resultPageEnd.toLocaleString()} of {resultTotal.toLocaleString()} results
-          </span>
-          <button
-            class="btn"
-            type="button"
-            disabled={resultOffset === 0}
-            aria-label="Previous search results page"
-            onClick={() => props.selectSearchPage(Math.max(0, resultOffset - resultLimit))}
-          >
-            Previous
-          </button>
-          <button
-            class="btn"
-            type="button"
-            disabled={resultPageEnd >= resultTotal}
-            aria-label="Next search results page"
-            onClick={() => props.selectSearchPage(resultOffset + resultLimit)}
-          >
-            Next
-          </button>
+      {selectedSearch && (
+        <div class="form-row subtle-row search-pagination" role="group" aria-label="Search result pages">
+          <span>{results.length.toLocaleString()} results on this page · {(displayedSearch?.resultCount ?? 0).toLocaleString()} collected</span>
+          <CursorControls cursor={props.resultCursor} nextCursor={props.resultPage?.meta.nextCursor ?? null}
+            loading={props.resultPage === null} change={props.selectSearchPage} />
         </div>
       )}
     </section>

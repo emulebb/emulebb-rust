@@ -191,6 +191,26 @@ impl EmulebbCore {
             .await?)
     }
 
+    /// Read globally sorted materialized summaries without hydrating provenance.
+    pub async fn search_results_page(
+        &self,
+        query: emulebb_metadata::MetadataSearchResultsQuery,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchPage<MetadataSearchResultHeader>>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_results_page(query).await?)
+    }
+    /// Ephemeral active-search telemetry; settled/restarted sessions need no cache.
+    pub async fn search_progress(&self, id: &str) -> Option<SearchProgress> {
+        self.state
+            .lock()
+            .await
+            .searches
+            .get(id)
+            .filter(|search| matches!(search.status.as_str(), "queued" | "running"))
+            .map(|search| search.progress.clone())
+    }
     pub async fn searches(&self) -> Vec<Search> {
         self.state.lock().await.searches.values().cloned().collect()
     }

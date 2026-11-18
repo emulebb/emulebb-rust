@@ -1,4 +1,5 @@
 //! Indexed search browsing with independent row and owned-byte bounds.
+mod sorted;
 use super::*;
 use crate::{MetadataSearchHeader, MetadataSearchPage, MetadataSearchResultHeader};
 use rusqlite::Row;

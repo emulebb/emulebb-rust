@@ -186,25 +186,6 @@ export type DownloadSource = {
   [key: string]: unknown;
 };
 
-export type SearchResultObservation = {
-  origin: string;
-  reporterEndpoint: string | null;
-  rawName: string;
-  normalizedName: string;
-  sizeBytes: number | null;
-  sources: number;
-  completeSources: number;
-  sourceClientId?: number | null;
-  sourceClientPort?: number | null;
-  fileType: string;
-  media?: SearchResultMedia;
-  rating: number;
-  aichHash?: string | null;
-  complete: boolean;
-  directory: string;
-  observedAt: string;
-};
-
 export type SearchResultMedia = {
   artist: string;
   album: string;
@@ -217,33 +198,18 @@ export type SearchResultMedia = {
 export type SearchResult = {
   id: string;
   searchId?: string;
-  type?: string;
   hash: string;
-  displayName?: string;
-  nameConsensus?: {
-    selectedName: string;
-    observationCount: number;
-    candidates: Array<{
-      normalizedName: string;
-      rawNames: string[];
-      votes: number;
-    }>;
-  };
+  displayName: string;
   sizeBytes: number | null;
   sources?: number;
   completeSources?: number;
-  availability?: number;
   fileType?: string;
   media?: SearchResultMedia;
-  knownType?: string;
   extension?: string;
   directory?: string;
   rating?: number;
   aichHash?: string | null;
   complete?: boolean;
-  observations?: SearchResultObservation[];
-  evidence?: Record<string, unknown>;
-  [key: string]: unknown;
 };
 
 export type SearchObservation = {
@@ -293,23 +259,17 @@ export type SearchProgress = {
 export type SearchItem = {
   id: string;
   query?: string;
-  state?: string;
-  status?: string;
+  status?: "queued" | "running" | "completed" | "error";
   statusReason?: string | null;
   requestedMethod?: string;
   resolvedMethod?: string | null;
   type?: string;
   criteria?: SearchCriteria;
-  progress?: SearchProgress;
-  items?: SearchResult[];
-  results?: SearchResult[];
-  total?: number;
-  offset?: number;
-  limit?: number;
-  sort?: string | null;
-  order?: string | null;
-  resultCount?: number;
-  [key: string]: unknown;
+  progress?: SearchProgress | null;
+  resultCount: number;
+  createdAt?: number;
+  updatedAt?: number;
+  completedAt?: number | null;
 };
 
 export type ServerItem = {

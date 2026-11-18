@@ -18,7 +18,7 @@ use emulebb_core::{
 };
 use serde_json::{Value, json};
 
-use crate::{RestState, SearchResultsPage, SharedFileResponse};
+use crate::{RestState, SharedFileResponse};
 
 pub(crate) const CONTRACT_VERSION: &str = "2.0.0";
 
@@ -407,14 +407,6 @@ pub(crate) fn server_status_value(status: &Status, servers: &[ServerInfo]) -> Va
     })
 }
 
-pub(crate) fn search_status_token(status: &str) -> &str {
-    if status == "completed" {
-        "complete"
-    } else {
-        status
-    }
-}
-
 fn firewall_state(firewalled: Option<bool>) -> &'static str {
     match firewalled {
         Some(true) => "firewalled",
@@ -623,52 +615,43 @@ pub(crate) fn search_session_response(search: &Search) -> Value {
         "resolvedMethod": search.resolved_method,
         "type": search.spec.r#type,
         "criteria": search_criteria_response(&search.spec),
-        "status": search_status_token(&search.status),
+        "status": search.status,
         "statusReason": search.status_reason,
         "progress": search.progress,
         "resultCount": search.results.len()
     })
 }
 
-pub(crate) fn search_response(search: &Search) -> Value {
-    // search/start contract: a freshly created search returns an empty first
-    // page with the shared {items,total,offset,limit} shape (status "running").
-    // Results are fetched by polling GET /searches/{id}.
-    json!({
-        "id": search.id,
-        "query": search.spec.query,
-        "requestedMethod": search.spec.method,
-        "resolvedMethod": search.resolved_method,
-        "type": search.spec.r#type,
-        "criteria": search_criteria_response(&search.spec),
-        "status": search_status_token(&search.status),
-        "statusReason": search.status_reason,
-        "progress": search.progress,
-        "total": 0,
-        "offset": 0,
-        "limit": 100,
-        "items": []
-    })
+pub(crate) fn search_created_response(search: &Search) -> Value {
+    json!({"id":search.id,"query":search.spec.query,"requestedMethod":search.spec.method,
+        "resolvedMethod":search.resolved_method,"type":search.spec.r#type,"criteria":search_criteria_response(&search.spec),
+        "status":search.status,"statusReason":search.status_reason,"progress":search.progress,
+        "resultCount":0,"createdAt":search.created_at.timestamp(),"updatedAt":search.updated_at.timestamp(),"completedAt":null})
 }
-
-pub(crate) fn search_page_response(search: &SearchResultsPage) -> Value {
-    json!({
-        "id": search.id,
-        "query": search.spec.query,
-        "requestedMethod": search.spec.method,
-        "resolvedMethod": search.resolved_method,
-        "type": search.spec.r#type,
-        "criteria": search_criteria_response(&search.spec),
-        "status": search_status_token(&search.status),
-        "statusReason": search.status_reason,
-        "progress": search.progress,
-        "total": search.total,
-        "offset": search.offset,
-        "limit": search.limit,
-        "sort": search.sort,
-        "order": search.order,
-        "items": search_results_response(&search.results, search.include_evidence)
-    })
+pub(crate) fn search_header_response(
+    header: &emulebb_metadata::MetadataSearchHeader,
+    progress: Option<&emulebb_core::SearchProgress>,
+) -> Value {
+    let data = &header.data;
+    let spec = &data.spec;
+    json!({"id":header.id.to_string(),"query":spec.query,"requestedMethod":spec.method,
+        "resolvedMethod":data.resolved_method,"type":spec.file_type,"status":data.status,"statusReason":data.status_reason,
+        "progress":progress,"resultCount":header.result_count,"createdAt":data.created_at_s,"updatedAt":data.updated_at_s,"completedAt":data.completed_at_s,
+        "criteria":{"extension":spec.extension,"minSizeBytes":spec.min_size_bytes,"maxSizeBytes":spec.max_size_bytes,
+            "minAvailability":spec.min_availability,"minCompleteSources":spec.min_complete_sources,"minBitrateKbps":spec.min_bitrate_kbps,
+            "minLengthSeconds":spec.min_length_seconds,"codec":spec.codec,"title":spec.title,"album":spec.album,"artist":spec.artist}})
+}
+pub(crate) fn search_summary_response(
+    session: i64,
+    row: &emulebb_metadata::MetadataSearchResultHeader,
+) -> Value {
+    let s = &row.summary;
+    json!({"id":row.claim_id.to_string(),"searchId":session.to_string(),"hash":row.file_hash,"displayName":s.name,
+        "sizeBytes":row.size_bytes,"sources":s.source_count,"completeSources":s.complete_source_count,
+        "fileType":s.file_type,"media":{"artist":s.media_artist,"album":s.media_album,"title":s.media_title,
+            "lengthSeconds":s.media_length_seconds,"bitrateKbps":s.media_bitrate_kbps,"codec":s.media_codec},
+        "rating":s.rating,"aichHash":(!s.aich_hash.is_empty()).then_some(&s.aich_hash),"complete":s.complete,"directory":s.directory,
+        "extension":FsPath::new(&s.name).extension().and_then(|v|v.to_str()).unwrap_or_default()})
 }
 
 fn search_criteria_response(spec: &SearchSpec) -> Value {

@@ -913,6 +913,7 @@ CREATE TABLE content_claims (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
     ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
     size_bytes BLOB CHECK(size_bytes IS NULL OR length(size_bytes) = 8),
+    size_sort_key BLOB GENERATED ALWAYS AS (CASE WHEN size_bytes IS NULL THEN x'00' ELSE CAST(x'01'||size_bytes AS BLOB) END) STORED NOT NULL,
     first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
     last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= first_seen_at_s)
 ) STRICT;
@@ -920,6 +921,8 @@ CREATE UNIQUE INDEX content_claims_known_size_idx
 ON content_claims(ed2k_hash, size_bytes) WHERE size_bytes IS NOT NULL;
 CREATE UNIQUE INDEX content_claims_unknown_size_idx
 ON content_claims(ed2k_hash) WHERE size_bytes IS NULL;
+
+CREATE UNIQUE INDEX content_claims_size_sort_idx ON content_claims(id,size_sort_key);
 
 CREATE TABLE content_claim_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
@@ -979,7 +982,8 @@ CREATE TABLE search_sessions (
 
 CREATE TABLE search_results (
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
-    claim_id INTEGER NOT NULL REFERENCES content_claims(id),
+    claim_id INTEGER NOT NULL,
+    size_sort_key BLOB NOT NULL,
     name TEXT NOT NULL,
     ed2k_source_count INTEGER NOT NULL DEFAULT 0 CHECK(ed2k_source_count BETWEEN 0 AND 4294967295),
     ed2k_complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(ed2k_complete_source_count BETWEEN 0 AND 4294967295),
@@ -1001,6 +1005,7 @@ CREATE TABLE search_results (
     complete INTEGER NOT NULL CHECK(complete IN (0, 1)),
     directory TEXT NOT NULL,
     PRIMARY KEY(session_id, claim_id),
+    FOREIGN KEY(claim_id,size_sort_key) REFERENCES content_claims(id,size_sort_key),
     CHECK((source_client_id IS NULL) = (source_client_port IS NULL))
 ) STRICT, WITHOUT ROWID;
 
@@ -1092,7 +1097,7 @@ CREATE INDEX download_delivery_attempts_staging_path_id_idx ON download_delivery
 CREATE INDEX download_delivery_tombstones_original_path_id_idx ON download_delivery_tombstones(original_path_id);
 CREATE INDEX download_delivery_tombstones_tombstone_path_id_idx ON download_delivery_tombstones(tombstone_path_id);
 CREATE INDEX kad_keyword_publishes_known_file_id_idx ON kad_keyword_publishes(known_file_id);
-CREATE INDEX search_results_claim_idx ON search_results(claim_id);
+CREATE INDEX search_results_claim_idx ON search_results(claim_id,size_sort_key);
 
 -- A cheap durable invalidation clock shared by every connection. It contains no
 -- parallel client state: session catalog projections are disposable derivatives.
@@ -1319,3 +1324,17 @@ CREATE TABLE search_field_quality (
 
 CREATE INDEX search_sessions_collecting_idx ON search_sessions(status,id)
 WHERE status IN ('queued','running');
+
+-- Every public result sort has a session-local seek path and immutable tie-breaker.
+CREATE INDEX search_results_sort_name_idx ON search_results(session_id,name,claim_id);
+CREATE INDEX search_results_sort_size_sort_key_idx ON search_results(session_id,size_sort_key,claim_id);
+CREATE INDEX search_results_sort_source_count_idx ON search_results(session_id,source_count,claim_id);
+CREATE INDEX search_results_sort_complete_source_count_idx ON search_results(session_id,complete_source_count,claim_id);
+CREATE INDEX search_results_sort_rating_idx ON search_results(session_id,rating,claim_id);
+CREATE INDEX search_results_sort_file_type_idx ON search_results(session_id,file_type,claim_id);
+CREATE INDEX search_results_sort_media_artist_idx ON search_results(session_id,media_artist,claim_id);
+CREATE INDEX search_results_sort_media_album_idx ON search_results(session_id,media_album,claim_id);
+CREATE INDEX search_results_sort_media_title_idx ON search_results(session_id,media_title,claim_id);
+CREATE INDEX search_results_sort_media_length_seconds_idx ON search_results(session_id,media_length_seconds,claim_id);
+CREATE INDEX search_results_sort_media_bitrate_kbps_idx ON search_results(session_id,media_bitrate_kbps,claim_id);
+CREATE INDEX search_results_sort_media_codec_idx ON search_results(session_id,media_codec,claim_id);

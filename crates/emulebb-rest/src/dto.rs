@@ -5,7 +5,7 @@
 //! `page()` projections onto the shared `PageQuery`. Extracted verbatim from
 //! `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
-use emulebb_core::{SearchProgress, SearchResult, SearchSpec, SharedFilePublicationStatus};
+use emulebb_core::SharedFilePublicationStatus;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,64 +100,6 @@ impl UploadQueueQuery {
             limit: self.limit,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SearchResultsQuery {
-    pub(crate) offset: Option<usize>,
-    pub(crate) limit: Option<usize>,
-    #[serde(default)]
-    pub(crate) include_evidence: Option<bool>,
-    #[serde(default)]
-    pub(crate) exact_total: Option<bool>,
-    pub(crate) sort: Option<SearchResultSort>,
-    pub(crate) order: Option<SearchSortOrder>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum SearchResultSort {
-    #[serde(rename = "displayName")]
-    Name,
-    SizeBytes,
-    Sources,
-    CompleteSources,
-    Rating,
-    FileType,
-    Artist,
-    Album,
-    Title,
-    LengthSeconds,
-    BitrateKbps,
-    Codec,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum SearchSortOrder {
-    Asc,
-    Desc,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SearchResultsPage {
-    pub(crate) id: String,
-    pub(crate) spec: SearchSpec,
-    pub(crate) resolved_method: Option<String>,
-    pub(crate) status: String,
-    /// Additive REST field: honest reason for a non-completed status (e.g.
-    /// `waiting-for-server-connection` while queued). `null` when absent.
-    pub(crate) status_reason: Option<String>,
-    pub(crate) progress: SearchProgress,
-    pub(crate) total: usize,
-    pub(crate) offset: usize,
-    pub(crate) limit: usize,
-    pub(crate) include_evidence: bool,
-    pub(crate) sort: Option<SearchResultSort>,
-    pub(crate) order: Option<SearchSortOrder>,
-    pub(crate) results: Vec<SearchResult>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

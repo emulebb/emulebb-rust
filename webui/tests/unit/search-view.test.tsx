@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 
-import { RestClient, RestError, type SearchItem } from "../../src/api";
+import { RestClient, RestError, type SearchItem, type CursorPage, type SearchResult } from "../../src/api";
 import { SearchView } from "../../src/views";
 
 describe("SearchView", () => {
@@ -17,16 +17,19 @@ describe("SearchView", () => {
       query: "linux",
       status: "completed",
       resultCount: 1,
-      total: 1,
-      offset: 0,
-      limit: 100,
-      items: [{ id: "11", hash, displayName: "Sample.bin", sizeBytes: 1 }]
+
     };
+    const resultPage: CursorPage<SearchResult> = { data: [{ id: "11", hash, displayName: "Sample.bin", sizeBytes: 1 }], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
       <SearchView
         searches={[search]}
         selectedSearch={search}
+        resultPage={resultPage}
+        resultCursor="current"
+        sessionCursor={null}
+        sessionNextCursor={null}
+        selectSearchSessionsPage={() => {}}
         selectedSearchId="7"
         categories={[]}
         client={client}
@@ -61,26 +64,29 @@ describe("SearchView", () => {
     confirm.mockRestore();
   });
 
-  it("shows the exact result window and requests adjacent pages", () => {
+  it("uses result cursors while distinguishing unknown size from zero", () => {
     const selectSearchPage = vi.fn();
     const search: SearchItem = {
       id: "7",
       query: "linux",
       status: "completed",
       resultCount: 250,
-      total: 250,
-      offset: 100,
-      limit: 100,
-      items: [
+
+    };
+    const resultPage: CursorPage<SearchResult> = { data: [
         { id: "11", hash: "00112233445566778899aabbccddeeff", displayName: "Result 101.bin", sizeBytes: null },
         { id: "12", hash: "ffeeddccbbaa99887766554433221100", displayName: "Result 102.bin", sizeBytes: 0 }
-      ]
-    };
+      ], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
       <SearchView
         searches={[search]}
         selectedSearch={search}
+        resultPage={resultPage}
+        resultCursor="current"
+        sessionCursor={null}
+        sessionNextCursor={null}
+        selectSearchSessionsPage={() => {}}
         selectedSearchId="7"
         categories={[]}
         client={new RestClient()}
@@ -96,18 +102,18 @@ describe("SearchView", () => {
       />
     );
 
-    expect(screen.getByText("Showing 101–102 of 250 results")).toBeInTheDocument();
+    expect(screen.getByText("2 results on this page · 250 collected")).toBeInTheDocument();
     for (const button of screen.getAllByRole("button", { name: "Download" })) {
       expect(button).toBeEnabled();
     }
 
     expect(screen.getByText("Unknown")).toBeInTheDocument();
     expect(screen.getByText("0 B")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Previous search results page" }));
-    fireEvent.click(screen.getByRole("button", { name: "Next search results page" }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Search result pages" })).getByRole("button", { name: "First page" }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Search result pages" })).getByRole("button", { name: "Next page" }));
 
-    expect(selectSearchPage).toHaveBeenNthCalledWith(1, 0);
-    expect(selectSearchPage).toHaveBeenNthCalledWith(2, 200);
+    expect(selectSearchPage).toHaveBeenNthCalledWith(1, null);
+    expect(selectSearchPage).toHaveBeenNthCalledWith(2, "next");
   });
 
   it("presents search provenance and manages result ordering and sessions", async () => {
@@ -132,9 +138,6 @@ describe("SearchView", () => {
         unit: "servers"
       },
       resultCount: 1,
-      total: 1,
-      offset: 0,
-      limit: 100,
       criteria: {
         extension: "flac",
         minAvailability: 4,
@@ -142,7 +145,9 @@ describe("SearchView", () => {
         codec: "flac",
         artist: "Example Artist"
       },
-      items: [{
+
+    };
+    const resultPage: CursorPage<SearchResult> = { data: [{
         id: "13",
         hash: "00112233445566778899aabbccddeeff",
         displayName: "Primary.flac",
@@ -163,13 +168,17 @@ describe("SearchView", () => {
           codec: "FLAC"
         },
 
-      }]
-    };
+      }], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
       <SearchView
         searches={[search]}
         selectedSearch={search}
+        resultPage={resultPage}
+        resultCursor="current"
+        sessionCursor={null}
+        sessionNextCursor={null}
+        selectSearchSessionsPage={() => {}}
         selectedSearchId="9"
         categories={[]}
         client={client}

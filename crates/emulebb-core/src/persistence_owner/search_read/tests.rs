@@ -165,3 +165,26 @@ async fn a_read_failure_does_not_fault_or_replay_the_persistence_owner() {
     assert!(owner.search_header(1).await.unwrap().value().is_none());
     owner.close_and_drain().await.unwrap();
 }
+
+#[tokio::test]
+async fn sorted_pages_release_anchor_preparation_and_retain_only_the_page_charge() {
+    let (_store, _state, owner, publication, events) = search_fixture().await;
+    let session = publication.search_id.parse().unwrap();
+    owner
+        .observe_content(&events, Some(&publication))
+        .await
+        .unwrap();
+    let query = emulebb_metadata::MetadataSearchResultsQuery {
+        session_id: session,
+        after_claim_id: None,
+        sort: emulebb_metadata::MetadataSearchResultSort::Sources,
+        order: emulebb_metadata::MetadataSearchSortOrder::Desc,
+        limit: 1,
+    };
+    let page = owner.search_results_page(query).await.unwrap();
+    assert_eq!(page.value().as_ref().unwrap().items.len(), 1);
+    assert_eq!(usage(&owner), (0, 1024 * 1024));
+    drop(page);
+    assert_eq!(usage(&owner), (0, 0));
+    owner.close_and_drain().await.unwrap();
+}
