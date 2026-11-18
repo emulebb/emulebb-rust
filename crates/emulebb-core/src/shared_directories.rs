@@ -2474,9 +2474,17 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     if core.lifecycle_state_name() != "running" {
         return Ok(());
     }
-    core.ed2k_transfers
-        .refresh_complete_shared_catalog()
-        .await?;
+    let background_core = core.clone();
+    if core
+        .ed2k_transfers
+        .refresh_complete_shared_catalog_while(move || {
+            background_core.lifecycle_state_name() == "running"
+        })
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
     record_reload_progress(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.active.clear();

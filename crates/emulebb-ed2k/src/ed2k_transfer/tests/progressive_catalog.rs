@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::Ed2kRuntimeConfig;
 use emulebb_metadata::{MetadataSharedDirectoryRoot, MetadataStore, MetadataVerifiedLocalContent};
+use std::sync::atomic::Ordering;
 
 fn path_evidence(
     path: &std::path::Path,
@@ -283,6 +284,24 @@ async fn byte_capped_catalog_pages_advance_past_rejected_candidate_without_skipp
     );
     let runtime = Ed2kTransferRuntime::load_or_create_with_metadata(&root, metadata).unwrap();
     assert_eq!(runtime.shared_catalog_count().await, files.len() - 1);
+    let generation = runtime.shared_catalog_generation.load(Ordering::Acquire);
+    let checkpoints = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_checkpoints = std::sync::Arc::clone(&checkpoints);
+    assert_eq!(
+        runtime
+            .refresh_complete_shared_catalog_while(move || {
+                worker_checkpoints.fetch_add(1, Ordering::AcqRel) < 3
+            })
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(checkpoints.load(Ordering::Acquire) > 1);
+    assert_eq!(runtime.shared_catalog_count().await, files.len() - 1);
+    assert_eq!(
+        runtime.shared_catalog_generation.load(Ordering::Acquire),
+        generation
+    );
     assert_eq!(
         runtime.refresh_complete_shared_catalog().await.unwrap(),
         files.len() - 1
