@@ -83,3 +83,38 @@ pub struct MetadataSearchResultObservation {
     pub last_seen_at_s: i64,
     pub observation_count: i64,
 }
+
+/// Session metadata for browsing; it never owns a result/provenance snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchHeader {
+    pub id: i64,
+    pub data: MetadataSearchData,
+    pub result_count: u64,
+}
+
+/// One materialized claim summary without observation hydration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchResultHeader {
+    pub claim_id: i64,
+    pub file_hash: String,
+    pub size_bytes: Option<u64>,
+    pub summary: MetadataSearchResultSummary,
+}
+
+#[derive(Debug)]
+pub struct MetadataSearchPage<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+}
+
+/// Bounded initial peer/name evidence for one selected claim, not full provenance.
+#[derive(Debug)]
+pub struct MetadataSearchDownloadSeed {
+    pub claim_id: i64,
+    pub file_hash: String,
+    pub size_bytes: Option<u64>,
+    pub name: String,
+    pub source_client_id: Option<u32>,
+    pub source_client_port: Option<u16>,
+    pub observations: Vec<MetadataSearchResultObservation>,
+}

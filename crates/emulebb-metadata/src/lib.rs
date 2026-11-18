@@ -134,7 +134,8 @@ pub use profile_ownership::ProfileLeaseGuard;
 pub use profile_store::{FriendWriteTiming, valid_category_name};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{
-    MetadataSearch, MetadataSearchData, MetadataSearchProjection, MetadataSearchResult,
+    MetadataSearch, MetadataSearchData, MetadataSearchDownloadSeed, MetadataSearchHeader,
+    MetadataSearchPage, MetadataSearchProjection, MetadataSearchResult, MetadataSearchResultHeader,
     MetadataSearchResultObservation, MetadataSearchResultSummary, MetadataSearchSpec,
 };
 pub use search_store::normalized_search_query;

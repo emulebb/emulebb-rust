@@ -62,39 +62,61 @@ impl EmulebbCore {
         result_id: &str,
         request: SearchResultDownloadCreate,
     ) -> Result<Option<(bool, RetainedRead<DownloadSummary>)>> {
-        let result = {
-            let state = self.state.lock().await;
-            state
-                .searches
-                .get(search_id)
-                .and_then(|search| search.results.iter().find(|result| result.id == result_id))
-                .cloned()
-        };
-        let Some(result) = result else {
-            return Ok(None);
-        };
-        let sources = search_result_source_hints(&result)
-            .into_iter()
-            .map(initial_source)
-            .collect();
-        let observations = result
+        let session_id: i64 = search_id.parse().context("invalid search identity")?;
+        let claim_id: i64 = result_id
+            .parse()
+            .context("invalid search result identity")?;
+        ensure!(
+            session_id > 0 && session_id.to_string() == search_id,
+            "invalid search identity"
+        );
+        ensure!(
+            claim_id > 0 && claim_id.to_string() == result_id,
+            "invalid search result identity"
+        );
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        let crate::LibraryReply {
+            value,
+            lease: _seed_lease,
+        } = owner.search_download_seed(session_id, claim_id).await?;
+        let Some(seed) = value else { return Ok(None) };
+        let sources = search_source_hints(
+            seed.source_client_id.zip(seed.source_client_port),
+            seed.observations.iter().filter_map(|member| {
+                member
+                    .observation
+                    .event
+                    .metadata
+                    .source_client_id
+                    .zip(member.observation.event.metadata.source_client_port)
+            }),
+        )
+        .into_iter()
+        .map(initial_source)
+        .collect();
+        let observations = seed
             .observations
             .into_iter()
-            .map(|observation| {
-                let endpoint = observation
+            .map(|member| {
+                let event = member.observation.event;
+                let metadata = event.metadata;
+                let endpoint = metadata
                     .source_client_id
-                    .zip(observation.source_client_port)
+                    .zip(metadata.source_client_port)
                     .and_then(|(id, port)| search_source_hint(id, port));
+                let name = metadata.name.unwrap_or_default();
                 MetadataTransferFileNameObservation {
                     source_ip: endpoint.as_ref().map(|v| v.ip.clone()),
                     source_tcp_port: endpoint.as_ref().map(|v| v.tcp_port),
                     user_hash: None,
                     client_software: String::new(),
-                    origin: observation.origin,
-                    reporter_endpoint: observation.reporter_endpoint,
-                    normalized_name: emulebb_ed2k::normalize_ed2k_file_name(&observation.name),
-                    raw_name: observation.name,
-                    observed_at_s: observation.observed_at.timestamp(),
+                    origin: event.origin.as_str().into(),
+                    reporter_endpoint: event.reporter_endpoint.map(|v| v.to_string()),
+                    normalized_name: emulebb_ed2k::normalize_ed2k_file_name(&name),
+                    raw_name: name,
+                    observed_at_s: member.last_seen_at_s,
                 }
             })
             .collect();
@@ -102,9 +124,9 @@ impl EmulebbCore {
         // selected execution must consume them; cached search metadata is not trust.
         self.admit_download(
             DownloadAdmissionInput {
-                hash: result.hash,
-                name: result.name,
-                size: result.size_bytes,
+                hash: seed.file_hash,
+                name: seed.name,
+                size: seed.size_bytes,
                 aich: None,
                 peers: MetadataDownloadInitialPeers {
                     sources,
@@ -211,18 +233,13 @@ fn initial_source(source: Ed2kSourceHint) -> MetadataTransferSource {
     }
 }
 
-fn search_result_source_hints(result: &SearchResult) -> Vec<Ed2kSourceHint> {
-    let mut sources = result
-        .observations
-        .iter()
-        .filter_map(|observation| {
-            observation
-                .source_client_id
-                .zip(observation.source_client_port)
-        })
-        .collect::<Vec<_>>();
+fn search_source_hints(
+    aggregate: Option<(u32, u16)>,
+    observations: impl IntoIterator<Item = (u32, u16)>,
+) -> Vec<Ed2kSourceHint> {
+    let mut sources = observations.into_iter().collect::<Vec<_>>();
     if sources.is_empty()
-        && let Some(source) = result.source_client_id.zip(result.source_client_port)
+        && let Some(source) = aggregate
     {
         sources.push(source);
     }
@@ -250,82 +267,30 @@ fn search_source_hint(client_id: u32, tcp_port: u16) -> Option<Ed2kSourceHint> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-
-    use super::search_result_source_hints;
-    use crate::{SearchResult, SearchResultObservation};
-
-    fn result(client_id: Option<u32>, client_port: Option<u16>) -> SearchResult {
-        SearchResult {
-            id: "1".to_owned(),
-            search_id: "1".to_string(),
-            r#type: String::new(),
-            hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "Synthetic.bin".to_string(),
-            size_bytes: Some(1),
-            sources: 1,
-            complete_sources: 0,
-            source_client_id: client_id,
-            source_client_port: client_port,
-            file_type: String::new(),
-            media: Default::default(),
-            rating: 0,
-            aich_hash: String::new(),
-            complete: false,
-            directory: String::new(),
-            observations: Vec::new(),
-        }
-    }
+    use super::search_source_hints;
 
     #[test]
     fn high_id_search_source_becomes_immediate_transfer_hint() {
-        let hints = search_result_source_hints(&result(
-            Some(u32::from_le_bytes([10, 20, 30, 40])),
-            Some(4662),
-        ));
-        let hint = &hints[0];
-
-        assert_eq!(hint.ip, "10.20.30.40");
-        assert_eq!(hint.tcp_port, 4662);
-        assert_eq!(hint.user_hash, None);
+        let hints = search_source_hints(Some((u32::from_le_bytes([10, 20, 30, 40]), 4662)), []);
+        assert_eq!(hints[0].ip, "10.20.30.40");
+        assert_eq!(hints[0].tcp_port, 4662);
+        assert_eq!(hints[0].user_hash, None);
     }
-
     #[test]
     fn low_id_or_incomplete_search_source_is_not_dialed_directly() {
-        assert!(search_result_source_hints(&result(Some(42), Some(4662))).is_empty());
-        assert!(search_result_source_hints(&result(Some(0x2800_000A), None)).is_empty());
+        assert!(search_source_hints(Some((42, 4662)), []).is_empty());
+        assert!(search_source_hints(None, []).is_empty());
+        assert!(search_source_hints(Some((0x2800_000A, 0)), []).is_empty());
     }
-
     #[test]
     fn every_distinct_observed_high_id_becomes_a_transfer_hint() {
-        let mut result = result(None, None);
-        result.observations = [
+        let observations = [
             ([10, 20, 30, 40], 4662),
             ([10, 20, 30, 41], 4663),
             ([10, 20, 30, 40], 4662),
         ]
-        .into_iter()
-        .map(|(ip, port)| SearchResultObservation {
-            origin: "global".to_string(),
-            reporter_endpoint: None,
-            name: result.name.clone(),
-            size_bytes: result.size_bytes,
-            sources: 1,
-            complete_sources: 0,
-            source_client_id: Some(u32::from_le_bytes(ip)),
-            source_client_port: Some(port),
-            file_type: String::new(),
-            media: Default::default(),
-            rating: 0,
-            aich_hash: String::new(),
-            complete: false,
-            directory: String::new(),
-            observed_at: Utc::now(),
-        })
-        .collect();
-
-        let hints = search_result_source_hints(&result);
-
+        .map(|(ip, port)| (u32::from_le_bytes(ip), port));
+        let hints = search_source_hints(None, observations);
         assert_eq!(hints.len(), 2);
         assert_eq!(hints[0].ip, "10.20.30.40");
         assert_eq!(hints[1].ip, "10.20.30.41");

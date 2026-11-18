@@ -4,7 +4,7 @@ use crate::{
     MetadataObservationOrigin, MetadataStore,
 };
 
-fn sample_search() -> MetadataSearchData {
+pub(super) fn sample_search() -> MetadataSearchData {
     MetadataSearchData {
         normalized_query: "sample query".into(),
         spec: MetadataSearchSpec {
@@ -31,7 +31,7 @@ fn sample_search() -> MetadataSearchData {
         completed_at_s: None,
     }
 }
-fn summary(name: &str) -> MetadataSearchResultSummary {
+pub(super) fn summary(name: &str) -> MetadataSearchResultSummary {
     MetadataSearchResultSummary {
         name: name.into(),
         source_count: 3,
@@ -51,7 +51,7 @@ fn summary(name: &str) -> MetadataSearchResultSummary {
         directory: String::new(),
     }
 }
-fn event(size: Option<u64>, name: &str) -> MetadataContentObservationEvent {
+pub(super) fn event(size: Option<u64>, name: &str) -> MetadataContentObservationEvent {
     MetadataContentObservationEvent {
         claim: MetadataContentClaim {
             hash: [0x42; 16],
@@ -68,7 +68,7 @@ fn event(size: Option<u64>, name: &str) -> MetadataContentObservationEvent {
         observed_at_s: 100,
     }
 }
-fn project(store: &MetadataStore, id: i64, size: Option<u64>, name: &str) -> i64 {
+pub(super) fn project(store: &MetadataStore, id: i64, size: Option<u64>, name: &str) -> i64 {
     store
         .ingest_search_observations(
             &[event(size, name)],

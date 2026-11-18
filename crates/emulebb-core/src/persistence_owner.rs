@@ -25,6 +25,7 @@ mod kad;
 mod library_sharing;
 mod library_tags;
 pub(crate) mod search_create;
+mod search_seed;
 mod search_sessions;
 pub(crate) mod search_transition;
 
@@ -112,6 +113,7 @@ enum Command {
     SearchSessions(search_sessions::SearchCommand),
     SearchCreate(search_create::CreateCommand),
     SearchTransition(search_transition::Transition),
+    SearchSeed { session_id: i64, claim_id: i64 },
     LibraryTags(crate::LibraryTagRequest),
     LibrarySharing(library_sharing::SharingCommand),
     Downloads(download::DownloadCommand),
@@ -127,6 +129,7 @@ enum Response {
     SearchRemoved(bool),
     SearchCreated(anyhow::Result<crate::Search>),
     SearchTransitioned,
+    SearchSeed(crate::LibraryReply<Option<emulebb_metadata::MetadataSearchDownloadSeed>>),
     Friend(Option<Friend>),
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
     LibraryTags(
@@ -303,6 +306,10 @@ impl Drop for Permit {
 }
 
 enum DbCommand {
+    SearchSeed {
+        session_id: i64,
+        claim_id: i64,
+    },
     SearchCreate(emulebb_metadata::MetadataSearchData),
     SearchUpdate(i64, emulebb_metadata::MetadataSearchData),
     SearchRemove(Option<i64>),
@@ -341,6 +348,7 @@ enum KadMergeOutcome {
 }
 
 enum DbResponse {
+    SearchSeed(Option<emulebb_metadata::MetadataSearchDownloadSeed>),
     SearchCreated(i64),
     SearchUpdated,
     SearchRemoved(bool),
@@ -494,6 +502,20 @@ impl PersistenceOwner {
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
+                    if let DbCommand::SearchSeed { session_id, claim_id } = &request.command {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.search_download_seed(*session_id, *claim_id)));
+                        let result = match outcome {
+                            Ok(Ok(seed)) => Ok(DbResponse::SearchSeed(seed)),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "search download seed read failed");
+                                Err(PersistenceError::Storage("database operation failed".into()))
+                            }
+                            Err(_) => Err(PersistenceError::Worker),
+                        };
+                        drop(request.command);
+                        let _ = request.response.send(result);
+                        continue;
+                    }
                     if let DbCommand::SearchUpdate(id, header) = &request.command {
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.update_search(*id, header)));
                         let result = match outcome {
@@ -683,7 +705,8 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::SearchUpdate(..)
+                            DbCommand::SearchSeed { .. }
+                            | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
@@ -732,7 +755,8 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::SearchUpdate(..)
+                                DbCommand::SearchSeed { .. }
+                            | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
@@ -762,7 +786,8 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::SearchUpdate(..)
+                            DbCommand::SearchSeed { .. }
+                            | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
@@ -1013,7 +1038,8 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::SearchTransition(_)
+            Command::SearchSeed { .. }
+            | Command::SearchTransition(_)
             | Command::SearchCreate(_)
             | Command::SearchSessions(_)
             | Command::ContentObservations(_)
@@ -1151,6 +1177,9 @@ async fn process(
     category_continuation: &mut Option<category::CategoryContinuation>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    if matches!(&request.command, Command::SearchSeed { .. }) {
+        return search_seed::process(db, request).await;
+    }
     if matches!(&request.command, Command::SearchTransition(_)) {
         return search_transition::process(
             state,
@@ -1259,7 +1288,8 @@ async fn process(
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
-            DbResponse::SearchUpdated
+            DbResponse::SearchSeed(_)
+            | DbResponse::SearchUpdated
             | DbResponse::SearchCreated(_)
             | DbResponse::SearchRemoved(_)
             | DbResponse::ContentObserved(_)
@@ -1291,7 +1321,8 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::SearchTransition(_)
+            Command::SearchSeed { .. }
+            | Command::SearchTransition(_)
             | Command::SearchCreate(_)
             | Command::SearchSessions(_)
             | Command::ContentObservations(_)

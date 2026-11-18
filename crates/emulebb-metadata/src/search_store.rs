@@ -1,3 +1,4 @@
+mod pages;
 use crate::{
     MetadataContentObservationReceipt,
     search_model::{

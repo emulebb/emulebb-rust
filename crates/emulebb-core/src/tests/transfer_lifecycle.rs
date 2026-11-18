@@ -468,7 +468,7 @@ fn kad_search_result_exposes_exact_hash_metadata() {
 }
 
 #[tokio::test]
-async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
+async fn search_result_admission_reads_selected_claim_without_hydrating_history() {
     let runtime_dir = unique_runtime_dir("emulebb-core-download-network-search-result");
     let index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     let core = EmulebbCore::new_with_network(
@@ -502,6 +502,9 @@ async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
     .await;
 
     let result_id = core.search(&search.id).await.unwrap().results[0].id.clone();
+    // Retained membership is authoritative; selecting one result must not
+    // hydrate the session history or depend on its in-memory snapshot.
+    core.state.lock().await.searches.clear();
     let (created, download) = core
         .download_search_result(
             &search.id,

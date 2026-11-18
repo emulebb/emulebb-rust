@@ -972,6 +972,7 @@ CREATE TABLE search_sessions (
     status_reason TEXT CHECK(status_reason IS NULL OR length(status_reason) > 0),
     created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
     updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
+    result_count INTEGER NOT NULL DEFAULT 0 CHECK(result_count >= 0),
     completed_at_s INTEGER CHECK(completed_at_s IS NULL OR completed_at_s >= 0),
     CHECK(min_size_bytes IS NULL OR max_size_bytes IS NULL OR min_size_bytes <= max_size_bytes)
 ) STRICT;
@@ -999,6 +1000,17 @@ CREATE TABLE search_results (
     CHECK((source_client_id IS NULL) = (source_client_port IS NULL))
 ) STRICT, WITHOUT ROWID;
 
+-- Count membership once, independently of packet repetitions and summary updates.
+CREATE TRIGGER search_results_count_insert AFTER INSERT ON search_results
+BEGIN
+    SELECT CASE WHEN (SELECT result_count FROM search_sessions WHERE id=new.session_id)=9223372036854775807
+        THEN RAISE(ABORT, 'search result count overflow') END;
+    UPDATE search_sessions SET result_count=result_count+1 WHERE id=new.session_id;
+END;
+CREATE TRIGGER search_results_count_delete AFTER DELETE ON search_results
+BEGIN
+    UPDATE search_sessions SET result_count=result_count-1 WHERE id=old.session_id;
+END;
 CREATE TABLE search_result_observations (
     session_id INTEGER NOT NULL,
     claim_id INTEGER NOT NULL,
