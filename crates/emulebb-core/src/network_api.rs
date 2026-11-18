@@ -341,7 +341,7 @@ impl EmulebbCore {
             );
             anyhow::bail!("blocked by VPN guard: {}", guard.startup_block_reason);
         }
-        let Some(network) = self.ed2k_network.clone() else {
+        let Some(network) = self.ed2k_network.as_deref().cloned() else {
             anyhow::bail!("ED2K network is not configured");
         };
         if let Some(endpoint) = endpoint {

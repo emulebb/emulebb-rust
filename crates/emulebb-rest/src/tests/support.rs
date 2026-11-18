@@ -279,82 +279,90 @@ pub(crate) async fn known_library_hash(app: &Router, byte: u8) -> String {
 /// search creation remains empty and never consults these fixture results.
 fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[IndexedFile]) {
     use emulebb_metadata::{
-        MetadataSearchData, MetadataSearchResult, MetadataSearchResultObservation,
-        MetadataSearchSpec,
+        MetadataContentClaim, MetadataContentMetadata, MetadataContentObservationEvent,
+        MetadataObservationOrigin, MetadataSearchData, MetadataSearchProjection,
+        MetadataSearchResultFields, MetadataSearchSpec,
     };
-    let results = files
-        .iter()
-        .map(|file| {
-            let sources = u32::try_from(file.availability_score).unwrap();
-            let observation = MetadataSearchResultObservation {
-                origin: "server".into(),
-                reporter_endpoint: Some("192.0.2.4:4661".into()),
-                name: file.name.clone(),
-                size_bytes: file.size_bytes,
-                source_count: sources,
-                complete_source_count: 0,
-                source_client_id: None,
-                source_client_port: None,
-                file_type: file.content_type.clone(),
-                media_artist: String::new(),
-                media_album: String::new(),
-                media_title: String::new(),
-                media_length_seconds: 0,
-                media_bitrate_kbps: 0,
-                media_codec: String::new(),
-                rating: 0,
-                aich_hash: String::new(),
-                complete: false,
-                directory: String::new(),
-                observed_at_ms: 1,
-            };
-            MetadataSearchResult {
-                file_hash: file.ed2k_hash.clone(),
-                name: file.name.clone(),
-                size_bytes: file.size_bytes,
-                source_count: sources,
-                complete_source_count: 0,
-                file_type: file.content_type.clone(),
-                media_artist: String::new(),
-                media_album: String::new(),
-                media_title: String::new(),
-                media_length_seconds: 0,
-                media_bitrate_kbps: 0,
-                media_codec: String::new(),
-                rating: 0,
-                aich_hash: String::new(),
-                complete: false,
-                directory: String::new(),
-                observations: vec![observation],
-            }
-        })
-        .collect();
-    store
-        .create_search(&MetadataSearchData {
-            normalized_query: "paged result".into(),
-            spec: MetadataSearchSpec {
-                query: "paged result".into(),
-                method: "automatic".into(),
-                file_type: String::new(),
-                extension: "iso".into(),
-                min_size_bytes: Some(1),
-                max_size_bytes: Some(1000),
-                min_availability: Some(2),
-                min_complete_sources: None,
-                min_bitrate_kbps: None,
-                min_length_seconds: None,
-                codec: String::new(),
-                title: String::new(),
-                album: String::new(),
-                artist: String::new(),
-            },
-            resolved_method: Some("server".into()),
-            status: "completed".into(),
-            status_reason: None,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            completed_at_ms: Some(1),
-            results,
-        })
-        .unwrap();
+    let mut header = MetadataSearchData {
+        normalized_query: "paged result".into(),
+        spec: MetadataSearchSpec {
+            query: "paged result".into(),
+            method: "automatic".into(),
+            file_type: String::new(),
+            extension: "iso".into(),
+            min_size_bytes: Some(1),
+            max_size_bytes: Some(1000),
+            min_availability: Some(2),
+            min_complete_sources: None,
+            min_bitrate_kbps: None,
+            min_length_seconds: None,
+            codec: String::new(),
+            title: String::new(),
+            album: String::new(),
+            artist: String::new(),
+        },
+        resolved_method: Some("server".into()),
+        status: "running".into(),
+        status_reason: None,
+        created_at_s: 1,
+        updated_at_s: 1,
+        completed_at_s: None,
+    };
+    let session_id = store.create_search(&header).unwrap();
+    for file in files {
+        let sources = u32::try_from(file.availability_score).unwrap();
+        let hash: [u8; 16] = hex::decode(&file.ed2k_hash).unwrap().try_into().unwrap();
+        store
+            .ingest_search_observations(
+                &[MetadataContentObservationEvent {
+                    claim: MetadataContentClaim {
+                        hash,
+                        size_bytes: Some(file.size_bytes),
+                    },
+                    origin: MetadataObservationOrigin::Server,
+                    reporter_endpoint: Some("192.0.2.4:4661".parse().unwrap()),
+                    metadata: MetadataContentMetadata {
+                        name: Some(file.name.clone()),
+                        source_count: Some(sources),
+                        file_type: Some(file.content_type.clone()),
+                        ..Default::default()
+                    },
+                    observed_at_s: 1,
+                }],
+                &MetadataSearchProjection {
+                    session_id,
+                    name_votes: vec![emulebb_metadata::MetadataSearchNameVote {
+                        normalized_name: file.name.clone(),
+                        origin: MetadataObservationOrigin::Server,
+                        reporter_endpoint: Some("192.0.2.4:4661".parse().unwrap()),
+                        quality: emulebb_metadata::MetadataSearchNameQuality {
+                            useful: true,
+                            sources,
+                            complete_sources: 0,
+                            rating: 0,
+                        },
+                    }],
+                    fields: vec![MetadataSearchResultFields {
+                        quality: Default::default(),
+                        source_client_id: None,
+                        source_client_port: None,
+                        file_type: file.content_type.clone(),
+                        media_artist: String::new(),
+                        media_album: String::new(),
+                        media_title: String::new(),
+                        media_length_seconds: 0,
+                        media_bitrate_kbps: 0,
+                        media_codec: String::new(),
+                        rating: 0,
+                        aich_hash: String::new(),
+                        complete: false,
+                        directory: String::new(),
+                    }],
+                },
+            )
+            .unwrap();
+    }
+    header.status = "completed".into();
+    header.completed_at_s = Some(1);
+    store.update_search(session_id, &header).unwrap();
 }

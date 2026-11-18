@@ -384,19 +384,9 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             let client_id = decode_path_parameter(client_id, "clientId")?;
             validate_client_id_path_token(&client_id)?
         }
-        (
-            "POST",
-            [
-                "searches",
-                search_id,
-                "results",
-                hash,
-                "operations",
-                "download",
-            ],
-        ) => {
+        ("POST", ["searches", search_id, "results", result_id, "download"]) => {
             validate_search_id(search_id)?;
-            validate_lowercase_md4_hex(hash, "hash")?;
+            validate_positive_decimal_id(result_id, "resultId")?;
         }
         _ => {}
     }
@@ -420,7 +410,11 @@ fn decode_path_parameter(value: &str, field: &'static str) -> Result<String, Box
 }
 
 fn validate_search_id(value: &str) -> Result<(), Box<Response>> {
-    let value = decode_path_parameter(value, "searchId")?;
+    validate_positive_decimal_id(value, "searchId")
+}
+
+fn validate_positive_decimal_id(value: &str, field: &'static str) -> Result<(), Box<Response>> {
+    let value = decode_path_parameter(value, field)?;
     if value
         .parse::<i64>()
         .is_ok_and(|id| id > 0 && id.to_string() == value)
@@ -431,7 +425,7 @@ fn validate_search_id(value: &str) -> Result<(), Box<Response>> {
         api_error(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",
-            "searchId must be a positive decimal i64 string",
+            format!("{field} must be a positive decimal i64 string"),
         )
         .into_response(),
     ))
@@ -662,7 +656,7 @@ fn route_query_fields_for_parameterized(
         ("POST", ["nat", "operations", "refresh"])
         | ("POST", ["servers", _, "operations", "connect"])
         | ("POST", ["vpn-guard", "operations", "probe"])
-        | ("POST", ["searches", _, "results", _, "operations", "download"]) => Some(NONE),
+        | ("POST", ["searches", _, "results", _, "download"]) => Some(NONE),
         ("GET", ["downloads", _, "parts" | "comments" | "sources"]) => Some(&["cursor", "limit"]),
         ("POST", ["downloads", _, "sources", _, "operations", operation])
             if matches!(

@@ -4,7 +4,7 @@ use rusqlite::params;
 #[test]
 fn current_marker_cannot_hide_missing_indexes_triggers_or_wrong_columns() {
     for damage in [
-        "DROP INDEX search_results_known_file_id_idx",
+        "DROP INDEX search_results_claim_idx",
         "DROP TRIGGER file_names_ai",
         "ALTER TABLE known_files ADD COLUMN obsolete_value TEXT",
         "DELETE FROM profile",

@@ -191,7 +191,7 @@ export type SearchResultObservation = {
   reporterEndpoint: string | null;
   rawName: string;
   normalizedName: string;
-  sizeBytes: number;
+  sizeBytes: number | null;
   sources: number;
   completeSources: number;
   sourceClientId?: number | null;
@@ -215,6 +215,7 @@ export type SearchResultMedia = {
 };
 
 export type SearchResult = {
+  id: string;
   searchId?: string;
   type?: string;
   hash: string;
@@ -228,7 +229,7 @@ export type SearchResult = {
       votes: number;
     }>;
   };
-  sizeBytes?: number;
+  sizeBytes: number | null;
   sources?: number;
   completeSources?: number;
   availability?: number;

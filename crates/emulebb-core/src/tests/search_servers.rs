@@ -122,7 +122,6 @@ async fn live_search_collects_network_results_independently_of_passive_index_set
         assert!(search.results.is_empty());
         assert!(
             core.metadata_store.load_searches().unwrap()[0]
-                .data
                 .results
                 .is_empty()
         );
@@ -606,18 +605,18 @@ async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search()
         ..SearchCreate::default()
     };
 
+    let sql = rusqlite::Connection::open(transfer_root.join("metadata.sqlite")).unwrap();
+    sql.execute_batch("CREATE TRIGGER fail_search_create BEFORE INSERT ON search_sessions BEGIN SELECT RAISE(ABORT, 'injected initial-search persistence failure'); END;").unwrap();
     let error = core
-        .create_search_with_initial_persistence(request.clone(), |_, _| {
-            Err(anyhow::anyhow!(
-                "injected initial-search persistence failure"
-            ))
-        })
+        .create_search(request.clone())
         .await
-        .expect_err("injected persistence failure must reject the search");
-    assert_eq!(
-        error.to_string(),
-        "injected initial-search persistence failure"
-    );
+        .expect_err("SQL failure must reject search creation");
+    assert!(matches!(
+        error.downcast_ref::<PersistenceError>(),
+        Some(PersistenceError::Storage(_))
+    ));
+    sql.execute_batch("DROP TRIGGER fail_search_create;")
+        .unwrap();
     assert!(core.searches().await.is_empty());
     assert!(core.metadata_store.load_searches().unwrap().is_empty());
     assert_eq!(core.search_queue.lock().pending_len(), 0);
@@ -629,6 +628,24 @@ async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search()
     assert_eq!(core.metadata_store.load_searches().unwrap().len(), 1);
     assert_eq!(core.search_queue.lock().pending_len(), 1);
     assert!(core.search_queue.lock().drain_task_running());
+    sql.execute_batch("CREATE TRIGGER fail_search_update BEFORE UPDATE ON search_sessions BEGIN SELECT RAISE(ABORT, 'injected status persistence failure'); END;").unwrap();
+    core.update_search_status(&search.id, "running", None, Some("server"))
+        .await;
+    assert_eq!(core.search(&search.id).await.unwrap().status, "queued");
+    assert_eq!(
+        core.metadata_store.load_searches().unwrap()[0].data.status,
+        "queued"
+    );
+    sql.execute_batch("DROP TRIGGER fail_search_update;")
+        .unwrap();
+    core.update_search_status(&search.id, "running", None, Some("server"))
+        .await;
+    assert_eq!(core.search(&search.id).await.unwrap().status, "running");
+    assert_eq!(
+        core.metadata_store.load_searches().unwrap()[0].data.status,
+        "running"
+    );
+    core.clear_searches().await.unwrap();
 }
 
 #[tokio::test]
@@ -670,30 +687,27 @@ async fn deleting_searches_cancels_pending_network_work() {
         )
     };
 
-    crate::search_state::publish_observation(
-        &core.state,
+    let mut raw = crate::search_observations::tests::raw_file();
+    raw.file_name = Some("Live Result.bin".into());
+    raw.file_size = Some(4096);
+    raw.source_count = Some(7);
+    let reporter = "192.0.2.4:4661".parse().unwrap();
+    let projected = crate::search_query::search_result_from_ed2k(
         &first.id,
         &first_request,
-        SearchResult {
-            search_id: first.id.clone(),
-            r#type: String::new(),
-            hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "Live Result.bin".to_string(),
-            size_bytes: 4_096,
-            sources: 7,
-            complete_sources: 2,
-            source_client_id: None,
-            source_client_port: None,
-            file_type: "Pro".to_string(),
-            media: SearchResultMedia::default(),
-            rating: 0,
-            aich_hash: String::new(),
-            complete: false,
-            directory: String::new(),
-            observations: Vec::new(),
-        },
-    )
-    .await;
+        "server",
+        Some(reporter),
+        raw.clone(),
+    );
+    let update = crate::search_observations::ed2k(
+        projected,
+        emulebb_metadata::MetadataObservationOrigin::Server,
+        Some(reporter),
+        &raw,
+    );
+    core.apply_search_live_update(&first.id, &first_request, update)
+        .await
+        .unwrap();
     assert_eq!(core.search(&first.id).await.unwrap().results.len(), 1);
 
     assert!(core.delete_search(&first.id).await.unwrap());
@@ -2109,7 +2123,7 @@ async fn search_state_survives_core_restart_and_downloads_result() {
     let (_, download) = reloaded
         .download_search_result(
             &search_id,
-            &file_hash,
+            &search.results[0].id,
             SearchResultDownloadCreate::default(),
         )
         .await

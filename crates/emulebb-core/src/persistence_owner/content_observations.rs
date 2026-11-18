@@ -21,55 +21,126 @@ pub(super) struct ObservationCommand {
 
 impl SearchPublication {
     fn payload_bytes(&self) -> Option<usize> {
-        let request = &self.request;
-        let result = &self.result;
-        let mut bytes = std::mem::size_of::<Self>();
-        for value in [
+        let r = &self.request;
+        [
             &self.search_id,
-            &request.query,
-            &request.method,
-            &request.r#type,
-            &request.extension,
-            &request.codec,
-            &request.title,
-            &request.album,
-            &request.artist,
-            &result.search_id,
-            &result.r#type,
-            &result.hash,
-            &result.name,
-            &result.file_type,
-            &result.aich_hash,
-            &result.directory,
+            &r.query,
+            &r.method,
+            &r.r#type,
+            &r.extension,
+            &r.codec,
+            &r.title,
+            &r.album,
+            &r.artist,
+        ]
+        .into_iter()
+        .try_fold(std::mem::size_of::<Self>(), |n, v| n.checked_add(v.len()))?
+        .checked_add(result_bytes(&self.result)?)
+    }
+}
+
+fn result_bytes(result: &crate::SearchResult) -> Option<usize> {
+    let mut bytes = std::mem::size_of::<crate::SearchResult>();
+    for value in [
+        &result.id,
+        &result.search_id,
+        &result.r#type,
+        &result.hash,
+        &result.name,
+        &result.file_type,
+        &result.aich_hash,
+        &result.directory,
+    ] {
+        bytes = bytes.checked_add(value.len())?;
+    }
+    bytes = bytes.checked_add(media_bytes(&result.media)?)?;
+    bytes = bytes.checked_add(
+        result
+            .observations
+            .len()
+            .checked_mul(std::mem::size_of::<crate::SearchResultObservation>())?,
+    )?;
+    for observation in &result.observations {
+        for value in [
+            &observation.origin,
+            &observation.name,
+            &observation.file_type,
+            &observation.aich_hash,
+            &observation.directory,
         ] {
             bytes = bytes.checked_add(value.len())?;
         }
-        bytes = bytes.checked_add(media_bytes(&result.media)?)?;
         bytes = bytes.checked_add(
-            result
-                .observations
-                .len()
-                .checked_mul(std::mem::size_of::<crate::SearchResultObservation>())?,
+            observation
+                .reporter_endpoint
+                .as_ref()
+                .map_or(0, String::len),
         )?;
-        for observation in &result.observations {
-            for value in [
-                &observation.origin,
-                &observation.name,
-                &observation.file_type,
-                &observation.aich_hash,
-                &observation.directory,
-            ] {
-                bytes = bytes.checked_add(value.len())?;
-            }
-            bytes = bytes.checked_add(
-                observation
-                    .reporter_endpoint
-                    .as_ref()
-                    .map_or(0, String::len),
-            )?;
-            bytes = bytes.checked_add(media_bytes(&observation.media)?)?;
-        }
-        Some(bytes)
+        bytes = bytes.checked_add(media_bytes(&observation.media)?)?;
+    }
+    Some(bytes)
+}
+
+struct PreparedProjection {
+    result: crate::SearchResult,
+    name_votes: Vec<emulebb_metadata::MetadataSearchNameVote>,
+    fields: Vec<emulebb_metadata::MetadataSearchResultFields>,
+}
+
+async fn prepare_projection(
+    publication: &SearchPublication,
+    permit: &mut Permit,
+) -> Result<Option<PreparedProjection>, PersistenceError> {
+    let mut accepted = vec![publication.result.clone()];
+    crate::search_query::apply_search_filters(&mut accepted, &publication.request);
+    let Some(result) = accepted.pop() else {
+        return Ok(None);
+    };
+    let state = publication.state.lock().await;
+    let Some(search) = state.searches.get(&publication.search_id) else {
+        return Ok(None);
+    };
+    if !matches!(search.status.as_str(), "queued" | "running") {
+        return Ok(None);
+    }
+    let vote_bytes = result
+        .observations
+        .iter()
+        .try_fold(0usize, |bytes, observation| {
+            bytes.checked_add(observation.name.len().checked_mul(6)?.checked_add(256)?)
+        })
+        .ok_or(PersistenceError::TooLarge)?;
+    permit.extend(vote_bytes)?;
+    let name_votes = crate::search_state::projection_name_votes(&result)
+        .map_err(|_| PersistenceError::Worker)?;
+    // Reserve the bounded SQL summary receipt before admitting its allocation.
+    permit.extend(512 * 1024)?;
+    let fields = crate::search_state::result_fields(&result);
+    if let Some(existing) = search
+        .results
+        .iter()
+        .find(|r| r.hash == result.hash && r.size_bytes == result.size_bytes)
+    {
+        // WHY: retained observations can outgrow a single packet. Reserve the
+        // candidate and aggregation work before copying existing result state.
+        permit.extend(
+            result_bytes(existing)
+                .and_then(|n| n.checked_mul(6))
+                .ok_or(PersistenceError::TooLarge)?,
+        )?;
+        let mut candidate = existing.clone();
+        candidate.merge_observations(result);
+        Ok(Some(PreparedProjection {
+            result: candidate,
+            name_votes,
+            fields,
+        }))
+    } else {
+        Ok(Some(PreparedProjection {
+            result,
+            name_votes,
+            fields,
+        }))
     }
 }
 
@@ -136,7 +207,7 @@ impl PersistenceOwner {
                 // WHY: only Busy proves no handoff occurred. Await admission
                 // capacity instead of replaying an uncertain or failed write.
                 Err(PersistenceError::Busy) => notified.await,
-                Ok(Response::ContentObserved) => return Ok(()),
+                Ok(Response::ContentObserved(result)) => return result,
                 Ok(_) => return Err(PersistenceError::Worker),
                 Err(error) => return Err(error),
             }
@@ -147,21 +218,23 @@ impl PersistenceOwner {
 pub(super) fn execute(
     store: &MetadataStore,
     events: &[MetadataContentObservationEvent],
-) -> Result<(), PersistenceError> {
-    store
-        .ingest_content_observations(events)
-        .map(|_| ())
-        .map_err(|error| {
-            if error
-                .downcast_ref::<MetadataObservationCommitUncertain>()
-                .is_some()
-            {
-                PersistenceError::CommitUnknown
-            } else {
-                tracing::warn!(%error, "content observation persistence failed");
-                PersistenceError::Storage("database operation failed".into())
-            }
-        })
+    projection: Option<&emulebb_metadata::MetadataSearchProjection>,
+) -> Result<Option<emulebb_metadata::MetadataSearchPublication>, PersistenceError> {
+    let result = match projection {
+        Some(projection) => store.ingest_search_observations(events, projection),
+        None => store.ingest_content_observations(events).map(|_| None),
+    };
+    result.map_err(|error| {
+        if error
+            .downcast_ref::<MetadataObservationCommitUncertain>()
+            .is_some()
+        {
+            PersistenceError::CommitUnknown
+        } else {
+            tracing::warn!(%error,"content observation persistence failed");
+            PersistenceError::Storage("database operation failed".into())
+        }
+    })
 }
 
 pub(super) async fn process(
@@ -176,17 +249,43 @@ pub(super) async fn process(
     else {
         unreachable!()
     };
+    let mut candidate = match publication.as_ref() {
+        Some(publication) => match prepare_projection(publication, &mut request.permit).await {
+            // This command was admitted but has not reached SQL. Report its
+            // capacity refusal once; retrying here would wake on its own permit
+            // release and spin while another reader retained the needed bytes.
+            Err(PersistenceError::Busy) => {
+                return Ok(Response::ContentObserved(Err(PersistenceError::Busy)));
+            }
+            other => other?,
+        },
+        None => None,
+    };
+    let projection = publication
+        .as_ref()
+        .zip(candidate.as_mut())
+        .map(|(publication, prepared)| {
+            Ok::<_, PersistenceError>(emulebb_metadata::MetadataSearchProjection {
+                session_id: publication
+                    .search_id
+                    .parse()
+                    .map_err(|_| PersistenceError::Worker)?,
+                fields: std::mem::take(&mut prepared.fields),
+                name_votes: std::mem::take(&mut prepared.name_votes),
+            })
+        })
+        .transpose()?;
     let (response, receive) = oneshot::channel();
     db.send(DbRequest {
-        command: DbCommand::ContentObservations(events),
+        command: DbCommand::ContentObservations { events, projection },
         response,
     })
     .map_err(|_| PersistenceError::Worker)?;
-    let response = match receive
+    let committed = match receive
         .await
         .map_err(|_| PersistenceError::CommitUnknown)??
     {
-        DbResponse::ContentObserved => Response::ContentObserved,
+        DbResponse::ContentObserved(committed) => committed,
         _ => return Err(PersistenceError::Worker),
     };
     #[cfg(test)]
@@ -198,17 +297,37 @@ pub(super) async fn process(
     }
     // WHY: the admitted request owns publication after SQL. A disconnected
     // producer must not strand durable evidence outside its collecting session.
-    if let Some(publication) = publication {
+    if let (Some(publication), Some(prepared), Some(committed)) =
+        (publication, candidate.take(), committed)
+    {
+        let mut result = prepared.result;
+        result.id = committed.claim_id.to_string();
+        let summary = committed.summary;
+        result.name = summary.name;
+        result.sources = summary.source_count;
+        result.complete_sources = summary.complete_source_count;
+        result.source_client_id = summary.source_client_id;
+        result.source_client_port = summary.source_client_port;
+        result.file_type = summary.file_type;
+        result.media.artist = summary.media_artist;
+        result.media.album = summary.media_album;
+        result.media.title = summary.media_title;
+        result.media.length_seconds = summary.media_length_seconds;
+        result.media.bitrate_kbps = summary.media_bitrate_kbps;
+        result.media.codec = summary.media_codec;
+        result.rating = summary.rating;
+        result.aich_hash = summary.aich_hash;
+        result.complete = summary.complete;
+        result.directory = summary.directory;
         crate::search_state::publish_observation(
             &publication.state,
             &publication.search_id,
-            &publication.request,
-            publication.result,
+            result,
         )
         .await;
     }
-    Ok(response)
+    Ok(Response::ContentObserved(Ok(())))
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

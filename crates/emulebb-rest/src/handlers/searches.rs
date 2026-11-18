@@ -37,12 +37,7 @@ pub(crate) async fn create_search(
     };
     match state.core.create_search(request).await {
         Ok(search) => api_ok(search_response(&search)).into_response(),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -73,12 +68,7 @@ pub(crate) async fn delete_search(
         Ok(false) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
         }
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -100,18 +90,13 @@ pub(crate) async fn delete_searches(
     }
     match state.core.clear_searches().await {
         Ok(()) => api_ok(json!({ "ok": true })).into_response(),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
 pub(crate) async fn download_search_result(
     State(state): State<RestState>,
-    Path((search_id, hash)): Path<(String, String)>,
+    Path((search_id, result_id)): Path<(String, String)>,
     body: Bytes,
 ) -> impl IntoResponse {
     let request = match optional_json_body::<SearchResultDownloadCreate>(&body) {
@@ -127,7 +112,7 @@ pub(crate) async fn download_search_result(
     };
     match state
         .core
-        .download_search_result(&search_id, &hash, request)
+        .download_search_result(&search_id, &result_id, request)
         .await
     {
         Ok(Some((created, download))) => super::resource::item(

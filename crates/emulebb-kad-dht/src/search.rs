@@ -168,7 +168,6 @@ pub(crate) fn search_keywords_by_request(
         let mut accepted_count = 0usize;
         let mut duplicate_count = 0usize;
         let mut missing_name_count = 0usize;
-        let mut missing_size_count = 0usize;
         let mut restrictive_mismatch_count = 0usize;
         let mut sample_rejection = None::<String>;
         loop {
@@ -201,18 +200,6 @@ pub(crate) fn search_keywords_by_request(
                 }
                 continue;
             }
-            if result.size.is_none() {
-                missing_size_count += 1;
-                if sample_rejection.is_none() {
-                    sample_rejection = Some(format!(
-                        "missing_size hash={} first_name={:?} tag_count={}",
-                        result.hash,
-                        result.names.first(),
-                        result.tags.len()
-                    ));
-                }
-                continue;
-            }
             if !retain_matching_keyword_names(&mut result, restrictive_payload.as_deref()) {
                 restrictive_mismatch_count += 1;
                 continue;
@@ -239,13 +226,12 @@ pub(crate) fn search_keywords_by_request(
             ));
         }
         debug!(
-            "kad keyword search stream summary target={} raw_entries={} accepted={} duplicates={} missing_name={} missing_size={} restrictive_mismatch={} result_cap={} sample_rejection={}",
+            "kad keyword search stream summary target={} raw_entries={} accepted={} duplicates={} missing_name={} restrictive_mismatch={} result_cap={} sample_rejection={}",
             request_target,
             raw_entry_count,
             accepted_count,
             duplicate_count,
             missing_name_count,
-            missing_size_count,
             restrictive_mismatch_count,
             result_cap,
             sample_rejection.unwrap_or_else(|| "-".to_string())
@@ -440,7 +426,7 @@ fn retain_matching_keyword_names(
             .names
             .retain(|name| matches_restrictive_keyword_payload(name, &result.tags, payload));
     }
-    !result.names.is_empty() && result.size.is_some()
+    !result.names.is_empty()
 }
 
 #[cfg(test)]
@@ -476,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_result_requires_filename_and_size() {
+    fn keyword_result_requires_filename_and_preserves_unknown_size() {
         let mut missing_name =
             SearchResult::from_tags(Ed2kHash::from_bytes([1; 16]), vec![Tag::filesize(42)]);
         assert!(!retain_matching_keyword_names(&mut missing_name, None));
@@ -485,7 +471,8 @@ mod tests {
             Ed2kHash::from_bytes([2; 16]),
             vec![Tag::filename("torino-trip.avi")],
         );
-        assert!(!retain_matching_keyword_names(&mut missing_size, None));
+        assert!(retain_matching_keyword_names(&mut missing_size, None));
+        assert_eq!(missing_size.size, None);
     }
 
     #[test]

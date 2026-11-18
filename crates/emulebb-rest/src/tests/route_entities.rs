@@ -636,13 +636,22 @@ async fn search_results_use_canonical_paging_query() {
 
 #[tokio::test]
 async fn search_to_download_flow_uses_recorded_network_observation() {
-    let core = test_search_core(&[IndexedFile {
-        ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-        name: "Indexed.Result.iso".to_string(),
-        size_bytes: 42,
-        content_type: "iso".to_string(),
-        availability_score: 2,
-    }]);
+    let core = test_search_core(&[
+        IndexedFile {
+            ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "Indexed.Result.iso".to_string(),
+            size_bytes: 42,
+            content_type: "iso".to_string(),
+            availability_score: 2,
+        },
+        IndexedFile {
+            ed2k_hash: "00112233445566778899aabbccddeeff".into(),
+            name: "Conflicting.Size.iso".into(),
+            size_bytes: 84,
+            content_type: "iso".into(),
+            availability_score: 2,
+        },
+    ]);
     let observed_search_id = core.searches().await.into_iter().next().unwrap().id;
     let app = router(
         core,
@@ -668,11 +677,15 @@ async fn search_to_download_flow_uses_recorded_network_observation() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     let search_id = value["data"]["id"].as_str().unwrap();
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
+    let items = value["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_ne!(items[0]["id"], items[1]["id"]);
+    let result_id = items.iter().find(|item| item["sizeBytes"] == 84).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
-    let download_uri = format!(
-        "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"
-    );
+    let download_uri = format!("/api/v1/searches/{search_id}/results/{result_id}/download");
     let response = app
         .clone()
         .oneshot(
@@ -690,6 +703,7 @@ async fn search_to_download_flow_uses_recorded_network_observation() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert!(value["data"]["id"].is_string());
     let admitted_id = value["data"]["id"].clone();
+    assert_eq!(value["data"]["sizeBytes"], 84);
     assert_eq!(value["data"]["hash"], "00112233445566778899aabbccddeeff");
 
     let duplicate = app
@@ -697,7 +711,7 @@ async fn search_to_download_flow_uses_recorded_network_observation() {
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"
+                    "/api/v1/searches/{search_id}/results/{result_id}/download"
                 ))
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
@@ -746,10 +760,9 @@ async fn search_result_download_accepts_stopped_intent() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     let search_id = value["data"]["id"].as_str().unwrap();
+    let result_id = value["data"]["items"][0]["id"].as_str().unwrap().to_owned();
 
-    let download_uri = format!(
-        "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"
-    );
+    let download_uri = format!("/api/v1/searches/{search_id}/results/{result_id}/download");
     let response = app
         .oneshot(
             Request::builder()
@@ -912,4 +925,45 @@ async fn kad_stop_frontdoor_reports_closed_persistence() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING");
     core.disconnect_ed2k_after_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn search_mutations_report_closed_admission_and_preserve_sessions() {
+    let core = test_search_core(&[IndexedFile {
+        ed2k_hash: "00112233445566778899aabbccddeeff".into(),
+        name: "Preserved.bin".into(),
+        size_bytes: 42,
+        content_type: "pro".into(),
+        availability_score: 2,
+    }]);
+    let id = core.searches().await[0].id.clone();
+    core.drain_persistence().await.unwrap();
+    let app = router(
+        Arc::clone(&core),
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    for uri in [
+        format!("/api/v1/searches/{id}"),
+        "/api/v1/searches?confirm=true".into(),
+    ] {
+        let (status, body) = request(&app, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
+        assert!(core.search(&id).await.is_some());
+    }
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/searches",
+        Some(json!({
+            "query": "closed admission", "method": "server",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
+    assert_eq!(core.searches().await.len(), 1);
 }

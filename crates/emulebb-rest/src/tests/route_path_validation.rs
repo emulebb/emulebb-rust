@@ -57,7 +57,7 @@ async fn search_id_path_uses_positive_exact_i64_validation() {
         ),
         (
             "POST",
-            "/api/v1/searches/9223372036854775808/results/00112233445566778899aabbccddeeff/operations/download",
+            "/api/v1/searches/9223372036854775808/results/1/download",
             "searchId must be a positive decimal i64 string",
         ),
     ];
@@ -67,6 +67,24 @@ async fn search_id_path_uses_positive_exact_i64_validation() {
         assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
         assert_eq!(value["error"]["message"], expected_message);
         assert_eq!(value["error"]["details"], json!({}));
+    }
+}
+
+#[tokio::test]
+async fn result_ids_use_exact_positive_i64_and_reach_lookup() {
+    for id in ["0", "01", "-1", "9223372036854775808"] {
+        let (status, value) =
+            path_error_value("POST", &format!("/api/v1/searches/1/results/{id}/download")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            value["error"]["message"],
+            "resultId must be a positive decimal i64 string"
+        );
+    }
+    for id in ["4294967296", "9007199254740993", "9223372036854775807"] {
+        let (status, _) =
+            path_error_value("POST", &format!("/api/v1/searches/1/results/{id}/download")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
 
