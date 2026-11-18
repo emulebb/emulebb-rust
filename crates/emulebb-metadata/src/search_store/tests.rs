@@ -143,13 +143,24 @@ fn session_results_reference_distinct_unknown_zero_conflicting_and_full_unsigned
         .into_iter()
         .map(|size| project(&store, id, size, "Sample.bin"))
         .collect();
-    let loaded = store.load_searches().unwrap();
-    assert_eq!(loaded[0].results.len(), 4);
-    for (index, result) in loaded[0].results.iter().enumerate() {
+    let loaded = store
+        .search_result_headers_page(id, 0, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.items.len(), 4);
+    for (index, result) in loaded.items.iter().enumerate() {
         assert_eq!(result.claim_id, claims[index]);
         assert_eq!(result.size_bytes, sizes[index]);
         assert_eq!(
-            result.observations[0].observation.event.claim.size_bytes,
+            store
+                .search_result_observations_page(id, result.claim_id, 0, 10)
+                .unwrap()
+                .unwrap()
+                .items[0]
+                .observation
+                .event
+                .claim
+                .size_bytes,
             sizes[index]
         );
     }
@@ -173,9 +184,24 @@ fn header_writes_never_replay_results_and_membership_counts_are_session_local() 
     );
     assert_eq!(project(&store, first, Some(12), "Sample.bin"), claim);
     assert_eq!(project(&store, second, Some(12), "Sample.bin"), claim);
-    let searches = store.load_searches().unwrap();
-    assert_eq!(searches[0].results[0].observations[0].observation_count, 2);
-    assert_eq!(searches[1].results[0].observations[0].observation_count, 1);
+    assert_eq!(
+        store
+            .search_result_observations_page(first, claim, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items[0]
+            .observation_count,
+        2
+    );
+    assert_eq!(
+        store
+            .search_result_observations_page(second, claim, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items[0]
+            .observation_count,
+        1
+    );
     assert_eq!(
         store.content_observations_page(claim, 0, 10).unwrap().items[0]
             .receipt
@@ -205,9 +231,17 @@ fn terminal_or_missing_sessions_freeze_membership_but_keep_valid_corpus_events()
             .unwrap()
             .is_none()
     );
-    let result = &store.load_searches().unwrap()[0].results[0];
+    let result = store.search_result_header(id, claim).unwrap().unwrap();
     assert_eq!(result.summary.name, "First.bin");
-    assert_eq!(result.observations.len(), 1);
+    assert_eq!(
+        store
+            .search_result_observations_page(id, claim, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
     assert_eq!(
         store
             .content_observations_page(claim, 0, 10)
@@ -295,11 +329,15 @@ fn unicode_and_binary_roots_roundtrip_and_filter_sizes_keep_unsigned_order() {
     header.spec.min_size_bytes = Some(255);
     header.spec.max_size_bytes = Some(256);
     let id = store.create_search(&header).unwrap();
-    project(&store, id, Some(256), "样本 Δ Sample.bin");
-    let loaded = store.load_searches().unwrap();
-    assert_eq!(loaded[0].results[0].summary.name, "样本 Δ Sample.bin");
+    let claim = project(&store, id, Some(256), "样本 Δ Sample.bin");
+    let loaded = store.search_result_header(id, claim).unwrap().unwrap();
+    assert_eq!(loaded.summary.name, "样本 Δ Sample.bin");
     assert_eq!(
-        loaded[0].results[0].observations[0]
+        store
+            .search_result_observations_page(id, claim, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items[0]
             .observation
             .event
             .metadata
@@ -320,7 +358,13 @@ fn unicode_and_binary_roots_roundtrip_and_filter_sizes_keep_unsigned_order() {
     header.spec.min_size_bytes = Some(257);
     assert!(store.transition_search(id, &header, &[]).is_err());
     assert_eq!(
-        store.load_searches().unwrap()[0].data.spec.min_size_bytes,
+        store
+            .search_header(id)
+            .unwrap()
+            .unwrap()
+            .data
+            .spec
+            .min_size_bytes,
         Some(255)
     );
     store.clear_searches().unwrap();
@@ -354,7 +398,7 @@ fn deleted_and_cleared_session_ids_are_not_reused_after_reopen() {
             .transition_search(second, &sample_search(), &[])
             .is_err()
     );
-    assert_eq!(store.load_searches().unwrap()[0].id, third);
+    assert_eq!(store.search_header(third).unwrap().unwrap().id, third);
 }
 
 #[test]
@@ -373,11 +417,11 @@ fn session_ids_use_full_positive_i64_space_and_fail_at_exhaustion() {
             .unwrap();
         let id = store.create_search(&sample_search()).unwrap();
         assert_eq!(id, previous + 1);
-        assert_eq!(store.load_searches().unwrap()[0].id, id);
+        assert_eq!(store.search_header(id).unwrap().unwrap().id, id);
         store.transition_search(id, &sample_search(), &[]).unwrap();
         if id == i64::MAX {
             assert!(store.create_search(&sample_search()).is_err());
-            assert_eq!(store.load_searches().unwrap().len(), 1);
+            assert_eq!(store.search_headers_page(None, 10).unwrap().items.len(), 1);
         }
     }
 }
@@ -410,7 +454,7 @@ fn independent_connections_allocate_distinct_session_ids() {
     let a = first.create_search(&sample_search()).unwrap();
     let b = worker.join().unwrap();
     assert_ne!(a, b);
-    assert_eq!(first.load_searches().unwrap().len(), 2);
+    assert_eq!(first.search_headers_page(None, 10).unwrap().items.len(), 2);
 }
 
 #[test]

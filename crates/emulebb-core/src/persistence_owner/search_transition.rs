@@ -195,6 +195,8 @@ pub(super) async fn process(
                 }
             }
         }
+        // Settled sessions are browsed from SQLite; keep runtime state active-only.
+        state.searches.remove(&command.id);
         if let Some(cancel) = state.search_cancels.remove(&command.id) {
             if matches!(command.phase, Phase::Error) {
                 cancel.cancel();

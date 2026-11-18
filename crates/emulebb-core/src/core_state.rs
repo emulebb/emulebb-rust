@@ -65,6 +65,7 @@ pub(crate) struct MonitoredSharedFile {
 
 #[derive(Debug)]
 pub(crate) struct CoreState {
+    /// Execution metadata only. Retained sessions and results live in SQLite.
     pub(crate) searches: HashMap<String, Search>,
     /// Cancellation handles for queued or running network searches, keyed by
     /// public search id. Terminal settlement and deletion remove the handle.

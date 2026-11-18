@@ -44,12 +44,36 @@ async fn search_delete_and_clear_survive_core_restart() {
     };
 
     let reloaded = open_core(&metadata_path, &transfer_root);
-    assert!(reloaded.search(&deleted_search_id).await.is_none());
-    assert_eq!(reloaded.searches().await.len(), 1);
+    assert!(
+        reloaded
+            .search_header(deleted_search_id.parse().unwrap())
+            .await
+            .unwrap()
+            .value()
+            .is_none()
+    );
+    assert_eq!(
+        reloaded
+            .search_headers_page(None, 10)
+            .await
+            .unwrap()
+            .value()
+            .items
+            .len(),
+        1
+    );
 
     reloaded.clear_searches().await.unwrap();
     let reloaded_again = open_core(&metadata_path, &transfer_root);
-    assert!(reloaded_again.searches().await.is_empty());
+    assert!(
+        reloaded_again
+            .search_headers_page(None, 10)
+            .await
+            .unwrap()
+            .value()
+            .items
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -80,7 +104,16 @@ async fn shared_local_file_is_not_surfaced_by_network_search_after_core_restart(
             })
             .await
             .unwrap();
-        assert!(search.results.is_empty());
+        assert_eq!(
+            core.search_header(search.id.parse().unwrap())
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .result_count,
+            0
+        );
     }
 
     let reloaded = open_core(&metadata_path, &transfer_root);
@@ -93,7 +126,17 @@ async fn shared_local_file_is_not_surfaced_by_network_search_after_core_restart(
         })
         .await
         .unwrap();
-    assert!(search.results.is_empty());
+    assert_eq!(
+        reloaded
+            .search_header(search.id.parse().unwrap())
+            .await
+            .unwrap()
+            .value()
+            .as_ref()
+            .unwrap()
+            .result_count,
+        0
+    );
 }
 
 fn open_core(metadata_path: &Path, transfer_root: &Path) -> EmulebbCore {

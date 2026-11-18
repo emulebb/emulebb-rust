@@ -92,7 +92,6 @@ impl EmulebbCore {
             progress: SearchProgress::new("queued", 0, None, ""),
             created_at: now,
             updated_at: now,
-            results: Vec::new(),
         };
         let search_id = crate::persistence_owner::search_create::insert(db, &search).await?;
         #[cfg(test)]
@@ -211,14 +210,6 @@ impl EmulebbCore {
             .filter(|search| matches!(search.status.as_str(), "queued" | "running"))
             .map(|search| search.progress.clone())
     }
-    pub async fn searches(&self) -> Vec<Search> {
-        self.state.lock().await.searches.values().cloned().collect()
-    }
-
-    pub async fn search(&self, search_id: &str) -> Option<Search> {
-        self.state.lock().await.searches.get(search_id).cloned()
-    }
-
     pub async fn delete_search(&self, search_id: &str) -> Result<bool> {
         let id: i64 = search_id.parse().context("invalid search identity")?;
         ensure!(

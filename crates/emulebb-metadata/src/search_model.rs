@@ -1,10 +1,3 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataSearch {
-    pub id: i64,
-    pub data: MetadataSearchData,
-    pub results: Vec<MetadataSearchResult>,
-}
-
 /// Search attributes accepted by both creation and updates; identity is allocated
 /// separately by SQLite and cannot be supplied by a creator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,15 +114,6 @@ impl MetadataSearchNameVote {
 pub struct MetadataSearchPublication {
     pub claim_id: i64,
     pub summary: MetadataSearchResultSummary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataSearchResult {
-    pub claim_id: i64,
-    pub file_hash: String,
-    pub size_bytes: Option<u64>,
-    pub summary: MetadataSearchResultSummary,
-    pub observations: Vec<MetadataSearchResultObservation>,
 }
 
 /// Optional session projection attached to newly decoded network occurrences.

@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn same_claim_merge_retains_observations_and_recomputes_the_aggregate() {
+    fn packet_observations_deduplicate_and_compute_the_aggregate() {
         let mut first = result("first-name.bin", 4_096, 1);
         let mut network = result("network-name.bin", 4_096, 12);
         first.observations[0].origin = "server".to_string();
@@ -465,8 +465,16 @@ mod tests {
         network.observations[0].aich_hash = "A".repeat(32);
         let expected_media = network.observations[0].media.clone();
 
-        first.merge_observations(network.clone());
-        first.merge_observations(network);
+        let first = SearchResult::from_observations(
+            first.search_id,
+            first.r#type,
+            first.hash,
+            first.observations.remove(0),
+            [
+                network.observations[0].clone(),
+                network.observations[0].clone(),
+            ],
+        );
 
         assert_eq!(first.observations.len(), 2);
         assert_eq!(first.name, "network-name.bin");
@@ -480,48 +488,35 @@ mod tests {
     }
 
     #[test]
-    fn availability_sums_distinct_ed2k_servers_and_maxes_over_kad() {
-        let observed =
-            |origin: &str, endpoint: Option<&str>, name: &str, sources, complete_sources| {
-                let mut observed = result(name, 4_096, sources);
-                observed.observations[0].origin = origin.to_string();
-                observed.observations[0].reporter_endpoint = endpoint.map(str::to_string);
-                observed.observations[0].complete_sources = complete_sources;
-                observed
-            };
-        let mut aggregate = observed(
-            "global",
-            Some("192.0.2.10:4661"),
-            "server-a-first.bin",
-            10,
-            3,
+    fn packet_availability_combines_reporters_and_overlapping_network_estimates() {
+        let observed = |origin: &str, endpoint: Option<&str>, sources, complete_sources| {
+            let mut observation = result("Sample.bin", 4096, sources).observations.remove(0);
+            observation.origin = origin.into();
+            observation.reporter_endpoint = endpoint.map(str::to_string);
+            observation.complete_sources = complete_sources;
+            observation
+        };
+        let first = observed("global", Some("192.0.2.10:4661"), 10, 3);
+        let others = [
+            observed("server", Some("192.0.2.10:4661"), 12, 2),
+            observed("global", Some("192.0.2.20:4661"), 7, 4),
+        ];
+        let aggregate = SearchResult::from_observations(
+            "1".into(),
+            "pro".into(),
+            "11".repeat(16),
+            first.clone(),
+            others.clone(),
         );
-
-        // A later connected-session observation from the same server replaces
-        // its count; it is not a second independent population.
-        aggregate.merge_observations(observed(
-            "server",
-            Some("192.0.2.10:4661"),
-            "server-a-later.bin",
-            12,
-            2,
-        ));
-        aggregate.merge_observations(observed(
-            "global",
-            Some("192.0.2.20:4661"),
-            "server-b.bin",
-            7,
-            4,
-        ));
-
-        assert_eq!(aggregate.sources, 19);
-        assert_eq!(aggregate.complete_sources, 7);
-
-        // Kad is an overlapping network estimate: select its stronger claim,
-        // but never add it to the independent ED2K server total.
-        aggregate.merge_observations(observed("kad", None, "kad.bin", 25, 0));
-        assert_eq!(aggregate.sources, 25);
-        assert_eq!(aggregate.complete_sources, 7);
+        assert_eq!((aggregate.sources, aggregate.complete_sources), (19, 7));
+        let aggregate = SearchResult::from_observations(
+            "1".into(),
+            "pro".into(),
+            "11".repeat(16),
+            first,
+            others.into_iter().chain([observed("kad", None, 25, 0)]),
+        );
+        assert_eq!((aggregate.sources, aggregate.complete_sources), (25, 7));
     }
 
     #[test]
@@ -571,8 +566,16 @@ mod tests {
         };
         let mut first = observed("192.0.2.7:4672");
         let second = observed("192.0.2.7:4673");
-        first.merge_observations(second.clone());
-        first.merge_observations(second);
+        let first = SearchResult::from_observations(
+            first.search_id,
+            first.r#type,
+            first.hash,
+            first.observations.remove(0),
+            [
+                second.observations[0].clone(),
+                second.observations[0].clone(),
+            ],
+        );
         assert_eq!(first.observations.len(), 2);
         assert_ne!(
             first.observations[0].reporter_endpoint,

@@ -10,15 +10,6 @@ async fn transition_after_disconnect(phase: Phase) {
         .await
         .unwrap();
     let id = publication.search_id.clone();
-    // Completion must use durable membership, independently of runtime rows.
-    state
-        .lock()
-        .await
-        .searches
-        .get_mut(&id)
-        .unwrap()
-        .results
-        .clear();
     let cancel = CancellationToken::new();
     state
         .lock()
@@ -55,18 +46,29 @@ async fn transition_after_disconnect(phase: Phase) {
     tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
-    assert_eq!(store.load_searches().unwrap()[0].data.status, expected);
+    assert_eq!(
+        store
+            .search_header(id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .data
+            .status,
+        expected
+    );
     caller.abort();
     *owner.publication_gate.lock().unwrap() = None;
     gate.release.notify_one();
     wait_for_slots(&owner, 0).await;
     let snapshot = state.lock().await;
-    assert_eq!(snapshot.searches[&id].status, expected);
-    assert!(snapshot.searches[&id].results.is_empty());
-    assert_eq!(
-        snapshot.searches[&id].status_reason.as_deref(),
-        Some("test-reason")
-    );
+    if matches!(phase, Phase::Running) {
+        assert_eq!(snapshot.searches[&id].status, expected);
+        assert_eq!(
+            snapshot.searches[&id].status_reason.as_deref(),
+            Some("test-reason")
+        );
+    } else {
+        assert!(!snapshot.searches.contains_key(&id));
+    }
     assert_eq!(
         snapshot.search_cancels.contains_key(&id),
         matches!(phase, Phase::Running)
@@ -95,8 +97,16 @@ async fn transition_after_disconnect(phase: Phase) {
             })
             .await
             .unwrap();
-        assert_eq!(state.lock().await.searches[&id].status, expected);
-        assert_eq!(store.load_searches().unwrap()[0].data.status, expected);
+        assert!(!state.lock().await.searches.contains_key(&id));
+        assert_eq!(
+            store
+                .search_header(id.parse().unwrap())
+                .unwrap()
+                .unwrap()
+                .data
+                .status,
+            expected
+        );
     }
     assert_eq!(usage(&owner), (0, 0));
     owner.close_and_drain().await.unwrap();

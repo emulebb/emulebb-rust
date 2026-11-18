@@ -53,14 +53,12 @@ pub(crate) fn load_core_state(
     }
 
     metadata.interrupt_collecting_searches(chrono::Utc::now().timestamp())?;
-    let searches = crate::search_state::load_searches(metadata)?;
 
     Ok(CoreState {
-        searches,
+        searches: HashMap::new(),
         // Startup durably ends interrupted collection; no cancellation handles survive.
         search_cancels: HashMap::new(),
-        // Search-result responder provenance is session-local. A restored
-        // display row must never become a fresh network trust vote.
+        // Network trust votes apply only to evidence received in this process.
         kad_aich_search_votes: std::collections::BTreeMap::new(),
         transfers: HashMap::new(),
         core_settings,

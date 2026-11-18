@@ -563,7 +563,14 @@ async fn search_to_download_flow_uses_recorded_network_observation() {
             availability_score: 2,
         },
     ]);
-    let observed_search_id = core.searches().await.into_iter().next().unwrap().id;
+    let observed_search_id = core
+        .search_headers_page(None, 1)
+        .await
+        .unwrap()
+        .value()
+        .items[0]
+        .id
+        .to_string();
     let app = router(
         core,
         RestServerSettings {
@@ -646,7 +653,14 @@ async fn search_result_download_accepts_stopped_intent() {
         content_type: "iso".to_string(),
         availability_score: 2,
     }]);
-    let observed_search_id = core.searches().await.into_iter().next().unwrap().id;
+    let observed_search_id = core
+        .search_headers_page(None, 1)
+        .await
+        .unwrap()
+        .value()
+        .items[0]
+        .id
+        .to_string();
     let app = router(
         core,
         RestServerSettings {
@@ -840,14 +854,21 @@ async fn kad_stop_frontdoor_reports_closed_persistence() {
 
 #[tokio::test]
 async fn search_mutations_report_closed_admission_and_preserve_sessions() {
-    let core = test_search_core(&[IndexedFile {
-        ed2k_hash: "00112233445566778899aabbccddeeff".into(),
-        name: "Preserved.bin".into(),
-        size_bytes: 42,
-        content_type: "pro".into(),
-        availability_score: 2,
-    }]);
-    let id = core.searches().await[0].id.clone();
+    let root = unique_test_dir("search-closed-admission");
+    let index = FileIndex::open(root.join("metadata.sqlite")).unwrap();
+    let metadata = index.metadata_store();
+    let core = Arc::new(
+        EmulebbCore::new_with_network("test", index, &root, Some(test_network_config(&root)))
+            .unwrap(),
+    );
+    let id = core
+        .create_search(
+            serde_json::from_value(json!({"query":"preserved session", "method":"server"}))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
     core.drain_persistence().await.unwrap();
     let app = router(
         Arc::clone(&core),
@@ -863,7 +884,12 @@ async fn search_mutations_report_closed_admission_and_preserve_sessions() {
         let (status, body) = request(&app, "DELETE", &uri, None).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
-        assert!(core.search(&id).await.is_some());
+        assert!(
+            metadata
+                .search_header(id.parse().unwrap())
+                .unwrap()
+                .is_some()
+        );
     }
     let (status, body) = request(
         &app,
@@ -876,7 +902,10 @@ async fn search_mutations_report_closed_admission_and_preserve_sessions() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
-    assert_eq!(core.searches().await.len(), 1);
+    assert_eq!(
+        metadata.search_headers_page(None, 10).unwrap().items.len(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -33,7 +33,11 @@ async fn creation_finishes_queue_and_cache_publication_after_caller_disconnect()
     tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
-    let rows = core.metadata_store.load_searches().unwrap();
+    let rows = core
+        .metadata_store
+        .search_headers_page(None, 10)
+        .unwrap()
+        .items;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].data.status, "queued");
     caller.abort();
@@ -41,7 +45,15 @@ async fn creation_finishes_queue_and_cache_publication_after_caller_disconnect()
     gate.release.notify_one();
     wait_for_slots(&owner, 0).await;
     let id = rows[0].id.to_string();
-    assert_eq!(core.search(&id).await.unwrap().id, id);
+    assert_eq!(
+        core.metadata_store
+            .search_header(id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .id
+            .to_string(),
+        id
+    );
     assert!(core.state.lock().await.search_cancels.contains_key(&id));
     assert_eq!(core.search_queue.lock().pending_len(), 1);
     assert!(core.search_queue.lock().drain_task_running());

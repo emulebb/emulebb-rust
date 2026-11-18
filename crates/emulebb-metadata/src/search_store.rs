@@ -5,8 +5,8 @@ mod pages;
 use crate::{
     MetadataContentObservationReceipt,
     search_model::{
-        MetadataSearch, MetadataSearchData, MetadataSearchProjection, MetadataSearchResult,
-        MetadataSearchResultObservation, MetadataSearchResultSummary, MetadataSearchSpec,
+        MetadataSearchData, MetadataSearchProjection, MetadataSearchResultObservation,
+        MetadataSearchResultSummary, MetadataSearchSpec,
     },
     text::normalize_search_text,
 };
@@ -149,62 +149,6 @@ impl super::MetadataStore {
             .execute(INTERRUPT_COLLECTING_SQL, [now_s])?)
     }
 
-    pub fn load_searches(&self) -> Result<Vec<MetadataSearch>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT id, query, normalized_query, requested_method,
-                   resolved_method, file_type_filter, extension_filter,
-                   min_size_bytes, max_size_bytes, min_availability,
-                   min_complete_sources, min_bitrate_kbps, min_length_seconds,
-                   codec_filter, title_filter, album_filter, artist_filter,
-                   status, status_reason, created_at_s, updated_at_s,
-                   completed_at_s
-            FROM search_sessions
-            ORDER BY created_at_s, id
-            "#,
-        )?;
-        let sessions = stmt
-            .query_map([], |row| {
-                Ok(MetadataSearch {
-                    id: row.get(0)?,
-                    data: MetadataSearchData {
-                        normalized_query: row.get(2)?,
-                        spec: MetadataSearchSpec {
-                            query: row.get(1)?,
-                            method: row.get(3)?,
-                            file_type: row.get(5)?,
-                            extension: row.get(6)?,
-                            min_size_bytes: decode_optional_u64(row.get(7)?, 7)?,
-                            max_size_bytes: decode_optional_u64(row.get(8)?, 8)?,
-                            min_availability: decode_optional_u32(row.get(9)?, 9)?,
-                            min_complete_sources: decode_optional_u32(row.get(10)?, 10)?,
-                            min_bitrate_kbps: decode_optional_u32(row.get(11)?, 11)?,
-                            min_length_seconds: decode_optional_u32(row.get(12)?, 12)?,
-                            codec: row.get(13)?,
-                            title: row.get(14)?,
-                            album: row.get(15)?,
-                            artist: row.get(16)?,
-                        },
-                        resolved_method: row.get(4)?,
-                        status: row.get(17)?,
-                        status_reason: row.get(18)?,
-                        created_at_s: row.get(19)?,
-                        updated_at_s: row.get(20)?,
-                        completed_at_s: row.get(21)?,
-                    },
-                    results: Vec::new(),
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut searches = Vec::with_capacity(sessions.len());
-        for mut search in sessions {
-            search.results = load_search_results(&conn, search.id)?;
-            searches.push(search);
-        }
-        Ok(searches)
-    }
-
     pub fn delete_search(&self, id: i64) -> Result<bool> {
         ensure!(id > 0, "search id must be positive");
         let deleted = self
@@ -220,79 +164,6 @@ impl super::MetadataStore {
     }
 }
 
-fn load_search_results(
-    conn: &rusqlite::Connection,
-    session_id: i64,
-) -> Result<Vec<MetadataSearchResult>> {
-    let mut stmt = conn.prepare(
-        "SELECT r.claim_id,c.ed2k_hash,c.size_bytes,r.name,r.source_count,r.complete_source_count,
-            r.source_client_id,r.source_client_port,r.file_type,r.media_artist,r.media_album,
-            r.media_title,r.media_length_seconds,r.media_bitrate_kbps,r.media_codec,r.rating,
-            r.aich_root,r.complete,r.directory
-         FROM search_results r JOIN content_claims c ON c.id=r.claim_id
-         WHERE r.session_id=?1 ORDER BY r.claim_id",
-    )?;
-    let mut rows = stmt.query([session_id])?;
-    let mut results = Vec::new();
-    while let Some(row) = rows.next()? {
-        let root: Option<Vec<u8>> = row.get(16)?;
-        results.push(MetadataSearchResult {
-            claim_id: row.get(0)?,
-            file_hash: hex::encode(row.get::<_, Vec<u8>>(1)?),
-            size_bytes: decode_optional_u64(row.get(2)?, 2)?,
-            summary: MetadataSearchResultSummary {
-                name: row.get(3)?,
-                source_count: row.get(4)?,
-                complete_source_count: row.get(5)?,
-                source_client_id: row.get(6)?,
-                source_client_port: row.get(7)?,
-                file_type: row.get(8)?,
-                media_artist: row.get(9)?,
-                media_album: row.get(10)?,
-                media_title: row.get(11)?,
-                media_length_seconds: row.get(12)?,
-                media_bitrate_kbps: row.get(13)?,
-                media_codec: row.get(14)?,
-                rating: row.get(15)?,
-                aich_hash: root
-                    .map(|root| data_encoding::BASE32_NOPAD.encode(&root))
-                    .unwrap_or_default(),
-                complete: row.get(17)?,
-                directory: row.get(18)?,
-            },
-            observations: load_search_observations(conn, session_id, row.get(0)?)?,
-        });
-    }
-    Ok(results)
-}
-
-fn load_search_observations(
-    conn: &rusqlite::Connection,
-    session_id: i64,
-    claim_id: i64,
-) -> Result<Vec<MetadataSearchResultObservation>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {},m.first_seen_at_s,m.last_seen_at_s,m.observation_count
-         FROM search_result_observations m
-         JOIN content_claim_observations o ON o.id=m.observation_id AND o.claim_id=m.claim_id
-         JOIN content_claims c ON c.id=o.claim_id
-         WHERE m.session_id=?1 AND m.claim_id=?2 ORDER BY o.id",
-        crate::content_observation_store::COLUMNS
-    ))?;
-    let mut rows = stmt.query(params![session_id, claim_id])?;
-    let mut values = Vec::new();
-    while let Some(row) = rows.next()? {
-        values.push(MetadataSearchResultObservation {
-            observation: crate::content_observation_store::observation_from_row(row)?,
-            first_seen_at_s: row.get(25)?,
-            last_seen_at_s: row.get(26)?,
-            observation_count: row.get(27)?,
-        });
-    }
-    Ok(values)
-}
-
-/// Record only collecting-session membership; corpus writes remain independent.
 pub(crate) fn persist_projection(
     tx: &rusqlite::Transaction<'_>,
     projection: &MetadataSearchProjection,

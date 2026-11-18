@@ -390,8 +390,7 @@ pub struct Search {
     pub id: String,
     pub spec: SearchSpec,
     /// Concrete backend selected for network execution. `None` means no
-    /// network backend has been selected (yet, or because the search stayed
-    /// local-only).
+    /// network backend has been selected yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_method: Option<String>,
     pub status: String,
@@ -405,7 +404,6 @@ pub struct Search {
     pub progress: SearchProgress,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub results: Vec<SearchResult>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,46 +534,6 @@ impl SearchResult {
         }
         result.recompute_observation_aggregate();
         result
-    }
-
-    pub(crate) fn merge_observations(&mut self, mut other: SearchResult) {
-        debug_assert_eq!(self.hash, other.hash);
-        debug_assert_eq!(self.size_bytes, other.size_bytes);
-        self.ensure_aggregate_observation();
-        other.ensure_aggregate_observation();
-        for observation in other.observations {
-            if !self
-                .observations
-                .iter()
-                .any(|existing| observations_are_equivalent(existing, &observation))
-            {
-                self.observations.push(observation);
-            }
-        }
-        self.recompute_observation_aggregate();
-    }
-
-    fn ensure_aggregate_observation(&mut self) {
-        if !self.observations.is_empty() {
-            return;
-        }
-        self.observations.push(SearchResultObservation {
-            origin: "unknown".to_string(),
-            reporter_endpoint: None,
-            name: self.name.clone(),
-            size_bytes: self.size_bytes,
-            sources: self.sources,
-            complete_sources: self.complete_sources,
-            source_client_id: self.source_client_id,
-            source_client_port: self.source_client_port,
-            file_type: self.file_type.clone(),
-            media: self.media.clone(),
-            rating: self.rating,
-            aich_hash: self.aich_hash.clone(),
-            complete: self.complete,
-            directory: self.directory.clone(),
-            observed_at: Utc::now(),
-        });
     }
 
     fn recompute_observation_aggregate(&mut self) {

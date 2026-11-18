@@ -15,7 +15,6 @@ async fn removal_after_disconnect(clear: bool) {
     let first_cancel = CancellationToken::new();
     let second_cancel = CancellationToken::new();
     let mut second = state.lock().await.searches[&first_id].clone();
-    second.results.clear();
     second.spec.query = "another query".into();
     second.id = crate::search_state::create_search(&store, &second).unwrap();
     let second_id = second.id.clone();
@@ -48,7 +47,10 @@ async fn removal_after_disconnect(clear: bool) {
     tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
-    assert_eq!(store.load_searches().unwrap().len(), usize::from(!clear));
+    assert_eq!(
+        store.search_headers_page(None, 10).unwrap().items.len(),
+        usize::from(!clear)
+    );
     caller.abort();
     *owner.publication_gate.lock().unwrap() = None;
     let late_ingress = {
