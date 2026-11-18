@@ -51,18 +51,19 @@ mod tests {
                     file_hash: hash.clone(),
                     uploaded_bytes: u64::MAX,
                     accepted_sessions: 0,
-                    last_uploaded_at_s: None,
+                    ..Default::default()
                 }],
             )
             .unwrap();
         for _ in 0..2 {
-            store.add_file_upload_request(&hash, 1).unwrap();
             store
                 .apply_credit_deltas(
                     &[],
                     &[crate::MetadataFileUploadDelta {
                         file_hash: hash.clone(),
                         accepted_sessions: 1,
+                        upload_requests: u64::MAX,
+                        last_requested_at_s: Some(1),
                         ..Default::default()
                     }],
                 )

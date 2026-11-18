@@ -397,50 +397,33 @@ impl super::MetadataStore {
         Ok(updated != 0)
     }
 
-    /// Record known-hash demand and return its committed totals in the same
-    /// statement, so the process accounting owner can seed a missing record.
-    pub fn add_file_upload_request(
+    /// Read committed demand facts without changing counters or creating content.
+    /// Callers park new events in the shared accounting batch after this lookup.
+    pub fn file_upload_snapshot(
         &self,
         file_hash: &str,
-        at_s: i64,
-    ) -> Result<Option<crate::MetadataFileUploadRequest>> {
-        ensure!(at_s >= 0, "invalid upload request timestamp");
+    ) -> Result<Option<crate::MetadataFileUploadSnapshot>> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let mut statement = conn.prepare_cached(
-            "UPDATE known_files
-             SET all_time_upload_requests = all_time_upload_requests + min(1, 9223372036854775807 - all_time_upload_requests),
-                 last_upload_requested_at_s = max(coalesce(last_upload_requested_at_s, ?2), ?2)
-             WHERE ed2k_hash = ?1
-             RETURNING all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,
+        conn.prepare_cached(
+            "SELECT all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,
                  last_upload_requested_at_s,last_uploaded_at_s,
                  CASE WHEN EXISTS(SELECT 1 FROM verified_local_content WHERE known_file_id=known_files.id)
                  THEN 1 ELSE EXISTS(SELECT 1 FROM download_jobs INDEXED BY download_jobs_unremoved_unfinished_content_idx
-                     WHERE known_file_id=known_files.id AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL) END"
-        )?;
-        let mut rows = statement.query(params![hash, at_s])?;
-        let result = rows
-            .next()?
-            .map(|row| -> rusqlite::Result<_> {
-                Ok(crate::MetadataFileUploadRequest {
-                    known_client: row.get(5)?,
-                    totals: crate::MetadataFileUploadTotals {
-                        uploaded_bytes: crate::sql_value::unsigned(row, 0)?,
-                        upload_requests: crate::sql_value::unsigned(row, 1)?,
-                        accepted_sessions: crate::sql_value::unsigned(row, 2)?,
-                        last_requested_at_s: row.get(3)?,
-                        last_uploaded_at_s: row.get(4)?,
-                    },
-                })
+                     WHERE known_file_id=known_files.id AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL) END
+             FROM known_files WHERE ed2k_hash=?1"
+        )?.query_row(params![hash], |row| {
+            Ok(crate::MetadataFileUploadSnapshot {
+                known_client: row.get(5)?,
+                totals: crate::MetadataFileUploadTotals {
+                    uploaded_bytes: crate::sql_value::unsigned(row, 0)?,
+                    upload_requests: crate::sql_value::unsigned(row, 1)?,
+                    accepted_sessions: crate::sql_value::unsigned(row, 2)?,
+                    last_requested_at_s: row.get(3)?,
+                    last_uploaded_at_s: row.get(4)?,
+                },
             })
-            .transpose()?;
-        // WHY: consume SQLITE_DONE before publishing a mutation's RETURNING row;
-        // statement reset must not hide a write/commit error after the first row.
-        ensure!(
-            rows.next()?.is_none(),
-            "upload request changed multiple content rows"
-        );
-        Ok(result)
+        }).optional().map_err(Into::into)
     }
 
     /// Returns the file's persisted `(all_time_uploaded_bytes, size_bytes)`,

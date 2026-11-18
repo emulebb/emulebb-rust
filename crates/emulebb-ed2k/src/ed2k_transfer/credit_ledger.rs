@@ -2,7 +2,7 @@
 //!
 //! The upload hot path used to commit TWO SQLite transactions per served
 //! 180 K fragment (`add_peer_credit_delta` + `add_file_all_time_uploaded`),
-//! and the download flush one more per accepted block — each commit a WAL
+//! and the download flush one more per accepted block â€” each commit a WAL
 //! fsync under `synchronous = FULL`, all through the global connection mutex
 //! REST reads also use. eMule keeps these counters in memory (`CClientCredits`
 //! / `CKnownFile`) and persists clients.met / known.met on coarse timers and
@@ -31,19 +31,21 @@ use parking_lot::Mutex;
 use super::Ed2kTransferRuntime;
 
 /// How long parked deltas may age before an add spawns a background flush.
-/// The crash-loss window for these best-effort counters — eMule's own loss
+/// The crash-loss window for these best-effort counters â€” eMule's own loss
 /// window is its clients.met/known.met save timer, measured in minutes.
 const PARKED_CREDIT_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Parked per-peer deltas: user hash -> (uploaded, downloaded).
 type ParkedPeerDeltas = HashMap<[u8; 16], (u64, u64)>;
-/// Parked file-byte and accepted-session deltas keyed by lowercase hex hash.
+/// Parked file demand, byte and accepted-session deltas keyed by lowercase hex hash.
 type ParkedFileDeltas = HashMap<String, ParkedFileCounters>;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ParkedFileCounters {
     uploaded_bytes: u64,
     accepted_sessions: u64,
+    upload_requests: u64,
+    last_requested_at_s: Option<i64>,
     last_uploaded_at_s: Option<i64>,
 }
 
@@ -51,10 +53,11 @@ struct ParkedFileCounters {
 pub(super) struct ParkedCreditLedger {
     /// Peer user hash -> (uploaded delta, downloaded delta) not yet in SQLite.
     peers: ParkedPeerDeltas,
-    /// File hash -> byte and accepted-session deltas not yet in SQLite.
+    /// File hash -> upload-accounting deltas not yet in SQLite.
     files: ParkedFileDeltas,
     pub(super) file_statistics: HashMap<[u8; 16], super::file_accounting::Ed2kFileUploadStatistics>,
     last_flush_started: Instant,
+    background_flush_pending: bool,
 }
 
 impl ParkedCreditLedger {
@@ -64,6 +67,7 @@ impl ParkedCreditLedger {
             files: HashMap::new(),
             file_statistics: HashMap::new(),
             last_flush_started: Instant::now(),
+            background_flush_pending: false,
         }
     }
 
@@ -93,6 +97,8 @@ impl ParkedCreditLedger {
             slot.accepted_sessions = slot
                 .accepted_sessions
                 .saturating_add(delta.accepted_sessions);
+            slot.upload_requests = slot.upload_requests.saturating_add(delta.upload_requests);
+            slot.last_requested_at_s = slot.last_requested_at_s.max(delta.last_requested_at_s);
             slot.last_uploaded_at_s = slot.last_uploaded_at_s.max(delta.last_uploaded_at_s);
         }
     }
@@ -121,6 +127,8 @@ fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) {
             file_hash: file_hash.clone(),
             uploaded_bytes: delta.uploaded_bytes,
             accepted_sessions: delta.accepted_sessions,
+            upload_requests: delta.upload_requests,
+            last_requested_at_s: delta.last_requested_at_s,
             last_uploaded_at_s: delta.last_uploaded_at_s,
         })
         .collect();
@@ -138,6 +146,29 @@ struct ParkedCreditFlushParts {
     ledger: std::sync::Arc<Mutex<ParkedCreditLedger>>,
     flush_gate: std::sync::Arc<Mutex<()>>,
     metadata: MetadataStore,
+}
+
+/// One scheduled or executing background checkpoint. Dropping queued work or
+/// unwinding releases admission without holding a mutex across SQLite work.
+struct BackgroundCreditFlush(ParkedCreditFlushParts);
+
+impl BackgroundCreditFlush {
+    fn reserve(parts: ParkedCreditFlushParts) -> Option<Self> {
+        {
+            let mut ledger = parts.ledger.lock();
+            if ledger.background_flush_pending {
+                return None;
+            }
+            ledger.background_flush_pending = true;
+        }
+        Some(Self(parts))
+    }
+}
+
+impl Drop for BackgroundCreditFlush {
+    fn drop(&mut self) {
+        self.0.ledger.lock().background_flush_pending = false;
+    }
 }
 
 impl Ed2kTransferRuntime {
@@ -173,9 +204,49 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
-    /// Park a file all-time-uploaded delta (the SQL half of the counter; the
-    /// in-memory catalog demand counter keeps its own RUST-PAR-025 parking)
-    /// and feed the shared-catalog demand counter exactly as before.
+    /// Capture one known-hash demand event in the existing checkpoint ledger.
+    /// Cold lookups may seed client facts, but passive records live only while
+    /// dirty and unknown requests never allocate an accounting record.
+    pub(super) fn park_file_upload_request(
+        &self,
+        hash: &Ed2kHash,
+        at_s: i64,
+        snapshot: Option<emulebb_metadata::MetadataFileUploadSnapshot>,
+    ) -> bool {
+        let key = hash.to_string();
+        let flush_due = {
+            let mut ledger = self.parked_credit.lock();
+            if let Some(snapshot) = snapshot {
+                if snapshot.known_client || ledger.file_statistics.contains_key(&hash.0) {
+                    ledger
+                        .file_statistics
+                        .entry(hash.0)
+                        .or_default()
+                        .observe(snapshot.totals);
+                }
+            } else if !ledger.file_statistics.contains_key(&hash.0)
+                && !ledger.files.contains_key(&key)
+            {
+                return false;
+            }
+            if let Some(stats) = ledger.file_statistics.get_mut(&hash.0) {
+                stats.session_upload_requests = stats.session_upload_requests.saturating_add(1);
+                stats.lifetime.upload_requests = stats.lifetime.upload_requests.saturating_add(1);
+                stats.lifetime.last_requested_at_s =
+                    stats.lifetime.last_requested_at_s.max(Some(at_s));
+            }
+            let slot = ledger.files.entry(key).or_default();
+            slot.upload_requests = slot.upload_requests.saturating_add(1);
+            slot.last_requested_at_s = slot.last_requested_at_s.max(Some(at_s));
+            ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
+        };
+        if flush_due {
+            self.spawn_parked_credit_flush();
+        }
+        true
+    }
+
+    /// Capture sent bytes in the process owner and its pending lifetime batch.
     pub(crate) fn add_file_all_time_uploaded(
         &self,
         file_hash: &Ed2kHash,
@@ -264,7 +335,7 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
-    /// Drop parked deltas for one peer WITHOUT committing them — for the
+    /// Drop parked deltas for one peer WITHOUT committing them â€” for the
     /// absolute totals seed, which would otherwise double-count them on the
     /// next flush.
     pub(super) fn discard_parked_peer_credit(&self, user_hash: [u8; 16]) {
@@ -274,15 +345,24 @@ impl Ed2kTransferRuntime {
 
     /// Fire-and-forget background flush of the whole ledger.
     fn spawn_parked_credit_flush(&self) {
-        let parts = self.parked_credit_flush_parts();
+        // WHY: the interval is observed by multiple producers before a queued
+        // flush drains anything. Reserve once so bursts cannot fill the blocking
+        // pool with tasks waiting for the same flush gate.
+        let Some(reservation) = BackgroundCreditFlush::reserve(self.parked_credit_flush_parts())
+        else {
+            return;
+        };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn_blocking(move || flush_parked_credit_blocking(&parts));
+            handle.spawn_blocking(move || {
+                let reservation = reservation;
+                flush_parked_credit_blocking(&reservation.0);
+            });
         } else {
-            flush_parked_credit_blocking(&parts);
+            flush_parked_credit_blocking(&reservation.0);
         }
     }
 
-    /// Flush every parked delta and wait for the commit — upload-session
+    /// Flush every parked delta and wait for the commit â€” upload-session
     /// release and tests use this so the tail is durable, mirroring the
     /// catalog counter's release-time flush.
     pub(crate) async fn flush_parked_credit(&self) {
@@ -299,6 +379,24 @@ mod tests {
     use super::*;
     use crate::ed2k_transfer::Ed2kTransferRuntime;
     use crate::paths::unique_test_dir;
+
+    #[test]
+    fn background_checkpoint_admission_is_single_flight_and_released_on_drop() {
+        let runtime =
+            Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-credit-flush-reservation"))
+                .unwrap();
+        runtime.add_peer_credit_delta([0x43; 16], 1, 2).unwrap();
+        let first = BackgroundCreditFlush::reserve(runtime.parked_credit_flush_parts()).unwrap();
+        for _ in 0..100 {
+            assert!(BackgroundCreditFlush::reserve(runtime.parked_credit_flush_parts()).is_none());
+        }
+        drop(first);
+        let next = BackgroundCreditFlush::reserve(runtime.parked_credit_flush_parts()).unwrap();
+        flush_parked_credit_blocking(&next.0);
+        drop(next);
+        assert_eq!(runtime.parked_peer_credit_delta([0x43; 16]), (0, 0));
+        assert!(BackgroundCreditFlush::reserve(runtime.parked_credit_flush_parts()).is_some());
+    }
 
     #[test]
     fn failed_peer_settlement_preserves_credit_until_exactly_once_retry_and_reopen() {

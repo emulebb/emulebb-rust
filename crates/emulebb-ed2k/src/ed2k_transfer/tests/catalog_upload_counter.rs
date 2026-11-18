@@ -433,9 +433,38 @@ async fn passive_and_unknown_demand_do_not_allocate_client_session_records() {
         .unwrap();
     runtime.note_file_upload_request(&hash).await;
     assert!(runtime.file_upload_statistics(&hash).is_none());
+    assert_eq!(
+        runtime
+            .metadata
+            .file_upload_snapshot(&hash.to_string())
+            .unwrap()
+            .unwrap()
+            .totals
+            .upload_requests,
+        0
+    );
     let unknown = Ed2kHash::from_bytes([0x2B; 16]);
     runtime.note_file_upload_request(&unknown).await;
     assert!(runtime.file_upload_statistics(&unknown).is_none());
+    assert!(runtime.parked_credit.lock().file_statistics.is_empty());
+    runtime.flush_parked_credit().await;
+    assert_eq!(
+        runtime
+            .metadata
+            .file_upload_snapshot(&hash.to_string())
+            .unwrap()
+            .unwrap()
+            .totals
+            .upload_requests,
+        1
+    );
+    assert!(
+        runtime
+            .metadata
+            .file_upload_snapshot(&unknown.to_string())
+            .unwrap()
+            .is_none()
+    );
     assert!(runtime.parked_credit.lock().file_statistics.is_empty());
 }
 
@@ -454,6 +483,8 @@ async fn request_and_acceptance_capture_do_not_wait_for_catalog_projection() {
     let work = runtime.begin_upload_work(&handle).await.unwrap();
     let catalog = runtime.shared_catalog();
     let held_projection = catalog.read().await;
+    let database = rusqlite::Connection::open(runtime.root_dir.join("metadata.sqlite")).unwrap();
+    database.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut context = Context::from_waker(std::task::Waker::noop());
     assert!(
         std::pin::pin!(runtime.note_file_upload_request(&hash))
@@ -483,6 +514,17 @@ async fn request_and_acceptance_capture_do_not_wait_for_catalog_projection() {
             .session_request_count,
         0
     );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT all_time_upload_requests FROM known_files",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    database.execute_batch("ROLLBACK").unwrap();
     drop(held_projection);
     drop(work);
     runtime.release_upload_session(&handle).await;
@@ -552,6 +594,9 @@ async fn cached_client_session_demand_survives_rejected_sql_write() {
     database.execute_batch("CREATE TRIGGER synthetic_request_failure BEFORE UPDATE OF all_time_upload_requests ON known_files
         BEGIN SELECT RAISE(ABORT,'synthetic demand failure'); END;").unwrap();
     runtime.note_file_upload_request(&hash).await;
+    runtime.add_file_all_time_uploaded(&hash, 7).unwrap();
+    runtime.add_peer_credit_delta([0x4E; 16], 3, 0).unwrap();
+    runtime.flush_parked_credit().await;
     assert_eq!(
         runtime
             .file_upload_statistics(&hash)
@@ -580,6 +625,19 @@ async fn cached_client_session_demand_survives_rejected_sql_write() {
             .unwrap(),
         0
     );
+    assert_eq!(
+        database
+            .query_row("SELECT all_time_uploaded_bytes FROM known_files", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM peers", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     database
         .execute_batch("DROP TRIGGER synthetic_request_failure")
         .unwrap();
@@ -590,5 +648,26 @@ async fn cached_client_session_demand_survives_rejected_sql_write() {
             .unwrap()
             .session_upload_requests,
         2
+    );
+    runtime.flush_parked_credit().await;
+    runtime.flush_parked_credit().await;
+    let stored = runtime
+        .metadata
+        .file_upload_snapshot(&hash.to_string())
+        .unwrap()
+        .unwrap()
+        .totals;
+    assert_eq!(stored.upload_requests, 2);
+    assert_eq!(stored.uploaded_bytes, 7);
+    assert_eq!(
+        stored,
+        runtime.file_upload_statistics(&hash).unwrap().lifetime
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT uploaded_bytes FROM peers", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        3
     );
 }

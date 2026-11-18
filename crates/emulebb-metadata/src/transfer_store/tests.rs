@@ -1539,14 +1539,14 @@ fn upload_demand_counters_persist_on_known_files() {
     );
     assert!(
         store
-            .add_file_upload_request(&manifest.file_hash, 1_700_000_001)
+            .file_upload_snapshot(&manifest.file_hash)
             .unwrap()
             .unwrap()
             .known_client
     );
     assert!(
         store
-            .add_file_upload_request(&manifest.file_hash, 1_700_000_000)
+            .file_upload_snapshot(&manifest.file_hash)
             .unwrap()
             .is_some()
     );
@@ -1556,6 +1556,8 @@ fn upload_demand_counters_persist_on_known_files() {
             &[crate::MetadataFileUploadDelta {
                 file_hash: manifest.file_hash.clone(),
                 accepted_sessions: 1,
+                upload_requests: 2,
+                last_requested_at_s: Some(1_700_000_001),
                 ..Default::default()
             }],
         )

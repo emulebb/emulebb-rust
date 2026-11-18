@@ -124,34 +124,4 @@ impl Ed2kTransferRuntime {
         stats.observe(totals);
         *stats
     }
-
-    pub(super) fn capture_cached_file_request(&self, hash: &Ed2kHash, at_s: i64) -> bool {
-        let mut owner = self.parked_credit.lock();
-        let Some(stats) = owner.file_statistics.get_mut(&hash.0) else {
-            return false;
-        };
-        stats.session_upload_requests = stats.session_upload_requests.saturating_add(1);
-        stats.lifetime.last_requested_at_s = stats.lifetime.last_requested_at_s.max(Some(at_s));
-        true
-    }
-
-    pub(super) fn note_known_file_request(
-        &self,
-        hash: &Ed2kHash,
-        demand: emulebb_metadata::MetadataFileUploadRequest,
-        captured: bool,
-    ) -> bool {
-        let mut owner = self.parked_credit.lock();
-        // WHY: passive/index-only observations do not allocate permanent client
-        // session records. Previously registered client knowledge stays owned.
-        if !demand.known_client && !owner.file_statistics.contains_key(&hash.0) {
-            return false;
-        }
-        let stats = owner.file_statistics.entry(hash.0).or_default();
-        stats.observe(demand.totals);
-        if !captured {
-            stats.session_upload_requests = stats.session_upload_requests.saturating_add(1);
-        }
-        true
-    }
 }

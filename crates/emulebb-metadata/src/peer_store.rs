@@ -18,7 +18,7 @@ pub struct MetadataFileUploadTotals {
 
 /// Demand facts distinguish client content from passive/index observations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MetadataFileUploadRequest {
+pub struct MetadataFileUploadSnapshot {
     pub totals: MetadataFileUploadTotals,
     pub known_client: bool,
 }
@@ -29,6 +29,8 @@ pub struct MetadataFileUploadDelta {
     pub file_hash: String,
     pub uploaded_bytes: u64,
     pub accepted_sessions: u64,
+    pub upload_requests: u64,
+    pub last_requested_at_s: Option<i64>,
     pub last_uploaded_at_s: Option<i64>,
 }
 
@@ -182,6 +184,12 @@ impl super::MetadataStore {
         for delta in file_deltas {
             ensure!(
                 delta
+                    .last_requested_at_s
+                    .is_none_or(|at| at >= 0 && delta.upload_requests > 0),
+                "invalid upload-request timestamp"
+            );
+            ensure!(
+                delta
                     .last_uploaded_at_s
                     .is_none_or(|at| at >= 0 && delta.uploaded_bytes > 0),
                 "invalid actual-upload timestamp"
@@ -192,11 +200,13 @@ impl super::MetadataStore {
                 UPDATE known_files
                 SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes),
                     all_time_upload_accepts = all_time_upload_accepts + min(?3, 9223372036854775807 - all_time_upload_accepts),
-                    last_uploaded_at_s = CASE WHEN ?4 IS NULL THEN last_uploaded_at_s ELSE max(coalesce(last_uploaded_at_s,?4),?4) END
+                    last_uploaded_at_s = CASE WHEN ?4 IS NULL THEN last_uploaded_at_s ELSE max(coalesce(last_uploaded_at_s,?4),?4) END,
+                    all_time_upload_requests = all_time_upload_requests + min(?5, 9223372036854775807 - all_time_upload_requests),
+                    last_upload_requested_at_s = CASE WHEN ?6 IS NULL THEN last_upload_requested_at_s ELSE max(coalesce(last_upload_requested_at_s,?6),?6) END
                 WHERE ed2k_hash = ?1
                 "#,
             )?
-            .execute(params![hash, u64_to_i64_saturating(delta.uploaded_bytes), u64_to_i64_saturating(delta.accepted_sessions), delta.last_uploaded_at_s])?;
+            .execute(params![hash, u64_to_i64_saturating(delta.uploaded_bytes), u64_to_i64_saturating(delta.accepted_sessions), delta.last_uploaded_at_s, u64_to_i64_saturating(delta.upload_requests), delta.last_requested_at_s])?;
         }
         tx.commit()?;
         Ok(())
@@ -244,7 +254,7 @@ impl super::MetadataStore {
     ///   sentinel (ClientCredits.cpp:347-350) so an attacker cannot spoof a
     ///   userhash that accrued credit via an unsecured peer and then claim it by
     ///   verifying with their own key. A fresh slot (no prior credit) keeps its
-    ///   zero totals — there is nothing to wipe;
+    ///   zero totals â€” there is nothing to wipe;
     /// - stored key == `public_key`: no change (the normal repeat verify);
     /// - stored key != `public_key`: retain the first verified key and all
     ///   credit totals. The caller must reject the mismatched identity.
@@ -300,7 +310,7 @@ impl super::MetadataStore {
             }
             None => {
                 // First verify on a fresh slot: bind the key, keep the (zero)
-                // credits — there is nothing accumulated to wipe.
+                // credits â€” there is nothing accumulated to wipe.
                 tx.execute(
                     r#"
                     INSERT INTO peers(
@@ -495,10 +505,20 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(times(), (None, None));
-        store.add_file_upload_request(&hash, 0).unwrap();
+        let request = |at| MetadataFileUploadDelta {
+            file_hash: hash.clone(),
+            upload_requests: 1,
+            last_requested_at_s: Some(at),
+            ..Default::default()
+        };
+        store.apply_credit_deltas(&[], &[request(0)]).unwrap();
         assert_eq!(times(), (Some(0), None));
-        store.add_file_upload_request(&hash, 1_700_000_010).unwrap();
-        store.add_file_upload_request(&hash, 1_700_000_001).unwrap();
+        store
+            .apply_credit_deltas(&[], &[request(1_700_000_010)])
+            .unwrap();
+        store
+            .apply_credit_deltas(&[], &[request(1_700_000_001)])
+            .unwrap();
         assert_eq!(times(), (Some(1_700_000_010), None));
         let bytes = |at| MetadataFileUploadDelta {
             file_hash: hash.clone(),
@@ -525,7 +545,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(times(), (Some(1_700_000_010), Some(1_700_000_009)));
-        assert!(store.add_file_upload_request(&hash, -1).is_err());
+        assert!(store.apply_credit_deltas(&[], &[request(-1)]).is_err());
         assert!(
             store
                 .apply_credit_deltas(&[("78".repeat(16), 1, 0)], &[bytes(-1)])

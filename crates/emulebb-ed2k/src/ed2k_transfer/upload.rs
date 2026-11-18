@@ -404,13 +404,23 @@ impl Ed2kTransferRuntime {
     /// Record one inbound OP_REQUESTPARTS demand signal for a shared file.
     pub(crate) async fn note_file_upload_request(&self, file_hash: &Ed2kHash) {
         let now = unix_time_s();
-        let captured = self.capture_cached_file_request(file_hash, now);
-        let changed = match self
-            .metadata
-            .add_file_upload_request(&file_hash.to_string(), now)
-        {
-            Ok(Some(demand)) => self.note_known_file_request(file_hash, demand, captured),
-            _ => captured || self.capture_cached_file_request(file_hash, now),
+        let changed = if self.park_file_upload_request(file_hash, now, None) {
+            true
+        } else {
+            // WHY: serving hashes are already registered by their catalog. Cold
+            // demand may need classification, but must not run SQLite on a peer
+            // worker or allocate accounting records for arbitrary unknown hashes.
+            let metadata = self.metadata.clone();
+            let hash = file_hash.to_string();
+            let snapshot =
+                tokio::task::spawn_blocking(move || metadata.file_upload_snapshot(&hash)).await;
+            match snapshot {
+                Ok(Ok(snapshot)) => self.park_file_upload_request(file_hash, now, snapshot),
+                result => {
+                    tracing::warn!("failed to classify cold upload demand: {result:?}");
+                    self.park_file_upload_request(file_hash, now, None)
+                }
+            }
         };
         if changed {
             self.try_publish_file_accounting(file_hash);
