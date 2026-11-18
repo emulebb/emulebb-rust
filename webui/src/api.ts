@@ -955,7 +955,7 @@ export class RestClient {
     const bundle = await this.request<Record<string, unknown>>(
       "POST", "diagnostics/bundles", { confirmCapture: true, maxBytes }, "json"
     );
-    if (!isRecord(bundle) || bundle.schema !== "emulebb.diagnostic-bundle.v6" || typeof bundle.capturedAt !== "string") {
+    if (!isRecord(bundle) || bundle.schema !== "emulebb.diagnostic-bundle.v7" || typeof bundle.capturedAt !== "string") {
       throw new Error("Diagnostic bundle returned an unexpected response");
     }
     return bundle;

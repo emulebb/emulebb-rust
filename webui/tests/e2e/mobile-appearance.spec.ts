@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 import { installMockApi, mockSnapshotFixture, mockDownloadFixture, type RecordedApiRequest } from "../fixtures/mockApi";
 import { pathForRoute, type Tab } from "../../src/routes";
@@ -170,7 +171,14 @@ test("mobile forms, row actions and direct diagnostic buttons preserve request m
   await page.goto("/diagnostics");
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Capture private bundle" }).click();
-  expect((await download).suggestedFilename()).toContain("diagnostic-bundle");
+  const downloaded = await download;
+  expect(downloaded.suggestedFilename()).toContain("diagnostic-bundle");
+  const downloadedPath = await downloaded.path();
+  if (!downloadedPath) throw new Error("Diagnostic download has no saved artifact");
+  expect(JSON.parse(await readFile(downloadedPath, "utf-8"))).toEqual({
+    schema: "emulebb.diagnostic-bundle.v7", capturedAt: "2026-11-14T12:00:00Z",
+    summary: { issueCount: 0 }
+  });
   await page.getByRole("button", { name: "Crash test" }).click();
   await page.getByRole("button", { name: "Shutdown", exact: true }).click();
   await expect.poll(() => requests.some((request) => request.method === "POST" && request.path === "app/shutdown")).toBe(true);
