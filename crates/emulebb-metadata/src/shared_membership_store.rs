@@ -137,9 +137,13 @@ impl MetadataStore {
                 now
             ],
         )?;
+        // WHY: replacing unchanged evidence fires the projection's INSERT
+        // trigger and makes a later read rebuild otherwise unchanged content.
         tx.execute(
-            "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
-             VALUES (?1, ?2)",
+            "INSERT INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
+             VALUES (?1, ?2)
+             ON CONFLICT(path_id) DO UPDATE SET verified_fingerprint = excluded.verified_fingerprint
+             WHERE session_verified_local_paths.verified_fingerprint IS NOT excluded.verified_fingerprint",
             params![path_id, stored],
         )?;
         Ok(true)
@@ -398,8 +402,10 @@ impl MetadataStore {
                 ],
             )?;
             tx.execute(
-                "INSERT OR REPLACE INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
-                 VALUES (?1, ?2)",
+                "INSERT INTO temp.session_verified_local_paths(path_id, verified_fingerprint)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(path_id) DO UPDATE SET verified_fingerprint = excluded.verified_fingerprint
+                 WHERE session_verified_local_paths.verified_fingerprint IS NOT excluded.verified_fingerprint",
                 params![path_id, cached.1],
             )?;
         }
