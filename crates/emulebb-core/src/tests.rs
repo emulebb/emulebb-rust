@@ -265,7 +265,7 @@ fn find_buddy_req_self_endpoint_matches_only_our_ip_and_port() {
     ));
 }
 
-fn test_network_config_with_store(
+pub(crate) fn test_network_config_with_store(
     transfer_root: &Path,
     kad_local_store: KadLocalStoreConfig,
     kad_snoop_queue: SnoopQueueConfig,

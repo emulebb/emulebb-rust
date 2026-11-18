@@ -23,6 +23,11 @@ impl KadAichSearchVotes {
         }
     }
 
+    pub(crate) fn payload_bytes(&self) -> usize {
+        // Includes conservative B-tree node/link overhead per bounded vote.
+        self.votes.len() * 128
+    }
+
     pub(crate) fn observations(&self) -> Vec<([u8; 20], IpAddr)> {
         self.votes
             .iter()

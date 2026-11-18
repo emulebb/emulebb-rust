@@ -605,18 +605,18 @@ async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search()
         ..SearchCreate::default()
     };
 
+    let sql = rusqlite::Connection::open(transfer_root.join("metadata.sqlite")).unwrap();
+    sql.execute_batch("CREATE TRIGGER fail_search_create BEFORE INSERT ON search_sessions BEGIN SELECT RAISE(ABORT, 'injected initial-search persistence failure'); END;").unwrap();
     let error = core
-        .create_search_with_initial_persistence(request.clone(), |_, _| {
-            Err(anyhow::anyhow!(
-                "injected initial-search persistence failure"
-            ))
-        })
+        .create_search(request.clone())
         .await
-        .expect_err("injected persistence failure must reject the search");
-    assert_eq!(
-        error.to_string(),
-        "injected initial-search persistence failure"
-    );
+        .expect_err("SQL failure must reject search creation");
+    assert!(matches!(
+        error.downcast_ref::<PersistenceError>(),
+        Some(PersistenceError::Storage(_))
+    ));
+    sql.execute_batch("DROP TRIGGER fail_search_create;")
+        .unwrap();
     assert!(core.searches().await.is_empty());
     assert!(core.metadata_store.load_searches().unwrap().is_empty());
     assert_eq!(core.search_queue.lock().pending_len(), 0);
@@ -628,6 +628,24 @@ async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search()
     assert_eq!(core.metadata_store.load_searches().unwrap().len(), 1);
     assert_eq!(core.search_queue.lock().pending_len(), 1);
     assert!(core.search_queue.lock().drain_task_running());
+    sql.execute_batch("CREATE TRIGGER fail_search_update BEFORE UPDATE ON search_sessions BEGIN SELECT RAISE(ABORT, 'injected status persistence failure'); END;").unwrap();
+    core.update_search_status(&search.id, "running", None, Some("server"))
+        .await;
+    assert_eq!(core.search(&search.id).await.unwrap().status, "queued");
+    assert_eq!(
+        core.metadata_store.load_searches().unwrap()[0].data.status,
+        "queued"
+    );
+    sql.execute_batch("DROP TRIGGER fail_search_update;")
+        .unwrap();
+    core.update_search_status(&search.id, "running", None, Some("server"))
+        .await;
+    assert_eq!(core.search(&search.id).await.unwrap().status, "running");
+    assert_eq!(
+        core.metadata_store.load_searches().unwrap()[0].data.status,
+        "running"
+    );
+    core.clear_searches().await.unwrap();
 }
 
 #[tokio::test]

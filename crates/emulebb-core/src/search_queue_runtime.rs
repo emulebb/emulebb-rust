@@ -18,9 +18,7 @@ use crate::search_query::SearchNetworkMethod;
 use crate::search_queue::{
     ConcreteSearchLane, QueuedSearch, SEARCH_QUEUE_RECHECK, SearchBackendReadiness, SearchDispatch,
 };
-use crate::{
-    EmulebbCore, SearchCreate, SearchProgress, SearchResult, kad_public_search, search_state,
-};
+use crate::{EmulebbCore, SearchCreate, SearchProgress, SearchResult, kad_public_search};
 
 pub(crate) enum SearchLiveUpdate {
     Result {
@@ -473,130 +471,76 @@ impl EmulebbCore {
         status_reason: Option<&str>,
         resolved_method: Option<&str>,
     ) {
-        let snapshot = {
-            let mut state = self.state.lock().await;
-            let Some(search) = state.searches.get_mut(search_id) else {
-                return;
-            };
-            search.status = status.to_string();
-            search.status_reason = status_reason.map(str::to_string);
-            if let Some(resolved_method) = resolved_method {
-                search.resolved_method = Some(resolved_method.to_string());
-            }
-            match status {
-                "queued" => search.progress = SearchProgress::new("queued", 0, None, ""),
-                "running" => search.progress = SearchProgress::new("starting", 0, None, ""),
-                _ => {}
-            }
-            search.updated_at = Utc::now();
-            search.clone()
+        use crate::persistence_owner::search_transition::{Phase, Transition};
+        let phase = match status {
+            "queued" => Phase::Queued,
+            "running" => Phase::Running,
+            _ => return,
         };
-        if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
-            tracing::warn!("failed to persist search {search_id} status change: {error}");
-        }
+        self.persist_search_transition(Transition {
+            id: search_id.into(),
+            phase,
+            reason: status_reason.map(str::to_owned),
+            method: resolved_method.map(str::to_owned),
+            method_token: "automatic",
+            votes: None,
+        })
+        .await;
     }
 
     /// Settle terminal status and integrity votes without replaying results.
-    /// Every decoded network observation already passed through live ingestion.
     pub(crate) async fn complete_search_with_results(
         &self,
         search_id: &str,
-        request: &SearchCreate,
+        _request: &SearchCreate,
         method_token: &'static str,
         status_reason: Option<&str>,
         kad_aich_votes: Option<std::collections::HashMap<String, crate::KadAichSearchVotes>>,
     ) {
-        let snapshot = {
-            let mut state = self.state.lock().await;
-            state.search_cancels.remove(search_id);
-            let Some(current) = state.searches.get(search_id) else {
-                return;
-            };
-            if !matches!(current.status.as_str(), "queued" | "running") {
-                return;
-            }
-            let accepted_hashes = current
-                .results
-                .iter()
-                .map(|result| result.hash.clone())
-                .collect::<std::collections::HashSet<_>>();
-            let snapshot = {
-                let Some(search) = state.searches.get_mut(search_id) else {
-                    return;
-                };
-                search.status = "completed".to_string();
-                search.status_reason = status_reason.map(str::to_string);
-                search.resolved_method = concrete_method(method_token).map(str::to_string);
-                search.progress.phase = "completed".to_string();
-                if let Some(total_units) = search.progress.total_units {
-                    search.progress.completed_units = total_units;
-                }
-                search.updated_at = Utc::now();
-                search.clone()
-            };
-            state
-                .kad_aich_search_votes
-                .retain(|(_, candidate_search_id), _| candidate_search_id != search_id);
-            if let Some(kad_aich_votes) = kad_aich_votes {
-                for (hash, votes) in kad_aich_votes {
-                    if accepted_hashes.contains(&hash) {
-                        state
-                            .kad_aich_search_votes
-                            .insert((hash, search_id.to_string()), votes);
-                    }
-                }
-            }
-            snapshot
-        };
-        crate::diag_sched::keyword_search(
-            search_id,
-            &request.query,
+        use crate::persistence_owner::search_transition::{Phase, Transition};
+        self.persist_search_transition(Transition {
+            id: search_id.into(),
+            phase: Phase::Completed,
+            reason: status_reason.map(str::to_owned),
+            method: concrete_method(method_token).map(str::to_owned),
             method_token,
-            snapshot.results.len(),
-            &snapshot.status,
-            snapshot.status_reason.as_deref(),
-        );
-        if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
-            tracing::warn!("failed to persist completed search {search_id}: {error}");
-        }
+            votes: kad_aich_votes,
+        })
+        .await;
     }
 
-    /// Fails a search with an explicit error status + reason (never a fake
-    /// "completed"). Shared by the queued path and the legacy immediate path.
     pub(crate) async fn fail_search(
         &self,
         search_id: &str,
-        request: &SearchCreate,
+        _request: &SearchCreate,
         method_token: &'static str,
         reason: &'static str,
     ) {
-        let snapshot = {
-            let mut state = self.state.lock().await;
-            if let Some(cancel) = state.search_cancels.remove(search_id) {
-                cancel.cancel();
-            }
-            let Some(search) = state.searches.get_mut(search_id) else {
-                return;
-            };
-            search.status = "error".to_string();
-            search.status_reason = Some(reason.to_string());
-            if let Some(method) = concrete_method(method_token) {
-                search.resolved_method = Some(method.to_string());
-            }
-            search.progress.phase = "failed".to_string();
-            search.updated_at = Utc::now();
-            search.clone()
-        };
-        crate::diag_sched::keyword_search(
-            search_id,
-            &request.query,
+        use crate::persistence_owner::search_transition::{Phase, Transition};
+        self.persist_search_transition(Transition {
+            id: search_id.into(),
+            phase: Phase::Error,
+            reason: Some(reason.into()),
+            method: concrete_method(method_token).map(str::to_owned),
             method_token,
-            snapshot.results.len(),
-            &snapshot.status,
-            snapshot.status_reason.as_deref(),
-        );
-        if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
-            tracing::warn!("failed to persist failed search {search_id}: {error}");
+            votes: None,
+        })
+        .await;
+    }
+
+    async fn persist_search_transition(
+        &self,
+        transition: crate::persistence_owner::search_transition::Transition,
+    ) {
+        let result = match self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)
+        {
+            Ok(owner) => owner.transition_search(transition).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "search transition could not be committed");
         }
     }
 }

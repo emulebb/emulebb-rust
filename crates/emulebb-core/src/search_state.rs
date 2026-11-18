@@ -20,6 +20,7 @@ pub(crate) fn load_searches(metadata: &MetadataStore) -> Result<HashMap<String, 
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn persist_search(metadata: &MetadataStore, search: &Search) -> Result<()> {
     metadata.update_search(
         search.id.parse().context("invalid search identity")?,
@@ -27,13 +28,14 @@ pub(crate) fn persist_search(metadata: &MetadataStore, search: &Search) -> Resul
     )
 }
 
+#[cfg(test)]
 pub(crate) fn create_search(metadata: &MetadataStore, search: &Search) -> Result<String> {
     Ok(metadata
         .create_search(&search_to_metadata(search))?
         .to_string())
 }
 
-fn search_to_metadata(search: &Search) -> MetadataSearchData {
+pub(crate) fn search_to_metadata(search: &Search) -> MetadataSearchData {
     MetadataSearchData {
         normalized_query: normalized_search_query(&search.spec.query),
         spec: MetadataSearchSpec {

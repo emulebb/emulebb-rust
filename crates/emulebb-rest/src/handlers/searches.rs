@@ -37,12 +37,7 @@ pub(crate) async fn create_search(
     };
     match state.core.create_search(request).await {
         Ok(search) => api_ok(search_response(&search)).into_response(),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 

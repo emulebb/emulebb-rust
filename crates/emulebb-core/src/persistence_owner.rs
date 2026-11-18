@@ -24,7 +24,9 @@ mod download_patch;
 mod kad;
 mod library_sharing;
 mod library_tags;
+pub(crate) mod search_create;
 mod search_sessions;
+pub(crate) mod search_transition;
 
 #[cfg(test)]
 mod download_tests;
@@ -108,6 +110,8 @@ enum Command {
     Category(category::CategoryCommand),
     ContentObservations(content_observations::ObservationCommand),
     SearchSessions(search_sessions::SearchCommand),
+    SearchCreate(search_create::CreateCommand),
+    SearchTransition(search_transition::Transition),
     LibraryTags(crate::LibraryTagRequest),
     LibrarySharing(library_sharing::SharingCommand),
     Downloads(download::DownloadCommand),
@@ -121,6 +125,8 @@ enum Command {
 enum Response {
     ContentObserved(Result<(), PersistenceError>),
     SearchRemoved(bool),
+    SearchCreated(anyhow::Result<crate::Search>),
+    SearchTransitioned,
     Friend(Option<Friend>),
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
     LibraryTags(
@@ -297,6 +303,8 @@ impl Drop for Permit {
 }
 
 enum DbCommand {
+    SearchCreate(emulebb_metadata::MetadataSearchData),
+    SearchUpdate(i64, emulebb_metadata::MetadataSearchData),
     SearchRemove(Option<i64>),
     Add(Friend),
     Delete(Friend),
@@ -333,6 +341,8 @@ enum KadMergeOutcome {
 }
 
 enum DbResponse {
+    SearchCreated(i64),
+    SearchUpdated,
     SearchRemoved(bool),
     ContentObserved(Option<i64>),
     Friend(Friend, bool),
@@ -343,7 +353,7 @@ enum DbResponse {
     KadReplaced(Option<i64>),
     KadMerged(KadMergeOutcome),
 }
-struct DbRequest {
+pub(crate) struct DbRequest {
     command: DbCommand,
     response: oneshot::Sender<Result<DbResponse, PersistenceError>>,
 }
@@ -444,9 +454,9 @@ pub(crate) struct PersistenceOwner {
 
 #[cfg(test)]
 #[derive(Default)]
-struct PublicationGate {
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+pub(crate) struct PublicationGate {
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
 }
 
 struct DrainState {
@@ -484,6 +494,32 @@ impl PersistenceOwner {
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
+                    if let DbCommand::SearchUpdate(id, header) = &request.command {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.update_search(*id, header)));
+                        let result = match outcome {
+                            Ok(Ok(())) => Ok(DbResponse::SearchUpdated),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "search status SQL failed");
+                                Err(PersistenceError::Storage("database operation failed".into()))
+                            }
+                            Err(_) => Err(PersistenceError::CommitUnknown),
+                        };
+                        let _ = request.response.send(result);
+                        continue;
+                    }
+                    if let DbCommand::SearchCreate(header) = &request.command {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.create_search(header)));
+                        let result = match outcome {
+                            Ok(Ok(id)) => Ok(DbResponse::SearchCreated(id)),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "search creation SQL failed");
+                                Err(PersistenceError::Storage("database operation failed".into()))
+                            }
+                            Err(_) => Err(PersistenceError::CommitUnknown),
+                        };
+                        let _ = request.response.send(result);
+                        continue;
+                    }
                     if let DbCommand::SearchRemove(id) = &request.command {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             match id {
@@ -647,7 +683,9 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::SearchRemove(_)
+                            DbCommand::SearchUpdate(..)
+                            | DbCommand::SearchCreate(_)
+                            | DbCommand::SearchRemove(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
@@ -694,7 +732,9 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::SearchRemove(_)
+                                DbCommand::SearchUpdate(..)
+                            | DbCommand::SearchCreate(_)
+                            | DbCommand::SearchRemove(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                                 | DbCommand::KadLoad
@@ -722,7 +762,9 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::SearchRemove(_)
+                            DbCommand::SearchUpdate(..)
+                            | DbCommand::SearchCreate(_)
+                            | DbCommand::SearchRemove(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
@@ -971,7 +1013,9 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::SearchSessions(_)
+            Command::SearchTransition(_)
+            | Command::SearchCreate(_)
+            | Command::SearchSessions(_)
             | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)
@@ -1107,6 +1151,25 @@ async fn process(
     category_continuation: &mut Option<category::CategoryContinuation>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    if matches!(&request.command, Command::SearchTransition(_)) {
+        return search_transition::process(
+            state,
+            db,
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
+    if matches!(&request.command, Command::SearchCreate(_)) {
+        return search_create::process(
+            db,
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::SearchSessions(_)) {
         return search_sessions::process(
             state,
@@ -1196,7 +1259,9 @@ async fn process(
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
-            DbResponse::SearchRemoved(_)
+            DbResponse::SearchUpdated
+            | DbResponse::SearchCreated(_)
+            | DbResponse::SearchRemoved(_)
             | DbResponse::ContentObserved(_)
             | DbResponse::Friend(..)
             | DbResponse::Category(..)
@@ -1226,7 +1291,9 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::SearchSessions(_)
+            Command::SearchTransition(_)
+            | Command::SearchCreate(_)
+            | Command::SearchSessions(_)
             | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)

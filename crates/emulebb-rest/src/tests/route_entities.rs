@@ -928,7 +928,7 @@ async fn kad_stop_frontdoor_reports_closed_persistence() {
 }
 
 #[tokio::test]
-async fn search_removal_reports_closed_admission_and_preserves_sessions() {
+async fn search_mutations_report_closed_admission_and_preserve_sessions() {
     let core = test_search_core(&[IndexedFile {
         ed2k_hash: "00112233445566778899aabbccddeeff".into(),
         name: "Preserved.bin".into(),
@@ -954,4 +954,16 @@ async fn search_removal_reports_closed_admission_and_preserves_sessions() {
         assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
         assert!(core.search(&id).await.is_some());
     }
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/searches",
+        Some(json!({
+            "query": "closed admission", "method": "server",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
+    assert_eq!(core.searches().await.len(), 1);
 }

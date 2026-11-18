@@ -455,7 +455,7 @@ pub struct EmulebbCore {
     /// to `stopping` when graceful teardown begins so a polling controller sees
     /// the shutdown instead of a hardcoded `running`.
     lifecycle: Arc<std::sync::atomic::AtomicU8>,
-    ed2k_network: Option<Ed2kNetworkConfig>,
+    ed2k_network: Option<Arc<Ed2kNetworkConfig>>,
     kad_local_store: Option<Arc<Mutex<KadLocalStore>>>,
     kad_snoop_queue: Option<Arc<Mutex<SnoopQueue>>>,
     ed2k_runtime: Arc<Mutex<Option<Ed2kRuntime>>>,
@@ -754,7 +754,7 @@ impl EmulebbCore {
             delivery_cursor: Arc::new(Mutex::new(None)),
             cleanup_cursors: Arc::new(Mutex::new((None, None))),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            ed2k_network,
+            ed2k_network: ed2k_network.map(Arc::new),
             kad_local_store,
             kad_snoop_queue,
             ed2k_runtime: Arc::new(Mutex::new(None)),

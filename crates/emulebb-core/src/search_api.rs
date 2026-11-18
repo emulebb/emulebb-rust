@@ -1,21 +1,23 @@
 use super::*;
 
 impl EmulebbCore {
-    pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
-        self.create_search_with_initial_persistence(request, search_state::create_search)
-            .await
-    }
-
-    pub(crate) async fn create_search_with_initial_persistence<P>(
-        &self,
-        mut request: SearchCreate,
-        persist: P,
-    ) -> Result<Search>
-    where
-        P: FnOnce(&MetadataStore, &Search) -> Result<String>,
-    {
+    pub async fn create_search(&self, mut request: SearchCreate) -> Result<Search> {
         request.canonicalize();
         request.validate()?;
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        owner.create_search_session(self, &request).await?
+    }
+
+    pub(crate) async fn create_search_owned(
+        &self,
+        request: SearchCreate,
+        db: &std::sync::mpsc::SyncSender<crate::persistence_owner::DbRequest>,
+        #[cfg(test)] publication_gate: &std::sync::Mutex<
+            Option<Arc<crate::persistence_owner::PublicationGate>>,
+        >,
+    ) -> Result<Search> {
         let now = Utc::now();
         let mut state = self.state.lock().await;
         match request.method.as_str() {
@@ -75,12 +77,6 @@ impl EmulebbCore {
                 }
             }
         };
-        // Create the search and return immediately; the network part runs via
-        // the queue drain and flips the status
-        // queued->running->completed. This keeps the eMuleBB contract's
-        // running->complete lifecycle: controllers (e.g. aMuTorrent) get a
-        // prompt POST and poll GET for results; "queued" is an additive state
-        // consumers treat like running (poll until "complete").
         // The private candidate has no ID until SQLite commits. Queue entries,
         // results and the public response receive that allocated identity together.
         let mut search = Search {
@@ -94,11 +90,15 @@ impl EmulebbCore {
             updated_at: now,
             results: Vec::new(),
         };
-        let search_id = persist(&self.metadata_store, &search)?;
-        search.id.clone_from(&search_id);
-        for result in &mut search.results {
-            result.search_id.clone_from(&search_id);
+        let search_id = crate::persistence_owner::search_create::insert(db, &search).await?;
+        #[cfg(test)]
+        let gate = publication_gate.lock().unwrap().clone();
+        #[cfg(test)]
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
         }
+        search.id.clone_from(&search_id);
         let spawn_drain = {
             let mut queue = self.search_queue.lock();
             queue.commit_enqueue(prepared_queue_entry, search_id.clone());
