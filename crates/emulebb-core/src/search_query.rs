@@ -2,7 +2,6 @@
 
 use chrono::Utc;
 use emulebb_ed2k::ed2k_server::{Ed2kSearchFile, SearchCriteria};
-use emulebb_index::IndexedFile;
 use emulebb_kad_dht::SearchResult as KadSearchResult;
 use std::net::SocketAddr;
 
@@ -142,37 +141,6 @@ fn refined_result_file_type(claimed: &str, name: &str) -> String {
                 claimed.to_string()
             }
         })
-}
-
-pub(crate) fn search_result_from_passive_cache(
-    search_id: &str,
-    request: &SearchCreate,
-    file: IndexedFile,
-) -> SearchResult {
-    let file_type = refined_result_file_type(&file.content_type, &file.name);
-    let observation = SearchResultObservation {
-        origin: "passive_cache".to_string(),
-        reporter_endpoint: None,
-        name: file.name,
-        size_bytes: file.size_bytes,
-        sources: file.availability_score.max(0) as u32,
-        complete_sources: 0,
-        source_client_id: None,
-        source_client_port: None,
-        file_type,
-        media: SearchResultMedia::default(),
-        rating: 0,
-        aich_hash: String::new(),
-        complete: false,
-        directory: String::new(),
-        observed_at: Utc::now(),
-    };
-    SearchResult::from_observation(
-        search_id.to_string(),
-        request.r#type.clone(),
-        file.ed2k_hash,
-        observation,
-    )
 }
 
 pub(crate) fn search_result_from_ed2k(

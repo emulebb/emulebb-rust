@@ -296,10 +296,7 @@ use local_search_response::send_local_search_response;
 use local_search_response::split_stock_search_responses;
 pub use network_binding::NetworkBindingStatus;
 use network_status_defaults::{ed2k_starting_status, ed2k_stopped_status, kad_starting_status};
-use search_query::{
-    SearchNetworkMethod, apply_search_filters, search_criteria_from_request,
-    search_result_from_passive_cache,
-};
+use search_query::{SearchNetworkMethod, apply_search_filters, search_criteria_from_request};
 use search_queue::{SearchQueue, SearchQueueLane};
 use search_queue_runtime::Ed2kServerSearchOutcome;
 use source_publish::{
@@ -675,13 +672,6 @@ impl EmulebbCore {
         let passive_replay_enabled = ed2k_network
             .as_ref()
             .is_some_and(|network| network.kad_passive_replay_enabled);
-        if !passive_replay_enabled {
-            for search in core_state.searches.values_mut() {
-                search
-                    .results
-                    .retain_mut(|result| result.remove_observation_origin("passive_cache"));
-            }
-        }
         let upload_queue_policy = initial_ed2k_upload_queue_policy(
             ed2k_network
                 .as_ref()

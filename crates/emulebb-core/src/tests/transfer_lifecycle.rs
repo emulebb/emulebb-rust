@@ -469,20 +469,8 @@ fn kad_search_result_exposes_exact_hash_metadata() {
 
 #[tokio::test]
 async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-download-passive-search-result");
-    let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
-    index
-        .upsert_file(
-            &IndexedFile {
-                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-                name: "Download.Me.bin".to_string(),
-                size_bytes: 4096,
-                content_type: "archive".to_string(),
-                availability_score: 1,
-            },
-            IndexedFileOrigin::PassiveCache,
-        )
-        .unwrap();
+    let runtime_dir = unique_runtime_dir("emulebb-core-download-network-search-result");
+    let index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     let core = EmulebbCore::new_with_network(
         "test",
         index,
@@ -503,15 +491,16 @@ async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
         })
         .await
         .unwrap();
+    publish_server_search_result(
+        &core,
+        &search,
+        "00112233445566778899aabbccddeeff",
+        "Download.Me.bin",
+        Some(4096),
+        Some([0xcd; 20]),
+    )
+    .await;
 
-    core.state
-        .lock()
-        .await
-        .searches
-        .get_mut(&search.id)
-        .unwrap()
-        .results[0]
-        .aich_hash = hex::encode([0xcd; 20]);
     let (created, download) = core
         .download_search_result(
             &search.id,
@@ -541,7 +530,7 @@ async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
         observations[0].observation.normalized_name,
         "Download.Me.bin"
     );
-    assert_eq!(observations[0].observation.origin, "passive_cache");
+    assert_eq!(observations[0].observation.origin, "server");
     assert_eq!(observations[0].observation.source_ip, None);
     drop(observations);
     let (_guard, transfer) = core.select_download_execution(id).await.unwrap().unwrap();
@@ -552,27 +541,15 @@ async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
             .unwrap()
             .aich_root
             .is_none(),
-        "cached AICH metadata must not become a live trust vote"
+        "server AICH metadata alone must not become a Kad trust vote"
     );
 }
 
 #[tokio::test]
 async fn download_search_result_rejects_missing_file_size() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-download-passive-missing-size");
-    let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
+    let runtime_dir = unique_runtime_dir("emulebb-core-download-network-missing-size");
+    let index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     let file_hash = "ffeeddccbbaa99887766554433221100";
-    index
-        .upsert_file(
-            &IndexedFile {
-                ed2k_hash: file_hash.to_string(),
-                name: "Missing.Size.bin".to_string(),
-                size_bytes: 0,
-                content_type: "archive".to_string(),
-                availability_score: 1,
-            },
-            IndexedFileOrigin::PassiveCache,
-        )
-        .unwrap();
     let core = EmulebbCore::new_with_network(
         "test",
         index,
@@ -591,6 +568,7 @@ async fn download_search_result_rejects_missing_file_size() {
         })
         .await
         .unwrap();
+    publish_server_search_result(&core, &search, file_hash, "Missing.Size.bin", None, None).await;
 
     let error = core
         .download_search_result(&search.id, file_hash, SearchResultDownloadCreate::default())
@@ -608,22 +586,10 @@ async fn download_search_result_rejects_missing_file_size() {
 }
 
 #[tokio::test]
-async fn download_search_result_replays_live_kad_aich_observations() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-download-passive-aich");
-    let mut index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
+async fn download_search_result_honors_corroborated_kad_aich() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-download-network-aich");
+    let index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     let file_hash = "11111111111111111111111111111111";
-    index
-        .upsert_file(
-            &IndexedFile {
-                ed2k_hash: file_hash.to_string(),
-                name: "Kad.AICH.bin".to_string(),
-                size_bytes: 4096,
-                content_type: "archive".to_string(),
-                availability_score: 1,
-            },
-            IndexedFileOrigin::PassiveCache,
-        )
-        .unwrap();
     let core = EmulebbCore::new_with_network(
         "test",
         index,
@@ -644,6 +610,7 @@ async fn download_search_result_replays_live_kad_aich_observations() {
         })
         .await
         .unwrap();
+    publish_server_search_result(&core, &search, file_hash, "Kad.AICH.bin", Some(4096), None).await;
     let root = [0xAB; 20];
     let mut votes = KadAichSearchVotes::default();
     for index in 0..10u8 {
@@ -1525,4 +1492,36 @@ async fn shared_files_require_explicit_redownload_and_remain_shared() {
             .any(|entry| entry.hash == share.hash)
     );
     assert_eq!(std::fs::read(payload_path).unwrap(), payload);
+}
+
+async fn publish_server_search_result(
+    core: &EmulebbCore,
+    search: &crate::Search,
+    hash: &str,
+    name: &str,
+    size: Option<u64>,
+    aich: Option<[u8; 20]>,
+) {
+    let mut raw = crate::search_observations::tests::raw_file();
+    raw.file_hash = Ed2kHash::from_bytes(hex::decode(hash).unwrap().try_into().unwrap());
+    raw.file_name = Some(name.into());
+    raw.file_size = size;
+    raw.aich_hash = aich.map(|root| data_encoding::BASE32.encode(&root));
+    let reporter = "192.0.2.4:4661".parse().unwrap();
+    let projected = crate::search_query::search_result_from_ed2k(
+        &search.id,
+        &search.spec,
+        "server",
+        Some(reporter),
+        raw.clone(),
+    );
+    let update = crate::search_observations::ed2k(
+        projected,
+        emulebb_metadata::MetadataObservationOrigin::Server,
+        Some(reporter),
+        &raw,
+    );
+    core.apply_search_live_update(&search.id, &search.spec, update)
+        .await
+        .unwrap();
 }

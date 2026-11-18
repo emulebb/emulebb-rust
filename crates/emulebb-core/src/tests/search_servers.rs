@@ -74,114 +74,106 @@ fn split_stock_search_responses_keeps_single_oversized_result_like_stock() {
 }
 
 #[tokio::test]
-async fn accepted_network_search_only_surfaces_enabled_passive_cache_results() {
-    let transfer_root = unique_runtime_dir("emulebb-core-search-passive-cache");
-    let mut index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
-    index
-        .upsert_file(
-            &IndexedFile {
-                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-                name: "Passive.Indexed.File.iso".to_string(),
-                size_bytes: 2048,
-                content_type: "iso".to_string(),
-                availability_score: 3,
-            },
-            emulebb_index::IndexedFileOrigin::PassiveCache,
-        )
-        .unwrap();
-    index
-        .upsert_file(
-            &IndexedFile {
-                ed2k_hash: "ffeeddccbbaa99887766554433221100".to_string(),
-                name: "Transfer.Indexed.File.iso".to_string(),
-                size_bytes: 4096,
-                content_type: "iso".to_string(),
-                availability_score: 9,
-            },
-            emulebb_index::IndexedFileOrigin::Transfer,
-        )
-        .unwrap();
-    let network = test_network_config_with_store(
-        &transfer_root,
-        KadLocalStoreConfig::default(),
-        SnoopQueueConfig::default(),
-    );
-    let core = EmulebbCore::new_with_network(
-        "test",
-        index,
-        transfer_root.join("transfers"),
-        Some(network),
-    )
-    .unwrap();
-
-    let search = core
-        .create_search(SearchCreate {
-            query: "indexed file".to_string(),
-            method: "automatic".to_string(),
-            r#type: String::new(),
+async fn live_search_collects_network_results_independently_of_passive_index_settings() {
+    for passive_replay in [false, true] {
+        let root = unique_runtime_dir("live-search-network-results");
+        let mut index = FileIndex::open(root.join("metadata.sqlite")).unwrap();
+        for (hash, name, origin) in [
+            (
+                "00112233445566778899aabbccddeeff",
+                "Passive.Indexed.File.iso",
+                emulebb_index::IndexedFileOrigin::PassiveCache,
+            ),
+            (
+                "ffeeddccbbaa99887766554433221100",
+                "Transfer.Indexed.File.iso",
+                emulebb_index::IndexedFileOrigin::Transfer,
+            ),
+        ] {
+            index
+                .upsert_file(
+                    &IndexedFile {
+                        ed2k_hash: hash.into(),
+                        name: name.into(),
+                        size_bytes: 2048,
+                        content_type: "iso".into(),
+                        availability_score: 3,
+                    },
+                    origin,
+                )
+                .unwrap();
+        }
+        let mut network = test_network_config_with_store(
+            &root,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        );
+        network.kad_passive_replay_enabled = passive_replay;
+        let core =
+            EmulebbCore::new_with_network("test", index, root.join("transfers"), Some(network))
+                .unwrap();
+        let request = SearchCreate {
+            query: "indexed file".into(),
+            method: "server".into(),
             ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(search.id, "1");
-    assert_eq!(search.status, "queued");
-    assert_eq!(search.spec.method, "automatic");
-    assert_eq!(search.resolved_method, None);
-    assert_eq!(search.results.len(), 1);
-    assert_eq!(search.results[0].name, "Passive.Indexed.File.iso");
-    assert_eq!(search.results[0].observations[0].origin, "passive_cache");
-}
-
-#[tokio::test]
-async fn disabled_passive_replay_does_not_surface_persisted_cache() {
-    let transfer_root = unique_runtime_dir("emulebb-core-search-passive-cache-disabled");
-    let mut index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
-    index
-        .upsert_file(
-            &IndexedFile {
-                ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
-                name: "Passive.Indexed.File.iso".to_string(),
-                size_bytes: 2048,
-                content_type: "iso".to_string(),
-                availability_score: 3,
-            },
-            emulebb_index::IndexedFileOrigin::PassiveCache,
-        )
-        .unwrap();
-    let mut network = test_network_config_with_store(
-        &transfer_root,
-        KadLocalStoreConfig::default(),
-        SnoopQueueConfig::default(),
-    );
-    network.kad_passive_replay_enabled = false;
-    let core = EmulebbCore::new_with_network(
-        "test",
-        index,
-        transfer_root.join("transfers"),
-        Some(network),
-    )
-    .unwrap();
-
-    let search = core
-        .create_search(SearchCreate {
-            query: "indexed file".to_string(),
-            method: "automatic".to_string(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(search.status, "queued");
-    assert!(search.results.is_empty());
-    assert_eq!(
-        core.index
-            .lock()
+        };
+        let search = core.create_search(request.clone()).await.unwrap();
+        assert_eq!(search.status, "queued");
+        assert!(search.results.is_empty());
+        assert!(
+            core.metadata_store.load_searches().unwrap()[0]
+                .data
+                .results
+                .is_empty()
+        );
+        assert_eq!(
+            core.metadata_store.table_count("content_claims").unwrap(),
+            0
+        );
+        let mut raw = crate::search_observations::tests::raw_file();
+        raw.file_name = Some("Network.Indexed.File.iso".into());
+        raw.file_size = Some(8192);
+        let reporter = "192.0.2.4:4661".parse().unwrap();
+        let projected = crate::search_query::search_result_from_ed2k(
+            &search.id,
+            &request,
+            "server",
+            Some(reporter),
+            raw.clone(),
+        );
+        let update = crate::search_observations::ed2k(
+            projected,
+            emulebb_metadata::MetadataObservationOrigin::Server,
+            Some(reporter),
+            &raw,
+        );
+        core.apply_search_live_update(&search.id, &request, update)
             .await
-            .search("indexed file", 10)
+            .unwrap();
+        let collected = core.search(&search.id).await.unwrap();
+        assert_eq!(collected.results.len(), 1);
+        assert_eq!(collected.results[0].name, "Network.Indexed.File.iso");
+        assert_eq!(
+            core.metadata_store.table_count("content_claims").unwrap(),
+            1
+        );
+        assert_eq!(
+            core.index
+                .lock()
+                .await
+                .search("indexed file", 10)
+                .unwrap()
+                .len(),
+            2
+        );
+        core.delete_search(&search.id).await.unwrap();
+        core.persistence_owner
+            .owner(&core.metadata_store, &core.state)
             .unwrap()
-            .len(),
-        1
-    );
+            .close_and_drain()
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -2008,4 +2000,120 @@ async fn raw_search_evidence_counts_once_survives_filters_and_freezes_terminal_m
         .close_and_drain()
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn search_state_survives_core_restart_and_downloads_result() {
+    let runtime_dir = unique_runtime_dir("search-state");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let open = || {
+        EmulebbCore::new_with_network(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+            Some(test_network_config_with_store(
+                &transfer_root,
+                KadLocalStoreConfig::default(),
+                SnoopQueueConfig::default(),
+            )),
+        )
+        .unwrap()
+    };
+
+    let (search_id, file_hash) = {
+        let core = open();
+        let search = core
+            .create_search(SearchCreate {
+                query: "sample payload".to_string(),
+                method: "automatic".to_string(),
+                r#type: "archive".to_string(),
+                extension: "bin".to_string(),
+                min_size_bytes: Some(1_000),
+                max_size_bytes: Some(2_000),
+                min_availability: Some(5),
+                min_complete_sources: Some(0),
+                min_bitrate_kbps: Some(0),
+                min_length_seconds: Some(0),
+                codec: String::new(),
+                title: String::new(),
+                album: String::new(),
+                artist: String::new(),
+            })
+            .await
+            .unwrap();
+        assert!(search.results.is_empty());
+        let mut raw = crate::search_observations::tests::raw_file();
+        raw.file_name = Some("Sample Search Payload.bin".into());
+        raw.file_size = Some(1234);
+        raw.file_type = Some("Arc".into());
+        raw.source_count = Some(7);
+        let reporter = "192.0.2.4:4661".parse().unwrap();
+        let projected = crate::search_query::search_result_from_ed2k(
+            &search.id,
+            &search.spec,
+            "server",
+            Some(reporter),
+            raw.clone(),
+        );
+        let update = crate::search_observations::ed2k(
+            projected,
+            emulebb_metadata::MetadataObservationOrigin::Server,
+            Some(reporter),
+            &raw,
+        );
+        core.apply_search_live_update(&search.id, &search.spec, update)
+            .await
+            .unwrap();
+        core.complete_search_with_results(&search.id, &search.spec, "server", None, None)
+            .await;
+        let recorded = core.search(&search.id).await.unwrap();
+        assert_eq!(recorded.results.len(), 1);
+        (recorded.id, recorded.results[0].hash.clone())
+    };
+
+    let reloaded = open();
+    let searches = reloaded.searches().await;
+    assert_eq!(searches.len(), 1);
+    assert_eq!(searches[0].id, search_id);
+    assert_eq!(searches[0].spec.method, "automatic");
+    assert_eq!(searches[0].spec.r#type, "arc");
+    assert_eq!(searches[0].spec.extension, "bin");
+    assert_eq!(searches[0].spec.min_size_bytes, Some(1_000));
+    assert_eq!(searches[0].spec.max_size_bytes, Some(2_000));
+    assert_eq!(searches[0].spec.min_availability, Some(5));
+    assert_eq!(searches[0].spec.min_complete_sources, None);
+    assert_eq!(searches[0].spec.min_bitrate_kbps, None);
+    assert_eq!(searches[0].spec.min_length_seconds, None);
+    assert_eq!(searches[0].spec.codec, "");
+    assert_eq!(searches[0].spec.title, "");
+    assert_eq!(searches[0].spec.album, "");
+    assert_eq!(searches[0].spec.artist, "");
+    assert_eq!(searches[0].resolved_method.as_deref(), Some("server"));
+    assert_eq!(searches[0].results[0].name, "Sample Search Payload.bin");
+    assert_eq!(searches[0].results[0].r#type, "arc");
+
+    assert_eq!(
+        reloaded
+            .metadata_store
+            .content_observations_page(1, 0, 10)
+            .unwrap()
+            .items[0]
+            .receipt
+            .observation_count,
+        1
+    );
+    let search = reloaded.search(&search_id).await.unwrap();
+    assert_eq!(search.results[0].hash, file_hash);
+
+    let (_, download) = reloaded
+        .download_search_result(
+            &search_id,
+            &file_hash,
+            SearchResultDownloadCreate::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(download.hash, file_hash);
 }

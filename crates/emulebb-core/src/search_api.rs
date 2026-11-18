@@ -17,15 +17,6 @@ impl EmulebbCore {
         request.canonicalize();
         request.validate()?;
         let now = Utc::now();
-        let passive_cached = if self.kad_snoop_queue.is_some() {
-            self.index.lock().await.search_by_origin(
-                &request.query,
-                emulebb_index::IndexedFileOrigin::PassiveCache,
-                200,
-            )?
-        } else {
-            Vec::new()
-        };
         let mut state = self.state.lock().await;
         match request.method.as_str() {
             "server" | "global" => {
@@ -63,11 +54,6 @@ impl EmulebbCore {
             &request.query,
             &search_criteria_from_request(&request),
         )?;
-        let mut results = passive_cached
-            .into_iter()
-            .map(|file| search_result_from_passive_cache("", &request, file))
-            .collect::<Vec<_>>();
-        apply_search_filters(&mut results, &request);
         let prepared_queue_entry = {
             let queue = self.search_queue.lock();
             match queue.prepare_enqueue(request.clone(), queue_lane, Instant::now()) {
@@ -106,7 +92,7 @@ impl EmulebbCore {
             progress: SearchProgress::new("queued", 0, None, ""),
             created_at: now,
             updated_at: now,
-            results,
+            results: Vec::new(),
         };
         let search_id = persist(&self.metadata_store, &search)?;
         search.id.clone_from(&search_id);

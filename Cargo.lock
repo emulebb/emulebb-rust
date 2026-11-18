@@ -854,6 +854,7 @@ dependencies = [
  "emulebb-diagnostics",
  "emulebb-ed2k",
  "emulebb-index",
+ "emulebb-metadata",
  "futures-util",
  "hex",
  "http-body-util",
