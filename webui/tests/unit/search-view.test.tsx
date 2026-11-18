@@ -252,3 +252,33 @@ describe("SearchView collection control", () => {
     expect(screen.getByText("Sample.bin")).toBeTruthy();
   });
 });
+
+
+describe("SearchView linked creation", () => {
+  it("prefills editable criteria and posts an exact parent ID through normal creation", async () => {
+    const client=new RestClient();
+    const search: SearchItem={id:"9007199254740993",query:"Parent query",requestedMethod:"server",type:"audio",status:"stopped",resultCount:12,
+      criteria:{extension:"flac",minSizeBytes:1024,minBitrateKbps:192,artist:"Sample Artist"}};
+    const created: SearchItem={id:"9007199254740994",parentSearchId:search.id,query:"Edited query",status:"queued",resultCount:0};
+    const post=vi.spyOn(client,"post").mockResolvedValue(created);
+    const onCreated=vi.fn();
+    render(<SearchView searches={[]} selectedSearch={search} selectedSearchId={search.id}
+      resultPage={null} resultCursor={null} sessionCursor={null} sessionNextCursor={null}
+      selectSearchSessionsPage={()=>{}} categories={[]} client={client}
+      run={async operation=>{await operation();}} selectSearch={()=>{}}
+      searchSort="sources" searchOrder="desc" selectSearchSort={()=>{}} selectSearchPage={()=>{}}
+      onSearchCreated={onCreated} onSearchDeleted={()=>{}} onSearchesCleared={()=>{}} />);
+    expect(screen.getByRole("option",{name: new RegExp(search.id)})).toBeTruthy();
+    fireEvent.click(screen.getByRole("button",{name:"Use criteria for new search"}));
+    const input=screen.getByPlaceholderText("Search query") as HTMLInputElement;
+    expect(input.value).toBe("Parent query");
+    fireEvent.input(input,{target:{value:"Edited query"}});
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(()=>expect(post).toHaveBeenCalledWith("searches",expect.objectContaining({
+      query:"Edited query",parentSearchId:"9007199254740993",method:"server",type:"audio",
+      extension:"flac",minSizeBytes:1024,minBitrateKbps:192,artist:"Sample Artist"
+    })));
+    expect(onCreated).toHaveBeenCalledWith(created);
+    await waitFor(()=>expect(screen.queryByText(`New search linked to #${search.id}`)).toBeNull());
+  });
+});

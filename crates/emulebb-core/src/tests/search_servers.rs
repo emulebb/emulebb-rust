@@ -113,6 +113,7 @@ async fn live_search_collects_network_results_independently_of_passive_index_set
             EmulebbCore::new_with_network("test", index, root.join("transfers"), Some(network))
                 .unwrap();
         let request = SearchCreate {
+            parent_search_id: None,
             query: "indexed file".into(),
             method: "server".into(),
             ..Default::default()
@@ -196,6 +197,7 @@ async fn explicit_network_search_without_runtime_is_rejected() {
     for method in ["automatic", "server", "global", "kad"] {
         let error = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "must use requested network".to_string(),
                 method: method.to_string(),
                 ..Default::default()
@@ -222,6 +224,7 @@ async fn invalid_search_method_is_rejected_before_creating_a_search() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "invalid method".to_string(),
             method: "local-ish".to_string(),
             ..Default::default()
@@ -257,6 +260,7 @@ async fn search_spec_is_canonicalized_before_persistence() {
 
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "  alpha\t beta  ".to_string(),
             method: " AUTOMATIC ".to_string(),
             r#type: " AUDIO ".to_string(),
@@ -308,6 +312,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         (SearchCreate::default(), "query must not be empty"),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad type".to_string(),
                 r#type: "executable".to_string(),
                 ..SearchCreate::default()
@@ -316,6 +321,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad range".to_string(),
                 min_size_bytes: Some(2),
                 max_size_bytes: Some(1),
@@ -325,6 +331,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "x".repeat(161),
                 ..SearchCreate::default()
             },
@@ -332,6 +339,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad\0query".to_string(),
                 ..SearchCreate::default()
             },
@@ -339,6 +347,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "too many sources".to_string(),
                 min_availability: Some(1_000_001),
                 ..SearchCreate::default()
@@ -347,6 +356,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad codec".to_string(),
                 codec: "bad\0codec".to_string(),
                 ..SearchCreate::default()
@@ -391,6 +401,7 @@ async fn explicit_network_search_respects_disabled_network_settings() {
     for method in ["server", "global", "kad"] {
         let error = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "disabled network".to_string(),
                 method: method.to_string(),
                 ..Default::default()
@@ -435,6 +446,7 @@ async fn automatic_search_is_rejected_when_all_networks_are_disabled() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "local only automatic search".to_string(),
             method: "automatic".to_string(),
             ..Default::default()
@@ -471,6 +483,7 @@ async fn automatic_search_waits_only_for_compatible_enabled_backends() {
 
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "alpha-beta".to_string(),
             method: "automatic".to_string(),
             ..SearchCreate::default()
@@ -511,6 +524,7 @@ async fn kad_only_automatic_search_rejects_an_invalid_kad_keyword() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "alpha-beta".to_string(),
             method: "automatic".to_string(),
             ..SearchCreate::default()
@@ -544,6 +558,7 @@ async fn network_search_rejects_malformed_expression_before_allocating_an_id() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "alpha OR".to_string(),
             method: "server".to_string(),
             ..SearchCreate::default()
@@ -554,6 +569,7 @@ async fn network_search_rejects_malformed_expression_before_allocating_an_id() {
 
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "valid query".to_string(),
             method: "server".to_string(),
             ..SearchCreate::default()
@@ -585,6 +601,7 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
     .unwrap();
 
     let request = SearchCreate {
+        parent_search_id: None,
         query: "queued query".to_string(),
         method: "server".to_string(),
         ..Default::default()
@@ -618,6 +635,7 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
     // A different query queues fine alongside it.
     let other = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "another queued query".to_string(),
             method: "server".to_string(),
             ..Default::default()
@@ -643,6 +661,7 @@ async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search()
     )
     .unwrap();
     let request = SearchCreate {
+        parent_search_id: None,
         query: "recover after persistence failure".to_string(),
         method: "server".to_string(),
         ..SearchCreate::default()
@@ -750,6 +769,7 @@ async fn deleting_searches_cancels_pending_network_work() {
     .unwrap();
 
     let first_request = SearchCreate {
+        parent_search_id: None,
         query: "first pending query".to_string(),
         method: "server".to_string(),
         ..Default::default()
@@ -757,6 +777,7 @@ async fn deleting_searches_cancels_pending_network_work() {
     let first = core.create_search(first_request.clone()).await.unwrap();
     let second = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "second pending query".to_string(),
             method: "kad".to_string(),
             ..Default::default()
@@ -2016,6 +2037,7 @@ async fn raw_search_evidence_counts_once_survives_filters_and_freezes_terminal_m
     )
     .unwrap();
     let request = SearchCreate {
+        parent_search_id: None,
         query: "sample query".into(),
         method: "server".into(),
         min_size_bytes: Some(1024),
@@ -2153,9 +2175,10 @@ async fn search_state_survives_core_restart_and_downloads_result() {
         let core = open();
         let search = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "sample payload".to_string(),
                 method: "automatic".to_string(),
-                r#type: "archive".to_string(),
+                r#type: "arc".to_string(),
                 extension: "bin".to_string(),
                 min_size_bytes: Some(1_000),
                 max_size_bytes: Some(2_000),

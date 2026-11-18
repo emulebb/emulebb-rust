@@ -484,6 +484,7 @@ async fn search_result_admission_reads_selected_claim_without_hydrating_history(
     .unwrap();
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "download me".to_string(),
             method: "automatic".to_string(),
             r#type: String::new(),
@@ -574,6 +575,7 @@ async fn unknown_size_search_result_creates_waiting_metadata_job() {
     .unwrap();
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "missing size".to_string(),
             ..SearchCreate::default()
         })
@@ -621,6 +623,7 @@ async fn download_search_result_honors_corroborated_kad_aich() {
     .unwrap();
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "kad aich".to_string(),
             method: "automatic".to_string(),
             r#type: String::new(),

@@ -955,6 +955,7 @@ CREATE UNIQUE INDEX content_claim_observations_page_idx ON content_claim_observa
 
 CREATE TABLE search_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+    parent_search_id INTEGER REFERENCES search_sessions(id) ON DELETE SET NULL CHECK(parent_search_id IS NULL OR parent_search_id > 0),
     query TEXT NOT NULL,
     normalized_query TEXT NOT NULL,
     requested_method TEXT NOT NULL CHECK(requested_method IN ('automatic', 'server', 'global', 'kad')),
@@ -977,8 +978,15 @@ CREATE TABLE search_sessions (
     updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     result_count INTEGER NOT NULL DEFAULT 0 CHECK(result_count >= 0),
     completed_at_s INTEGER CHECK(completed_at_s IS NULL OR completed_at_s >= 0),
-    CHECK(min_size_bytes IS NULL OR max_size_bytes IS NULL OR min_size_bytes <= max_size_bytes)
+    CHECK(min_size_bytes IS NULL OR max_size_bytes IS NULL OR min_size_bytes <= max_size_bytes),
+    CHECK(parent_search_id IS NULL OR parent_search_id < id)
 ) STRICT;
+CREATE INDEX search_sessions_parent_idx ON search_sessions(parent_search_id);
+CREATE TRIGGER search_parent_unlinked AFTER UPDATE OF parent_search_id ON search_sessions
+WHEN old.parent_search_id IS NOT NULL AND new.parent_search_id IS NULL
+BEGIN
+    UPDATE search_sessions SET updated_at_s=max(updated_at_s,unixepoch()) WHERE id=new.id;
+END;
 
 CREATE TABLE search_results (
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,

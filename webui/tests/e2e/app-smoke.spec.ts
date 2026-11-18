@@ -298,6 +298,7 @@ test("loads a selected search session from a deep link", async ({ page }) => {
   const state: any = mockSnapshotFixture();
   state.searches = [{
     id: "7",
+    parentSearchId: null,
     query: "synthetic archive",
     requestedMethod: "kad",
     resolvedMethod: "kad",
@@ -359,6 +360,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   state.kad = { enabled: true, running: false, connected: false, firewalled: null, contactCount: 0 };
   state.searches = [{
     id: "1",
+    parentSearchId: null,
     query: "older search",
     requestedMethod: "server",
     resolvedMethod: "server",
@@ -447,6 +449,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       record();
       const search = {
         id: "2",
+        parentSearchId: request.postDataJSON()?.parentSearchId ?? null,
         query: "linux",
         requestedMethod: "automatic",
         resolvedMethod: "global",
@@ -455,7 +458,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
         criteria: { extension: "pdf", maxSizeBytes: 5_242_879 }
       };
       state.searches = [...state.searches, search];
-      await fulfill({ ...search, total: 0, offset: 0, limit: 100, items: [] });
+      await route.fulfill({ status: 201, json: { data: { ...search, status: "queued", resultCount: 0 }, meta: { apiVersion: "v1" } } });
       return;
     }
     if (method === "GET" && /^searches\/\d+$/.test(path)) {

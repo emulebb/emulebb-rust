@@ -11,7 +11,7 @@ const SUMMARY_BOUNDS: (usize, usize) = (512 * 1024, 1024 * 1024);
 const HEADER_COLUMNS: &str = "s.id,s.query,s.normalized_query,s.requested_method,s.resolved_method,
     s.file_type_filter,s.extension_filter,s.min_size_bytes,s.max_size_bytes,s.min_availability,
     s.min_complete_sources,s.min_bitrate_kbps,s.min_length_seconds,s.codec_filter,s.title_filter,
-    s.album_filter,s.artist_filter,s.status,s.status_reason,s.created_at_s,s.updated_at_s,s.completed_at_s,s.result_count";
+    s.album_filter,s.artist_filter,s.status,s.status_reason,s.created_at_s,s.updated_at_s,s.completed_at_s,s.result_count,s.parent_search_id";
 const RESULT_COLUMNS: &str = "r.claim_id,c.ed2k_hash,c.size_bytes,r.name,r.source_count,r.complete_source_count,
     r.source_client_id,r.source_client_port,r.file_type,r.media_artist,r.media_album,r.media_title,
     r.media_length_seconds,r.media_bitrate_kbps,r.media_codec,r.rating,r.aich_root,r.complete,r.directory";
@@ -277,6 +277,7 @@ fn header_from_row(row: &Row<'_>) -> Result<MetadataSearchHeader> {
         result_count: u64::try_from(row.get::<_, i64>(22)?)
             .context("invalid search result count")?,
         data: MetadataSearchData {
+            parent_search_id: row.get(23)?,
             normalized_query: row.get(2)?,
             spec: MetadataSearchSpec {
                 query: row.get(1)?,

@@ -52,7 +52,7 @@ impl PersistenceOwner {
 pub(crate) async fn insert(
     db: &mpsc::SyncSender<DbRequest>,
     search: &Search,
-) -> Result<String, PersistenceError> {
+) -> anyhow::Result<String> {
     let (response, receive) = oneshot::channel();
     db.send(DbRequest {
         command: DbCommand::SearchCreate(crate::search_state::search_to_metadata(search)),
@@ -63,8 +63,8 @@ pub(crate) async fn insert(
         .await
         .map_err(|_| PersistenceError::CommitUnknown)??
     {
-        DbResponse::SearchCreated(id) => Ok(id.to_string()),
-        _ => Err(PersistenceError::Worker),
+        DbResponse::SearchCreated(id) => Ok(id?.to_string()),
+        _ => Err(PersistenceError::Worker.into()),
     }
 }
 

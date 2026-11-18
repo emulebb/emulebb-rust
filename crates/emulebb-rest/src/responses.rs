@@ -420,7 +420,7 @@ fn ed2k_id_state(connected: bool, firewalled: Option<bool>) -> &'static str {
 }
 
 pub(crate) fn search_created_response(search: &Search) -> Value {
-    json!({"id":search.id,"query":search.spec.query,"requestedMethod":search.spec.method,
+    json!({"id":search.id,"parentSearchId":search.spec.parent_search_id.map(|id|id.to_string()),"query":search.spec.query,"requestedMethod":search.spec.method,
         "resolvedMethod":search.resolved_method,"type":search.spec.r#type,"criteria":search_criteria_response(&search.spec),
         "status":search.status,"statusReason":search.status_reason,"progress":search.progress,
         "resultCount":0,"createdAt":search.created_at.timestamp(),"updatedAt":search.updated_at.timestamp(),"completedAt":null})
@@ -431,7 +431,7 @@ pub(crate) fn search_header_response(
 ) -> Value {
     let data = &header.data;
     let spec = &data.spec;
-    json!({"id":header.id.to_string(),"query":spec.query,"requestedMethod":spec.method,
+    json!({"id":header.id.to_string(),"parentSearchId":data.parent_search_id.map(|id|id.to_string()),"query":spec.query,"requestedMethod":spec.method,
         "resolvedMethod":data.resolved_method,"type":spec.file_type,"status":data.status,"statusReason":data.status_reason,
         "progress":progress,"resultCount":header.result_count,"createdAt":data.created_at_s,"updatedAt":data.updated_at_s,"completedAt":data.completed_at_s,
         "criteria":{"extension":spec.extension,"minSizeBytes":spec.min_size_bytes,"maxSizeBytes":spec.max_size_bytes,

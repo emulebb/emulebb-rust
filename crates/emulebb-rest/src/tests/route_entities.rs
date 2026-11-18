@@ -998,3 +998,80 @@ async fn stop_search_preserves_collected_results_and_returns_no_content() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn linked_creation_uses_supplied_criteria_and_unlinks_without_deleting_children() {
+    let core = test_search_core(&[IndexedFile {
+        ed2k_hash: "11".repeat(16),
+        name: "Parent.bin".into(),
+        size_bytes: 42,
+        content_type: "pro".into(),
+        availability_score: 1,
+    }]);
+    let parent = core
+        .search_headers_page(None, 1)
+        .await
+        .unwrap()
+        .value()
+        .items[0]
+        .id
+        .to_string();
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let (status, created) = request(
+        &app,
+        "POST",
+        "/api/v1/searches",
+        Some(json!({"parentSearchId":parent,"query":"edited child", "method":"server"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let child = created["data"]["id"].as_str().unwrap();
+    assert_eq!(created["data"]["parentSearchId"], parent);
+    assert_eq!(created["data"]["query"], "edited child");
+    assert_eq!(created["data"]["resultCount"], 0);
+    assert_eq!(
+        request(&app, "DELETE", &format!("/api/v1/searches/{parent}"), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, metadata) = request(&app, "GET", &format!("/api/v1/searches/{child}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(metadata["data"]["parentSearchId"].is_null());
+    assert_eq!(metadata["data"]["query"], "edited child");
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/searches",
+            Some(json!({"parentSearchId":parent,"query":"missing parent", "method":"server"}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    for invalid in [
+        json!(1),
+        json!("0"),
+        json!("01"),
+        json!("9223372036854775808"),
+    ] {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/v1/searches",
+                Some(json!({"parentSearchId":invalid,"query":"invalid parent", "method":"server"}))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}

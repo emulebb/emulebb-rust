@@ -285,6 +285,7 @@ mod tests {
 
     fn request() -> SearchCreate {
         SearchCreate {
+            parent_search_id: None,
             query: "q".to_string(),
             method: "automatic".to_string(),
             r#type: String::new(),

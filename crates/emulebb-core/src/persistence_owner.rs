@@ -347,7 +347,7 @@ enum KadMergeOutcome {
 
 enum DbResponse {
     SearchRead(search_read::Value),
-    SearchCreated(i64),
+    SearchCreated(Result<i64, emulebb_metadata::MissingSearchParent>),
     SearchUpdated(emulebb_metadata::MetadataSearchTransitionReceipt),
     SearchMutated(bool),
     ContentObserved(Option<emulebb_metadata::MetadataSearchPublication>),
@@ -530,7 +530,8 @@ impl PersistenceOwner {
                     if let DbCommand::SearchCreate(header) = &request.command {
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.create_search(header)));
                         let result = match outcome {
-                            Ok(Ok(id)) => Ok(DbResponse::SearchCreated(id)),
+                            Ok(Ok(id)) => Ok(DbResponse::SearchCreated(Ok(id))),
+                            Ok(Err(error)) if error.is::<emulebb_metadata::MissingSearchParent>() => Ok(DbResponse::SearchCreated(Err(emulebb_metadata::MissingSearchParent))),
                             Ok(Err(error)) => {
                                 tracing::warn!(%error, "search creation SQL failed");
                                 Err(PersistenceError::Storage("database operation failed".into()))

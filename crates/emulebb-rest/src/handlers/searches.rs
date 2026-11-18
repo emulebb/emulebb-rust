@@ -36,6 +36,12 @@ pub(crate) async fn create_search(
             );
             response
         }
+        Err(error) if error.is::<emulebb_metadata::MissingSearchParent>() => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "parent search not found",
+        )
+        .into_response(),
         Err(error) => super::persistence::persistence_error(error),
     }
 }

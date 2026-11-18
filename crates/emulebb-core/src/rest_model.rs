@@ -217,6 +217,8 @@ pub struct TransferStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchSpec {
+    #[serde(default, with = "crate::rest_model_serde::optional_decimal_id")]
+    pub parent_search_id: Option<i64>,
     pub query: String,
     #[serde(default = "default_search_method")]
     pub method: String,
@@ -259,12 +261,7 @@ impl SearchSpec {
         if self.method.is_empty() {
             self.method = default_search_method();
         }
-        self.r#type = match self.r#type.trim().to_ascii_lowercase().as_str() {
-            "archive" => "arc".to_string(),
-            "document" => "doc".to_string(),
-            "program" => "pro".to_string(),
-            canonical => canonical.to_string(),
-        };
+        self.r#type = self.r#type.trim().to_ascii_lowercase();
         self.extension = self
             .extension
             .trim()
@@ -284,6 +281,10 @@ impl SearchSpec {
 
     /// Validate transport-independent search invariants at the core boundary.
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.parent_search_id.is_none_or(|id| id > 0),
+            "parentSearchId must be positive"
+        );
         anyhow::ensure!(!self.query.is_empty(), "query must not be empty");
         anyhow::ensure!(
             !self.query.chars().any(char::is_control),

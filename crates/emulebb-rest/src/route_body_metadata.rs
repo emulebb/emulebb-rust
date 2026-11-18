@@ -163,6 +163,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const CATEGORY_PATCH: &[&str] = &["tempDir", "destinationDir", "comment"];
     const FRIEND_CREATE: &[&str] = &["userHash", "name"];
     const SEARCH_CREATE: &[&str] = &[
+        "parentSearchId",
         "query",
         "method",
         "type",

@@ -24,6 +24,7 @@ async fn search_delete_and_clear_survive_core_restart() {
         let core = open_core(&metadata_path, &transfer_root);
         let first = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "alpha".to_string(),
                 method: "automatic".to_string(),
                 r#type: String::new(),
@@ -32,6 +33,7 @@ async fn search_delete_and_clear_survive_core_restart() {
             .await
             .unwrap();
         core.create_search(SearchCreate {
+            parent_search_id: None,
             query: "beta".to_string(),
             method: "automatic".to_string(),
             r#type: String::new(),
@@ -97,6 +99,7 @@ async fn shared_local_file_is_not_surfaced_by_network_search_after_core_restart(
         .unwrap();
         let search = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "searchable payload".to_string(),
                 method: "automatic".to_string(),
                 r#type: String::new(),
@@ -119,6 +122,7 @@ async fn shared_local_file_is_not_surfaced_by_network_search_after_core_restart(
     let reloaded = open_core(&metadata_path, &transfer_root);
     let search = reloaded
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "searchable payload".to_string(),
             method: "automatic".to_string(),
             r#type: String::new(),

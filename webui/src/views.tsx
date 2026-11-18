@@ -408,6 +408,7 @@ export function SearchView(props: {
   onSearchesCleared: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [parentSearchId, setParentSearchId] = useState<string | null>(null);
   const [method, setMethod] = useState("automatic");
   const [fileType, setFileType] = useState("");
   const [extension, setExtension] = useState("");
@@ -467,6 +468,7 @@ export function SearchView(props: {
     }
     const next = await props.client.post<SearchItem>("searches", {
       query: normalizedQuery,
+      ...(parentSearchId ? { parentSearchId } : {}),
       method,
       type: fileType,
       ...(extension.trim() ? { extension: extension.trim() } : {}),
@@ -481,7 +483,27 @@ export function SearchView(props: {
       ...(album.trim() ? { album: album.trim() } : {}),
       ...(artist.trim() ? { artist: artist.trim() } : {})
     });
+    setParentSearchId(null);
     props.onSearchCreated(next);
+  };
+
+  const useSelectedCriteria = () => {
+    if (!displayedSearch) return;
+    const source = displayedSearch.criteria;
+    const numberText = (value: number | null | undefined) => value == null ? "" : String(value);
+    setParentSearchId(displayedSearch.id);
+    setQuery(displayedSearch.query ?? "");
+    setMethod(displayedSearch.requestedMethod ?? "automatic");
+    setFileType(displayedSearch.type ?? "");
+    setExtension(source?.extension ?? "");
+    setMinSizeBytes(numberText(source?.minSizeBytes));
+    setMaxSizeBytes(numberText(source?.maxSizeBytes));
+    setMinAvailability(numberText(source?.minAvailability));
+    setMinCompleteSources(numberText(source?.minCompleteSources));
+    setMinBitrateKbps(numberText(source?.minBitrateKbps));
+    setMinLengthSeconds(numberText(source?.minLengthSeconds));
+    setCodec(source?.codec ?? ""); setTitle(source?.title ?? "");
+    setAlbum(source?.album ?? ""); setArtist(source?.artist ?? "");
   };
 
   const deleteSelectedSearch = async () => {
@@ -490,11 +512,13 @@ export function SearchView(props: {
       return;
     }
     await props.client.delete(`searches/${searchId}`);
+    if (parentSearchId === searchId) setParentSearchId(null);
     props.onSearchDeleted(searchId);
   };
 
   const clearSearches = async () => {
     await props.client.delete("searches?confirm=true");
+    setParentSearchId(null);
     props.onSearchesCleared();
   };
 
@@ -504,6 +528,8 @@ export function SearchView(props: {
         <h2>Search</h2>
         <span>{props.searches.length} sessions on this page</span>
       </div>
+      {parentSearchId && <div class="form-row"><span>New search linked to #{parentSearchId}</span>
+        <button class="btn" type="button" onClick={() => setParentSearchId(null)}>Clear link</button></div>}
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         if (!searchQueryError) {
@@ -531,7 +557,7 @@ export function SearchView(props: {
         <button class="btn" type="submit" disabled={!normalizeSearchQuery(query) || Boolean(searchQueryError)}><Search size={16} />Start</button>
       </form>
       {searchQueryError && <p class="field-error">{searchQueryError}</p>}
-      {orderedSearches.length > 0 && (
+      {(orderedSearches.length > 0 || displayedSearch != null) && (
         <div class="form-row subtle-row search-session-row">
           <label for="search-session">Search session</label>
           <select
@@ -541,6 +567,8 @@ export function SearchView(props: {
             onInput={(event) => props.selectSearch(event.currentTarget.value)}
           >
             {!props.selectedSearchId && <option value="" disabled>Select a search session</option>}
+            {displayedSearch && !orderedSearches.some((search) => search.id === displayedSearch.id) &&
+              <option value={displayedSearch.id}>#{displayedSearch.id} {displayedSearch.query} · {displayedStatus}</option>}
             {orderedSearches.map((search) => (
               <option key={search.id} value={search.id}>
                 #{search.id} {search.query || "Untitled search"} · {search.status ?? "unknown"} · {search.resultCount} results
@@ -548,6 +576,11 @@ export function SearchView(props: {
             ))}
           </select>
           {displayedSearch && <StatusPill value={displayedStatus} />}
+          <button class="btn btn-outline-secondary" type="button" disabled={!displayedSearch} onClick={useSelectedCriteria}>
+            Use criteria for new search
+          </button>
+          {displayedSearch?.parentSearchId && <button class="btn" type="button"
+            onClick={() => props.selectSearch(displayedSearch.parentSearchId!)}>View parent #{displayedSearch.parentSearchId}</button>}
           <button class="btn btn-outline-secondary" type="button"
             disabled={!displayedSearch || !["queued", "running"].includes(displayedStatus)}
             onClick={() => { void props.run(() => props.client.post(`searches/${displayedSearch!.id}/stop`), "Search stopped"); }}>
@@ -569,7 +602,7 @@ export function SearchView(props: {
           <button
             class="btn btn-outline-danger"
             type="button"
-            disabled={props.searches.length === 0}
+            disabled={props.searches.length === 0 && !displayedSearch}
             onClick={() => {
               if (window.confirm("Clear every saved search session and result?")) {
                 void props.run(clearSearches, "Search sessions cleared", { refresh: false });

@@ -2,6 +2,7 @@
 /// separately by SQLite and cannot be supplied by a creator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchData {
+    pub parent_search_id: Option<i64>,
     pub normalized_query: String,
     pub spec: MetadataSearchSpec,
     pub resolved_method: Option<String>,
@@ -235,3 +236,13 @@ pub struct MetadataSearchTransitionReceipt {
     pub result_count: u64,
     pub accepted_hashes: Vec<String>,
 }
+
+/// A linked creation referenced a parent absent from its write transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct MissingSearchParent;
+impl std::fmt::Display for MissingSearchParent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("parent search not found")
+    }
+}
+impl std::error::Error for MissingSearchParent {}

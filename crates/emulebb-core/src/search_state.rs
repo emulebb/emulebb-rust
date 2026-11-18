@@ -28,6 +28,7 @@ pub(crate) fn create_search(metadata: &MetadataStore, search: &Search) -> Result
 
 pub(crate) fn search_to_metadata(search: &Search) -> MetadataSearchData {
     MetadataSearchData {
+        parent_search_id: search.spec.parent_search_id,
         normalized_query: normalized_search_query(&search.spec.query),
         spec: MetadataSearchSpec {
             query: search.spec.query.clone(),
@@ -136,6 +137,7 @@ mod tests {
     fn complete_spec_and_terminal_reason_survive_persistence() {
         let metadata = MetadataStore::in_memory().unwrap();
         let spec = SearchSpec {
+            parent_search_id: None,
             query: "exact session".to_string(),
             method: "global".to_string(),
             r#type: "audio".to_string(),

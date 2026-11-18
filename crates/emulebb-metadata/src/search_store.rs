@@ -47,6 +47,18 @@ impl super::MetadataStore {
     ) -> Result<(i64, crate::MetadataSearchTransitionReceipt)> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        if id.is_none()
+            && let Some(parent) = search.parent_search_id
+        {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM search_sessions WHERE id=?1)",
+                [parent],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(crate::MissingSearchParent.into());
+            }
+        }
         // WHY: allocation and updates share the body writer, but a missing
         // update ID must never recreate a deleted session. The statement's
         // existence predicate and mutation belong to one SQLite snapshot.
@@ -59,11 +71,11 @@ impl super::MetadataStore {
                 min_availability, min_complete_sources, min_bitrate_kbps,
                 min_length_seconds, codec_filter, title_filter, album_filter,
                 artist_filter, status, status_reason, created_at_s, updated_at_s,
-                completed_at_s
+                completed_at_s, parent_search_id
             )
             SELECT
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
             WHERE ?1 IS NULL OR EXISTS (SELECT 1 FROM search_sessions WHERE id = ?1)
             ON CONFLICT(id) DO UPDATE SET
                 query = excluded.query,
@@ -111,6 +123,7 @@ impl super::MetadataStore {
                     search.created_at_s,
                     search.updated_at_s,
                     search.completed_at_s,
+                    search.parent_search_id,
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

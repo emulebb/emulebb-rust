@@ -62,6 +62,7 @@ pub(in crate::persistence_owner) async fn search_fixture() -> (
 ) {
     let (store, state, owner) = setup();
     let request = crate::SearchCreate {
+        parent_search_id: None,
         query: "sample query".into(),
         method: "server".into(),
         ..Default::default()

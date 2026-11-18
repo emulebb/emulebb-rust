@@ -324,6 +324,15 @@ fn late_pages_seek_indexes_with_one_hundred_thousand_sessions_results_and_varian
             "{sql}"
         );
     }
+    let mut delete = conn
+        .prepare("DELETE FROM search_sessions WHERE id=1")
+        .unwrap();
+    assert_eq!(delete.execute([]).unwrap(), 1);
+    assert_eq!(
+        delete.get_status(rusqlite::StatementStatus::FullscanStep),
+        0
+    );
+    assert!(delete.get_status(rusqlite::StatementStatus::VmStep) < 1000);
 }
 
 #[test]

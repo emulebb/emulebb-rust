@@ -6,6 +6,7 @@ use crate::{
 
 pub(super) fn sample_search() -> MetadataSearchData {
     MetadataSearchData {
+        parent_search_id: None,
         normalized_query: "sample query".into(),
         spec: MetadataSearchSpec {
             query: "sample query".into(),
@@ -626,4 +627,75 @@ fn stop_preserves_results_is_idempotent_and_rolls_back_before_publication() {
             .len(),
         2
     );
+}
+
+#[test]
+fn linked_sessions_keep_independent_criteria_results_and_survive_parent_deletion() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("metadata.sqlite");
+    let store = MetadataStore::open(&path).unwrap();
+    let parent = store.create_search(&sample_search()).unwrap();
+    project(&store, parent, Some(12), "Parent.bin");
+    let mut child_data = sample_search();
+    child_data.parent_search_id = Some(parent);
+    child_data.spec.query = "edited child criteria".into();
+    let child = store.create_search(&child_data).unwrap();
+    assert_eq!(store.search_header(child).unwrap().unwrap().result_count, 0);
+    let claim = project(&store, child, Some(24), "Child.bin");
+    drop(store);
+    let store = MetadataStore::open(&path).unwrap();
+    let before = store.search_header(child).unwrap().unwrap();
+    assert_eq!(before.data.parent_search_id, Some(parent));
+    assert_eq!(before.data.spec.query, "edited child criteria");
+    assert!(store.delete_search(parent).unwrap());
+    let after = store.search_header(child).unwrap().unwrap();
+    assert_eq!(after.data.parent_search_id, None);
+    assert_eq!(after.result_count, 1);
+    assert_eq!(after.data.spec, before.data.spec);
+    assert!(after.data.updated_at_s >= before.data.updated_at_s);
+    assert_eq!(
+        store
+            .search_result_header(child, claim)
+            .unwrap()
+            .unwrap()
+            .summary
+            .name,
+        "Child.bin"
+    );
+    // An active execution's immutable creation spec can still carry the former
+    // parent. A later status transition must preserve the committed unlink.
+    child_data.status = "completed".into();
+    child_data.updated_at_s = after.data.updated_at_s + 1;
+    child_data.completed_at_s = Some(child_data.updated_at_s);
+    store.transition_search(child, &child_data, &[]).unwrap();
+    assert_eq!(
+        store
+            .search_header(child)
+            .unwrap()
+            .unwrap()
+            .data
+            .parent_search_id,
+        None
+    );
+    assert_eq!(
+        store
+            .connection()
+            .unwrap()
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn missing_parent_creation_allocates_neither_session_nor_identity() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut data = sample_search();
+    data.parent_search_id = Some(42);
+    let error = store.create_search(&data).unwrap_err();
+    assert!(error.is::<crate::MissingSearchParent>());
+    assert_eq!(store.table_count("search_sessions").unwrap(), 0);
+    assert_eq!(store.create_search(&sample_search()).unwrap(), 1);
 }
