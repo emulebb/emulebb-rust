@@ -492,13 +492,26 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
               rating: 4,
               fileType: "doc",
               media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" },
-              observations: [
-                { origin: "server", rawName: "Linux Guide.pdf", normalizedName: "Linux Guide.pdf", sizeBytes: 1_048_576, sources: 3, completeSources: 1, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Guide", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 4, aichHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", complete: false, directory: "", observedAt: "2026-10-06T12:00:00Z" },
-                { origin: "global", rawName: "Linux Manual.pdf", normalizedName: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Manual", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 3, aichHash: null, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
-              ]
+
             }]
           : [{ id: "14", hash: "00112233445566778899AABBCCDDEEFF", displayName: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
       });
+      return;
+    }
+    if (method === "GET" && path === "searches/2/results/13/observations") {
+      record();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: ["server", "global"].map((origin, index) => ({
+          id: String(index + 1), origin, reporterEndpoint: index ? "192.0.2.10:4661" : null,
+          rawName: index ? "Linux Manual.pdf" : "Linux Guide.pdf",
+          normalizedName: index ? "Linux Manual.pdf" : "Linux Guide.pdf",
+          sizeBytes: 1_048_576, sources: index ? 5 : 3, completeSources: index ? 2 : 1,
+          sourceClientId: null, sourceClientPort: null, fileType: "doc",
+          media: { artist: "Example Author", album: null, title: index ? "Linux Manual" : "Linux Guide", lengthSeconds: null, bitrateKbps: null, codec: "PDF" },
+          rating: index ? 3 : 4, aichHash: null, complete: null, directory: null,
+          firstSeenAt: 1_791_288_000, lastSeenAt: 1_791_288_001, observationCount: 1,
+        })), meta: { apiVersion: "v1", nextCursor: null, hasMore: false },
+      }) });
       return;
     }
     if (method === "DELETE" && /^searches\/\d+$/.test(path)) {
@@ -606,8 +619,13 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(searchPanel.getByText("Extension: .pdf")).toBeVisible();
   await expect(resultRow).toContainText("2 complete");
   await expect(resultRow).toContainText("4/5");
-  await expect(resultRow).toContainText("server, global");
-  await expect(resultRow).toContainText("Linux Manual.pdf");
+  await resultRow.getByRole("button", { name: "Observations", exact: true }).click();
+  const observations = page.getByRole("region", { name: "Search result observations", exact: true });
+  await expect(observations.getByRole("cell", { name: "Linux Manual.pdf", exact: true })).toBeVisible();
+  await expect(observations.getByRole("cell", { name: "global 192.0.2.10:4661", exact: true })).toBeVisible();
+  await expect(observations.getByRole("button", { name: "Next observations page" })).toBeDisabled();
+  await observations.getByRole("button", { name: "Close observations" }).click();
+  await expect(observations).toHaveCount(0);
   await expect(resultRow).toContainText("Title: Linux Guide");
   await expect(resultRow).toContainText("Artist: Example Author");
   await expect(resultRow).toContainText("Codec: PDF");

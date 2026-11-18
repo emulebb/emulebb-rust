@@ -1,7 +1,6 @@
-//! Search REST handlers (`/searches` and the search-result download op).
-//!
-//! Extracted verbatim from `lib.rs` during the maintainability restructuring;
-//! behavior is unchanged.
+//! Search resources and selected-result actions.
+mod observations;
+pub(crate) use observations::search_result_observations;
 
 use axum::{
     body::Bytes,

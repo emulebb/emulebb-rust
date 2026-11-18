@@ -1,5 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
+import { SearchObservations } from "./searchObservations";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
@@ -45,7 +46,6 @@ import {
   RestClient,
   RuntimeDiagnostics,
   SearchItem,
-  SearchResultObservation,
   SearchResultMedia,
   ServerItem,
   SharedDirectories,
@@ -417,6 +417,7 @@ export function SearchView(props: {
   const [artist, setArtist] = useState("");
   const [category, setCategory] = useState("");
   const [paused, setPaused] = useState(false);
+  const [observationSelection, setObservationSelection] = useState<{ session: string; claim: string } | null>(null);
   const orderedSearches = useMemo(
     () => [...props.searches].sort((left, right) => Number(right.id) - Number(left.id)),
     [props.searches]
@@ -667,61 +668,22 @@ export function SearchView(props: {
               <th>Sources</th>
               <th>Rating</th>
               <th>Type</th>
-              <th>Origin</th>
+              <th>Observations</th>
               <th>Hash</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody>
             {results.map((result) => {
-              const observations = result.observations ?? [];
               const mediaSummary = searchResultMediaSummary(result.media);
-              const origins = [...new Set(observations.map((observation) => observation.origin))];
-              const alternateNames = [...new Set(
-                observations
-                  .map((observation) => observation.normalizedName)
-                  .filter((name) => name && name !== result.displayName)
-              )];
-              const aichHashes = [...new Set(
-                observations
-                  .map((observation) => observation.aichHash)
-                  .concat(result.aichHash)
-                  .filter((hash): hash is string => Boolean(hash))
-              )];
               return (
               <tr key={result.id}>
                 <td class="search-result-name-cell">
                   <strong>{result.displayName ?? result.hash}</strong>
-                  {alternateNames.length > 0 && (
-                    <span class="search-result-alternates">Also seen as: {alternateNames.join(", ")}</span>
-                  )}
                   {result.complete && <span class="search-result-complete">Complete file</span>}
                   {result.directory && <span class="search-result-directory">Folder: {result.directory}</span>}
                   {mediaSummary && <span class="search-result-media">{mediaSummary}</span>}
-                  {aichHashes.length > 0 && (
-                    <span class={`search-result-aich${aichHashes.length > 1 ? " search-result-aich-conflict" : ""}`}>
-                      {aichHashes.length === 1 ? "AICH" : "Conflicting AICH claims"}: {aichHashes.join(", ")}
-                    </span>
-                  )}
-                  {observations.length > 0 && (
-                    <details class="search-observations">
-                      <summary>{observations.length} observation{observations.length === 1 ? "" : "s"}</summary>
-                      <ul>
-                        {observations.map((observation, index) => {
-                          const observationMedia = searchResultMediaSummary(observation.media);
-                          return (
-                            <li key={`${observation.origin}-${observation.rawName}-${index}`}>
-                              <strong>{observation.origin}</strong>: {observation.normalizedName}
-                              {observation.rawName !== observation.normalizedName ? ` (raw: ${observation.rawName})` : ""} · {searchResultObservationEvidence(observation)}
-                              {observation.rating > 0 ? ` · rating ${observation.rating}/5` : ""}
-                              {observation.aichHash ? ` · AICH ${observation.aichHash}` : ""}
-                              {observationMedia ? ` · ${observationMedia}` : ""}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </details>
-                  )}
+                  {result.aichHash && <span class="search-result-aich">AICH: {result.aichHash}</span>}
                 </td>
                 <td>{result.sizeBytes === null ? "Unknown" : formatBytes(result.sizeBytes)}</td>
                 <td>
@@ -730,7 +692,7 @@ export function SearchView(props: {
                 </td>
                 <td>{(result.rating ?? 0) > 0 ? `${result.rating}/5` : "—"}</td>
                 <td>{result.fileType ?? ""}</td>
-                <td>{origins.length > 0 ? origins.join(", ") : "unknown"}</td>
+                <td><button class="btn" type="button" onClick={() => setObservationSelection({ session: props.selectedSearch!.id, claim: result.id })}>Observations</button></td>
                 <td><code class="search-result-hash">{result.hash}</code></td>
                 <td>
                   <button class="btn"
@@ -758,6 +720,11 @@ export function SearchView(props: {
           </tbody>
         </table>
       </TableScroll>
+      {observationSelection && observationSelection.session === props.selectedSearch?.id && (
+        <SearchObservations key={`${observationSelection.session}:${observationSelection.claim}`}
+          client={props.client} session={observationSelection.session} claim={observationSelection.claim}
+          close={() => setObservationSelection(null)} />
+      )}
       {props.selectedSearch && (
         <div class="form-row subtle-row search-pagination" aria-label="Search result pages">
           <span>
@@ -806,21 +773,6 @@ function searchResultMediaSummary(media?: SearchResultMedia): string {
   return fields.filter(Boolean).join(" · ");
 }
 
-function searchResultObservationEvidence(observation: SearchResultObservation): string {
-  const sourceEndpoint = observation.sourceClientId != null && observation.sourceClientPort != null
-    ? `client ${observation.sourceClientId}:${observation.sourceClientPort}`
-    : "";
-  return [
-    observation.sizeBytes === null ? "Unknown size" : formatBytes(observation.sizeBytes),
-    observation.fileType && observation.fileType !== "unknown" ? `type ${observation.fileType}` : "",
-    `${observation.sources} sources / ${observation.completeSources} complete`,
-    observation.reporterEndpoint ? `reporter ${observation.reporterEndpoint}` : "",
-    sourceEndpoint,
-    observation.complete ? "complete file" : "",
-    observation.directory ? `folder ${observation.directory}` : "",
-    observation.observedAt ? `observed ${shortTime(observation.observedAt)}` : ""
-  ].filter(Boolean).join(" · ");
-}
 
 function formatMediaDuration(totalSeconds: number): string {
   const seconds = Math.max(0, Math.trunc(totalSeconds));

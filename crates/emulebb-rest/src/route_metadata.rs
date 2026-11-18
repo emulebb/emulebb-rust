@@ -384,7 +384,8 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             let client_id = decode_path_parameter(client_id, "clientId")?;
             validate_client_id_path_token(&client_id)?
         }
-        ("POST", ["searches", search_id, "results", result_id, "download"]) => {
+        ("GET", ["searches", search_id, "results", result_id, "observations"])
+        | ("POST", ["searches", search_id, "results", result_id, "download"]) => {
             validate_search_id(search_id)?;
             validate_positive_decimal_id(result_id, "resultId")?;
         }
@@ -618,6 +619,7 @@ fn route_query_fields_for_parameterized(
     path: &str,
 ) -> Option<&'static [&'static str]> {
     const NONE: &[&str] = &[];
+    const SEARCH_OBSERVATIONS: &[&str] = &["limit", "cursor"];
     const LIBRARY_TAGS: &[&str] = &["limit", "cursor"];
     const SEARCH: &[&str] = &[
         "offset",
@@ -676,6 +678,7 @@ fn route_query_fields_for_parameterized(
             Some(NONE)
         }
         ("GET", ["searches", _]) => Some(SEARCH),
+        ("GET", ["searches", _, "results", _, "observations"]) => Some(SEARCH_OBSERVATIONS),
         _ => None,
     }
 }

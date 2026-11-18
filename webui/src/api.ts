@@ -246,6 +246,29 @@ export type SearchResult = {
   [key: string]: unknown;
 };
 
+export type SearchObservation = {
+  id: string;
+  origin: "server" | "global" | "kad";
+  reporterEndpoint: string | null;
+  rawName: string | null;
+  normalizedName: string | null;
+  sizeBytes: number | null;
+  sources: number | null;
+  completeSources: number | null;
+  sourceClientId: number | null;
+  sourceClientPort: number | null;
+  fileType: string | null;
+  media: { artist: string | null; album: string | null; title: string | null;
+    lengthSeconds: number | null; bitrateKbps: number | null; codec: string | null };
+  rating: number | null;
+  aichHash: string | null;
+  complete: boolean | null;
+  directory: string | null;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  observationCount: number;
+};
+
 export type SearchCriteria = {
   extension?: string;
   minSizeBytes?: number | null;
