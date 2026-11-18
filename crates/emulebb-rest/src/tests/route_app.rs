@@ -582,7 +582,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(value.get("fullMemoryIncluded").is_none());
     assert!(value.get("path").is_none());
     assert!(value.get("byteCount").is_none());
-    assert_eq!(value["schema"], "emulebb.diagnostic-bundle.v6");
+    assert_eq!(value["schema"], "emulebb.diagnostic-bundle.v7");
     assert_eq!(value["budget"]["maxBytes"], 4_194_304);
     assert_eq!(value["budget"]["encodedBytes"], body.len());
     assert_eq!(value["summary"]["artifactFileCount"], 0);
@@ -596,7 +596,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(!runtime_dir.join("diagnostics").exists());
 
     let bundle = &value;
-    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v6");
+    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v7");
     assert!(bundle.get("memory").is_none());
     assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], true);
     assert_eq!(bundle["settingsProvenance"]["sensitiveValues"], "exact");

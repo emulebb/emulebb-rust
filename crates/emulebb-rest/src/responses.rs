@@ -4,17 +4,13 @@
 //! JSON shapes the eMuleBB REST contract publishes. They were extracted verbatim
 //! from `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path as FsPath,
-};
+use std::path::Path as FsPath;
 
 use emulebb_core::{
     AppInfo, AppLifecycle, BUILD_ARCHITECTURE, BUILD_CHANNEL, BUILD_FLAVOR, BUILD_SOURCE_REVISION,
-    LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus, Search, SearchResult,
-    SearchSpec, ServerInfo, SharedFileListItem, SharedFilePublishState, Status,
-    TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
-    normal_path_display, normalize_ed2k_file_name,
+    LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus, Search, SearchSpec,
+    ServerInfo, SharedFileListItem, SharedFilePublishState, Status, TransferThroughputStats,
+    UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus, normal_path_display,
 };
 use serde_json::{Value, json};
 
@@ -423,205 +419,6 @@ fn ed2k_id_state(connected: bool, firewalled: Option<bool>) -> &'static str {
     }
 }
 
-#[cfg(test)]
-fn search_result_response(result: &SearchResult) -> Value {
-    search_result_response_with_options(result, true)
-}
-
-pub(crate) fn search_result_response_with_options(
-    result: &SearchResult,
-    include_evidence: bool,
-) -> Value {
-    let extension = FsPath::new(&result.name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    let observations = result
-        .observations
-        .iter()
-        .map(|observation| {
-            json!({
-                "origin": observation.origin,
-                "reporterEndpoint": observation.reporter_endpoint,
-                "rawName": observation.name,
-                "normalizedName": normalize_ed2k_file_name(&observation.name),
-                "sizeBytes": observation.size_bytes,
-                "sources": observation.sources,
-                "completeSources": observation.complete_sources,
-                "sourceClientId": observation.source_client_id,
-                "sourceClientPort": observation.source_client_port,
-                "fileType": observation.file_type,
-                "media": {
-                    "artist": observation.media.artist,
-                    "album": observation.media.album,
-                    "title": observation.media.title,
-                    "lengthSeconds": observation.media.length_seconds,
-                    "bitrateKbps": observation.media.bitrate_kbps,
-                    "codec": observation.media.codec,
-                },
-                "rating": observation.rating,
-                "aichHash": (!observation.aich_hash.is_empty())
-                    .then_some(observation.aich_hash.as_str()),
-                "complete": observation.complete,
-                "directory": observation.directory,
-                "observedAt": observation.observed_at,
-            })
-        })
-        .collect::<Vec<_>>();
-    let observed_raw_names = result
-        .observations
-        .iter()
-        .map(|observation| observation.name.clone())
-        .filter(|name| !name.trim().is_empty())
-        .collect::<BTreeSet<_>>();
-    let observed_names = observed_raw_names
-        .iter()
-        .map(|name| normalize_ed2k_file_name(name))
-        .filter(|name| !name.is_empty())
-        .collect::<BTreeSet<_>>();
-    let observed_extensions = observed_names
-        .iter()
-        .filter_map(|name| {
-            FsPath::new(name)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .filter(|extension| !extension.is_empty())
-                .map(str::to_ascii_lowercase)
-        })
-        .collect::<BTreeSet<_>>();
-    let mut candidate_votes = BTreeMap::<String, BTreeSet<(Option<&str>, Option<&str>)>>::new();
-    for observation in &result.observations {
-        let normalized = normalize_ed2k_file_name(&observation.name);
-        if !normalized.is_empty() {
-            let reporter = observation.reporter_endpoint.as_deref();
-            let unknown_origin = reporter.is_none().then_some(observation.origin.as_str());
-            candidate_votes
-                .entry(normalized)
-                .or_default()
-                .insert((reporter, unknown_origin));
-        }
-    }
-    let name_candidates = candidate_votes
-        .into_iter()
-        .map(|(normalized_name, votes)| {
-            let raw_names = result
-                .observations
-                .iter()
-                .filter(|observation| {
-                    normalize_ed2k_file_name(&observation.name) == normalized_name
-                })
-                .map(|observation| observation.name.clone())
-                .collect::<BTreeSet<_>>();
-            json!({
-                "normalizedName": normalized_name,
-                "rawNames": raw_names,
-                "votes": votes.len(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let aich_hashes = result
-        .observations
-        .iter()
-        .map(|observation| observation.aich_hash.as_str())
-        .chain(std::iter::once(result.aich_hash.as_str()))
-        .filter(|hash| !hash.is_empty())
-        .collect::<BTreeSet<_>>();
-    let observed_sources = result
-        .observations
-        .iter()
-        .filter_map(|observation| {
-            observation
-                .source_client_id
-                .zip(observation.source_client_port)
-        })
-        .collect::<BTreeSet<_>>();
-    let divergent_names = observed_names.len() > 1;
-    let has_aich_hash = !aich_hashes.is_empty();
-    let multiple_aich = aich_hashes.len() > 1;
-    let mut response = json!({
-        "id": result.id,
-        "searchId": result.search_id,
-        "type": result.r#type,
-        "hash": result.hash,
-        "displayName": result.name,
-        "nameConsensus": {
-            "selectedName": result.name,
-            "observationCount": result.observations.len(),
-            "candidates": name_candidates,
-        },
-        "sizeBytes": result.size_bytes,
-        "sources": result.sources,
-        "completeSources": result.complete_sources,
-        "fileType": result.file_type,
-        "media": {
-            "artist": result.media.artist,
-            "album": result.media.album,
-            "title": result.media.title,
-            "lengthSeconds": result.media.length_seconds,
-            "bitrateKbps": result.media.bitrate_kbps,
-            "codec": result.media.codec,
-        },
-        "extension": extension,
-        "complete": result.complete,
-        "directory": result.directory,
-        "rating": result.rating,
-        "aichHash": (!result.aich_hash.is_empty()).then_some(result.aich_hash.as_str()),
-        "observations": observations,
-    });
-    if include_evidence {
-        let mut availability = json!({
-            "sources": result.sources,
-            "completeSources": result.complete_sources,
-        });
-        if result.complete {
-            availability["completionState"] = json!("complete");
-        }
-        if !observed_sources.is_empty() {
-            availability["observedSourceEndpoints"] = json!(observed_sources.len());
-        }
-        response["evidence"] = json!({
-            "availabilityEvidence": availability,
-            "nameEvidence": {
-                "observedRawNames": observed_raw_names,
-                "observedNames": observed_names,
-                "observedExtensions": observed_extensions,
-                "divergent": divergent_names,
-            },
-            "integrityEvidence": {
-                "hasAichHash": has_aich_hash,
-                "multipleAich": multiple_aich,
-                "aichHashes": aich_hashes,
-            }
-        });
-    }
-    response
-}
-
-pub(crate) fn search_results_response(
-    results: &[SearchResult],
-    include_evidence: bool,
-) -> Vec<Value> {
-    results
-        .iter()
-        .map(|result| search_result_response_with_options(result, include_evidence))
-        .collect()
-}
-
-pub(crate) fn search_session_response(search: &Search) -> Value {
-    json!({
-        "id": search.id,
-        "query": search.spec.query,
-        "requestedMethod": search.spec.method,
-        "resolvedMethod": search.resolved_method,
-        "type": search.spec.r#type,
-        "criteria": search_criteria_response(&search.spec),
-        "status": search.status,
-        "statusReason": search.status_reason,
-        "progress": search.progress,
-        "resultCount": search.results.len()
-    })
-}
-
 pub(crate) fn search_created_response(search: &Search) -> Value {
     json!({"id":search.id,"query":search.spec.query,"requestedMethod":search.spec.method,
         "resolvedMethod":search.resolved_method,"type":search.spec.r#type,"criteria":search_criteria_response(&search.spec),
@@ -728,15 +525,14 @@ mod tests {
     use std::sync::Arc;
 
     use emulebb_core::{
-        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, SearchResult,
-        SearchResultObservation, ServerInfo, TransferThroughputStats, VpnGuardStatus,
+        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, ServerInfo,
+        TransferThroughputStats, VpnGuardStatus,
     };
     use emulebb_index::FileIndex;
 
     use super::{
-        kad_response, network_response, search_result_response,
-        server_connect_acknowledgement_value, server_status_value, shared_file_response,
-        stats_response,
+        kad_response, network_response, server_connect_acknowledgement_value, server_status_value,
+        shared_file_response, stats_response,
     };
 
     #[test]
@@ -769,120 +565,6 @@ mod tests {
         assert_eq!(
             response.directory,
             if cfg!(windows) { r"C:\shared" } else { "" }
-        );
-    }
-
-    #[test]
-    fn search_result_response_emits_only_supported_evidence() {
-        let mut result = SearchResult {
-            id: "1".to_owned(),
-            search_id: "search-1".to_string(),
-            r#type: "doc".to_string(),
-            hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "sample.bin".to_string(),
-            size_bytes: Some(1024),
-            sources: 2,
-            complete_sources: 1,
-            source_client_id: None,
-            source_client_port: None,
-            file_type: "doc".to_string(),
-            media: emulebb_core::SearchResultMedia {
-                artist: "Example Artist".to_string(),
-                album: "Example Album".to_string(),
-                title: "Example Title".to_string(),
-                length_seconds: 321,
-                bitrate_kbps: 192,
-                codec: "FLAC".to_string(),
-            },
-            rating: 4,
-            aich_hash: "A".repeat(32),
-            complete: true,
-            directory: String::new(),
-            observations: Vec::new(),
-        };
-        result.observations.push(SearchResultObservation {
-            origin: "global".to_string(),
-            reporter_endpoint: Some("192.0.2.10:4661".to_string()),
-            name: result.name.clone(),
-            size_bytes: result.size_bytes,
-            sources: result.sources,
-            complete_sources: result.complete_sources,
-            source_client_id: None,
-            source_client_port: None,
-            file_type: result.file_type.clone(),
-            media: result.media.clone(),
-            rating: result.rating,
-            aich_hash: result.aich_hash.clone(),
-            complete: result.complete,
-            directory: result.directory.clone(),
-            observed_at: Default::default(),
-        });
-
-        let complete = search_result_response(&result);
-        assert_eq!(complete["complete"], true);
-        assert_eq!(complete["displayName"], "sample.bin");
-        assert_eq!(complete["nameConsensus"]["selectedName"], "sample.bin");
-        assert_eq!(complete["observations"][0]["rawName"], "sample.bin");
-        assert_eq!(complete["observations"][0]["normalizedName"], "sample.bin");
-        assert!(complete.get("name").is_none());
-        assert!(complete["observations"][0].get("name").is_none());
-        assert_eq!(complete["rating"], 4);
-        assert_eq!(complete["media"]["artist"], "Example Artist");
-        assert_eq!(complete["media"]["album"], "Example Album");
-        assert_eq!(complete["media"]["title"], "Example Title");
-        assert_eq!(complete["media"]["lengthSeconds"], 321);
-        assert_eq!(complete["media"]["bitrateKbps"], 192);
-        assert_eq!(complete["media"]["codec"], "FLAC");
-        assert_eq!(complete["aichHash"], "A".repeat(32));
-        assert_eq!(complete["observations"][0]["aichHash"], "A".repeat(32));
-        assert_eq!(
-            complete["observations"][0]["reporterEndpoint"],
-            "192.0.2.10:4661"
-        );
-        assert!(complete.get("method").is_none());
-        assert!(complete.get("knownType").is_none());
-        assert!(complete.get("clientIp").is_none());
-        assert!(complete.get("serverCount").is_none());
-        assert!(complete["evidence"].get("confidence").is_none());
-        assert_eq!(
-            complete["evidence"]["integrityEvidence"]["hasAichHash"],
-            true
-        );
-        assert_eq!(
-            complete["evidence"]["integrityEvidence"]["aichHashes"],
-            serde_json::json!(["A".repeat(32)])
-        );
-        assert_eq!(
-            complete["evidence"]["availabilityEvidence"]["completionState"],
-            "complete"
-        );
-        assert!(
-            complete["evidence"]["availabilityEvidence"]
-                .get("complete")
-                .is_none()
-        );
-
-        let mut changed = result.observations[0].clone();
-        changed.origin = "server".into();
-        changed.sources += 1;
-        result.observations.push(changed.clone());
-        let repeated = search_result_response(&result);
-        assert_eq!(repeated["nameConsensus"]["candidates"][0]["votes"], 1);
-        changed.reporter_endpoint = None;
-        result.observations.push(changed.clone());
-        changed.sources += 1;
-        result.observations.push(changed.clone());
-        changed.origin = "global".into();
-        result.observations.push(changed);
-        let independent = search_result_response(&result);
-        assert_eq!(independent["nameConsensus"]["candidates"][0]["votes"], 3);
-
-        result.complete = false;
-        let incomplete = search_result_response(&result);
-        assert!(
-            incomplete["evidence"]["availabilityEvidence"]
-                .get("completionState")
-                .is_none()
         );
     }
 

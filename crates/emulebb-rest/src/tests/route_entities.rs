@@ -1,6 +1,49 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
+async fn diagnostic_search_capture_reads_bounded_durable_summaries() {
+    let files = (0..260)
+        .map(|index| IndexedFile {
+            ed2k_hash: format!("{index:032x}"),
+            name: format!("Sample-{index:03}.bin"),
+            size_bytes: 4096,
+            content_type: "pro".into(),
+            availability_score: index + 1,
+        })
+        .collect::<Vec<_>>();
+    let core = test_search_core(&files);
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let (status, bundle) = request(
+        &app,
+        "POST",
+        "/api/v1/diagnostics/bundles",
+        Some(json!({"confirmCapture":true,"maxBytes":4194304})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let searches = &bundle["operationalSnapshots"]["searches"];
+    assert!(searches["total"].is_null());
+    assert_eq!(searches["included"], 1);
+    assert_eq!(searches["hasMore"], false);
+    let snapshot = &searches["items"][0];
+    assert_eq!(snapshot["session"]["resultCount"], 260);
+    assert!(snapshot["session"]["createdAt"].is_i64());
+    let results = &snapshot["results"];
+    assert_eq!(results["included"], 128);
+    assert_eq!(results["total"], 260);
+    assert_eq!(results["omittedAfterLimit"], 132);
+    assert_eq!(results["hasMore"], true);
+    assert_eq!(results["items"][0]["displayName"], "Sample-259.bin");
+    assert!(serde_json::to_vec(&searches["items"]).unwrap().len() <= 1024 * 1024);
+}
+
+#[tokio::test]
 async fn download_source_friend_routes_report_closed_persistence() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
