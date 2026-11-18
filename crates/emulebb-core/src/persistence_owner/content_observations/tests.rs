@@ -53,7 +53,7 @@ async fn observed_content_is_ordered_and_closing_never_replays_it() {
     assert_eq!(page.items[0].receipt.observation_count, 2);
 }
 
-async fn search_fixture() -> (
+pub(in crate::persistence_owner) async fn search_fixture() -> (
     MetadataStore,
     Arc<Mutex<CoreState>>,
     Arc<PersistenceOwner>,

@@ -284,4 +284,4 @@ pub(super) async fn process(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

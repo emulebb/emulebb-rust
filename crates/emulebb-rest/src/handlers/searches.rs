@@ -73,12 +73,7 @@ pub(crate) async fn delete_search(
         Ok(false) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
         }
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 
@@ -100,12 +95,7 @@ pub(crate) async fn delete_searches(
     }
     match state.core.clear_searches().await {
         Ok(()) => api_ok(json!({ "ok": true })).into_response(),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 

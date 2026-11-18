@@ -24,6 +24,7 @@ mod download_patch;
 mod kad;
 mod library_sharing;
 mod library_tags;
+mod search_sessions;
 
 #[cfg(test)]
 mod download_tests;
@@ -106,6 +107,7 @@ enum Command {
     Delete { hash: String },
     Category(category::CategoryCommand),
     ContentObservations(content_observations::ObservationCommand),
+    SearchSessions(search_sessions::SearchCommand),
     LibraryTags(crate::LibraryTagRequest),
     LibrarySharing(library_sharing::SharingCommand),
     Downloads(download::DownloadCommand),
@@ -118,6 +120,7 @@ enum Command {
 
 enum Response {
     ContentObserved(Result<(), PersistenceError>),
+    SearchRemoved(bool),
     Friend(Option<Friend>),
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
     LibraryTags(
@@ -294,6 +297,7 @@ impl Drop for Permit {
 }
 
 enum DbCommand {
+    SearchRemove(Option<i64>),
     Add(Friend),
     Delete(Friend),
     Category(category::CategoryDbCommand),
@@ -329,6 +333,7 @@ enum KadMergeOutcome {
 }
 
 enum DbResponse {
+    SearchRemoved(bool),
     ContentObserved(Option<i64>),
     Friend(Friend, bool),
     Category(category::CategoryWrite),
@@ -479,6 +484,24 @@ impl PersistenceOwner {
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
+                    if let DbCommand::SearchRemove(id) = &request.command {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            match id {
+                                Some(id) => store.delete_search(*id),
+                                None => store.clear_searches().map(|()| true),
+                            }
+                        }));
+                        let result = match result {
+                            Ok(Ok(removed)) => Ok(DbResponse::SearchRemoved(removed)),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "search removal SQL failed");
+                                Err(PersistenceError::Storage("database operation failed".into()))
+                            }
+                            Err(_) => Err(PersistenceError::CommitUnknown),
+                        };
+                        let _ = request.response.send(result);
+                        continue;
+                    }
                     if matches!(&request.command, DbCommand::ContentObservations { .. }) {
                         let DbRequest { command, response } = request;
                         let DbCommand::ContentObservations { events, projection } = command else { unreachable!() };
@@ -624,7 +647,8 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
+                            DbCommand::SearchRemove(_)
+                            | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
@@ -670,7 +694,8 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
+                                DbCommand::SearchRemove(_)
+                            | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                                 | DbCommand::KadLoad
                                 | DbCommand::KadIdentity
@@ -697,7 +722,8 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
+                            DbCommand::SearchRemove(_)
+                            | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
@@ -945,7 +971,8 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::ContentObservations(_)
+            Command::SearchSessions(_)
+            | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)
             | Command::Category(_)
@@ -1080,6 +1107,16 @@ async fn process(
     category_continuation: &mut Option<category::CategoryContinuation>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    if matches!(&request.command, Command::SearchSessions(_)) {
+        return search_sessions::process(
+            state,
+            db,
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::Downloads(_)) {
         return download::process(
             request,
@@ -1159,7 +1196,8 @@ async fn process(
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
-            DbResponse::ContentObserved(_)
+            DbResponse::SearchRemoved(_)
+            | DbResponse::ContentObserved(_)
             | DbResponse::Friend(..)
             | DbResponse::Category(..)
             | DbResponse::LibraryTags(..) => Err(PersistenceError::Worker),
@@ -1188,7 +1226,8 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::ContentObservations(_)
+            Command::SearchSessions(_)
+            | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)
             | Command::Category(_)

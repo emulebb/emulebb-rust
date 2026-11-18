@@ -133,39 +133,26 @@ impl EmulebbCore {
     }
 
     pub async fn delete_search(&self, search_id: &str) -> Result<bool> {
-        // Serialize against create/retry while removing the durable record,
-        // pending wire work, and cached session. The shared lock order is
-        // state -> queue; the drain loop never holds both locks at once.
-        let mut state = self.state.lock().await;
-        let persisted = self
-            .metadata_store
-            .delete_search(search_id.parse().context("invalid search identity")?)?;
-        let queued = self.search_queue.lock().remove_pending(search_id);
-        let cancelled = state
-            .search_cancels
-            .remove(search_id)
-            .is_some_and(|cancel| {
-                cancel.cancel();
-                true
-            });
-        let cached = state.searches.remove(search_id).is_some();
-        state
-            .kad_aich_search_votes
-            .retain(|(_, candidate_search_id), _| candidate_search_id != search_id);
-        Ok(persisted || queued || cancelled || cached)
+        let id: i64 = search_id.parse().context("invalid search identity")?;
+        ensure!(
+            id > 0 && id.to_string() == search_id,
+            "invalid search identity"
+        );
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .remove_search_sessions(Some(id), &self.search_queue)
+            .await?)
     }
 
     pub async fn clear_searches(&self) -> Result<()> {
-        // Keep creates and retry requeues outside the clear transaction so a
-        // deleted session cannot leave orphaned network work behind.
-        let mut state = self.state.lock().await;
-        self.metadata_store.clear_searches()?;
-        self.search_queue.lock().clear_pending();
-        for (_, cancel) in state.search_cancels.drain() {
-            cancel.cancel();
-        }
-        state.searches.clear();
-        state.kad_aich_search_votes.clear();
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        owner
+            .remove_search_sessions(None, &self.search_queue)
+            .await?;
         Ok(())
     }
 }

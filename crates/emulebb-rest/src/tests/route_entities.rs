@@ -926,3 +926,32 @@ async fn kad_stop_frontdoor_reports_closed_persistence() {
     assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING");
     core.disconnect_ed2k_after_persistence().await.unwrap();
 }
+
+#[tokio::test]
+async fn search_removal_reports_closed_admission_and_preserves_sessions() {
+    let core = test_search_core(&[IndexedFile {
+        ed2k_hash: "00112233445566778899aabbccddeeff".into(),
+        name: "Preserved.bin".into(),
+        size_bytes: 42,
+        content_type: "pro".into(),
+        availability_score: 2,
+    }]);
+    let id = core.searches().await[0].id.clone();
+    core.drain_persistence().await.unwrap();
+    let app = router(
+        Arc::clone(&core),
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    for uri in [
+        format!("/api/v1/searches/{id}"),
+        "/api/v1/searches?confirm=true".into(),
+    ] {
+        let (status, body) = request(&app, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "PERSISTENCE_CLOSING");
+        assert!(core.search(&id).await.is_some());
+    }
+}
