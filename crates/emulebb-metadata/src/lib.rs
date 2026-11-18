@@ -4,6 +4,13 @@ mod aich_recovery_store;
 mod app_settings_store;
 pub use app_settings_store::{MetadataAppSettings, MetadataSettingsWriteError};
 mod content_identity;
+mod content_observation_model;
+mod content_observation_store;
+pub use content_observation_model::{
+    CONTENT_OBSERVATION_BATCH_BYTES, CONTENT_OBSERVATION_BATCH_ITEMS, MetadataContentClaim,
+    MetadataContentMetadata, MetadataContentObservation, MetadataContentObservationEvent,
+    MetadataContentObservationPage, MetadataContentObservationReceipt, MetadataObservationOrigin,
+};
 mod download_availability;
 pub use download_availability::{
     AvailabilitySource, DownloadAvailabilityAdmission, LocalContentAvailability,

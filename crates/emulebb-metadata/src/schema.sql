@@ -908,6 +908,48 @@ CREATE TABLE kad_outbound_publish_schedule (
     PRIMARY KEY(ed2k_hash, publish_kind, keyword)
 ) STRICT, WITHOUT ROWID;
 
+-- Remote evidence never references session membership or accepted local identity.
+CREATE TABLE content_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+    ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
+    size_bytes BLOB CHECK(size_bytes IS NULL OR length(size_bytes) = 8),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= first_seen_at_s)
+) STRICT;
+CREATE UNIQUE INDEX content_claims_known_size_idx
+ON content_claims(ed2k_hash, size_bytes) WHERE size_bytes IS NOT NULL;
+CREATE UNIQUE INDEX content_claims_unknown_size_idx
+ON content_claims(ed2k_hash) WHERE size_bytes IS NULL;
+
+CREATE TABLE content_claim_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+    claim_id INTEGER NOT NULL REFERENCES content_claims(id),
+    fingerprint BLOB NOT NULL CHECK(length(fingerprint) = 32),
+    origin TEXT NOT NULL CHECK(origin IN ('server', 'global', 'kad')),
+    reporter_endpoint TEXT,
+    name TEXT,
+    source_count INTEGER CHECK(source_count IS NULL OR source_count BETWEEN 0 AND 4294967295),
+    complete_source_count INTEGER CHECK(complete_source_count IS NULL OR complete_source_count BETWEEN 0 AND 4294967295),
+    source_client_id INTEGER CHECK(source_client_id IS NULL OR source_client_id BETWEEN 0 AND 4294967295),
+    source_client_port INTEGER CHECK(source_client_port IS NULL OR source_client_port BETWEEN 0 AND 65535),
+    file_type TEXT,
+    media_artist TEXT,
+    media_album TEXT,
+    media_title TEXT,
+    media_length_seconds INTEGER CHECK(media_length_seconds IS NULL OR media_length_seconds BETWEEN 0 AND 4294967295),
+    media_bitrate_kbps INTEGER CHECK(media_bitrate_kbps IS NULL OR media_bitrate_kbps BETWEEN 0 AND 4294967295),
+    media_codec TEXT,
+    rating INTEGER CHECK(rating IS NULL OR rating BETWEEN 0 AND 255),
+    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
+    complete INTEGER CHECK(complete IS NULL OR complete IN (0, 1)),
+    directory TEXT,
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= first_seen_at_s),
+    observation_count INTEGER NOT NULL CHECK(observation_count > 0),
+    UNIQUE(claim_id, fingerprint)
+) STRICT;
+CREATE INDEX content_claim_observations_page_idx ON content_claim_observations(claim_id, id);
+
 CREATE TABLE search_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
     query TEXT NOT NULL,
