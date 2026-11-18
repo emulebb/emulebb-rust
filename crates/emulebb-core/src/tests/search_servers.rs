@@ -113,16 +113,27 @@ async fn live_search_collects_network_results_independently_of_passive_index_set
             EmulebbCore::new_with_network("test", index, root.join("transfers"), Some(network))
                 .unwrap();
         let request = SearchCreate {
+            parent_search_id: None,
             query: "indexed file".into(),
             method: "server".into(),
             ..Default::default()
         };
         let search = core.create_search(request.clone()).await.unwrap();
         assert_eq!(search.status, "queued");
-        assert!(search.results.is_empty());
+        assert_eq!(
+            core.metadata_store
+                .search_header(search.id.parse().unwrap())
+                .unwrap()
+                .unwrap()
+                .result_count,
+            0
+        );
         assert!(
-            core.metadata_store.load_searches().unwrap()[0]
-                .results
+            core.metadata_store
+                .search_result_headers_page(search.id.parse().unwrap(), 0, 10)
+                .unwrap()
+                .unwrap()
+                .items
                 .is_empty()
         );
         assert_eq!(
@@ -149,9 +160,13 @@ async fn live_search_collects_network_results_independently_of_passive_index_set
         core.apply_search_live_update(&search.id, &request, update)
             .await
             .unwrap();
-        let collected = core.search(&search.id).await.unwrap();
-        assert_eq!(collected.results.len(), 1);
-        assert_eq!(collected.results[0].name, "Network.Indexed.File.iso");
+        let collected = core
+            .metadata_store
+            .search_result_headers_page(search.id.parse().unwrap(), 0, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(collected.items.len(), 1);
+        assert_eq!(collected.items[0].summary.name, "Network.Indexed.File.iso");
         assert_eq!(
             core.metadata_store.table_count("content_claims").unwrap(),
             1
@@ -182,6 +197,7 @@ async fn explicit_network_search_without_runtime_is_rejected() {
     for method in ["automatic", "server", "global", "kad"] {
         let error = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "must use requested network".to_string(),
                 method: method.to_string(),
                 ..Default::default()
@@ -196,7 +212,10 @@ async fn explicit_network_search_without_runtime_is_rejected() {
         );
     }
 
-    assert!(core.searches().await.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -205,6 +224,7 @@ async fn invalid_search_method_is_rejected_before_creating_a_search() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "invalid method".to_string(),
             method: "local-ish".to_string(),
             ..Default::default()
@@ -216,7 +236,10 @@ async fn invalid_search_method_is_rejected_before_creating_a_search() {
         error.to_string(),
         "search method must be one of automatic, server, global, kad"
     );
-    assert!(core.searches().await.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -237,6 +260,7 @@ async fn search_spec_is_canonicalized_before_persistence() {
 
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "  alpha\t beta  ".to_string(),
             method: " AUTOMATIC ".to_string(),
             r#type: " AUDIO ".to_string(),
@@ -270,8 +294,15 @@ async fn search_spec_is_canonicalized_before_persistence() {
     assert_eq!(search.spec.album, "Example Album");
     assert_eq!(search.spec.artist, "Example Artist");
 
-    let persisted = core.search(&search.id).await.unwrap();
-    assert_eq!(persisted.spec, search.spec);
+    let persisted = core
+        .metadata_store
+        .search_header(search.id.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted.data.spec,
+        crate::search_state::search_to_metadata(&search).spec
+    );
 }
 
 #[tokio::test]
@@ -281,6 +312,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         (SearchCreate::default(), "query must not be empty"),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad type".to_string(),
                 r#type: "executable".to_string(),
                 ..SearchCreate::default()
@@ -289,6 +321,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad range".to_string(),
                 min_size_bytes: Some(2),
                 max_size_bytes: Some(1),
@@ -298,6 +331,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "x".repeat(161),
                 ..SearchCreate::default()
             },
@@ -305,6 +339,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad\0query".to_string(),
                 ..SearchCreate::default()
             },
@@ -312,6 +347,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "too many sources".to_string(),
                 min_availability: Some(1_000_001),
                 ..SearchCreate::default()
@@ -320,6 +356,7 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         ),
         (
             SearchCreate {
+                parent_search_id: None,
                 query: "bad codec".to_string(),
                 codec: "bad\0codec".to_string(),
                 ..SearchCreate::default()
@@ -332,7 +369,10 @@ async fn invalid_search_spec_is_rejected_before_creating_a_search() {
         let error = core.create_search(request).await.unwrap_err();
         assert_eq!(error.to_string(), expected);
     }
-    assert!(core.searches().await.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -361,6 +401,7 @@ async fn explicit_network_search_respects_disabled_network_settings() {
     for method in ["server", "global", "kad"] {
         let error = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "disabled network".to_string(),
                 method: method.to_string(),
                 ..Default::default()
@@ -373,7 +414,10 @@ async fn explicit_network_search_respects_disabled_network_settings() {
         );
     }
 
-    assert!(core.searches().await.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
     assert_eq!(core.search_queue.lock().pending_len(), 0);
 }
 
@@ -402,6 +446,7 @@ async fn automatic_search_is_rejected_when_all_networks_are_disabled() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "local only automatic search".to_string(),
             method: "automatic".to_string(),
             ..Default::default()
@@ -414,7 +459,10 @@ async fn automatic_search_is_rejected_when_all_networks_are_disabled() {
         "search networks are disabled in settings.core"
     );
     assert_eq!(core.search_queue.lock().pending_len(), 0);
-    assert!(core.searches().await.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -435,6 +483,7 @@ async fn automatic_search_waits_only_for_compatible_enabled_backends() {
 
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "alpha-beta".to_string(),
             method: "automatic".to_string(),
             ..SearchCreate::default()
@@ -475,6 +524,7 @@ async fn kad_only_automatic_search_rejects_an_invalid_kad_keyword() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "alpha-beta".to_string(),
             method: "automatic".to_string(),
             ..SearchCreate::default()
@@ -483,7 +533,10 @@ async fn kad_only_automatic_search_rejects_an_invalid_kad_keyword() {
         .unwrap_err();
 
     assert_eq!(error.to_string(), "invalid Kad search keyword");
-    assert!(core.searches().await.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
     assert_eq!(core.search_queue.lock().pending_len(), 0);
 }
 
@@ -505,6 +558,7 @@ async fn network_search_rejects_malformed_expression_before_allocating_an_id() {
 
     let error = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "alpha OR".to_string(),
             method: "server".to_string(),
             ..SearchCreate::default()
@@ -515,6 +569,7 @@ async fn network_search_rejects_malformed_expression_before_allocating_an_id() {
 
     let search = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "valid query".to_string(),
             method: "server".to_string(),
             ..SearchCreate::default()
@@ -546,6 +601,7 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
     .unwrap();
 
     let request = SearchCreate {
+        parent_search_id: None,
         query: "queued query".to_string(),
         method: "server".to_string(),
         ..Default::default()
@@ -562,8 +618,12 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
     // No server session ever connects: the search stays honestly queued
     // (drain ticks run but the backend never becomes ready).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let still_queued = core.search(&search.id).await.unwrap();
-    assert_eq!(still_queued.status, "queued");
+    let still_queued = core
+        .metadata_store
+        .search_header(search.id.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_queued.data.status, "queued");
 
     // An identical queued query on the same lane is rejected explicitly.
     let error = core
@@ -575,6 +635,7 @@ async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
     // A different query queues fine alongside it.
     let other = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "another queued query".to_string(),
             method: "server".to_string(),
             ..Default::default()
@@ -600,6 +661,7 @@ async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search()
     )
     .unwrap();
     let request = SearchCreate {
+        parent_search_id: None,
         query: "recover after persistence failure".to_string(),
         method: "server".to_string(),
         ..SearchCreate::default()
@@ -617,32 +679,74 @@ async fn initial_persistence_failure_leaves_queue_runnable_for_the_next_search()
     ));
     sql.execute_batch("DROP TRIGGER fail_search_create;")
         .unwrap();
-    assert!(core.searches().await.is_empty());
-    assert!(core.metadata_store.load_searches().unwrap().is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
+    assert!(
+        core.metadata_store
+            .search_headers_page(None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
     assert_eq!(core.search_queue.lock().pending_len(), 0);
     assert!(!core.search_queue.lock().drain_task_running());
 
     let search = core.create_search(request).await.unwrap();
     assert_eq!(search.id, "1");
     assert_eq!(search.status, "queued");
-    assert_eq!(core.metadata_store.load_searches().unwrap().len(), 1);
+    assert_eq!(
+        core.metadata_store
+            .search_headers_page(None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
     assert_eq!(core.search_queue.lock().pending_len(), 1);
     assert!(core.search_queue.lock().drain_task_running());
     sql.execute_batch("CREATE TRIGGER fail_search_update BEFORE UPDATE ON search_sessions BEGIN SELECT RAISE(ABORT, 'injected status persistence failure'); END;").unwrap();
     core.update_search_status(&search.id, "running", None, Some("server"))
         .await;
-    assert_eq!(core.search(&search.id).await.unwrap().status, "queued");
     assert_eq!(
-        core.metadata_store.load_searches().unwrap()[0].data.status,
+        core.metadata_store
+            .search_header(search.id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .data
+            .status,
+        "queued"
+    );
+    assert_eq!(
+        core.metadata_store
+            .search_headers_page(None, 10)
+            .unwrap()
+            .items[0]
+            .data
+            .status,
         "queued"
     );
     sql.execute_batch("DROP TRIGGER fail_search_update;")
         .unwrap();
     core.update_search_status(&search.id, "running", None, Some("server"))
         .await;
-    assert_eq!(core.search(&search.id).await.unwrap().status, "running");
     assert_eq!(
-        core.metadata_store.load_searches().unwrap()[0].data.status,
+        core.metadata_store
+            .search_header(search.id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .data
+            .status,
+        "running"
+    );
+    assert_eq!(
+        core.metadata_store
+            .search_headers_page(None, 10)
+            .unwrap()
+            .items[0]
+            .data
+            .status,
         "running"
     );
     core.clear_searches().await.unwrap();
@@ -665,6 +769,7 @@ async fn deleting_searches_cancels_pending_network_work() {
     .unwrap();
 
     let first_request = SearchCreate {
+        parent_search_id: None,
         query: "first pending query".to_string(),
         method: "server".to_string(),
         ..Default::default()
@@ -672,6 +777,7 @@ async fn deleting_searches_cancels_pending_network_work() {
     let first = core.create_search(first_request.clone()).await.unwrap();
     let second = core
         .create_search(SearchCreate {
+            parent_search_id: None,
             query: "second pending query".to_string(),
             method: "kad".to_string(),
             ..Default::default()
@@ -708,7 +814,14 @@ async fn deleting_searches_cancels_pending_network_work() {
     core.apply_search_live_update(&first.id, &first_request, update)
         .await
         .unwrap();
-    assert_eq!(core.search(&first.id).await.unwrap().results.len(), 1);
+    assert_eq!(
+        core.metadata_store
+            .search_header(first.id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .result_count,
+        1
+    );
 
     assert!(core.delete_search(&first.id).await.unwrap());
     assert_eq!(core.search_queue.lock().pending_len(), 1);
@@ -717,7 +830,10 @@ async fn deleting_searches_cancels_pending_network_work() {
 
     core.clear_searches().await.unwrap();
     assert_eq!(core.search_queue.lock().pending_len(), 0);
-    assert!(core.searches().await.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        0
+    );
     assert!(second_cancel.is_cancelled());
     let next = core.create_search(first_request).await.unwrap();
     assert!(next.id.parse::<i64>().unwrap() > second.id.parse::<i64>().unwrap());
@@ -1921,6 +2037,7 @@ async fn raw_search_evidence_counts_once_survives_filters_and_freezes_terminal_m
     )
     .unwrap();
     let request = SearchCreate {
+        parent_search_id: None,
         query: "sample query".into(),
         method: "server".into(),
         min_size_bytes: Some(1024),
@@ -1951,7 +2068,14 @@ async fn raw_search_evidence_counts_once_survives_filters_and_freezes_terminal_m
     core.apply_search_live_update(&search.id, &request, update(&raw))
         .await
         .unwrap();
-    assert_eq!(core.search(&search.id).await.unwrap().results.len(), 1);
+    assert_eq!(
+        core.metadata_store
+            .search_header(search.id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .result_count,
+        1
+    );
     let page = core
         .metadata_store
         .content_observations_page(1, 0, 100)
@@ -1964,7 +2088,14 @@ async fn raw_search_evidence_counts_once_survives_filters_and_freezes_terminal_m
     core.apply_search_live_update(&search.id, &request, update(&filtered))
         .await
         .unwrap();
-    assert_eq!(core.search(&search.id).await.unwrap().results.len(), 1);
+    assert_eq!(
+        core.metadata_store
+            .search_header(search.id.parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .result_count,
+        1
+    );
     assert_eq!(
         core.metadata_store.table_count("content_claims").unwrap(),
         2
@@ -1984,8 +2115,13 @@ async fn raw_search_evidence_counts_once_survives_filters_and_freezes_terminal_m
     core.apply_search_live_update(&search.id, &request, update(&raw))
         .await
         .unwrap();
-    let completed = core.search(&search.id).await.unwrap();
-    assert_eq!(completed.results[0].name, "Sample.bin");
+    let completed = core
+        .metadata_store
+        .search_result_headers_page(search.id.parse().unwrap(), 0, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.items[0].summary.name, "Sample.bin");
+    assert!(!core.state.lock().await.searches.contains_key(&search.id));
     assert_eq!(
         core.metadata_store
             .content_observations_page(1, 0, 100)
@@ -2039,9 +2175,10 @@ async fn search_state_survives_core_restart_and_downloads_result() {
         let core = open();
         let search = core
             .create_search(SearchCreate {
+                parent_search_id: None,
                 query: "sample payload".to_string(),
                 method: "automatic".to_string(),
-                r#type: "archive".to_string(),
+                r#type: "arc".to_string(),
                 extension: "bin".to_string(),
                 min_size_bytes: Some(1_000),
                 max_size_bytes: Some(2_000),
@@ -2056,7 +2193,14 @@ async fn search_state_survives_core_restart_and_downloads_result() {
             })
             .await
             .unwrap();
-        assert!(search.results.is_empty());
+        assert_eq!(
+            core.metadata_store
+                .search_header(search.id.parse().unwrap())
+                .unwrap()
+                .unwrap()
+                .result_count,
+            0
+        );
         let mut raw = crate::search_observations::tests::raw_file();
         raw.file_name = Some("Sample Search Payload.bin".into());
         raw.file_size = Some(1234);
@@ -2081,31 +2225,48 @@ async fn search_state_survives_core_restart_and_downloads_result() {
             .unwrap();
         core.complete_search_with_results(&search.id, &search.spec, "server", None, None)
             .await;
-        let recorded = core.search(&search.id).await.unwrap();
-        assert_eq!(recorded.results.len(), 1);
-        (recorded.id, recorded.results[0].hash.clone())
+        let recorded = core
+            .metadata_store
+            .search_result_headers_page(search.id.parse().unwrap(), 0, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.items.len(), 1);
+        assert!(core.state.lock().await.searches.is_empty());
+        (search.id, recorded.items[0].file_hash.clone())
     };
 
     let reloaded = open();
-    let searches = reloaded.searches().await;
-    assert_eq!(searches.len(), 1);
-    assert_eq!(searches[0].id, search_id);
-    assert_eq!(searches[0].spec.method, "automatic");
-    assert_eq!(searches[0].spec.r#type, "arc");
-    assert_eq!(searches[0].spec.extension, "bin");
-    assert_eq!(searches[0].spec.min_size_bytes, Some(1_000));
-    assert_eq!(searches[0].spec.max_size_bytes, Some(2_000));
-    assert_eq!(searches[0].spec.min_availability, Some(5));
-    assert_eq!(searches[0].spec.min_complete_sources, None);
-    assert_eq!(searches[0].spec.min_bitrate_kbps, None);
-    assert_eq!(searches[0].spec.min_length_seconds, None);
-    assert_eq!(searches[0].spec.codec, "");
-    assert_eq!(searches[0].spec.title, "");
-    assert_eq!(searches[0].spec.album, "");
-    assert_eq!(searches[0].spec.artist, "");
-    assert_eq!(searches[0].resolved_method.as_deref(), Some("server"));
-    assert_eq!(searches[0].results[0].name, "Sample Search Payload.bin");
-    assert_eq!(searches[0].results[0].r#type, "arc");
+    assert!(reloaded.state.lock().await.searches.is_empty());
+    let searches = reloaded
+        .metadata_store
+        .search_headers_page(None, 10)
+        .unwrap();
+    assert_eq!(searches.items.len(), 1);
+    assert_eq!(searches.items[0].id.to_string(), search_id);
+    assert_eq!(searches.items[0].data.spec.method, "automatic");
+    assert_eq!(searches.items[0].data.spec.file_type, "arc");
+    assert_eq!(searches.items[0].data.spec.extension, "bin");
+    assert_eq!(searches.items[0].data.spec.min_size_bytes, Some(1_000));
+    assert_eq!(searches.items[0].data.spec.max_size_bytes, Some(2_000));
+    assert_eq!(searches.items[0].data.spec.min_availability, Some(5));
+    assert_eq!(searches.items[0].data.spec.min_complete_sources, None);
+    assert_eq!(searches.items[0].data.spec.min_bitrate_kbps, None);
+    assert_eq!(searches.items[0].data.spec.min_length_seconds, None);
+    assert_eq!(searches.items[0].data.spec.codec, "");
+    assert_eq!(searches.items[0].data.spec.title, "");
+    assert_eq!(searches.items[0].data.spec.album, "");
+    assert_eq!(searches.items[0].data.spec.artist, "");
+    assert_eq!(
+        searches.items[0].data.resolved_method.as_deref(),
+        Some("server")
+    );
+    let results = reloaded
+        .metadata_store
+        .search_result_headers_page(search_id.parse().unwrap(), 0, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(results.items[0].summary.name, "Sample Search Payload.bin");
+    assert_eq!(results.items[0].summary.file_type, "Arc");
 
     assert_eq!(
         reloaded
@@ -2117,17 +2278,53 @@ async fn search_state_survives_core_restart_and_downloads_result() {
             .observation_count,
         1
     );
-    let search = reloaded.search(&search_id).await.unwrap();
-    assert_eq!(search.results[0].hash, file_hash);
+    assert_eq!(results.items[0].file_hash, file_hash);
 
     let (_, download) = reloaded
         .download_search_result(
             &search_id,
-            &search.results[0].id,
+            &results.items[0].claim_id.to_string(),
             SearchResultDownloadCreate::default(),
         )
         .await
         .unwrap()
         .unwrap();
     assert_eq!(download.hash, file_hash);
+}
+
+#[tokio::test]
+async fn startup_keeps_one_hundred_thousand_retained_sessions_out_of_runtime_state() {
+    let root = unique_runtime_dir("search-retained-startup");
+    let path = root.join("metadata.sqlite");
+    drop(FileIndex::open(&path).unwrap());
+    {
+        let sql = rusqlite::Connection::open(&path).unwrap();
+        sql.execute_batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
+            INSERT INTO search_sessions(id,query,normalized_query,requested_method,status,created_at_s,updated_at_s)
+            SELECT i,'sample','sample','server',CASE WHEN i<3 THEN 'running' ELSE 'completed' END,1,1 FROM n;").unwrap();
+    }
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::open(&path).unwrap(),
+        root.join("transfers"),
+        None,
+    )
+    .unwrap();
+    assert!(core.state.lock().await.searches.is_empty());
+    assert!(core.state.lock().await.search_cancels.is_empty());
+    assert_eq!(
+        core.metadata_store.table_count("search_sessions").unwrap(),
+        100000
+    );
+    let interrupted = core.metadata_store.search_header(1).unwrap().unwrap();
+    assert_eq!(interrupted.data.status, "error");
+    assert_eq!(
+        interrupted.data.status_reason.as_deref(),
+        Some("interrupted-by-restart")
+    );
+    let page = core.search_headers_page(None, 2).await.unwrap();
+    assert_eq!(page.value().items.len(), 2);
+    assert!(page.value().has_more);
+    assert_eq!(page.value().items[0].id, 100000);
+    assert!(core.state.lock().await.searches.is_empty());
 }

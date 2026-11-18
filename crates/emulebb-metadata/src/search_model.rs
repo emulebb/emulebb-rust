@@ -1,14 +1,8 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataSearch {
-    pub id: i64,
-    pub data: MetadataSearchData,
-    pub results: Vec<MetadataSearchResult>,
-}
-
 /// Search attributes accepted by both creation and updates; identity is allocated
 /// separately by SQLite and cannot be supplied by a creator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchData {
+    pub parent_search_id: Option<i64>,
     pub normalized_query: String,
     pub spec: MetadataSearchSpec,
     pub resolved_method: Option<String>,
@@ -123,15 +117,6 @@ pub struct MetadataSearchPublication {
     pub summary: MetadataSearchResultSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataSearchResult {
-    pub claim_id: i64,
-    pub file_hash: String,
-    pub size_bytes: Option<u64>,
-    pub summary: MetadataSearchResultSummary,
-    pub observations: Vec<MetadataSearchResultObservation>,
-}
-
 /// Optional session projection attached to newly decoded network occurrences.
 /// The transaction checks the session's collecting state before writing it.
 #[derive(Debug, Clone)]
@@ -184,3 +169,80 @@ pub struct MetadataSearchDownloadSeed {
     pub source_client_port: Option<u16>,
     pub observations: Vec<MetadataSearchResultObservation>,
 }
+
+/// The fixed native global result sorts. Text uses binary ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataSearchResultSort {
+    #[serde(rename = "displayName")]
+    Name,
+    SizeBytes,
+    Sources,
+    CompleteSources,
+    Rating,
+    FileType,
+    Artist,
+    Album,
+    Title,
+    LengthSeconds,
+    BitrateKbps,
+    Codec,
+}
+impl MetadataSearchResultSort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "displayName",
+            Self::SizeBytes => "sizeBytes",
+            Self::Sources => "sources",
+            Self::CompleteSources => "completeSources",
+            Self::Rating => "rating",
+            Self::FileType => "fileType",
+            Self::Artist => "artist",
+            Self::Album => "album",
+            Self::Title => "title",
+            Self::LengthSeconds => "lengthSeconds",
+            Self::BitrateKbps => "bitrateKbps",
+            Self::Codec => "codec",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetadataSearchSortOrder {
+    Asc,
+    Desc,
+}
+impl MetadataSearchSortOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+/// The anchor is a membership identity, never an unbounded text sort key.
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataSearchResultsQuery {
+    pub session_id: i64,
+    pub after_claim_id: Option<i64>,
+    pub sort: MetadataSearchResultSort,
+    pub order: MetadataSearchSortOrder,
+    pub limit: usize,
+}
+
+/// A committed header transition and its session-local incoming vote membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSearchTransitionReceipt {
+    pub result_count: u64,
+    pub accepted_hashes: Vec<String>,
+}
+
+/// A linked creation referenced a parent absent from its write transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct MissingSearchParent;
+impl std::fmt::Display for MissingSearchParent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("parent search not found")
+    }
+}
+impl std::error::Error for MissingSearchParent {}

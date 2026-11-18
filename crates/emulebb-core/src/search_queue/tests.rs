@@ -2,6 +2,7 @@ use super::*;
 
 fn request(query: &str) -> SearchCreate {
     SearchCreate {
+        parent_search_id: None,
         query: query.to_string(),
         method: "server".to_string(),
         ..SearchCreate::default()

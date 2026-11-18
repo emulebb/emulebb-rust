@@ -850,6 +850,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "data-encoding",
  "emulebb-core",
  "emulebb-diagnostics",
  "emulebb-ed2k",

@@ -2838,6 +2838,7 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
     store.add_file_all_time_uploaded(hash, 23).unwrap();
     let session_id = store
         .create_search(&crate::MetadataSearchData {
+            parent_search_id: None,
             normalized_query: "scenario file".to_string(),
             spec: crate::MetadataSearchSpec {
                 query: "scenario file".to_string(),

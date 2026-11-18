@@ -1,4 +1,8 @@
 use super::*;
+use emulebb_metadata::{
+    MetadataSearchHeader, MetadataSearchPage, MetadataSearchResultHeader,
+    MetadataSearchResultObservation,
+};
 
 impl EmulebbCore {
     pub async fn create_search(&self, mut request: SearchCreate) -> Result<Search> {
@@ -88,7 +92,6 @@ impl EmulebbCore {
             progress: SearchProgress::new("queued", 0, None, ""),
             created_at: now,
             updated_at: now,
-            results: Vec::new(),
         };
         let search_id = crate::persistence_owner::search_create::insert(db, &search).await?;
         #[cfg(test)]
@@ -124,12 +127,100 @@ impl EmulebbCore {
         Ok(search)
     }
 
-    pub async fn searches(&self) -> Vec<Search> {
-        self.state.lock().await.searches.values().cloned().collect()
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_headers_page(
+        &self,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<crate::LibraryReply<MetadataSearchPage<MetadataSearchHeader>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_headers_page(before, limit).await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_header(
+        &self,
+        id: i64,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchHeader>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_header(id).await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_result_headers_page(
+        &self,
+        session: i64,
+        after: i64,
+        limit: usize,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchPage<MetadataSearchResultHeader>>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .search_result_headers_page(session, after, limit)
+            .await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_result_header(
+        &self,
+        session: i64,
+        claim: i64,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchResultHeader>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_result_header(session, claim).await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_result_observations_page(
+        &self,
+        session: i64,
+        claim: i64,
+        after: i64,
+        limit: usize,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchPage<MetadataSearchResultObservation>>>>
+    {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .search_result_observations_page(session, claim, after, limit)
+            .await?)
     }
 
-    pub async fn search(&self, search_id: &str) -> Option<Search> {
-        self.state.lock().await.searches.get(search_id).cloned()
+    /// Read globally sorted materialized summaries without hydrating provenance.
+    pub async fn search_results_page(
+        &self,
+        query: emulebb_metadata::MetadataSearchResultsQuery,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchPage<MetadataSearchResultHeader>>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_results_page(query).await?)
+    }
+    /// Ephemeral active-search telemetry; settled/restarted sessions need no cache.
+    pub async fn search_progress(&self, id: &str) -> Option<SearchProgress> {
+        self.state
+            .lock()
+            .await
+            .searches
+            .get(id)
+            .filter(|search| matches!(search.status.as_str(), "queued" | "running"))
+            .map(|search| search.progress.clone())
+    }
+    /// Stop collection durably before releasing queued or running execution.
+    pub async fn stop_search(&self, search_id: &str) -> Result<bool> {
+        let id: i64 = search_id.parse().context("invalid search identity")?;
+        ensure!(
+            id > 0 && id.to_string() == search_id,
+            "invalid search identity"
+        );
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.stop_search_session(id, &self.search_queue).await?)
     }
 
     pub async fn delete_search(&self, search_id: &str) -> Result<bool> {

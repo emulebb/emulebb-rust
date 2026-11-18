@@ -5,8 +5,14 @@ use crate::search_queue::SearchQueue;
 type Queue = Arc<parking_lot::Mutex<SearchQueue>>;
 
 pub(super) struct SearchCommand {
-    id: Option<i64>,
+    mutation: Mutation,
     queue: Queue,
+}
+
+#[derive(Clone, Copy)]
+enum Mutation {
+    Remove(Option<i64>),
+    Stop(i64),
 }
 
 impl PersistenceOwner {
@@ -15,16 +21,33 @@ impl PersistenceOwner {
         id: Option<i64>,
         queue: &Queue,
     ) -> Result<bool, PersistenceError> {
+        self.mutate_search_sessions(Mutation::Remove(id), queue)
+            .await
+    }
+
+    pub(crate) async fn stop_search_session(
+        &self,
+        id: i64,
+        queue: &Queue,
+    ) -> Result<bool, PersistenceError> {
+        self.mutate_search_sessions(Mutation::Stop(id), queue).await
+    }
+
+    async fn mutate_search_sessions(
+        &self,
+        mutation: Mutation,
+        queue: &Queue,
+    ) -> Result<bool, PersistenceError> {
         match self
             .submit_reserved(FIXED_CHARGE + 128, || {
                 Ok(Command::SearchSessions(SearchCommand {
-                    id,
+                    mutation,
                     queue: Arc::clone(queue),
                 }))
             })
             .await?
         {
-            Response::SearchRemoved(removed) => Ok(removed),
+            Response::SearchMutated(removed) => Ok(removed),
             _ => Err(PersistenceError::Worker),
         }
     }
@@ -46,11 +69,14 @@ pub(super) async fn process(
     let mut state = state.lock().await;
     let (response, receive) = oneshot::channel();
     db.send(DbRequest {
-        command: DbCommand::SearchRemove(command.id),
+        command: match command.mutation {
+            Mutation::Remove(id) => DbCommand::SearchRemove(id),
+            Mutation::Stop(id) => DbCommand::SearchStop(id),
+        },
         response,
     })
     .map_err(|_| PersistenceError::Worker)?;
-    let DbResponse::SearchRemoved(persisted) = receive
+    let DbResponse::SearchMutated(persisted) = receive
         .await
         .map_err(|_| PersistenceError::CommitUnknown)??
     else {
@@ -63,7 +89,11 @@ pub(super) async fn process(
         gate.entered.notify_one();
         gate.release.notified().await;
     }
-    let changed = match command.id {
+    let id = match command.mutation {
+        Mutation::Remove(id) => id,
+        Mutation::Stop(id) => Some(id),
+    };
+    let changed = match id {
         Some(id) => {
             let id = id.to_string();
             let queued = command.queue.lock().remove_pending(&id);
@@ -72,9 +102,9 @@ pub(super) async fn process(
                 true
             });
             let cached = state.searches.remove(&id).is_some();
-            state
-                .kad_aich_search_votes
-                .retain(|(_, search_id), _| search_id != &id);
+            if matches!(command.mutation, Mutation::Remove(_)) {
+                state.kad_aich_search_votes.remove_session(&id);
+            }
             persisted || queued || cancelled || cached
         }
         None => {
@@ -87,7 +117,7 @@ pub(super) async fn process(
             persisted
         }
     };
-    Ok(Response::SearchRemoved(changed))
+    Ok(Response::SearchMutated(changed))
 }
 
 #[cfg(test)]

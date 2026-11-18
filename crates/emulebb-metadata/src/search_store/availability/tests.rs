@@ -55,11 +55,14 @@ fn reporter_maxima_deduplicate_transports_and_unknown_reporters_per_origin() {
     ];
     assert_eq!(counts(ingest(&store, id, &packets)), (24, 9));
     assert_eq!(counts(ingest(&store, id, &packets)), (24, 9));
-    let loaded = store.load_searches().unwrap();
+    let loaded = store
+        .search_result_headers_page(id, 0, 10)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         (
-            loaded[0].results[0].summary.source_count,
-            loaded[0].results[0].summary.complete_source_count
+            loaded.items[0].summary.source_count,
+            loaded.items[0].summary.complete_source_count
         ),
         (24, 9)
     );
@@ -141,8 +144,11 @@ fn saturation_and_absence_preserve_raw_facts_without_decreasing_totals() {
         (u32::MAX, u32::MAX)
     );
     assert_eq!(
-        store.load_searches().unwrap()[0].results[0]
-            .observations
+        store
+            .search_result_observations_page(id, 1, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items
             .len(),
         5
     );
@@ -166,9 +172,20 @@ fn failure_rolls_back_all_derived_and_raw_changes_then_explicit_retry_succeeds()
             .ingest_search_observations(&[packet.clone()], &projection)
             .is_err()
     );
-    let loaded = store.load_searches().unwrap();
-    assert_eq!(loaded[0].results[0].summary.source_count, 3);
-    assert_eq!(loaded[0].results[0].observations.len(), 1);
+    let loaded = store
+        .search_result_headers_page(id, 0, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.items[0].summary.source_count, 3);
+    assert_eq!(
+        store
+            .search_result_observations_page(id, loaded.items[0].claim_id, 0, 10)
+            .unwrap()
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
     let conn = store.connection().unwrap();
     for table in [
         "content_claim_observations",
@@ -208,7 +225,7 @@ fn claims_sessions_terminal_state_and_deletion_keep_availability_scoped() {
     let mut header = sample_search();
     header.status = "completed".into();
     header.completed_at_s = Some(101);
-    store.update_search(id, &header).unwrap();
+    store.transition_search(id, &header, &[]).unwrap();
     assert!(
         store
             .ingest_search_observations(

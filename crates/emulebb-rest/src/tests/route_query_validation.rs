@@ -76,14 +76,13 @@ async fn pagination_rejects_out_of_range_bounds_with_details() {
 async fn search_result_sort_query_is_strict() {
     for (uri, expected_message) in [
         (
-            "/api/v1/searches/1?sort=availability",
-            "sort must be one of name, sizeBytes, sources, completeSources, rating, fileType, artist, album, title, lengthSeconds, bitrateKbps, codec",
+            "/api/v1/searches/1/results?sort=invalid",
+            "sort must be one of displayName, sizeBytes, sources, completeSources, rating, fileType, artist, album, title, lengthSeconds, bitrateKbps, codec",
         ),
         (
-            "/api/v1/searches/1?sort=sources&order=descending",
+            "/api/v1/searches/1/results?sort=sources&order=descending",
             "order must be one of asc, desc",
         ),
-        ("/api/v1/searches/1?order=desc", "order requires sort"),
     ] {
         let (status, value) = query_error_value(uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
@@ -100,7 +99,7 @@ async fn search_result_sort_query_is_strict() {
         "codec",
     ] {
         let (status, value) =
-            query_error_value(&format!("/api/v1/searches/1?sort={sort}&order=asc")).await;
+            query_error_value(&format!("/api/v1/searches/1/results?sort={sort}&order=asc")).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{sort}: {value}");
     }
 }

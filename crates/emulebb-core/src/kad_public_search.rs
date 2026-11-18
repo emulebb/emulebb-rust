@@ -208,6 +208,7 @@ mod tests {
 
     fn request(query: &str) -> SearchCreate {
         SearchCreate {
+            parent_search_id: None,
             query: query.to_string(),
             method: "kad".to_string(),
             r#type: String::new(),

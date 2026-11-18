@@ -13,8 +13,7 @@ use axum::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::{PageQuery, SearchResultSort, SearchResultsPage, SearchResultsQuery, SearchSortOrder};
-use emulebb_core::Search;
+use crate::PageQuery;
 
 pub(crate) fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
     (
@@ -54,88 +53,6 @@ pub(crate) fn api_collection_page<T: Serialize>(items: Vec<T>, query: PageQuery)
         "limit": limit
     }))
     .into_response()
-}
-
-pub(crate) fn search_results_page(
-    search: Search,
-    query: SearchResultsQuery,
-) -> Result<SearchResultsPage, Box<Response>> {
-    let (offset, limit) = resolve_page_bounds(query.offset, query.limit)?;
-    if query.sort.is_none() && query.order.is_some() {
-        return Err(Box::new(
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                "order requires sort",
-            )
-            .into_response(),
-        ));
-    }
-    let include_evidence = query.include_evidence.unwrap_or(true);
-    let exact_total = query.exact_total.unwrap_or(true);
-    let mut results = search.results;
-    if let Some(sort) = query.sort {
-        let order = query.order.unwrap_or(SearchSortOrder::Asc);
-        results.sort_by(|left, right| {
-            let comparison = match sort {
-                SearchResultSort::Name => left.name.cmp(&right.name),
-                SearchResultSort::SizeBytes => left.size_bytes.cmp(&right.size_bytes),
-                SearchResultSort::Sources => left.sources.cmp(&right.sources),
-                SearchResultSort::CompleteSources => {
-                    left.complete_sources.cmp(&right.complete_sources)
-                }
-                SearchResultSort::Rating => left.rating.cmp(&right.rating),
-                SearchResultSort::FileType => left.file_type.cmp(&right.file_type),
-                SearchResultSort::Artist => left.media.artist.cmp(&right.media.artist),
-                SearchResultSort::Album => left.media.album.cmp(&right.media.album),
-                SearchResultSort::Title => left.media.title.cmp(&right.media.title),
-                SearchResultSort::LengthSeconds => {
-                    left.media.length_seconds.cmp(&right.media.length_seconds)
-                }
-                SearchResultSort::BitrateKbps => {
-                    left.media.bitrate_kbps.cmp(&right.media.bitrate_kbps)
-                }
-                SearchResultSort::Codec => left.media.codec.cmp(&right.media.codec),
-            };
-            let comparison = match order {
-                SearchSortOrder::Asc => comparison,
-                SearchSortOrder::Desc => comparison.reverse(),
-            };
-            comparison
-                .then_with(|| left.name.cmp(&right.name))
-                .then_with(|| left.hash.cmp(&right.hash))
-        });
-    }
-    let total = if exact_total {
-        results.len()
-    } else {
-        estimated_total(results.len(), offset, limit)
-    };
-    let results = results.into_iter().skip(offset).take(limit).collect();
-    Ok(SearchResultsPage {
-        id: search.id,
-        spec: search.spec,
-        resolved_method: search.resolved_method,
-        status: search.status,
-        status_reason: search.status_reason,
-        progress: search.progress,
-        total,
-        offset,
-        limit,
-        include_evidence,
-        sort: query.sort,
-        order: query.order,
-        results,
-    })
-}
-
-fn estimated_total(exact_count: usize, offset: usize, limit: usize) -> usize {
-    let page_end = offset.saturating_add(limit);
-    if exact_count > page_end {
-        page_end.saturating_add(1)
-    } else {
-        exact_count
-    }
 }
 
 pub(crate) fn api_meta() -> Value {

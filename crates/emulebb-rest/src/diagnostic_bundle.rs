@@ -8,19 +8,18 @@ use std::{
 
 use anyhow::{Result, bail};
 use chrono::Utc;
-use emulebb_core::Search;
 use serde_json::{Value, json};
 
 use crate::{
     RestState,
     handlers::logs::recent_log_values,
     responses::{
-        app_info_response, runtime_diagnostics_response, search_results_response,
-        search_session_response, server_response, shared_file_response, status_response,
+        app_info_response, runtime_diagnostics_response, search_header_response,
+        search_summary_response, server_response, shared_file_response, status_response,
     },
 };
 
-pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v6";
+pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v7";
 pub(crate) const MIN_DIAGNOSTIC_BUNDLE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_DIAGNOSTIC_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -32,6 +31,7 @@ const MAX_SERVER_SNAPSHOTS: usize = 512;
 const MAX_SHARED_FILE_SNAPSHOTS: usize = 512;
 const MAX_SEARCH_SNAPSHOTS: usize = 64;
 const MAX_SEARCH_RESULTS_PER_SNAPSHOT: usize = 128;
+const MAX_SEARCH_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const MAX_DOWNLOAD_SNAPSHOTS: usize = 200;
 const MAX_UPLOAD_SNAPSHOTS: usize = 512;
 const MAX_UPLOAD_QUEUE_SNAPSHOTS: usize = 512;
@@ -110,7 +110,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
         unified_run.as_ref(),
     );
     let logs = recent_log_values(MAX_LOG_RECORDS);
-    let operational_snapshots = operational_snapshots(state).await?;
+    let operational_snapshots = operational_snapshots(state, max_bytes).await?;
 
     let payload = json!({
         "schema": DIAGNOSTIC_BUNDLE_SCHEMA,
@@ -144,6 +144,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
             "sharedFileSnapshots": MAX_SHARED_FILE_SNAPSHOTS,
             "searchSnapshots": MAX_SEARCH_SNAPSHOTS,
             "searchResultsPerSnapshot": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
+            "searchSnapshotBytes": max_bytes.min(MAX_SEARCH_SNAPSHOT_BYTES),
             "downloadSnapshots": MAX_DOWNLOAD_SNAPSHOTS,
             "uploadSnapshots": MAX_UPLOAD_SNAPSHOTS,
             "uploadQueueSnapshots": MAX_UPLOAD_QUEUE_SNAPSHOTS,
@@ -164,17 +165,12 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
     encode_bounded_bundle(payload, max_bytes)
 }
 
-async fn operational_snapshots(state: &RestState) -> Result<Value> {
+async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Value> {
     let mut servers = state.core.servers().await;
     servers.sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
     let (shared_files, shared_file_total) =
         state.core.shares_page(0, MAX_SHARED_FILE_SNAPSHOTS).await;
-    let mut searches = state.core.searches().await;
-    searches.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
+    let searches = search_snapshots(state, max_bytes.min(MAX_SEARCH_SNAPSHOT_BYTES)).await?;
     let downloads = state
         .core
         .download_page(emulebb_core::DownloadJobQuery {
@@ -200,7 +196,7 @@ async fn operational_snapshots(state: &RestState) -> Result<Value> {
             MAX_SHARED_FILE_SNAPSHOTS,
             |share| json!(shared_file_response(share)),
         ),
-        "searches": bounded_tail_collection(&searches, MAX_SEARCH_SNAPSHOTS, search_snapshot),
+        "searches": searches,
         "downloads": bounded_prefix_collection(&downloads.downloads,download_count,MAX_DOWNLOAD_SNAPSHOTS,|download|json!(download)),
         "uploads": bounded_prefix_collection(
             &uploads,
@@ -248,21 +244,83 @@ fn bounded_prefix_collection<T>(
     })
 }
 
-fn search_snapshot(search: &Search) -> Value {
-    let included = search.results.len().min(MAX_SEARCH_RESULTS_PER_SNAPSHOT);
-    let retained = &search.results[..included];
-    let mut snapshot = search_session_response(search);
-    snapshot["createdAt"] = json!(search.created_at);
-    snapshot["updatedAt"] = json!(search.updated_at);
-    snapshot["results"] = json!({
-        "total": search.results.len(),
-        "included": retained.len(),
-        "omittedAfterLimit": search.results.len().saturating_sub(retained.len()),
-        "omittedForBudget": 0,
-        "limit": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
-        "items": search_results_response(retained, true),
-    });
-    snapshot
+/// Capture newest sessions and materialized summaries, never raw provenance.
+async fn search_snapshots(state: &RestState, max_bytes: usize) -> Result<Value> {
+    let headers = state
+        .core
+        .search_headers_page(None, MAX_SEARCH_SNAPSHOTS)
+        .await?;
+    let mut snapshots = Vec::new();
+    // WHY: per-page SQL limits alone permit 64 independent large pages. Bound
+    // retained JSON across the whole section before requesting the next page.
+    let mut retained_bytes = 2usize;
+    let mut more = headers.value().has_more;
+    let mut omitted_for_budget = 0;
+    for (index, header) in headers.value().items.iter().enumerate() {
+        let progress = state.core.search_progress(&header.id.to_string()).await;
+        let mut snapshot = json!({"session":search_header_response(header, progress.as_ref())});
+        let results = state
+            .core
+            .search_results_page(emulebb_metadata::MetadataSearchResultsQuery {
+                session_id: header.id,
+                after_claim_id: None,
+                sort: emulebb_metadata::MetadataSearchResultSort::Sources,
+                order: emulebb_metadata::MetadataSearchSortOrder::Desc,
+                limit: MAX_SEARCH_RESULTS_PER_SNAPSHOT,
+            })
+            .await?;
+        let Some(page) = results.value() else {
+            // A session may be deleted between the two bounded reads.
+            continue;
+        };
+        snapshot["results"] = json!({
+            "total": header.result_count,
+            "included": page.items.len(),
+            "omittedAfterLimit": header.result_count.saturating_sub(page.items.len() as u64),
+            "omittedForBudget": 0,
+            "hasMore": page.has_more,
+            "limit": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
+            "items": page.items.iter().map(|row| search_summary_response(header.id, row)).collect::<Vec<_>>(),
+        });
+        drop(results);
+        if !fit_search_snapshot(&mut snapshot, &mut retained_bytes, max_bytes)? {
+            omitted_for_budget = headers.value().items.len() - index;
+            more = true;
+            break;
+        }
+        snapshots.push(snapshot);
+        if retained_bytes >= max_bytes {
+            omitted_for_budget = headers.value().items.len() - index - 1;
+            more |= omitted_for_budget > 0;
+            break;
+        }
+    }
+    Ok(json!({
+        "total": null,
+        "included": snapshots.len(),
+        "hasMore": more,
+        "omittedForBudget": omitted_for_budget,
+        "limit": MAX_SEARCH_SNAPSHOTS,
+        "items": snapshots,
+    }))
+}
+
+fn fit_search_snapshot(
+    snapshot: &mut Value,
+    retained_bytes: &mut usize,
+    max_bytes: usize,
+) -> Result<bool> {
+    loop {
+        let bytes = serde_json::to_vec(snapshot)?.len().saturating_add(1);
+        if bytes <= max_bytes.saturating_sub(*retained_bytes) {
+            *retained_bytes += bytes;
+            return Ok(true);
+        }
+        if !shrink_collection(&mut snapshot["results"], false) {
+            return Ok(false);
+        }
+        snapshot["results"]["hasMore"] = json!(true);
+    }
 }
 
 fn diagnostic_writer_issues(runtime_diagnostics: &Value) -> Vec<Value> {
@@ -705,7 +763,7 @@ fn shrink_budget_section(payload: &mut Value, section: &str) -> bool {
             shrink_path_collection(payload, &["operationalSnapshots", "servers"], false)
         }
         "operationalSnapshots.searches" => {
-            shrink_path_collection(payload, &["operationalSnapshots", "searches"], true)
+            shrink_path_collection(payload, &["operationalSnapshots", "searches"], false)
         }
         "recentLogs" => shrink_path_collection(payload, &["recentLogs"], true),
         "diagnosticArtifacts.records" => shrink_artifact_records(payload),
@@ -829,6 +887,34 @@ fn encode_hex(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_item_budget_is_shared_and_preserves_omission_counts() {
+        let mut snapshot = json!({
+            "id": "1", "results": {
+                "total": 20, "included": 8, "omittedAfterLimit": 12,
+                "omittedForBudget": 0, "hasMore": true,
+                "items": (0..8).map(|id| json!({"id":id,"displayName":"x".repeat(1024)})).collect::<Vec<_>>()
+            }
+        });
+        let mut retained = 2;
+        assert!(fit_search_snapshot(&mut snapshot, &mut retained, 4096).unwrap());
+        let results = &snapshot["results"];
+        assert_eq!(results["total"], 20);
+        assert_eq!(results["omittedAfterLimit"], 12);
+        assert_eq!(
+            results["included"].as_u64().unwrap() + results["omittedForBudget"].as_u64().unwrap(),
+            8
+        );
+        assert_eq!(results["items"][0]["id"], 0);
+        let mut next = snapshot.clone();
+        assert!(fit_search_snapshot(&mut next, &mut retained, 4096).unwrap());
+        assert!(retained <= 4096);
+        let mut oversized_header = json!({"query":"x".repeat(4096),"results":{"items":[]}});
+        let before = retained;
+        assert!(!fit_search_snapshot(&mut oversized_header, &mut retained, 4096).unwrap());
+        assert_eq!(retained, before);
+    }
 
     fn empty_collection() -> Value {
         json!({
