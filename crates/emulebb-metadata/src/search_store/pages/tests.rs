@@ -231,7 +231,7 @@ fn count_trigger_failure_rolls_back_corpus_and_membership_atomically() {
                 &[event(Some(12), "sample.bin")],
                 &MetadataSearchProjection {
                     session_id: id,
-                    fields: fields(),
+                    fields: vec![fields()],
                     name_votes: vec![name_vote("sample.bin")]
                 }
             )
@@ -329,9 +329,11 @@ fn result_summary_can_combine_independently_bounded_packet_fields() {
     let store = MetadataStore::in_memory().unwrap();
     let id = store.create_search(&sample_search()).unwrap();
     let long = "x".repeat(5000);
-    let mut aggregate = fields();
     let mut claim = 0;
     for index in 0..7 {
+        let mut aggregate = fields();
+        aggregate.file_type.clear();
+        aggregate.aich_hash.clear();
         let mut packet = event(Some(12), &long);
         match index {
             0 => {
@@ -367,7 +369,7 @@ fn result_summary_can_combine_independently_bounded_packet_fields() {
                 &[packet],
                 &MetadataSearchProjection {
                     session_id: id,
-                    fields: aggregate.clone(),
+                    fields: vec![aggregate.clone()],
                     name_votes: vec![name_vote(&long)],
                 },
             )

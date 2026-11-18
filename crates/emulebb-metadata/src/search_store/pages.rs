@@ -333,3 +333,16 @@ fn result_from_row(row: &Row<'_>) -> Result<MetadataSearchResultHeader> {
 
 #[cfg(test)]
 mod tests;
+
+/// Read the bounded receipt in the committing transaction, without another connection.
+pub(super) fn committed_summary(
+    tx: &rusqlite::Transaction<'_>,
+    session: i64,
+    claim: i64,
+) -> Result<crate::MetadataSearchResultSummary> {
+    let mut statement = tx.prepare(&result_sql(false))?;
+    let mut rows = statement.query(params![session, claim])?;
+    let row = rows.next()?.context("missing committed search result")?;
+    row_bytes(row, &[3, 8, 9, 10, 11, 14, 18], SUMMARY_BOUNDS.0)?;
+    Ok(result_from_row(row)?.summary)
+}

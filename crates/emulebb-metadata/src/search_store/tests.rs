@@ -33,6 +33,7 @@ pub(super) fn sample_search() -> MetadataSearchData {
 }
 pub(super) fn fields() -> crate::MetadataSearchResultFields {
     crate::MetadataSearchResultFields {
+        quality: Default::default(),
         source_client_id: None,
         source_client_port: None,
         file_type: "Pro".into(),
@@ -85,7 +86,7 @@ pub(super) fn project(store: &MetadataStore, id: i64, size: Option<u64>, name: &
             &[event(size, name)],
             &MetadataSearchProjection {
                 session_id: id,
-                fields: fields(),
+                fields: vec![fields()],
                 name_votes: vec![name_vote(name)],
             },
         )
@@ -154,7 +155,7 @@ fn terminal_or_missing_sessions_freeze_membership_but_keep_valid_corpus_events()
     store.update_search(id, &header).unwrap();
     let projection = MetadataSearchProjection {
         session_id: id,
-        fields: fields(),
+        fields: vec![fields()],
         name_votes: vec![name_vote("Later.bin")],
     };
     assert!(
@@ -209,7 +210,7 @@ fn membership_failure_rolls_back_corpus_and_projection_together() {
                 &[event(None, "Sample.bin")],
                 &MetadataSearchProjection {
                     session_id: id,
-                    fields: fields(),
+                    fields: vec![fields()],
                     name_votes: vec![name_vote("Sample.bin")]
                 }
             )

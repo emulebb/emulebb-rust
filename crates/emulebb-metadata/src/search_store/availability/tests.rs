@@ -27,7 +27,7 @@ fn ingest(
             events,
             &MetadataSearchProjection {
                 session_id: session,
-                fields: fields(),
+                fields: vec![fields()],
                 name_votes: vec![name_vote("Sample.bin")],
             },
         )
@@ -35,7 +35,10 @@ fn ingest(
         .unwrap()
 }
 fn counts(value: MetadataSearchPublication) -> (u32, u32) {
-    (value.source_count, value.complete_source_count)
+    (
+        value.summary.source_count,
+        value.summary.complete_source_count,
+    )
 }
 
 #[test]
@@ -155,7 +158,7 @@ fn failure_rolls_back_all_derived_and_raw_changes_then_explicit_retry_succeeds()
     let packet = report(Origin::Global, None, Some(8), Some(4));
     let projection = MetadataSearchProjection {
         session_id: id,
-        fields: fields(),
+        fields: vec![fields()],
         name_votes: vec![name_vote("Changed.bin")],
     };
     assert!(
@@ -212,7 +215,7 @@ fn claims_sessions_terminal_state_and_deletion_keep_availability_scoped() {
                 &[first],
                 &MetadataSearchProjection {
                     session_id: id,
-                    fields: fields(),
+                    fields: vec![fields()],
                     name_votes: vec![name_vote("Sample.bin")]
                 }
             )

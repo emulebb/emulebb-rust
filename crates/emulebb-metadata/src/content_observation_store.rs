@@ -48,6 +48,37 @@ impl MetadataStore {
                 && projection.name_votes.len() <= CONTENT_OBSERVATION_BATCH_ITEMS,
             "search projection requires bounded filename votes"
         );
+        ensure!(
+            !projection.fields.is_empty()
+                && projection.fields.len() <= CONTENT_OBSERVATION_BATCH_ITEMS,
+            "search projection requires bounded presentation observations"
+        );
+        let mut field_bytes = 0usize;
+        for fields in &projection.fields {
+            ensure!(
+                fields.rating <= 5 && fields.quality.rating <= 5,
+                "invalid presentation rating"
+            );
+            ensure!(
+                fields.source_client_id.is_some() == fields.source_client_port.is_some()
+                    && fields.source_client_port != Some(0),
+                "invalid presentation source pair"
+            );
+            let charge = fields
+                .payload_bytes()
+                .context("presentation size overflow")?;
+            ensure!(
+                charge <= OBSERVATION_BYTES,
+                "presentation observation is too large"
+            );
+            field_bytes = field_bytes
+                .checked_add(charge)
+                .context("presentation batch size overflow")?;
+        }
+        ensure!(
+            field_bytes <= CONTENT_OBSERVATION_BATCH_BYTES,
+            "presentation observations exceed batch bound"
+        );
         let mut bytes = 0usize;
         for vote in &projection.name_votes {
             ensure!(

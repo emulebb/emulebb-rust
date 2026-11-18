@@ -84,6 +84,7 @@ fn result_bytes(result: &crate::SearchResult) -> Option<usize> {
 struct PreparedProjection {
     result: crate::SearchResult,
     name_votes: Vec<emulebb_metadata::MetadataSearchNameVote>,
+    fields: Vec<emulebb_metadata::MetadataSearchResultFields>,
 }
 
 async fn prepare_projection(
@@ -112,6 +113,9 @@ async fn prepare_projection(
     permit.extend(vote_bytes)?;
     let name_votes = crate::search_state::projection_name_votes(&result)
         .map_err(|_| PersistenceError::Worker)?;
+    // Reserve the bounded SQL summary receipt before admitting its allocation.
+    permit.extend(512 * 1024)?;
+    let fields = crate::search_state::result_fields(&result);
     if let Some(existing) = search
         .results
         .iter()
@@ -129,9 +133,14 @@ async fn prepare_projection(
         Ok(Some(PreparedProjection {
             result: candidate,
             name_votes,
+            fields,
         }))
     } else {
-        Ok(Some(PreparedProjection { result, name_votes }))
+        Ok(Some(PreparedProjection {
+            result,
+            name_votes,
+            fields,
+        }))
     }
 }
 
@@ -261,7 +270,7 @@ pub(super) async fn process(
                     .search_id
                     .parse()
                     .map_err(|_| PersistenceError::Worker)?,
-                fields: crate::search_state::result_fields(&prepared.result),
+                fields: std::mem::take(&mut prepared.fields),
                 name_votes: std::mem::take(&mut prepared.name_votes),
             })
         })
@@ -293,9 +302,23 @@ pub(super) async fn process(
     {
         let mut result = prepared.result;
         result.id = committed.claim_id.to_string();
-        result.name = committed.name;
-        result.sources = committed.source_count;
-        result.complete_sources = committed.complete_source_count;
+        let summary = committed.summary;
+        result.name = summary.name;
+        result.sources = summary.source_count;
+        result.complete_sources = summary.complete_source_count;
+        result.source_client_id = summary.source_client_id;
+        result.source_client_port = summary.source_client_port;
+        result.file_type = summary.file_type;
+        result.media.artist = summary.media_artist;
+        result.media.album = summary.media_album;
+        result.media.title = summary.media_title;
+        result.media.length_seconds = summary.media_length_seconds;
+        result.media.bitrate_kbps = summary.media_bitrate_kbps;
+        result.media.codec = summary.media_codec;
+        result.rating = summary.rating;
+        result.aich_hash = summary.aich_hash;
+        result.complete = summary.complete;
+        result.directory = summary.directory;
         crate::search_state::publish_observation(
             &publication.state,
             &publication.search_id,

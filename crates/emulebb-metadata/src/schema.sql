@@ -1302,3 +1302,17 @@ BEGIN
     SELECT old.id, revision FROM library_catalog_revision WHERE id = 1
     ON CONFLICT(known_file_id) DO UPDATE SET revision = excluded.revision;
 END;
+
+-- One quality tuple per populated presentation field; values live in search_results.
+CREATE TABLE search_field_quality (
+    session_id INTEGER NOT NULL,
+    claim_id INTEGER NOT NULL,
+    field TEXT NOT NULL CHECK(field IN ('source_client_id','file_type','media_artist','media_album','media_title',
+        'media_length_seconds','media_bitrate_kbps','media_codec','aich_root','directory')),
+    quality_useful INTEGER NOT NULL CHECK(quality_useful IN (0,1)),
+    quality_sources INTEGER NOT NULL CHECK(quality_sources BETWEEN 0 AND 4294967295),
+    quality_complete_sources INTEGER NOT NULL CHECK(quality_complete_sources BETWEEN 0 AND 4294967295),
+    quality_rating INTEGER NOT NULL CHECK(quality_rating BETWEEN 0 AND 5),
+    PRIMARY KEY(session_id,claim_id,field),
+    FOREIGN KEY(session_id,claim_id) REFERENCES search_results(session_id,claim_id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;

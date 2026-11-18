@@ -61,6 +61,7 @@ pub struct MetadataSearchResultSummary {
 /// Presentation fields supplied by ingress; the database selects name and counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchResultFields {
+    pub quality: MetadataSearchNameQuality,
     pub source_client_id: Option<u32>,
     pub source_client_port: Option<u16>,
     pub file_type: String,
@@ -74,6 +75,24 @@ pub struct MetadataSearchResultFields {
     pub aich_hash: String,
     pub complete: bool,
     pub directory: String,
+}
+
+impl MetadataSearchResultFields {
+    pub fn payload_bytes(&self) -> Option<usize> {
+        [
+            &self.file_type,
+            &self.media_artist,
+            &self.media_album,
+            &self.media_title,
+            &self.media_codec,
+            &self.aich_hash,
+            &self.directory,
+        ]
+        .into_iter()
+        .try_fold(256usize, |bytes, value| {
+            bytes.checked_add(value.len().checked_mul(6)?)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -101,9 +120,7 @@ impl MetadataSearchNameVote {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchPublication {
     pub claim_id: i64,
-    pub name: String,
-    pub source_count: u32,
-    pub complete_source_count: u32,
+    pub summary: MetadataSearchResultSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +137,7 @@ pub struct MetadataSearchResult {
 #[derive(Debug, Clone)]
 pub struct MetadataSearchProjection {
     pub session_id: i64,
-    pub fields: MetadataSearchResultFields,
+    pub fields: Vec<MetadataSearchResultFields>,
     pub name_votes: Vec<MetadataSearchNameVote>,
 }
 

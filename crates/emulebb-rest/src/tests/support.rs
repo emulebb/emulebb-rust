@@ -342,7 +342,8 @@ fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[Indexe
                             rating: 0,
                         },
                     }],
-                    fields: MetadataSearchResultFields {
+                    fields: vec![MetadataSearchResultFields {
+                        quality: Default::default(),
                         source_client_id: None,
                         source_client_port: None,
                         file_type: file.content_type.clone(),
@@ -356,7 +357,7 @@ fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[Indexe
                         aich_hash: String::new(),
                         complete: false,
                         directory: String::new(),
-                    },
+                    }],
                 },
             )
             .unwrap();

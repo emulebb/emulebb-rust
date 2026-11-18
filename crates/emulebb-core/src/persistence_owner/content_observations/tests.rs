@@ -369,3 +369,48 @@ async fn publication_uses_durable_independent_ed2k_and_kad_counts() {
     }
     owner.close_and_drain().await.unwrap();
 }
+
+#[tokio::test]
+async fn durable_field_winners_publish_without_cached_observation_history() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    let id = publication.search_id.clone();
+    publication.result.observations[0].media.artist = "Sample Artist".into();
+    publication.result.observations[0].sources = 3;
+    events[0].metadata.media_artist = Some("Sample Artist".into());
+    events[0].metadata.source_count = Some(3);
+    owner
+        .observe_content(&events, Some(&publication))
+        .await
+        .unwrap();
+    state
+        .lock()
+        .await
+        .searches
+        .get_mut(&id)
+        .unwrap()
+        .results
+        .clear();
+    publication.result.observations[0].media.artist.clear();
+    publication.result.observations[0].media.codec = "flac".into();
+    publication.result.observations[0].sources = 9;
+    events[0].metadata.media_artist = None;
+    events[0].metadata.media_codec = Some("flac".into());
+    events[0].metadata.source_count = Some(9);
+    owner
+        .observe_content(&events, Some(&publication))
+        .await
+        .unwrap();
+    let snapshot = state.lock().await;
+    let result = &snapshot.searches[&id].results[0];
+    assert_eq!(result.media.artist, "Sample Artist");
+    assert_eq!(result.media.codec, "flac");
+    assert_eq!(result.observations.len(), 1);
+    let persisted = store
+        .search_result_header(id.parse().unwrap(), result.id.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.summary.media_artist, result.media.artist);
+    assert_eq!(persisted.summary.media_codec, result.media.codec);
+    drop(snapshot);
+    owner.close_and_drain().await.unwrap();
+}

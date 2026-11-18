@@ -63,23 +63,39 @@ pub(crate) fn search_to_metadata(search: &Search) -> MetadataSearchData {
     }
 }
 
-pub(crate) fn result_fields(result: &SearchResult) -> MetadataSearchResultFields {
-    let source = result.source_client_id.zip(result.source_client_port);
-    MetadataSearchResultFields {
-        source_client_id: source.map(|(id, _)| id),
-        source_client_port: source.map(|(_, port)| port),
-        file_type: result.file_type.clone(),
-        media_artist: result.media.artist.clone(),
-        media_album: result.media.album.clone(),
-        media_title: result.media.title.clone(),
-        media_length_seconds: result.media.length_seconds,
-        media_bitrate_kbps: result.media.bitrate_kbps,
-        media_codec: result.media.codec.clone(),
-        rating: result.rating,
-        aich_hash: result.aich_hash.clone(),
-        complete: result.complete,
-        directory: result.directory.clone(),
-    }
+pub(crate) fn result_fields(result: &SearchResult) -> Vec<MetadataSearchResultFields> {
+    result
+        .observations
+        .iter()
+        .map(|observation| {
+            let (useful, sources, complete_sources, _, rating) =
+                crate::rest_model::observation_quality(observation, &result.hash);
+            let source = observation
+                .source_client_id
+                .zip(observation.source_client_port);
+            MetadataSearchResultFields {
+                quality: emulebb_metadata::MetadataSearchNameQuality {
+                    useful,
+                    sources,
+                    complete_sources,
+                    rating,
+                },
+                source_client_id: source.map(|v| v.0),
+                source_client_port: source.map(|v| v.1),
+                file_type: observation.file_type.clone(),
+                media_artist: observation.media.artist.clone(),
+                media_album: observation.media.album.clone(),
+                media_title: observation.media.title.clone(),
+                media_length_seconds: observation.media.length_seconds,
+                media_bitrate_kbps: observation.media.bitrate_kbps,
+                media_codec: observation.media.codec.clone(),
+                rating: observation.rating,
+                aich_hash: observation.aich_hash.clone(),
+                complete: observation.complete,
+                directory: observation.directory.clone(),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn projection_name_votes(

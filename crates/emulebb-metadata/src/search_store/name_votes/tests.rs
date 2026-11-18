@@ -34,7 +34,7 @@ fn cast(
             &[packet],
             &MetadataSearchProjection {
                 session_id: session,
-                fields: fields(),
+                fields: vec![fields()],
                 name_votes: vec![vote],
             },
         )
@@ -83,7 +83,7 @@ fn changing_metadata_and_transport_origin_never_multiply_a_reporters_name_vote()
             Some(12),
             vote("Alpha.bin", Some("192.0.2.1:4661"), Origin::Server, sources),
         );
-        assert_eq!(published.name, "Beta.bin");
+        assert_eq!(published.summary.name, "Beta.bin");
     }
     cast(
         &store,
@@ -125,11 +125,15 @@ fn unknown_reporters_count_once_per_origin_and_ties_use_quality_then_binary_name
     let id = store.create_search(&sample_search()).unwrap();
     cast(&store, id, None, vote("Zed.bin", None, Origin::Server, 3));
     assert_eq!(
-        cast(&store, id, None, vote("Alpha.bin", None, Origin::Server, 3)).name,
+        cast(&store, id, None, vote("Alpha.bin", None, Origin::Server, 3))
+            .summary
+            .name,
         "Alpha.bin"
     );
     assert_eq!(
-        cast(&store, id, None, vote("Zed.bin", None, Origin::Server, 4)).name,
+        cast(&store, id, None, vote("Zed.bin", None, Origin::Server, 4))
+            .summary
+            .name,
         "Zed.bin"
     );
     assert_eq!(total(&store, id, "Zed.bin"), 1);
@@ -141,11 +145,14 @@ fn unknown_reporters_count_once_per_origin_and_ties_use_quality_then_binary_name
             None,
             vote("Zed.bin", None, Origin::Kad, u32::MAX)
         )
+        .summary
         .name,
         "Zed.bin"
     );
     assert_eq!(
-        cast(&store, id, None, vote("Alpha.bin", None, Origin::Kad, 0)).name,
+        cast(&store, id, None, vote("Alpha.bin", None, Origin::Kad, 0))
+            .summary
+            .name,
         "Alpha.bin"
     );
     assert_eq!(total(&store, id, "Alpha.bin"), 3);
@@ -170,7 +177,7 @@ fn quality_updates_preserve_the_winning_tuple_without_mixing_component_maxima() 
     assert_eq!(stored, (10, 0, 0));
     let mut better = vote("Beta.bin", None, Origin::Kad, 10);
     better.quality.complete_sources = 1;
-    assert_eq!(cast(&store, id, Some(1), better).name, "Beta.bin");
+    assert_eq!(cast(&store, id, Some(1), better).summary.name, "Beta.bin");
 }
 
 #[test]
@@ -202,7 +209,7 @@ fn name_publication_failure_rolls_back_votes_occurrences_and_summary() {
                 &[packet],
                 &MetadataSearchProjection {
                     session_id: id,
-                    fields: fields(),
+                    fields: vec![fields()],
                     name_votes: vec![beta.clone()]
                 }
             )
@@ -225,7 +232,7 @@ fn name_publication_failure_rolls_back_votes_occurrences_and_summary() {
         .unwrap()
         .execute_batch("DROP TRIGGER fail_name;")
         .unwrap();
-    assert_eq!(cast(&store, id, None, beta).name, "Beta.bin");
+    assert_eq!(cast(&store, id, None, beta).summary.name, "Beta.bin");
 }
 
 #[test]
@@ -252,7 +259,7 @@ fn votes_are_scoped_to_session_and_size_claim_and_terminal_membership_stays_froz
                 &[event(None, "Late.bin")],
                 &MetadataSearchProjection {
                     session_id: first,
-                    fields: fields(),
+                    fields: vec![fields()],
                     name_votes: vec![name_vote("Late.bin")]
                 }
             )
@@ -313,6 +320,7 @@ fn winner_lookup_uses_its_index_with_one_hundred_thousand_names() {
             None,
             vote("Winner.bin", None, Origin::Server, 4)
         )
+        .summary
         .name,
         "Winner.bin"
     );

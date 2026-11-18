@@ -2893,7 +2893,8 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
                         rating: 0,
                     },
                 }],
-                fields: crate::MetadataSearchResultFields {
+                fields: vec![crate::MetadataSearchResultFields {
+                    quality: Default::default(),
                     source_client_id: None,
                     source_client_port: None,
                     file_type: String::new(),
@@ -2907,7 +2908,7 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
                     aich_hash: String::new(),
                     complete: false,
                     directory: String::new(),
-                },
+                }],
             },
         )
         .unwrap();
