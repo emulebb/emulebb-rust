@@ -24,11 +24,15 @@ pub(crate) async fn forward_ed2k<T>(
     >,
     operation: impl std::future::Future<Output = T>,
 ) -> T {
-    tokio::pin!(operation);
+    let mut operation = Box::pin(operation);
     loop {
         tokio::select! {
             output = &mut operation => {
-                while let Ok(observation) = receive.try_recv() {
+                // WHY: cancellation can settle the caller before the decoder
+                // finishes its current page. Drop the operation's sender, then
+                // drain until the independent decoder relinquishes its sender.
+                drop(operation);
+                while let Some(observation) = receive.recv().await {
                     forward_one(search_id, request, origin, sink, observation).await;
                 }
                 return output;

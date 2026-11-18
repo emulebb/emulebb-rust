@@ -1,4 +1,45 @@
 use super::*;
+
+#[tokio::test]
+async fn cancelled_queued_keyword_request_cannot_keep_its_result_stream_open() {
+    let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+    let (result_sink, mut observations) = tokio::sync::mpsc::channel(1);
+    let cancel = CancellationToken::new();
+    let search = search_keyword_via_background_session(
+        &handle,
+        "sample query",
+        Default::default(),
+        Duration::from_secs(1),
+        &cancel,
+        Some(result_sink),
+    );
+    let queued = async {
+        let request = inbox.receiver.recv().await.unwrap();
+        cancel.cancel();
+        request
+    };
+    let (outcome, request) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(search, queued)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome.unwrap(),
+        Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())
+    );
+    // Retain the queued request as a disconnected runtime would, without
+    // retaining the caller's result channel or allowing a later upgrade.
+    let BackgroundServerSearchRequest::Keyword { result_sink, .. } = request else {
+        panic!("expected keyword request");
+    };
+    assert!(result_sink.unwrap().upgrade().is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), observations.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
 use std::collections::{HashMap, HashSet};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant as TokioInstant};
 

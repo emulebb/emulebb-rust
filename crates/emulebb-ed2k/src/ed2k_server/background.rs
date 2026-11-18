@@ -181,7 +181,7 @@ pub(super) enum BackgroundServerSearchRequest {
         criteria: Box<SearchCriteria>,
         timeout: Duration,
         cancel: CancellationToken,
-        result_sink: Option<mpsc::Sender<Ed2kServerSearchObservation>>,
+        result_sink: Option<mpsc::WeakSender<Ed2kServerSearchObservation>>,
         response: oneshot::Sender<BackgroundKeywordSearchResponse>,
     },
     Source {
@@ -284,9 +284,12 @@ pub async fn search_keyword_via_background_session(
         criteria: Box::new(criteria),
         timeout,
         cancel: cancel.clone(),
-        result_sink,
+        result_sink: result_sink.as_ref().map(mpsc::Sender::downgrade),
         response,
     };
+    // WHY: queued cancelled requests must not keep a result stream open while
+    // disconnected. Only an executing decoder upgrades the weak channel handle.
+    let _result_sink = result_sink;
     tokio::select! {
         _ = cancel.cancelled() => {
             return Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new()));
@@ -819,6 +822,7 @@ pub(super) async fn start_background_server_search(
                 let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(Vec::new())));
                 return Ok(None);
             }
+            let result_sink = result_sink.and_then(|sink| sink.upgrade());
             let supports_64bit =
                 session.server_flags.unwrap_or_default() & SERVER_TCP_FLAG_LARGEFILES != 0;
             // WHY: legacy servers do not understand the 64-bit numeric search

@@ -56,7 +56,7 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
     pub criteria: &'a SearchCriteria,
     /// Optional live-result sink. The terminal return value remains the full
     /// result set; this sink lets callers present pages during a long sweep.
-    pub result_sink: Option<&'a mpsc::Sender<Ed2kServerSearchObservation>>,
+    pub result_sink: Option<mpsc::Sender<Ed2kServerSearchObservation>>,
     /// Optional `(completed, total)` server-walk progress sink.
     pub progress_sink: Option<&'a (dyn Fn(usize, usize) + Send + Sync + 'a)>,
     pub cancel: &'a CancellationToken,
@@ -273,7 +273,7 @@ pub async fn search_keyword_udp_servers(
             &queried_servers,
             pacing_deadline,
             None,
-            result_sink,
+            result_sink.as_ref(),
             &mut results,
             cancel,
         )
@@ -297,7 +297,7 @@ pub async fn search_keyword_udp_servers(
         &queried_servers,
         response_deadline,
         Some(UDP_KEYWORD_RESPONSE_GRACE),
-        result_sink,
+        result_sink.as_ref(),
         &mut results,
         cancel,
     )

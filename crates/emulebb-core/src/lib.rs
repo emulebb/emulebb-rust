@@ -1042,7 +1042,7 @@ impl EmulebbCore {
                 dead_server_endpoints: &dead_server_endpoints,
                 query: &request.query,
                 criteria: &criteria,
-                result_sink: Some(&global_result_sink),
+                result_sink: Some(global_result_sink),
                 progress_sink: incremental_results
                     .is_some()
                     .then_some(&global_progress_sink),

@@ -56,7 +56,7 @@ fn raw_evidence_retains_absence_and_decodes_the_wire_aich_representation() {
 }
 
 #[tokio::test]
-async fn bounded_forwarding_preserves_750_decoded_occurrences_without_a_second_cap() {
+async fn settled_request_drains_all_750_occurrences_until_the_decoder_closes() {
     let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(2);
     let (live_tx, mut live_rx) = tokio::sync::mpsc::channel(2);
     let request = SearchCreate::default();
@@ -79,9 +79,7 @@ async fn bounded_forwarding_preserves_750_decoded_occurrences_without_a_second_c
         MetadataObservationOrigin::Server,
         Some(&live_tx),
         raw_rx,
-        async {
-            producer.await.unwrap();
-        },
+        std::future::ready(()),
     );
     let consume = async {
         for index in 0u32..750 {
@@ -97,4 +95,5 @@ async fn bounded_forwarding_preserves_750_decoded_occurrences_without_a_second_c
     })
     .await
     .unwrap();
+    producer.await.unwrap();
 }
