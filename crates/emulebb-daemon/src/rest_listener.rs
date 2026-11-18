@@ -12,7 +12,8 @@ pub(crate) async fn bind(address: SocketAddr) -> Result<TcpListener> {
         format!(
             "failed to bind REST/WebUI TCP listener at {address}; check that the address is local \
              and the port is available, permitted by security software, and outside Windows \
-             excluded port ranges; use --rest-bind-addr <IP:PORT> to select another listener"
+             excluded port ranges; set [rest].bind_addr in {} to select another listener",
+            crate::PROFILE_SETTINGS_FILE
         )
     })
 }
@@ -29,7 +30,8 @@ mod tests {
 
         assert!(error.to_string().contains(&address.to_string()));
         assert!(error.to_string().contains("REST/WebUI TCP listener"));
-        assert!(error.to_string().contains("--rest-bind-addr"));
+        assert!(error.to_string().contains("[rest].bind_addr"));
+        assert!(error.to_string().contains(crate::PROFILE_SETTINGS_FILE));
         assert!(error.downcast_ref::<std::io::Error>().is_some());
     }
 }

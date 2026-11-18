@@ -4,13 +4,15 @@
 //! JSON shapes the eMuleBB REST contract publishes. They were extracted verbatim
 //! from `lib.rs` during the maintainability restructuring; behavior is unchanged.
 
+use anyhow::Result;
 use std::path::Path as FsPath;
 
 use emulebb_core::{
     AppInfo, AppLifecycle, BUILD_ARCHITECTURE, BUILD_CHANNEL, BUILD_FLAVOR, BUILD_SOURCE_REVISION,
     LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus, Search, SearchSpec,
-    ServerInfo, SharedFileListItem, SharedFilePublishState, Status, TransferThroughputStats,
-    UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus, normal_path_display,
+    ServerInfo, SharedFileListItem, SharedFilePublishState, Status, TransferStats,
+    TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
+    normal_path_display,
 };
 use serde_json::{Value, json};
 
@@ -61,6 +63,7 @@ pub(crate) fn capabilities_response(app: AppInfo) -> Value {
 
 pub(crate) fn stats_response(
     status: &Status,
+    transfers: &TransferStats,
     upload_policy: &UploadPolicyMetrics,
     throughput: &TransferThroughputStats,
     shared_hashing_count: i64,
@@ -75,7 +78,7 @@ pub(crate) fn stats_response(
         "uploadSpeedKiBps": upload_policy.upload_rate_bytes_per_sec as f64 / 1024.0,
         "sessionDownloadedBytes": throughput.session_downloaded_bytes,
         "sessionUploadedBytes": throughput.session_uploaded_bytes,
-        "activeDownloads": status.transfers.active,
+        "activeDownloads": transfers.active,
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
         "uploadBaseSlots": upload_policy.base_slots,
@@ -85,7 +88,7 @@ pub(crate) fn stats_response(
         "uploadElasticUnderfillBytesPerSec": upload_policy.elastic_underfill_bytes_per_sec,
         "uploadElasticUnderfill": upload_policy.elastic_underfill,
         "uploadUnderfillSinceMs": upload_policy.underfill_since_ms,
-        "downloadCount": status.transfers.total,
+        "downloadCount": transfers.total,
         "sharedHashingActive": shared_hashing_active,
         "sharedHashingCount": shared_hashing_count,
         "sharedFilesReady": status.lifecycle.state == "running",
@@ -98,8 +101,9 @@ pub(crate) fn stats_response(
     })
 }
 
-pub(crate) async fn status_response(state: &RestState) -> Value {
+pub(crate) async fn status_response(state: &RestState) -> Result<Value> {
     let status = state.core.status().await;
+    let transfers = state.core.transfer_stats().await?;
     let guard = state.core.vpn_guard_status();
     let network = state.core.network_binding_status();
     let upload_policy = state.core.upload_policy_metrics().await;
@@ -109,7 +113,7 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let shared_directory_reload_progress = shared_directories.reload_progress;
     let shared_hashing_active = shared_hashing_count > 0;
     let shared_file_count = state.core.shared_catalog_count().await;
-    let download_file_count = status.transfers.total;
+    let download_file_count = transfers.total;
     let runtime_diagnostics = runtime_diagnostics_response_with(
         state,
         shared_file_count,
@@ -119,9 +123,9 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
         &upload_policy,
     )
     .await;
-    json!({
+    Ok(json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
-        "stats": stats_response(&status, &upload_policy, &throughput, shared_hashing_count),
+        "stats": stats_response(&status, &transfers, &upload_policy, &throughput, shared_hashing_count),
         "servers": server_status_response(state).await,
         "kad": kad_response(&status.kad, network.as_ref(), &guard),
         "network": network_response(network.as_ref(), &guard),
@@ -142,23 +146,23 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
             "reloadProgress": shared_directory_reload_progress.clone()
         },
         "runtimeDiagnostics": runtime_diagnostics
-    })
+    }))
 }
 
-pub(crate) async fn runtime_diagnostics_response(state: &RestState) -> Value {
-    let status = state.core.status().await;
+pub(crate) async fn runtime_diagnostics_response(state: &RestState) -> Result<Value> {
+    let transfers = state.core.transfer_stats().await?;
     let upload_policy = state.core.upload_policy_metrics().await;
     let shared_directories = state.core.shared_directories().await;
     let shared_file_count = state.core.shared_catalog_count().await;
-    runtime_diagnostics_response_with(
+    Ok(runtime_diagnostics_response_with(
         state,
         shared_file_count,
-        status.transfers.total,
+        transfers.total,
         shared_directories.hashing_count,
         shared_directories.reload_progress,
         &upload_policy,
     )
-    .await
+    .await)
 }
 
 async fn runtime_diagnostics_response_with(
@@ -648,7 +652,13 @@ mod tests {
             session_downloaded_bytes: 1_048_576,
             session_uploaded_bytes: 524_288,
         };
-        let value = stats_response(&status, &upload_policy, &throughput, 0);
+        let value = stats_response(
+            &status,
+            &core.transfer_stats().await.unwrap(),
+            &upload_policy,
+            &throughput,
+            0,
+        );
         assert_eq!(value["downloadSpeedKiBps"], 4.0);
         assert_eq!(value["sessionDownloadedBytes"], 1_048_576);
         assert_eq!(value["sessionUploadedBytes"], 524_288);
@@ -670,7 +680,13 @@ mod tests {
         let upload_policy = core.upload_policy_metrics().await;
         let throughput = TransferThroughputStats::default();
 
-        let value = stats_response(&status, &upload_policy, &throughput, 3);
+        let value = stats_response(
+            &status,
+            &core.transfer_stats().await.unwrap(),
+            &upload_policy,
+            &throughput,
+            3,
+        );
 
         assert_eq!(value["sharedHashingActive"], true);
         assert_eq!(value["sharedHashingCount"], 3);
@@ -688,7 +704,13 @@ mod tests {
         let upload_policy = core.upload_policy_metrics().await;
         let throughput = TransferThroughputStats::default();
 
-        let value = stats_response(&status, &upload_policy, &throughput, 0);
+        let value = stats_response(
+            &status,
+            &core.transfer_stats().await.unwrap(),
+            &upload_policy,
+            &throughput,
+            0,
+        );
 
         assert_eq!(value["ed2kConnected"], true);
         assert_eq!(value["ed2kHighId"], false);

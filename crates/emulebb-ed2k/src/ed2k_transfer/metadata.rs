@@ -7,7 +7,7 @@ use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
     JobToken, MetadataLocalShareEntry, MetadataSharedFilePage, MetadataSharedFileQuery,
-    MetadataTransferCounts, MetadataVerifiedLocalContent, NativeFileFingerprint,
+    MetadataVerifiedLocalContent, NativeFileFingerprint,
 };
 use uuid::Uuid;
 
@@ -20,16 +20,6 @@ use super::{
 };
 
 impl Ed2kTransferRuntime {
-    /// Return persisted transfer counts without hydrating every manifest.
-    pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {
-        self.metadata.transfer_counts()
-    }
-
-    /// Return persisted transfer counts if the metadata connection is free.
-    pub fn try_transfer_counts(&self) -> Result<Option<MetadataTransferCounts>> {
-        self.metadata.try_transfer_counts()
-    }
-
     /// Return REST shared-file summaries without hydrating every manifest.
     pub async fn share_entries(&self) -> Result<Vec<MetadataLocalShareEntry>> {
         let metadata = self.metadata.clone();

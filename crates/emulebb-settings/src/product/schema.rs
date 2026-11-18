@@ -40,13 +40,56 @@ pub fn settings_schemas() -> Value {
     patch["description"] = json!(
         "Atomic settings edit. At least one leaf must be set or reset. Set/reset must not overlap. The complete edited candidate must validate; any failure saves nothing."
     );
+    let failure = object_schema(
+        [
+            ("key", keys.clone()),
+            (
+                "code",
+                json!({"type":"string","enum":[snapshot::APPLY_FAILURE_CODE]}),
+            ),
+            (
+                "message",
+                json!({"type":"string","maxLength":MAX_APPLY_MESSAGE_BYTES,"x-maxUtf8Bytes":MAX_APPLY_MESSAGE_BYTES}),
+            ),
+            ("truncated", json!({"type":"boolean"})),
+        ],
+        true,
+    );
+    let application = object_schema(
+        [
+            (
+                "pendingRestart",
+                json!({"type":"array","items":keys.clone(),"uniqueItems":true,"maxItems":setting_specs().len()}),
+            ),
+            (
+                "failed",
+                json!({"type":"array","items":failure.clone(),"maxItems":setting_specs().len(),"x-uniqueBy":"key"}),
+            ),
+        ],
+        true,
+    );
+    let mut read = object_schema(
+        [
+            ("saved", saved.clone()),
+            ("effective", SettingsValues::schema()),
+            ("application", application.clone()),
+        ],
+        true,
+    );
+    read["x-maxSerializedBytes"] = json!(MAX_SNAPSHOT_BYTES);
+    read["description"] = json!(
+        "Coherent settings data. The containing native envelope carries the saved revision in meta.settingsRevision; effective values are supplied by the runtime owner."
+    );
     json!({
         "SettingsValues":SettingsValues::schema(),
         "SavedSettings":saved,
         "SettingsPartial":SettingsPartial::schema(),
         "SettingsPatch":patch,
         "SettingKey":keys,
-        "SettingsRevision":revision
+        "SettingsRevision":revision,
+        "SettingApplyFailure":failure,
+        "SettingsApplicationStatus":application,
+        "SettingsReadData":read
     })
 }
 

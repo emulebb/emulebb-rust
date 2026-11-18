@@ -90,10 +90,10 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
             "maxBytes must be in the range {MIN_DIAGNOSTIC_BUNDLE_BYTES}..={MAX_DIAGNOSTIC_BUNDLE_BYTES}"
         );
     }
-    let status = status_response(state).await;
+    let status = status_response(state).await?;
     let runtime_diagnostics = match status.get("runtimeDiagnostics") {
         Some(runtime_diagnostics) => runtime_diagnostics.clone(),
-        None => runtime_diagnostics_response(state).await,
+        None => runtime_diagnostics_response(state).await?,
     };
     let unified_run = unified_run_selection(&runtime_diagnostics);
     let writer_issues = diagnostic_writer_issues(&runtime_diagnostics);

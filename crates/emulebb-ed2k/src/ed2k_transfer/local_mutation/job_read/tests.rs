@@ -179,6 +179,7 @@ async fn every_compact_result_variant_reuses_and_releases_the_registry_control()
     for request in [
         JobRead::Query(emulebb_metadata::DownloadJobQuery::default()),
         JobRead::Counts,
+        JobRead::TransferCounts,
         JobRead::Exact(job.token.job_id),
         JobRead::Detail(job.token.job_id),
         JobRead::Parts(job.token.job_id, None, 1),

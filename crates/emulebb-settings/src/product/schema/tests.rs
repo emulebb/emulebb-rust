@@ -50,6 +50,56 @@ fn complete_schemas_match_actual_serde_shapes_and_all_canonical_keys() {
 }
 
 #[test]
+fn read_schema_matches_the_bounded_snapshot_and_application_catalog() {
+    let schemas = settings_schemas();
+    let key = SettingKey::parse("network.nickname").unwrap();
+    let status = SettingsApplicationStatus::new(
+        vec![key],
+        vec![SettingApplyFailure::new(key, "Cannot apply setting.")],
+    )
+    .unwrap();
+    let read =
+        SettingsReadData::new(SavedSettings::default(), SettingsValues::default(), status).unwrap();
+    let value = serde_json::to_value(read).unwrap();
+    assert_complete_shape(&value, &schemas["SettingsReadData"]);
+    assert_complete_shape(
+        &value["application"]["failed"][0],
+        &schemas["SettingApplyFailure"],
+    );
+    assert_eq!(
+        schemas["SettingsReadData"]["properties"]["saved"],
+        schemas["SavedSettings"]
+    );
+    assert_eq!(
+        schemas["SettingsReadData"]["properties"]["effective"],
+        schemas["SettingsValues"]
+    );
+    assert_eq!(
+        schemas["SettingsReadData"]["x-maxSerializedBytes"],
+        MAX_SNAPSHOT_BYTES
+    );
+    let properties = &schemas["SettingsApplicationStatus"]["properties"];
+    assert_eq!(properties["pendingRestart"]["items"], schemas["SettingKey"]);
+    assert_eq!(properties["pendingRestart"]["uniqueItems"], true);
+    assert_eq!(
+        properties["pendingRestart"]["maxItems"],
+        setting_specs().len()
+    );
+    assert_eq!(properties["failed"]["maxItems"], setting_specs().len());
+    assert_eq!(properties["failed"]["x-uniqueBy"], "key");
+    let failure = &schemas["SettingApplyFailure"]["properties"];
+    assert_eq!(failure["key"], schemas["SettingKey"]);
+    assert_eq!(
+        failure["code"]["enum"],
+        json!([value["application"]["failed"][0]["code"]])
+    );
+    assert_eq!(
+        failure["message"]["x-maxUtf8Bytes"],
+        MAX_APPLY_MESSAGE_BYTES
+    );
+}
+
+#[test]
 fn partial_schema_does_not_invent_values_or_require_omitted_groups() {
     let schemas = settings_schemas();
     let partial = schemas["SettingsPartial"].to_string();

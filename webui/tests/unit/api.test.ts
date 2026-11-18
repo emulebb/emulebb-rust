@@ -4,7 +4,7 @@ import { RestClient, RestError } from "../../src/api";
 
 describe("RestClient", () => {
   it("captures the exact raw diagnostic bundle with its required bounded request", async () => {
-    const bundle = { schema: "emulebb.diagnostic-bundle.v6", capturedAt: "2026-11-14T12:00:00Z",
+    const bundle = { schema: "emulebb.diagnostic-bundle.v7", capturedAt: "2026-11-14T12:00:00Z",
       settingsProvenance: { apiKeyIncluded: true, sensitiveValues: "exact", apiKey: "synthetic-private-key" } };
     const fetchMock = vi.fn(async () => jsonResponse(bundle)) as unknown as typeof fetch;
     const client = new RestClient({ fetch: fetchMock });
@@ -17,7 +17,7 @@ describe("RestClient", () => {
   });
 
   it("rejects an envelope substituted for the raw diagnostic bundle", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ data: { schema: "emulebb.diagnostic-bundle.v6", capturedAt: "synthetic" } })) as unknown as typeof fetch;
+    const fetchMock = vi.fn(async () => jsonResponse({ data: { schema: "emulebb.diagnostic-bundle.v7", capturedAt: "synthetic" } })) as unknown as typeof fetch;
     await expect(new RestClient({ fetch: fetchMock }).captureDiagnosticBundle(16_777_216)).rejects.toThrow("unexpected response");
   });
 

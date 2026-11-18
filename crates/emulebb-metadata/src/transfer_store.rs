@@ -730,13 +730,6 @@ impl super::MetadataStore {
         transfer_counts_from_connection(&conn)
     }
 
-    pub fn try_transfer_counts(&self) -> Result<Option<MetadataTransferCounts>> {
-        let Some(conn) = self.try_connection()? else {
-            return Ok(None);
-        };
-        transfer_counts_from_connection(&conn).map(Some)
-    }
-
     pub fn download_publish_entries_after(
         &self,
         after_hash: Option<&str>,
@@ -2329,31 +2322,19 @@ fn manifest_from_row(
     })
 }
 
-fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<MetadataTransferCounts> {
-    conn.query_row(
-        r#"
-        SELECT count(*),
-               coalesce(sum(CASE
-                   WHEN download_jobs.terminal_completed_at_s IS NULL
-                        AND download_jobs.intent = 'started'
+pub(crate) const TRANSFER_COUNTS_SQL: &str = "SELECT
+    unfinished-delete_requested_unfinished+completed-delete_requested_completed,
+    started, completed-delete_requested_completed
+    FROM download_job_counts WHERE id=1";
 
-                   THEN 1 ELSE 0 END), 0),
-               coalesce(sum(CASE
-                   WHEN download_jobs.terminal_completed_at_s IS NOT NULL THEN 1 ELSE 0 END), 0)
-        FROM download_jobs
-        JOIN known_files ON known_files.id = download_jobs.known_file_id
-        WHERE download_jobs.removed_at_s IS NULL
-          AND download_jobs.delete_requested_at_s IS NULL
-        "#,
-        [],
-        |row| {
-            Ok(MetadataTransferCounts {
-                total: crate::sql_value::unsigned::<usize>(row, 0)?,
-                active: crate::sql_value::unsigned::<usize>(row, 1)?,
-                completed: crate::sql_value::unsigned::<usize>(row, 2)?,
-            })
-        },
-    )
+fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<MetadataTransferCounts> {
+    conn.query_row(TRANSFER_COUNTS_SQL, [], |row| {
+        Ok(MetadataTransferCounts {
+            total: crate::sql_value::unsigned::<usize>(row, 0)?,
+            active: crate::sql_value::unsigned::<usize>(row, 1)?,
+            completed: crate::sql_value::unsigned::<usize>(row, 2)?,
+        })
+    })
     .map_err(Into::into)
 }
 
