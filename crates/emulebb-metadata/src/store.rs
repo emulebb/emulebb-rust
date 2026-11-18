@@ -246,13 +246,19 @@ impl MetadataStore {
             "#,
             params![profile_uuid, now],
         )?;
+        let mut settings = emulebb_settings::product::SavedSettings::default();
         // WHY: publishing the schema marker before host defaults can make a
         // failed first start permanently skip its folders on retry. Both belong
         // to the same transaction; failed initialization leaves no current schema.
         if let Some(initialize) = initialize_storage {
             let storage = initialize()?;
+            let mut edit = emulebb_settings::product::SettingsEdit::default();
+            edit.set.storage.incoming_directory =
+                emulebb_settings::product::PartialValue::Set(storage.incoming_dir.clone());
+            settings = settings.edited(&edit)?;
             crate::profile_store::seed_host_storage_defaults(&tx, &storage)?;
         }
+        crate::app_settings_store::seed(&tx, &settings)?;
         tx.commit()?;
         Ok(())
     }
@@ -861,6 +867,13 @@ mod tests {
         )
         .unwrap();
         assert!(store.initialized_new_schema());
+        let canonical = store.load_app_settings().unwrap();
+        assert_eq!(canonical.revision.get(), 1);
+        assert_eq!(canonical.saved.storage.incoming_directory.value, wanted);
+        assert_eq!(
+            canonical.saved.storage.incoming_directory.mode,
+            emulebb_settings::product::ValueMode::Custom
+        );
         let actual: String = store.connection().unwrap().query_row(
             "SELECT json_extract(value_json, '$') FROM settings WHERE section = 'daemon' AND key = 'incomingDir'", [], |row| row.get(0),
         ).unwrap();

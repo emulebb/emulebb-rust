@@ -1,7 +1,32 @@
 #!/usr/bin/with-contenv bash
 set -euo pipefail
 
-exec 3<>/dev/tcp/127.0.0.1/20017
+# This package-private helper accepts a profile path, never setting overrides.
+profile="${1:-/config/emulebb-rust}"
+fields="$(jq -er '
+    select(type == "object") |
+    select(.probeHost | type == "string") |
+    select(.probeHost | length > 0 and length <= 64) |
+    select(.probeHost | test("^[0-9A-Fa-f:.%]+$")) |
+    select(.probePort | type == "number") |
+    select(.probePort >= 1 and .probePort <= 65535 and .probePort == (.probePort | floor)) |
+    select(.instanceId | type == "string") |
+    select(.instanceId | test("^[0-9a-f]{32}$")) |
+    [.probeHost, (.probePort | tostring), .instanceId] | @tsv
+' "$profile/.emulebb-rest-listener.json")"
+IFS=$'\t' read -r host port expected_instance <<< "$fields"
+
+exec 3<>/dev/tcp/"$host"/"$port"
 printf 'GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
 IFS=$'\r' read -r status <&3
 [[ $status == "HTTP/1.1 204 No Content" ]]
+actual_instance=""
+while IFS= read -r line <&3; do
+    line="${line%$'\r'}"
+    [[ -z $line ]] && break
+    if [[ ${line,,} == x-emulebb-instance:* ]]; then
+        actual_instance="${line#*:}"
+        actual_instance="${actual_instance# }"
+    fi
+done
+[[ $actual_instance == "$expected_instance" ]]

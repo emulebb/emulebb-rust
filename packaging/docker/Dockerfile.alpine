@@ -21,7 +21,7 @@ ENV HOME=/config \
     XDG_DATA_HOME=/config
 
 # Refresh the pinned base's security packages; the SBOM records resolved versions.
-RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates jq
 COPY --from=unpack /payload/ /usr/lib/emulebb-rust/
 COPY root/ /
 RUN chmod 755 /usr/lib/emulebb-rust/emulebb-rust \

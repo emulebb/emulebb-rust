@@ -1,6 +1,8 @@
 //! SQLite metadata store for the Rust eMuleBB client.
 
 mod aich_recovery_store;
+mod app_settings_store;
+pub use app_settings_store::{MetadataAppSettings, MetadataSettingsWriteError};
 mod content_identity;
 mod download_availability;
 pub use download_availability::{

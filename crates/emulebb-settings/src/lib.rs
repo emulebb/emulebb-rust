@@ -3,6 +3,7 @@ use std::{error::Error, fmt, net::Ipv4Addr, path::PathBuf};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
+pub mod product;
 mod surface;
 pub use surface::{
     BOOTSTRAP_SETTINGS_SURFACE, SettingSurfaceClass, SettingSurfaceSpec,
