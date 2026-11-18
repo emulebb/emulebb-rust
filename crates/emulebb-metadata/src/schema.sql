@@ -948,7 +948,7 @@ CREATE TABLE content_claim_observations (
     observation_count INTEGER NOT NULL CHECK(observation_count > 0),
     UNIQUE(claim_id, fingerprint)
 ) STRICT;
-CREATE INDEX content_claim_observations_page_idx ON content_claim_observations(claim_id, id);
+CREATE UNIQUE INDEX content_claim_observations_page_idx ON content_claim_observations(claim_id, id);
 
 CREATE TABLE search_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
@@ -970,60 +970,46 @@ CREATE TABLE search_sessions (
     artist_filter TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'error')),
     status_reason TEXT CHECK(status_reason IS NULL OR length(status_reason) > 0),
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
+    completed_at_s INTEGER CHECK(completed_at_s IS NULL OR completed_at_s >= 0),
     CHECK(min_size_bytes IS NULL OR max_size_bytes IS NULL OR min_size_bytes <= max_size_bytes)
 ) STRICT;
 
 CREATE TABLE search_results (
-    id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
-    known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
-    ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
+    claim_id INTEGER NOT NULL REFERENCES content_claims(id),
     name TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
-    source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count BETWEEN 0 AND 4294967295),
-    complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(complete_source_count BETWEEN 0 AND 4294967295),
-    file_type TEXT NOT NULL DEFAULT '',
-    media_artist TEXT NOT NULL DEFAULT '',
-    media_album TEXT NOT NULL DEFAULT '',
-    media_title TEXT NOT NULL DEFAULT '',
-    media_length_seconds INTEGER NOT NULL DEFAULT 0 CHECK(media_length_seconds BETWEEN 0 AND 4294967295),
-    media_bitrate_kbps INTEGER NOT NULL DEFAULT 0 CHECK(media_bitrate_kbps BETWEEN 0 AND 4294967295),
-    media_codec TEXT NOT NULL DEFAULT '',
-    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
-    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
-    complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
-    directory TEXT NOT NULL DEFAULT '',
-    UNIQUE(session_id, ed2k_hash)
-) STRICT;
-
-CREATE TABLE search_result_observations (
-    id INTEGER PRIMARY KEY,
-    result_id INTEGER NOT NULL REFERENCES search_results(id) ON DELETE CASCADE,
-    origin TEXT NOT NULL,
-    reporter_endpoint TEXT,
-    name TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
-    source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count BETWEEN 0 AND 4294967295),
-    complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(complete_source_count BETWEEN 0 AND 4294967295),
+    source_count INTEGER NOT NULL CHECK(source_count BETWEEN 0 AND 4294967295),
+    complete_source_count INTEGER NOT NULL CHECK(complete_source_count BETWEEN 0 AND 4294967295),
     source_client_id INTEGER CHECK(source_client_id IS NULL OR source_client_id BETWEEN 0 AND 4294967295),
     source_client_port INTEGER CHECK(source_client_port IS NULL OR source_client_port BETWEEN 1 AND 65535),
-    file_type TEXT NOT NULL DEFAULT '',
-    media_artist TEXT NOT NULL DEFAULT '',
-    media_album TEXT NOT NULL DEFAULT '',
-    media_title TEXT NOT NULL DEFAULT '',
-    media_length_seconds INTEGER NOT NULL DEFAULT 0 CHECK(media_length_seconds BETWEEN 0 AND 4294967295),
-    media_bitrate_kbps INTEGER NOT NULL DEFAULT 0 CHECK(media_bitrate_kbps BETWEEN 0 AND 4294967295),
-    media_codec TEXT NOT NULL DEFAULT '',
-    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+    file_type TEXT NOT NULL,
+    media_artist TEXT NOT NULL,
+    media_album TEXT NOT NULL,
+    media_title TEXT NOT NULL,
+    media_length_seconds INTEGER NOT NULL CHECK(media_length_seconds BETWEEN 0 AND 4294967295),
+    media_bitrate_kbps INTEGER NOT NULL CHECK(media_bitrate_kbps BETWEEN 0 AND 4294967295),
+    media_codec TEXT NOT NULL,
+    rating INTEGER NOT NULL CHECK(rating BETWEEN 0 AND 5),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
-    complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
-    directory TEXT NOT NULL DEFAULT '',
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    complete INTEGER NOT NULL CHECK(complete IN (0, 1)),
+    directory TEXT NOT NULL,
+    PRIMARY KEY(session_id, claim_id),
     CHECK((source_client_id IS NULL) = (source_client_port IS NULL))
-) STRICT;
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE search_result_observations (
+    session_id INTEGER NOT NULL,
+    claim_id INTEGER NOT NULL,
+    observation_id INTEGER NOT NULL,
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= first_seen_at_s),
+    observation_count INTEGER NOT NULL CHECK(observation_count > 0),
+    PRIMARY KEY(session_id, claim_id, observation_id),
+    FOREIGN KEY(session_id, claim_id) REFERENCES search_results(session_id, claim_id) ON DELETE CASCADE,
+    FOREIGN KEY(claim_id, observation_id) REFERENCES content_claim_observations(claim_id, id)
+) STRICT, WITHOUT ROWID;
 
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_path_content_idx ON shared_file_memberships(path_id, known_file_id);
@@ -1033,9 +1019,8 @@ WHERE delete_requested_at_s IS NOT NULL;
 CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
 CREATE INDEX kad_source_file_idx ON kad_source_publishes(ed2k_hash, observed_at_ms);
 CREATE INDEX kad_note_file_idx ON kad_note_publishes(ed2k_hash, observed_at_ms);
-CREATE INDEX search_results_session_idx ON search_results(session_id, id);
-CREATE INDEX search_result_observations_result_idx
-ON search_result_observations(result_id, observed_at_ms, id);
+CREATE INDEX search_result_observations_observation_idx
+ON search_result_observations(claim_id, observation_id);
 CREATE INDEX categories_temp_path_id_idx ON categories(temp_path_id);
 CREATE INDEX categories_destination_path_id_idx ON categories(destination_path_id);
 CREATE INDEX download_jobs_temp_path_idx ON download_jobs(selected_temp_path_id);
@@ -1046,7 +1031,7 @@ CREATE INDEX download_delivery_attempts_staging_path_id_idx ON download_delivery
 CREATE INDEX download_delivery_tombstones_original_path_id_idx ON download_delivery_tombstones(original_path_id);
 CREATE INDEX download_delivery_tombstones_tombstone_path_id_idx ON download_delivery_tombstones(tombstone_path_id);
 CREATE INDEX kad_keyword_publishes_known_file_id_idx ON kad_keyword_publishes(known_file_id);
-CREATE INDEX search_results_known_file_id_idx ON search_results(known_file_id);
+CREATE INDEX search_results_claim_idx ON search_results(claim_id);
 
 -- A cheap durable invalidation clock shared by every connection. It contains no
 -- parallel client state: session catalog projections are disposable derivatives.

@@ -59,7 +59,7 @@ impl EmulebbCore {
     pub async fn download_search_result(
         &self,
         search_id: &str,
-        hash: &str,
+        result_id: &str,
         request: SearchResultDownloadCreate,
     ) -> Result<Option<(bool, RetainedRead<DownloadSummary>)>> {
         let result = {
@@ -67,16 +67,12 @@ impl EmulebbCore {
             state
                 .searches
                 .get(search_id)
-                .and_then(|search| search.results.iter().find(|result| result.hash == hash))
+                .and_then(|search| search.results.iter().find(|result| result.id == result_id))
                 .cloned()
         };
         let Some(result) = result else {
             return Ok(None);
         };
-        ensure!(
-            result.size_bytes > 0,
-            "search result has no usable file size"
-        );
         let sources = search_result_source_hints(&result)
             .into_iter()
             .map(initial_source)
@@ -108,7 +104,7 @@ impl EmulebbCore {
             DownloadAdmissionInput {
                 hash: result.hash,
                 name: result.name,
-                size: Some(result.size_bytes),
+                size: result.size_bytes,
                 aich: None,
                 peers: MetadataDownloadInitialPeers {
                     sources,
@@ -261,11 +257,12 @@ mod tests {
 
     fn result(client_id: Option<u32>, client_port: Option<u16>) -> SearchResult {
         SearchResult {
+            id: "1".to_owned(),
             search_id: "1".to_string(),
             r#type: String::new(),
             hash: "00112233445566778899aabbccddeeff".to_string(),
             name: "Synthetic.bin".to_string(),
-            size_bytes: 1,
+            size_bytes: Some(1),
             sources: 1,
             complete_sources: 0,
             source_client_id: client_id,

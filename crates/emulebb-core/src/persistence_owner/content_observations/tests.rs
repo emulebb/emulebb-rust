@@ -53,8 +53,13 @@ async fn observed_content_is_ordered_and_closing_never_replays_it() {
     assert_eq!(page.items[0].receipt.observation_count, 2);
 }
 
-#[tokio::test]
-async fn committed_search_observation_publishes_after_caller_disconnect() {
+async fn search_fixture() -> (
+    MetadataStore,
+    Arc<Mutex<CoreState>>,
+    Arc<PersistenceOwner>,
+    SearchPublication,
+    Vec<MetadataContentObservationEvent>,
+) {
     let (store, state, owner) = setup();
     let request = crate::SearchCreate {
         query: "sample query".into(),
@@ -106,6 +111,13 @@ async fn committed_search_observation_publishes_after_caller_disconnect() {
         request,
         result: *result,
     };
+    (store, state, owner, publication, observations)
+}
+
+#[tokio::test]
+async fn committed_search_observation_publishes_after_caller_disconnect() {
+    let (store, state, owner, publication, observations) = search_fixture().await;
+    let search_id = publication.search_id.clone();
     let gate = Arc::new(PublicationGate::default());
     *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
     let caller = {
@@ -140,5 +152,90 @@ async fn committed_search_observation_publishes_after_caller_disconnect() {
         1
     );
     assert_eq!(usage(&owner), (0, 0));
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn projection_capacity_refusal_does_not_retry_or_commit() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    for index in 0..64 {
+        let name = format!("{index}{}", "x".repeat(1024));
+        publication.result.name = name.clone();
+        publication.result.observations[0].name = name.clone();
+        events[0].metadata.name = Some(name);
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+    }
+    let held_bytes = MAX_BYTES - 64 * 1024;
+    let quota = {
+        let admission = owner.admission.lock().unwrap();
+        let mut quota = admission.quota.lock().unwrap();
+        quota.bytes += held_bytes;
+        Arc::clone(&admission.quota)
+    };
+    let held = ByteLease {
+        quota,
+        bytes: held_bytes,
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        owner.observe_content(&events, Some(&publication)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(PersistenceError::Busy)));
+    assert_eq!(usage(&owner), (0, held_bytes));
+    assert_eq!(store.table_count("content_claim_observations").unwrap(), 64);
+    let mut after = 0;
+    let mut seen = 0;
+    loop {
+        let page = store.content_observations_page(1, after, 100).unwrap();
+        assert!(page.items.iter().all(|r| r.receipt.observation_count == 1));
+        seen += page.items.len();
+        if let Some(last) = page.items.last() {
+            after = last.receipt.observation_id;
+        }
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(seen, 64);
+    assert_eq!(
+        state.lock().await.searches[&publication.search_id].results[0]
+            .observations
+            .len(),
+        64
+    );
+    drop(held);
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn same_hash_different_sizes_publish_distinct_claim_ids() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    for size in [None, Some(0), Some(1024), Some(2048)] {
+        publication.result.size_bytes = size;
+        publication.result.observations[0].size_bytes = size;
+        events[0].claim.size_bytes = size;
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+    }
+    let state = state.lock().await;
+    let results = &state.searches[&publication.search_id].results;
+    assert_eq!(results.len(), 4);
+    for (index, result) in results.iter().enumerate() {
+        assert!(!result.id.is_empty());
+        assert!(
+            results[..index]
+                .iter()
+                .all(|previous| previous.id != result.id)
+        );
+    }
+    drop(state);
+    assert_eq!(store.load_searches().unwrap()[0].results.len(), 4);
     owner.close_and_drain().await.unwrap();
 }

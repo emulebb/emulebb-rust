@@ -542,6 +542,7 @@ pub(crate) fn search_result_response_with_options(
     let has_aich_hash = !aich_hashes.is_empty();
     let multiple_aich = aich_hashes.len() > 1;
     let mut response = json!({
+        "id": result.id,
         "searchId": result.search_id,
         "type": result.r#type,
         "hash": result.hash,
@@ -786,11 +787,12 @@ mod tests {
     #[test]
     fn search_result_response_emits_only_supported_evidence() {
         let mut result = SearchResult {
+            id: "1".to_owned(),
             search_id: "search-1".to_string(),
             r#type: "doc".to_string(),
             hash: "00112233445566778899aabbccddeeff".to_string(),
             name: "sample.bin".to_string(),
-            size_bytes: 1024,
+            size_bytes: Some(1024),
             sources: 2,
             complete_sources: 1,
             source_client_id: None,

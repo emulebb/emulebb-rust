@@ -111,7 +111,7 @@ pub(crate) async fn delete_searches(
 
 pub(crate) async fn download_search_result(
     State(state): State<RestState>,
-    Path((search_id, hash)): Path<(String, String)>,
+    Path((search_id, result_id)): Path<(String, String)>,
     body: Bytes,
 ) -> impl IntoResponse {
     let request = match optional_json_body::<SearchResultDownloadCreate>(&body) {
@@ -127,7 +127,7 @@ pub(crate) async fn download_search_result(
     };
     match state
         .core
-        .download_search_result(&search_id, &hash, request)
+        .download_search_result(&search_id, &result_id, request)
         .await
     {
         Ok(Some((created, download))) => super::resource::item(

@@ -12,7 +12,8 @@ use crate::{
 };
 
 const PAGE_ITEMS: usize = 100;
-const COLUMNS: &str = "o.id,o.claim_id,o.first_seen_at_s,o.last_seen_at_s,o.observation_count,
+pub(crate) const COLUMNS: &str =
+    "o.id,o.claim_id,o.first_seen_at_s,o.last_seen_at_s,o.observation_count,
     o.origin,o.reporter_endpoint,c.ed2k_hash,c.size_bytes,o.name,o.source_count,
     o.complete_source_count,o.source_client_id,o.source_client_port,o.file_type,
     o.media_artist,o.media_album,o.media_title,o.media_length_seconds,
@@ -26,6 +27,31 @@ impl MetadataStore {
         &self,
         events: &[MetadataContentObservationEvent],
     ) -> Result<Vec<MetadataContentObservationReceipt>> {
+        self.write_content_observations(events, None)
+            .map(|(receipts, _)| receipts)
+    }
+
+    /// Ingest raw facts and collecting-session membership in the same transaction.
+    /// A missing/terminal session still retains every valid corpus occurrence.
+    pub fn ingest_search_observations(
+        &self,
+        events: &[MetadataContentObservationEvent],
+        projection: &crate::MetadataSearchProjection,
+    ) -> Result<Option<i64>> {
+        ensure!(projection.session_id > 0, "invalid search identity");
+        ensure!(
+            !events.is_empty(),
+            "search projection requires observations"
+        );
+        self.write_content_observations(events, Some(projection))
+            .map(|(receipts, member)| member.then(|| receipts[0].claim_id))
+    }
+
+    fn write_content_observations(
+        &self,
+        events: &[MetadataContentObservationEvent],
+        projection: Option<&crate::MetadataSearchProjection>,
+    ) -> Result<(Vec<MetadataContentObservationReceipt>, bool)> {
         ensure!(
             events.len() <= CONTENT_OBSERVATION_BATCH_ITEMS,
             "too many content observations"
@@ -126,10 +152,19 @@ impl MetadataStore {
             )?;
             receipts.push(receipt);
         }
+        let projected = match projection {
+            Some(projection) => crate::search_store::persist_projection(
+                &tx,
+                projection,
+                &receipts,
+                &events.iter().map(|e| e.observed_at_s).collect::<Vec<_>>(),
+            )?,
+            None => false,
+        };
         tx.commit().map_err(|error| {
             anyhow::Error::new(error).context(crate::MetadataObservationCommitUncertain)
         })?;
-        Ok(receipts)
+        Ok((receipts, projected))
     }
 
     /// Keyset page of permanent provenance. Returns no more than 256 KiB of
@@ -222,7 +257,7 @@ fn decode_claim(hash: Vec<u8>, size: Option<Vec<u8>>) -> Result<MetadataContentC
     })
 }
 
-fn observation_from_row(row: &rusqlite::Row<'_>) -> Result<MetadataContentObservation> {
+pub(crate) fn observation_from_row(row: &rusqlite::Row<'_>) -> Result<MetadataContentObservation> {
     let origin: String = row.get(5)?;
     let origin = match origin.as_str() {
         "server" => MetadataObservationOrigin::Server,

@@ -422,11 +422,12 @@ pub struct SearchResultMedia {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
+    pub id: String,
     pub search_id: String,
     pub r#type: String,
     pub hash: String,
     pub name: String,
-    pub size_bytes: u64,
+    pub size_bytes: Option<u64>,
     pub sources: u32,
     pub complete_sources: u32,
     /// ED2K source identity embedded in a server search result. Kept internal
@@ -459,8 +460,7 @@ pub struct SearchResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResultObservation {
-    /// Backend that produced this observation (`local_index`, `server`,
-    /// `global`, or `kad`). A later transport-specific locator can refine this
+    /// Backend that produced this observation (`server`, `global`, or `kad`). A later transport-specific locator can refine this
     /// without changing the hash-level result identity.
     pub origin: String,
     /// Endpoint of the server or Kad node that reported this observation.
@@ -468,7 +468,7 @@ pub struct SearchResultObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reporter_endpoint: Option<String>,
     pub name: String,
-    pub size_bytes: u64,
+    pub size_bytes: Option<u64>,
     pub sources: u32,
     pub complete_sources: u32,
     #[serde(default, skip_serializing)]
@@ -497,6 +497,7 @@ impl SearchResult {
         observation: SearchResultObservation,
     ) -> Self {
         Self {
+            id: String::new(),
             search_id,
             r#type,
             hash,
@@ -539,6 +540,7 @@ impl SearchResult {
 
     pub(crate) fn merge_observations(&mut self, mut other: SearchResult) {
         debug_assert_eq!(self.hash, other.hash);
+        debug_assert_eq!(self.size_bytes, other.size_bytes);
         self.ensure_aggregate_observation();
         other.ensure_aggregate_observation();
         for observation in other.observations {
@@ -588,12 +590,6 @@ impl SearchResult {
         };
         self.name = majority_observation_name(&self.observations, &self.hash)
             .unwrap_or_else(|| normalize_ed2k_file_name(&display.name));
-        self.size_bytes = self
-            .observations
-            .iter()
-            .filter(|observation| observation.size_bytes != 0)
-            .max_by_key(|observation| observation_quality(observation, &self.hash))
-            .map_or(display.size_bytes, |observation| observation.size_bytes);
         self.sources =
             aggregate_observation_count(&self.observations, |observation| observation.sources);
         self.complete_sources = aggregate_observation_count(&self.observations, |observation| {
@@ -687,7 +683,7 @@ fn majority_observation_name(
     observations: &[SearchResultObservation],
     hash: &str,
 ) -> Option<String> {
-    let mut candidates = HashMap::<String, (usize, (bool, bool, u32, u32, bool, u8))>::new();
+    let mut candidates = HashMap::<String, (usize, (bool, u32, u32, bool, u8))>::new();
     for observation in observations {
         let normalized = normalize_ed2k_file_name(&observation.name);
         if normalized.is_empty() {
@@ -712,7 +708,7 @@ fn majority_observation_name(
 ///
 /// Each eD2K server reports its own independent population, so its strongest
 /// observation is summed with the strongest observation from every other
-/// server. Kad and local/index observations are estimates of an overlapping
+/// server. Kad observations are estimates of an overlapping
 /// population; their strongest value competes with (rather than adds to) the
 /// eD2K total.
 fn aggregate_observation_count(
@@ -726,8 +722,8 @@ fn aggregate_observation_count(
         let value = count(observation);
         if matches!(observation.origin.as_str(), "server" | "global") {
             // A canonical endpoint unifies connected and global observations
-            // from the same server. Legacy rows without provenance retain one
-            // conservative bucket per origin rather than being summed blindly.
+            // from the same server. Unknown reporters share a conservative
+            // bucket per origin rather than being summed blindly.
             let key = observation
                 .reporter_endpoint
                 .as_deref()
@@ -763,13 +759,12 @@ fn best_media_observation<'a>(
 fn observation_quality(
     observation: &SearchResultObservation,
     hash: &str,
-) -> (bool, bool, u32, u32, bool, u8) {
+) -> (bool, u32, u32, bool, u8) {
     (
         !observation.name.trim().is_empty() && !observation.name.eq_ignore_ascii_case(hash),
-        observation.origin != "local_index",
         observation.sources,
         observation.complete_sources,
-        observation.size_bytes != 0,
+        observation.size_bytes.is_some(),
         observation.rating,
     )
 }
@@ -804,7 +799,7 @@ mod search_result_name_tests {
             origin: origin.to_string(),
             reporter_endpoint: None,
             name: name.to_string(),
-            size_bytes: 1024,
+            size_bytes: Some(1024),
             sources: 1,
             complete_sources: 0,
             source_client_id: None,

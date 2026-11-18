@@ -2836,7 +2836,7 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
     store.add_file_all_time_uploaded(hash, 23).unwrap();
-    store
+    let session_id = store
         .create_search(&crate::MetadataSearchData {
             normalized_query: "scenario file".to_string(),
             spec: crate::MetadataSearchSpec {
@@ -2856,33 +2856,34 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
                 artist: String::new(),
             },
             resolved_method: None,
-            status: "completed".to_string(),
+            status: "running".to_string(),
             status_reason: None,
-            created_at_ms: 1,
-            updated_at_ms: 2,
-            completed_at_ms: Some(2),
-            results: vec![crate::MetadataSearchResult {
-                file_hash: hash.to_string(),
-                name: "Scenario.File.bin".to_string(),
-                size_bytes: 1,
-                source_count: 1,
-                complete_source_count: 1,
-                file_type: String::new(),
-                media_artist: String::new(),
-                media_album: String::new(),
-                media_title: String::new(),
-                media_length_seconds: 0,
-                media_bitrate_kbps: 0,
-                media_codec: String::new(),
-                rating: 0,
-                aich_hash: String::new(),
-                complete: false,
-                directory: String::new(),
-                observations: vec![crate::MetadataSearchResultObservation {
-                    origin: "local_index".to_string(),
-                    reporter_endpoint: None,
-                    name: "Scenario.File.bin".to_string(),
-                    size_bytes: 1,
+            created_at_s: 1,
+            updated_at_s: 2,
+            completed_at_s: None,
+        })
+        .unwrap();
+    store
+        .ingest_search_observations(
+            &[crate::MetadataContentObservationEvent {
+                claim: crate::MetadataContentClaim {
+                    hash: hex::decode(hash).unwrap().try_into().unwrap(),
+                    size_bytes: Some(1),
+                },
+                origin: crate::MetadataObservationOrigin::Server,
+                reporter_endpoint: Some("192.0.2.4:4661".parse().unwrap()),
+                metadata: crate::MetadataContentMetadata {
+                    name: Some("Scenario.File.bin".into()),
+                    source_count: Some(1),
+                    complete_source_count: Some(1),
+                    ..Default::default()
+                },
+                observed_at_s: 2,
+            }],
+            &crate::MetadataSearchProjection {
+                session_id,
+                summary: crate::MetadataSearchResultSummary {
+                    name: "Scenario.File.bin".into(),
                     source_count: 1,
                     complete_source_count: 1,
                     source_client_id: None,
@@ -2898,10 +2899,9 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
                     aich_hash: String::new(),
                     complete: false,
                     directory: String::new(),
-                    observed_at_ms: 2,
-                }],
-            }],
-        })
+                },
+            },
+        )
         .unwrap();
 
     assert!(
@@ -2913,7 +2913,7 @@ fn deleting_last_job_preserves_known_file_knowledge_and_search_links() {
     assert_eq!(store.table_count("known_files").unwrap(), 1);
     assert!(store.latest_download_job(hash).unwrap().is_none());
     let retained:(String,i64,bool)=store.connection().unwrap().query_row(
-        "SELECT display_name,all_time_uploaded_bytes,EXISTS(SELECT 1 FROM search_results WHERE known_file_id=known_files.id) FROM known_files",
+        "SELECT display_name,all_time_uploaded_bytes,EXISTS(SELECT 1 FROM search_results r JOIN content_claims c ON c.id=r.claim_id WHERE c.ed2k_hash=known_files.ed2k_hash) FROM known_files",
         [],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
     assert_eq!(retained, ("Scenario.File.bin".into(), 23, true));
 }

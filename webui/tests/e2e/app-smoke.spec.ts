@@ -483,6 +483,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
         limit: 250,
         items: searchId === "2"
           ? [{
+              id: "13",
               hash: resultHash,
               displayName: "Linux Guide.pdf",
               sizeBytes: 1_048_576,
@@ -496,7 +497,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
                 { origin: "global", rawName: "Linux Manual.pdf", normalizedName: "Linux Manual.pdf", sizeBytes: 1_048_576, sources: 5, completeSources: 2, fileType: "doc", media: { artist: "Example Author", album: "", title: "Linux Manual", lengthSeconds: 0, bitrateKbps: 0, codec: "PDF" }, rating: 3, aichHash: null, complete: false, directory: "", observedAt: "2026-10-06T12:00:01Z" }
               ]
             }]
-          : [{ hash: "00112233445566778899AABBCCDDEEFF", displayName: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
+          : [{ id: "14", hash: "00112233445566778899AABBCCDDEEFF", displayName: "Older Result.bin", sizeBytes: 4096, sources: 1 }]
       });
       return;
     }
@@ -518,7 +519,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await route.fulfill({ json: { data: downloadRows, meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } } });
       return;
     }
-    if (method === "POST" && path === `searches/2/results/${resultHash}/operations/download`) {
+    if (method === "POST" && path === `searches/2/results/13/download`) {
       record();
       downloadRows = [{ id: "2", hash: resultHash.toLowerCase(), name: "Linux Guide.pdf", state: "downloading",
         sizeBytes: 1_048_576, progress: 4096 / 1_048_576, intent: "started", category: null, createdAt: 1, updatedAt: 1, completedAt: null }];
@@ -670,7 +671,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     new URLSearchParams(request.query).get("sort") === "sources" &&
     new URLSearchParams(request.query).get("order") === "desc"
   )).toBe(true);
-  const searchDownload = requests.find((request) => request.path === `searches/2/results/${resultHash}/operations/download`);
+  const searchDownload = requests.find((request) => request.path === `searches/2/results/13/download`);
   expect(searchDownload).toBeDefined();
   expect(JSON.parse(searchDownload?.body ?? "{}")).toMatchObject({ intent: "started", redownload: false });
   expect(requests.some((request) => request.method === "DELETE" && request.path === "searches/2")).toBe(true);

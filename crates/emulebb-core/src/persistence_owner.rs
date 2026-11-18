@@ -117,7 +117,7 @@ enum Command {
 }
 
 enum Response {
-    ContentObserved,
+    ContentObserved(Result<(), PersistenceError>),
     Friend(Option<Friend>),
     Category(Result<Option<crate::Category>, CategoryNameConflict>),
     LibraryTags(
@@ -297,7 +297,10 @@ enum DbCommand {
     Add(Friend),
     Delete(Friend),
     Category(category::CategoryDbCommand),
-    ContentObservations(Vec<emulebb_metadata::MetadataContentObservationEvent>),
+    ContentObservations {
+        events: Vec<emulebb_metadata::MetadataContentObservationEvent>,
+        projection: Option<emulebb_metadata::MetadataSearchProjection>,
+    },
     LibraryTags(crate::LibraryTagRequest),
     KadLoad,
     KadIdentity,
@@ -326,7 +329,7 @@ enum KadMergeOutcome {
 }
 
 enum DbResponse {
-    ContentObserved,
+    ContentObserved(Option<i64>),
     Friend(Friend, bool),
     Category(category::CategoryWrite),
     LibraryTags(library_tags::Outcome),
@@ -476,14 +479,14 @@ impl PersistenceOwner {
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
-                    if matches!(&request.command, DbCommand::ContentObservations(_)) {
+                    if matches!(&request.command, DbCommand::ContentObservations { .. }) {
                         let DbRequest { command, response } = request;
-                        let DbCommand::ContentObservations(events) = command else { unreachable!() };
+                        let DbCommand::ContentObservations { events, projection } = command else { unreachable!() };
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            content_observations::execute(&store, &events)
+                            content_observations::execute(&store, &events, projection.as_ref())
                         }));
                         let result = match outcome {
-                            Ok(value) => value.map(|()| DbResponse::ContentObserved),
+                            Ok(value) => value.map(DbResponse::ContentObserved),
                             Err(_) => Err(PersistenceError::CommitUnknown),
                         };
                         let _ = response.send(result);
@@ -621,7 +624,7 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::ContentObservations(_) | DbCommand::LibraryTags(_)
+                            DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
@@ -667,7 +670,7 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::ContentObservations(_) | DbCommand::LibraryTags(_)
+                                DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                                 | DbCommand::KadLoad
                                 | DbCommand::KadIdentity
@@ -694,7 +697,7 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::ContentObservations(_) | DbCommand::LibraryTags(_)
+                            DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
@@ -1156,7 +1159,7 @@ async fn process(
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
-            DbResponse::ContentObserved
+            DbResponse::ContentObserved(_)
             | DbResponse::Friend(..)
             | DbResponse::Category(..)
             | DbResponse::LibraryTags(..) => Err(PersistenceError::Worker),

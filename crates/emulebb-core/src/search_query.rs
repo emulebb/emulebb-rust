@@ -78,12 +78,12 @@ pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &Se
             }
         }
         if let Some(min) = request.min_size_bytes
-            && result.size_bytes < min
+            && result.size_bytes.is_none_or(|size| size < min)
         {
             return false;
         }
         if let Some(max) = request.max_size_bytes
-            && result.size_bytes > max
+            && result.size_bytes.is_none_or(|size| size > max)
         {
             return false;
         }
@@ -161,7 +161,7 @@ pub(crate) fn search_result_from_ed2k(
         origin: origin.to_string(),
         reporter_endpoint: reporter_endpoint.map(|endpoint| endpoint.to_string()),
         name,
-        size_bytes: file.file_size.unwrap_or_default(),
+        size_bytes: file.file_size,
         sources: file.source_count.unwrap_or_default(),
         complete_sources: file.complete_source_count.unwrap_or_default(),
         source_client_id,
@@ -203,9 +203,9 @@ pub(crate) fn search_result_from_kad(
     let first_name = names.next().unwrap_or_else(|| hash.clone());
     let aich_hash = result
         .aich_candidate
-        .map(|candidate| hex::encode(candidate.root))
+        .map(|candidate| data_encoding::BASE32_NOPAD.encode(&candidate.root))
         .unwrap_or_default();
-    let size_bytes = result.size.unwrap_or_default();
+    let size_bytes = result.size;
     let sources = result.source_count.unwrap_or_default();
     let file_type =
         refined_result_file_type(result.file_type.as_deref().unwrap_or_default(), &first_name);
@@ -267,7 +267,7 @@ mod tests {
                 origin: "unknown".to_string(),
                 reporter_endpoint: None,
                 name: name.to_string(),
-                size_bytes,
+                size_bytes: Some(size_bytes),
                 sources,
                 complete_sources: 0,
                 source_client_id: None,
@@ -444,10 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn hash_merge_retains_observations_and_recomputes_the_aggregate() {
-        let mut local = result("local-name.bin", 0, 1);
+    fn same_claim_merge_retains_observations_and_recomputes_the_aggregate() {
+        let mut first = result("first-name.bin", 4_096, 1);
         let mut network = result("network-name.bin", 4_096, 12);
-        local.observations[0].origin = "local_index".to_string();
+        first.observations[0].origin = "server".to_string();
+        first.observations[0].reporter_endpoint = Some("192.0.2.4:4661".into());
+        network.observations[0].reporter_endpoint = Some("192.0.2.4:4661".into());
         network.observations[0].origin = "global".to_string();
         network.observations[0].complete_sources = 4;
         network.observations[0].file_type = "Pro".to_string();
@@ -463,18 +465,18 @@ mod tests {
         network.observations[0].aich_hash = "A".repeat(32);
         let expected_media = network.observations[0].media.clone();
 
-        local.merge_observations(network.clone());
-        local.merge_observations(network);
+        first.merge_observations(network.clone());
+        first.merge_observations(network);
 
-        assert_eq!(local.observations.len(), 2);
-        assert_eq!(local.name, "network-name.bin");
-        assert_eq!(local.size_bytes, 4_096);
-        assert_eq!(local.sources, 12);
-        assert_eq!(local.complete_sources, 4);
-        assert_eq!(local.file_type, "Pro");
-        assert_eq!(local.media, expected_media);
-        assert_eq!(local.rating, 3);
-        assert_eq!(local.aich_hash, "A".repeat(32));
+        assert_eq!(first.observations.len(), 2);
+        assert_eq!(first.name, "network-name.bin");
+        assert_eq!(first.size_bytes, Some(4_096));
+        assert_eq!(first.sources, 12);
+        assert_eq!(first.complete_sources, 4);
+        assert_eq!(first.file_type, "Pro");
+        assert_eq!(first.media, expected_media);
+        assert_eq!(first.rating, 3);
+        assert_eq!(first.aich_hash, "A".repeat(32));
     }
 
     #[test]
@@ -621,7 +623,7 @@ mod tests {
         assert_eq!(result.search_id, "42");
         assert_eq!(result.hash, file_hash.to_string());
         assert_eq!(result.name, "Alternate File.bin");
-        assert_eq!(result.size_bytes, 1234);
+        assert_eq!(result.size_bytes, Some(1234));
         assert_eq!(result.sources, 9);
         assert_eq!(result.complete_sources, 0);
         assert_eq!(result.file_type, "Audio");
@@ -631,7 +633,10 @@ mod tests {
         assert_eq!(result.media.length_seconds, 321);
         assert_eq!(result.media.bitrate_kbps, 192);
         assert_eq!(result.media.codec, "MP3");
-        assert_eq!(result.aich_hash, hex::encode([0xAB; 20]));
+        assert_eq!(
+            result.aich_hash,
+            data_encoding::BASE32_NOPAD.encode(&[0xAB; 20])
+        );
         assert_eq!(result.observations.len(), 2);
         assert!(result.observations.iter().all(|observation| {
             observation.reporter_endpoint.as_deref() == Some("203.0.113.9:4665")

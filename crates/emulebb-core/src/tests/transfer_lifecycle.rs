@@ -501,10 +501,11 @@ async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
     )
     .await;
 
+    let result_id = core.search(&search.id).await.unwrap().results[0].id.clone();
     let (created, download) = core
         .download_search_result(
             &search.id,
-            "00112233445566778899aabbccddeeff",
+            &result_id,
             SearchResultDownloadCreate::default(),
         )
         .await
@@ -546,7 +547,7 @@ async fn search_result_admission_is_lazy_and_retains_diagnostic_names() {
 }
 
 #[tokio::test]
-async fn download_search_result_rejects_missing_file_size() {
+async fn unknown_size_search_result_creates_waiting_metadata_job() {
     let runtime_dir = unique_runtime_dir("emulebb-core-download-network-missing-size");
     let index = FileIndex::open(runtime_dir.join("metadata.sqlite")).unwrap();
     let file_hash = "ffeeddccbbaa99887766554433221100";
@@ -570,19 +571,19 @@ async fn download_search_result_rejects_missing_file_size() {
         .unwrap();
     publish_server_search_result(&core, &search, file_hash, "Missing.Size.bin", None, None).await;
 
-    let error = core
-        .download_search_result(&search.id, file_hash, SearchResultDownloadCreate::default())
+    let result_id = core.search(&search.id).await.unwrap().results[0].id.clone();
+    let (created, download) = core
+        .download_search_result(
+            &search.id,
+            &result_id,
+            SearchResultDownloadCreate::default(),
+        )
         .await
-        .unwrap_err();
-
-    assert_eq!(error.to_string(), "search result has no usable file size");
-    assert!(
-        core.download_page(Default::default())
-            .await
-            .unwrap()
-            .downloads
-            .is_empty()
-    );
+        .unwrap()
+        .unwrap();
+    assert!(created);
+    assert_eq!(download.size_bytes, None);
+    assert_eq!(download.state, DownloadState::WaitingMetadata);
 }
 
 #[tokio::test]
@@ -622,8 +623,13 @@ async fn download_search_result_honors_corroborated_kad_aich() {
         .kad_aich_search_votes
         .insert((file_hash.to_string(), search.id.clone()), votes);
 
+    let result_id = core.search(&search.id).await.unwrap().results[0].id.clone();
     let (_, download) = core
-        .download_search_result(&search.id, file_hash, SearchResultDownloadCreate::default())
+        .download_search_result(
+            &search.id,
+            &result_id,
+            SearchResultDownloadCreate::default(),
+        )
         .await
         .unwrap()
         .unwrap();

@@ -122,7 +122,6 @@ async fn live_search_collects_network_results_independently_of_passive_index_set
         assert!(search.results.is_empty());
         assert!(
             core.metadata_store.load_searches().unwrap()[0]
-                .data
                 .results
                 .is_empty()
         );
@@ -670,30 +669,27 @@ async fn deleting_searches_cancels_pending_network_work() {
         )
     };
 
-    crate::search_state::publish_observation(
-        &core.state,
+    let mut raw = crate::search_observations::tests::raw_file();
+    raw.file_name = Some("Live Result.bin".into());
+    raw.file_size = Some(4096);
+    raw.source_count = Some(7);
+    let reporter = "192.0.2.4:4661".parse().unwrap();
+    let projected = crate::search_query::search_result_from_ed2k(
         &first.id,
         &first_request,
-        SearchResult {
-            search_id: first.id.clone(),
-            r#type: String::new(),
-            hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "Live Result.bin".to_string(),
-            size_bytes: 4_096,
-            sources: 7,
-            complete_sources: 2,
-            source_client_id: None,
-            source_client_port: None,
-            file_type: "Pro".to_string(),
-            media: SearchResultMedia::default(),
-            rating: 0,
-            aich_hash: String::new(),
-            complete: false,
-            directory: String::new(),
-            observations: Vec::new(),
-        },
-    )
-    .await;
+        "server",
+        Some(reporter),
+        raw.clone(),
+    );
+    let update = crate::search_observations::ed2k(
+        projected,
+        emulebb_metadata::MetadataObservationOrigin::Server,
+        Some(reporter),
+        &raw,
+    );
+    core.apply_search_live_update(&first.id, &first_request, update)
+        .await
+        .unwrap();
     assert_eq!(core.search(&first.id).await.unwrap().results.len(), 1);
 
     assert!(core.delete_search(&first.id).await.unwrap());
@@ -2109,7 +2105,7 @@ async fn search_state_survives_core_restart_and_downloads_result() {
     let (_, download) = reloaded
         .download_search_result(
             &search_id,
-            &file_hash,
+            &search.results[0].id,
             SearchResultDownloadCreate::default(),
         )
         .await
