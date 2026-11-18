@@ -579,7 +579,9 @@ impl EmulebbCore {
         &self,
         edit: ExplicitRootEdit,
     ) -> Result<SharedDirectories> {
+        tracing::debug!(phase = "implicitSync", "explicit root replacement");
         shared_directories::sync_implicit_shared_directory_roots(self).await?;
+        tracing::debug!(phase = "preparation", "explicit root replacement");
         loop {
             let expected = self.state.lock().await.shared_directories.clone();
             let roots = match &edit {
@@ -636,6 +638,7 @@ impl EmulebbCore {
             let owner = self
                 .persistence_owner
                 .owner(&self.metadata_store, &self.state)?;
+            tracing::debug!(phase = "ownerCommit", "explicit root replacement");
             if owner
                 .replace_explicit_roots(
                     crate::persistence_owner::category::CategoryCommand::ReplaceRoots {
@@ -649,6 +652,7 @@ impl EmulebbCore {
                 )
                 .await?
             {
+                tracing::debug!(phase = "completed", "explicit root replacement");
                 return Ok(self.shared_directories().await);
             }
         }
