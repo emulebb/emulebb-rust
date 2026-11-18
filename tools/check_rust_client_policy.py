@@ -1415,7 +1415,12 @@ def check_container_health_contract(
             (dockerfile_source, "bounded Docker healthcheck"),
         'CMD ["/usr/local/bin/emulebb-rust-healthcheck"]':
             (dockerfile_source, "exec-form healthcheck command"),
-        "/dev/tcp/127.0.0.1/20017": (probe_source, "loopback-only probe"),
+        ".emulebb-rest-listener.json": (probe_source, "runtime listener receipt"),
+        '/dev/tcp/"$host"/"$port"': (probe_source, "receipt-selected listener probe"),
+        '"x-emulebb-instance"': (routes_source, "listener instance response identity"),
+        'test("^[0-9a-f]{32}$")': (probe_source, "bounded receipt identity"),
+        ".probePort >= 1 and .probePort <= 65535": (probe_source, "bounded listener port"),
+        '[[ $actual_instance == "$expected_instance" ]]': (probe_source, "stale receipt refusal"),
         "GET /healthz HTTP/1.1": (probe_source, "health endpoint request"),
         "HTTP/1.1 204 No Content": (probe_source, "strict ready-status check"),
     }

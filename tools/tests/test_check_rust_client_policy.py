@@ -731,10 +731,22 @@ class TestContainerHealthContract(unittest.TestCase):
     def test_rejects_authenticated_or_unbounded_probe(self) -> None:
         errors = CHECKER.check_container_health_contract("", "", "")
 
-        self.assertEqual(len(errors), 9)
+        self.assertEqual(len(errors), 14)
         self.assertTrue(any("outside API-key" in error for error in errors))
         self.assertTrue(any("bounded Docker" in error for error in errors))
-        self.assertTrue(any("loopback-only" in error for error in errors))
+        self.assertTrue(any("receipt-selected" in error for error in errors))
+        self.assertTrue(any("stale receipt" in error for error in errors))
+
+    def test_receipt_identity_and_address_checks_are_required(self) -> None:
+        probe = (CHECKER.ROOT / "packaging/docker/root/usr/local/bin/emulebb-rust-healthcheck").read_text(encoding="utf-8")
+        for fragment, diagnostic in [
+            ('[[ $actual_instance == "$expected_instance" ]]', "stale receipt"),
+            ('test("^[0-9a-f]{32}$")', "bounded receipt identity"),
+            (".probePort >= 1 and .probePort <= 65535", "bounded listener port"),
+        ]:
+            with self.subTest(diagnostic=diagnostic):
+                errors = CHECKER.check_container_health_contract(probe_text=probe.replace(fragment, ""))
+                self.assertTrue(any(diagnostic in error for error in errors))
 
 
 class TestReleaseBuildIdentity(unittest.TestCase):

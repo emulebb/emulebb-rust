@@ -71,6 +71,10 @@ async fn healthz_is_unauthenticated_and_tracks_readiness() {
         .await
         .unwrap();
     assert_eq!(ready.status(), StatusCode::NO_CONTENT);
+    assert_eq!(ready.headers()["x-emulebb-instance"], core.instance_id());
+    assert_eq!(core.clone().instance_id(), core.instance_id());
+    let another = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    assert_ne!(another.instance_id(), core.instance_id());
     assert_eq!(
         ready.headers().get("x-content-type-options").unwrap(),
         "nosniff"
@@ -93,6 +97,10 @@ async fn healthz_is_unauthenticated_and_tracks_readiness() {
         .await
         .unwrap();
     assert_eq!(shutting_down.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        shutting_down.headers()["x-emulebb-instance"],
+        core.instance_id()
+    );
 }
 
 #[tokio::test]

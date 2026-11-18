@@ -12,6 +12,12 @@ impl std::fmt::Display for CommittedSettingsRefreshFailure {
 impl std::error::Error for CommittedSettingsRefreshFailure {}
 
 impl EmulebbCore {
+    /// Ephemeral identity shared by this running core and all its handles.
+    /// Hosts use it to distinguish a live listener from a stale readiness receipt.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
     /// Identify a saved settings update whose subsequent runtime refresh failed.
     pub fn settings_update_was_committed(error: &anyhow::Error) -> bool {
         error.is::<CommittedSettingsRefreshFailure>()

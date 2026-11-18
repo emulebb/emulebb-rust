@@ -13,5 +13,6 @@ workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+ipnet = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]

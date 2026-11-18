@@ -39,6 +39,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    #[command(about = "Read or prepare one saved application setting while the daemon is stopped")]
+    Settings {
+        #[command(subcommand)]
+        operation: SettingsCommand,
+    },
     #[command(
         about = "Reconcile imported/cached hashes with file metadata; never hash or start networking"
     )]
@@ -59,9 +64,35 @@ enum CliCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SettingsCommand {
+    Get { key: String },
+    Set { key: String, value: String },
+    Reset { key: String },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(CliCommand::Settings { operation }) = &cli.command {
+        use emulebb_daemon::{OfflineSettingsOperation, run_offline_settings};
+        let path = cli
+            .profile
+            .clone()
+            .context("--profile is required for offline settings commands")?;
+        let operation = match operation {
+            SettingsCommand::Get { key } => OfflineSettingsOperation::Get { key: key.clone() },
+            SettingsCommand::Set { key, value } => OfflineSettingsOperation::Set {
+                key: key.clone(),
+                value: value.clone(),
+            },
+            SettingsCommand::Reset { key } => OfflineSettingsOperation::Reset { key: key.clone() },
+        };
+        if let Some(value) = run_offline_settings(path, operation)? {
+            println!("{value}");
+        }
+        return Ok(());
+    }
     let mut profile = match cli.command.as_ref() {
         Some(_) => {
             let profile_dir = cli

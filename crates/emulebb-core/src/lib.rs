@@ -425,6 +425,7 @@ enum Ed2kServerCallbackDispatch {
 #[derive(Clone)]
 pub struct EmulebbCore {
     started_at: Instant,
+    instance_id: Arc<str>,
     version: String,
     metadata_store: MetadataStore,
     index: Arc<Mutex<FileIndex>>,
@@ -749,6 +750,7 @@ impl EmulebbCore {
         let ed2k_reachability = ed2k_reachability_authority.reader();
         Ok(Self {
             started_at: Instant::now(),
+            instance_id: uuid::Uuid::new_v4().simple().to_string().into(),
             version: version.into(),
             metadata_store,
             index: Arc::new(Mutex::new(index)),

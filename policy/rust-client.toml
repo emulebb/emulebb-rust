@@ -126,6 +126,9 @@ current_model_note = "incoming and category delivery are implemented operator-fa
 
 [ipv4_only]
 allowed_ipv6_mentions = [
+    # Control-service address reporting mirrors its existing SocketAddr listener;
+    # this does not enable IPv6 in the eD2K/Kad data plane.
+    "crates/emulebb-daemon/src/listener_receipt.rs",
     "crates/emulebb-core/src/lib.rs",
     "crates/emulebb-core/src/kad_buddy.rs",
     "crates/emulebb-core/src/kad_hello.rs",
