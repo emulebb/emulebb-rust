@@ -178,7 +178,9 @@ impl EmulebbCore {
         &self,
         query: SharedFileListQuery,
     ) -> Result<SharedFileListPage> {
+        tracing::debug!(phase = "publicationContextWait", "shared-file read");
         let context = self.shared_file_publication_context().await;
+        tracing::debug!(phase = "metadataWait", "shared-file read");
         let page = self
             .ed2k_transfers
             .query_share_entries(MetadataSharedFileQuery {
@@ -189,6 +191,7 @@ impl EmulebbCore {
                 count_total: true,
             })
             .await?;
+        tracing::debug!(phase = "metadataReady", "shared-file read");
         Ok(SharedFileListPage {
             items: page
                 .entries

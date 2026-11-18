@@ -322,8 +322,19 @@ impl MetadataStore {
         root: &Path,
         paths: &[(PathBuf, PathBuf, NativeFileFingerprint)],
     ) -> Result<()> {
+        let started = std::time::Instant::now();
+        tracing::debug!(
+            phase = "connectionWait",
+            paths = paths.len(),
+            "root admission"
+        );
         let native_root = NativePath::from(root);
         let mut conn = self.connection()?;
+        tracing::debug!(
+            phase = "connectionAcquired",
+            elapsed_ms = started.elapsed().as_millis(),
+            "root admission"
+        );
         let tx = conn.transaction()?;
         let root_id: i64 = tx.query_row(
             "SELECT shared_directory_roots.id
@@ -416,6 +427,11 @@ impl MetadataStore {
             params![root_id, now],
         )?;
         tx.execute("DELETE FROM temp.scanned_membership_paths", [])?;
+        tracing::debug!(
+            phase = "membershipsBound",
+            elapsed_ms = started.elapsed().as_millis(),
+            "root admission"
+        );
         tx.execute(
             "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_ms = ?2
              WHERE id = ?1",
