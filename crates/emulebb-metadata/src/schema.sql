@@ -1316,3 +1316,6 @@ CREATE TABLE search_field_quality (
     PRIMARY KEY(session_id,claim_id,field),
     FOREIGN KEY(session_id,claim_id) REFERENCES search_results(session_id,claim_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+
+CREATE INDEX search_sessions_collecting_idx ON search_sessions(status,id)
+WHERE status IN ('queued','running');

@@ -363,3 +363,107 @@ fn independent_connections_allocate_distinct_session_ids() {
     assert_ne!(a, b);
     assert_eq!(first.load_searches().unwrap().len(), 2);
 }
+
+#[test]
+fn startup_interruption_is_durable_atomic_idempotent_and_preserves_terminal_history() {
+    let store = MetadataStore::in_memory().unwrap();
+    let running = store.create_search(&sample_search()).unwrap();
+    let mut queued_header = sample_search();
+    queued_header.status = "queued".into();
+    let queued = store.create_search(&queued_header).unwrap();
+    let mut completed = sample_search();
+    completed.status = "completed".into();
+    completed.completed_at_s = Some(3);
+    let terminal = store.create_search(&completed).unwrap();
+    let claim = project(&store, running, Some(12), "Sample.bin");
+    store.connection().unwrap().execute_batch("CREATE TRIGGER fail_interruption BEFORE UPDATE OF status ON search_sessions WHEN old.status='running' BEGIN SELECT RAISE(ABORT,'injected interruption failure'); END;").unwrap();
+    assert!(store.interrupt_collecting_searches(200).is_err());
+    assert_eq!(
+        store.search_header(queued).unwrap().unwrap().data.status,
+        "queued"
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_interruption")
+        .unwrap();
+    assert_eq!(store.interrupt_collecting_searches(200).unwrap(), 2);
+    assert_eq!(store.interrupt_collecting_searches(300).unwrap(), 0);
+    for id in [running, queued] {
+        let header = store.search_header(id).unwrap().unwrap();
+        assert_eq!(header.data.status, "error");
+        assert_eq!(
+            header.data.status_reason.as_deref(),
+            Some("interrupted-by-restart")
+        );
+        assert_eq!(header.data.updated_at_s, 200);
+    }
+    assert_eq!(
+        store.search_header(terminal).unwrap().unwrap().data,
+        completed
+    );
+    assert!(
+        store
+            .search_result_header(running, claim)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .search_result_observations_page(running, claim, 0, 1)
+            .unwrap()
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn startup_interruption_seeks_collecting_index_among_one_hundred_thousand_terminal_sessions() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut completed = sample_search();
+    completed.status = "completed".into();
+    completed.completed_at_s = Some(3);
+    let terminal = store.create_search(&completed).unwrap();
+    let conn = store.connection().unwrap();
+    let columns = conn
+        .prepare(
+            "SELECT name FROM pragma_table_info('search_sessions') WHERE name!='id' ORDER BY cid",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let names = columns.join(",");
+    let selected = columns
+        .iter()
+        .map(|name| format!("s.{name}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.execute(&format!("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
+        INSERT INTO search_sessions({names}) SELECT {selected} FROM search_sessions s CROSS JOIN n WHERE s.id=?1"),[terminal]).unwrap();
+    drop(conn);
+    let collecting = store.create_search(&sample_search()).unwrap();
+    let conn = store.connection().unwrap();
+    let mut statement = conn.prepare(INTERRUPT_COLLECTING_SQL).unwrap();
+    assert_eq!(statement.execute([100]).unwrap(), 1);
+    assert_eq!(
+        statement.get_status(rusqlite::StatementStatus::FullscanStep),
+        0
+    );
+    assert_eq!(statement.get_status(rusqlite::StatementStatus::Sort), 0);
+    assert!(statement.get_status(rusqlite::StatementStatus::VmStep) < 1000);
+    drop(statement);
+    drop(conn);
+    assert_eq!(
+        store
+            .search_header(collecting)
+            .unwrap()
+            .unwrap()
+            .data
+            .status,
+        "error"
+    );
+}

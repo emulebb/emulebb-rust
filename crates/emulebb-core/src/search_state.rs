@@ -140,13 +140,7 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
     let header = search.data;
     let created_at = timestamp_s(header.created_at_s, "search created_at_s")?;
     let updated_at = timestamp_s(header.updated_at_s, "search updated_at_s")?;
-    let (status, status_reason) = match header.status.as_str() {
-        "queued" | "running" => (
-            "error".to_owned(),
-            Some("interrupted-by-restart".to_owned()),
-        ),
-        _ => (header.status, header.status_reason),
-    };
+    let (status, status_reason) = (header.status, header.status_reason);
     let s = header.spec;
     let spec = SearchSpec {
         query: s.query,

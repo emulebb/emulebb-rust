@@ -52,12 +52,12 @@ pub(crate) fn load_core_state(
         servers.insert(endpoint, server_from_metadata(server));
     }
 
+    metadata.interrupt_collecting_searches(chrono::Utc::now().timestamp())?;
     let searches = crate::search_state::load_searches(metadata)?;
 
     Ok(CoreState {
         searches,
-        // Persisted searches are terminal (in-flight states are converted to
-        // interrupted errors on load), so no cancellation handles survive.
+        // Startup durably ends interrupted collection; no cancellation handles survive.
         search_cancels: HashMap::new(),
         // Search-result responder provenance is session-local. A restored
         // display row must never become a fresh network trust vote.

@@ -13,6 +13,11 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
+pub(super) const INTERRUPT_COLLECTING_SQL: &str =
+    "UPDATE search_sessions SET status='error',status_reason='interrupted-by-restart',
+                updated_at_s=max(updated_at_s,?1),completed_at_s=NULL
+             WHERE status IN ('queued','running')";
+
 impl super::MetadataStore {
     /// Allocate a never-reused session identity and commit its initial contents.
     /// Failed transactions publish neither the record nor its identity.
@@ -101,6 +106,15 @@ impl super::MetadataStore {
             .context("search no longer exists")?;
         tx.commit()?;
         Ok(session_id)
+    }
+
+    /// End collecting sessions once at process startup, without loading history.
+    /// Terminal sessions and retained evidence are unchanged.
+    pub fn interrupt_collecting_searches(&self, now_s: i64) -> Result<usize> {
+        ensure!(now_s >= 0, "negative search interruption timestamp");
+        Ok(self
+            .connection()?
+            .execute(INTERRUPT_COLLECTING_SQL, [now_s])?)
     }
 
     pub fn load_searches(&self) -> Result<Vec<MetadataSearch>> {

@@ -1,4 +1,8 @@
 use super::*;
+use emulebb_metadata::{
+    MetadataSearchHeader, MetadataSearchPage, MetadataSearchResultHeader,
+    MetadataSearchResultObservation,
+};
 
 impl EmulebbCore {
     pub async fn create_search(&self, mut request: SearchCreate) -> Result<Search> {
@@ -122,6 +126,69 @@ impl EmulebbCore {
             self.spawn_search_queue_drain();
         }
         Ok(search)
+    }
+
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_headers_page(
+        &self,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<crate::LibraryReply<MetadataSearchPage<MetadataSearchHeader>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_headers_page(before, limit).await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_header(
+        &self,
+        id: i64,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchHeader>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_header(id).await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_result_headers_page(
+        &self,
+        session: i64,
+        after: i64,
+        limit: usize,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchPage<MetadataSearchResultHeader>>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .search_result_headers_page(session, after, limit)
+            .await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_result_header(
+        &self,
+        session: i64,
+        claim: i64,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchResultHeader>>> {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.search_result_header(session, claim).await?)
+    }
+    /// Indexed, byte-bounded search read; retains the owner charge until dropped.
+    pub async fn search_result_observations_page(
+        &self,
+        session: i64,
+        claim: i64,
+        after: i64,
+        limit: usize,
+    ) -> Result<crate::LibraryReply<Option<MetadataSearchPage<MetadataSearchResultObservation>>>>
+    {
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .search_result_observations_page(session, claim, after, limit)
+            .await?)
     }
 
     pub async fn searches(&self) -> Vec<Search> {
