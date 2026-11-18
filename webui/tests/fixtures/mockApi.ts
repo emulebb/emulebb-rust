@@ -142,7 +142,7 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       const valid = body.confirmCapture === true && Number.isInteger(body.maxBytes)
         && body.maxBytes >= 65_536 && body.maxBytes <= 67_108_864;
       await route.fulfill({ status: valid ? 200 : 400, contentType: "application/json", body: JSON.stringify(valid
-        ? { schema: "emulebb.diagnostic-bundle.v6", capturedAt: "2026-11-14T12:00:00Z", summary: { issueCount: 0 } }
+        ? { schema: "emulebb.diagnostic-bundle.v7", capturedAt: "2026-11-14T12:00:00Z", summary: { issueCount: 0 } }
         : { error: { code: "BAD_REQUEST", message: "A bounded maxBytes value is required" } }) });
       return;
     }

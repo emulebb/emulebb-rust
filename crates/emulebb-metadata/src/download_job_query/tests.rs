@@ -35,6 +35,83 @@ fn counts(store: &MetadataStore, unfinished: u64, completed: u64) {
         }
     );
 }
+
+#[test]
+fn dashboard_counters_track_intent_delete_admission_removal_and_rollback() {
+    let store = MetadataStore::in_memory().unwrap();
+    let a = add(&store, 81, None, 8);
+    let b = add(&store, 82, None, 8);
+    let c = add(&store, 83, None, 8);
+    complete(&store, &c);
+    let check = |total, active, completed| {
+        let expected = crate::MetadataTransferCounts {
+            total,
+            active,
+            completed,
+        };
+        assert_eq!(store.transfer_counts().unwrap(), expected);
+        // Independent row-scan oracle for the existing public membership rules.
+        let conn = store.connection().unwrap();
+        let actual = conn.query_row(
+            "SELECT count(*),coalesce(sum(terminal_completed_at_s IS NULL AND intent='started'),0),coalesce(sum(terminal_completed_at_s IS NOT NULL),0)
+             FROM download_jobs WHERE removed_at_s IS NULL AND delete_requested_at_s IS NULL",
+            [], |row| Ok(crate::MetadataTransferCounts {
+                total: crate::sql_value::unsigned(row, 0)?,
+                active: crate::sql_value::unsigned(row, 1)?,
+                completed: crate::sql_value::unsigned(row, 2)?,
+            }),
+        ).unwrap();
+        assert_eq!(actual, expected);
+    };
+    let update = |id: JobId, set: &str| {
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                &format!("UPDATE download_jobs SET {set} WHERE id=?1"),
+                [id.get()],
+            )
+            .unwrap();
+    };
+    check(3, 0, 1);
+    update(a.token.job_id, "intent='started'");
+    check(3, 1, 1);
+    update(a.token.job_id, "delete_requested_at_s=1");
+    check(2, 0, 1);
+    update(b.token.job_id, "delete_requested_at_s=1");
+    check(1, 0, 1);
+    update(c.token.job_id, "delete_requested_at_s=1");
+    check(0, 0, 0);
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("BEGIN; UPDATE download_jobs SET delete_requested_at_s=NULL; ROLLBACK;")
+        .unwrap();
+    check(0, 0, 0);
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("UPDATE download_jobs SET delete_requested_at_s=NULL;")
+        .unwrap();
+    check(3, 1, 1);
+    update(b.token.job_id, "removed_at_s=1");
+    check(2, 1, 1);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM download_jobs WHERE id=?1",
+            [a.token.job_id.get()],
+        )
+        .unwrap();
+    check(1, 0, 1);
+    update(c.token.job_id, "removed_at_s=1");
+    check(0, 0, 0);
+    assert!(store.finalize_transfer_retirement(c.token.job_id).unwrap());
+    assert!(store.delete_transfer_manifest(b.token.job_id).unwrap());
+    assert!(store.delete_transfer_manifest(c.token.job_id).unwrap());
+    check(0, 0, 0);
+}
 fn prepare_completion(store: &MetadataStore, job: &DownloadJobRecord) {
     let path = std::env::temp_dir().join(format!("completed-sample-{}.bin", job.token.job_id));
     let fingerprint = NativeFileFingerprint {
@@ -465,24 +542,38 @@ fn mixed_100k_keysets_use_exact_indexes_and_summary_never_scans_jobs() {
     counts(&store, unfinished, completed);
     {
         let conn = store.connection().unwrap();
-        let mut stmt = conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {COUNTS_SQL}"))
-            .unwrap();
-        let plan = stmt
-            .query_map([], |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert!(
-            plan.iter()
-                .all(|line| line.contains("SEARCH download_job_counts USING INTEGER PRIMARY KEY")),
-            "{plan:?}"
-        );
+        for sql in [COUNTS_SQL, crate::transfer_store::TRANSFER_COUNTS_SQL] {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plan = stmt
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .all(|line| line
+                        .contains("SEARCH download_job_counts USING INTEGER PRIMARY KEY")),
+                "{plan:?}"
+            );
+            let mut stmt = conn.prepare(sql).unwrap();
+            stmt.query_row([], |_| Ok(())).unwrap();
+            assert_eq!(stmt.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+            assert_eq!(stmt.get_status(rusqlite::StatementStatus::Sort), 0);
+            assert!(stmt.get_status(rusqlite::StatementStatus::VmStep) < 80);
+        }
         conn.execute_batch("CREATE TEMP VIEW download_jobs AS SELECT * FROM forbidden_job_scan;")
             .unwrap();
     }
     for _ in 0..8 {
         counts(&store, unfinished, completed);
+        assert_eq!(
+            store.transfer_counts().unwrap(),
+            crate::MetadataTransferCounts {
+                total: (unfinished + completed) as usize,
+                active: 0,
+                completed: completed as usize,
+            }
+        );
     }
 }
 

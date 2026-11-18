@@ -16,7 +16,7 @@
 //! rejected: this module contains no migration or legacy interpretation.
 
 pub const SCHEMA_ID: &str = "emulebb.metadata";
-pub const SCHEMA_VERSION: i64 = 101;
+pub const SCHEMA_VERSION: i64 = 102;
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 
 #[cfg(test)]

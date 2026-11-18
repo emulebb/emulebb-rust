@@ -11,6 +11,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Parts(JobId, Option<u32>, usize),
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
+    TransferCounts,
     Execution(emulebb_metadata::JobToken),
     SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
@@ -35,6 +36,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Parts(Option<RetainedRead<emulebb_metadata::MetadataDownloadPartPage>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
+    TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Comments(RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>),
@@ -64,7 +66,7 @@ impl LocalMutationRegistry {
                 );
                 2 * 1024 * 1024 + 4096
             }
-            JobRead::Counts => 4096,
+            JobRead::Counts | JobRead::TransferCounts => 4096,
             JobRead::Parts(_, _, limit) => {
                 ensure!((1..=256).contains(&limit), "invalid part page size");
                 32 * 1024
@@ -140,6 +142,9 @@ impl LocalMutationRegistry {
                 }),
                 JobRead::Counts => metadata.download_job_counts().map(|value| {
                     JobReadResult::Counts(RetainedRead::new(value, capacity.take_result()))
+                }),
+                JobRead::TransferCounts => metadata.transfer_counts().map(|value| {
+                    JobReadResult::TransferCounts(RetainedRead::new(value, capacity.take_result()))
                 }),
                 JobRead::Detail(id) => metadata.download_job_detail(id).map(|value| {
                     JobReadResult::Detail(
@@ -325,6 +330,18 @@ impl transfer::Ed2kTransferRuntime {
         &self,
     ) -> Result<RetainedRead<emulebb_metadata::DownloadJobCounts>> {
         let JobReadResult::Counts(counts) = self.read_job_metadata(JobRead::Counts).await? else {
+            unreachable!()
+        };
+        Ok(counts)
+    }
+
+    /// Await authoritative dashboard counts on the bounded metadata worker.
+    pub async fn transfer_counts(
+        &self,
+    ) -> Result<RetainedRead<emulebb_metadata::MetadataTransferCounts>> {
+        let JobReadResult::TransferCounts(counts) =
+            self.read_job_metadata(JobRead::TransferCounts).await?
+        else {
             unreachable!()
         };
         Ok(counts)

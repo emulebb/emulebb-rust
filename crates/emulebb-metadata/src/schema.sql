@@ -365,7 +365,14 @@ CREATE INDEX shared_file_memberships_root_content_idx
 CREATE TABLE download_job_counts (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     unfinished INTEGER NOT NULL DEFAULT 0 CHECK(unfinished >= 0),
-    completed INTEGER NOT NULL DEFAULT 0 CHECK(completed >= 0)
+    completed INTEGER NOT NULL DEFAULT 0 CHECK(completed >= 0),
+    -- Started unfinished jobs, excluding admitted destructive deletion.
+    started INTEGER NOT NULL DEFAULT 0 CHECK(started >= 0),
+    delete_requested_unfinished INTEGER NOT NULL DEFAULT 0 CHECK(delete_requested_unfinished >= 0),
+    delete_requested_completed INTEGER NOT NULL DEFAULT 0 CHECK(delete_requested_completed >= 0),
+    CHECK(delete_requested_unfinished <= unfinished),
+    CHECK(delete_requested_completed <= completed),
+    CHECK(started <= unfinished - delete_requested_unfinished)
 ) STRICT;
 INSERT INTO download_job_counts(id) VALUES(1);
 
@@ -486,11 +493,17 @@ BEGIN
         OR (new.terminal_completed_at_s IS NOT NULL AND completed=9223372036854775807)
         THEN RAISE(ABORT, 'download job count overflow') END FROM download_job_counts WHERE id=1;
     UPDATE download_job_counts SET unfinished=unfinished+(new.terminal_completed_at_s IS NULL),
-        completed=completed+(new.terminal_completed_at_s IS NOT NULL) WHERE id=1;
+        completed=completed+(new.terminal_completed_at_s IS NOT NULL),
+        started=started+(new.terminal_completed_at_s IS NULL AND new.intent='started' AND new.delete_requested_at_s IS NULL),
+        delete_requested_unfinished=delete_requested_unfinished+(new.terminal_completed_at_s IS NULL AND new.delete_requested_at_s IS NOT NULL),
+        delete_requested_completed=delete_requested_completed+(new.terminal_completed_at_s IS NOT NULL AND new.delete_requested_at_s IS NOT NULL)
+        WHERE id=1;
 END;
-CREATE TRIGGER download_jobs_counts_update AFTER UPDATE OF removed_at_s, terminal_completed_at_s ON download_jobs
+CREATE TRIGGER download_jobs_counts_update AFTER UPDATE OF removed_at_s, terminal_completed_at_s, intent, delete_requested_at_s ON download_jobs
 WHEN (old.removed_at_s IS NULL) != (new.removed_at_s IS NULL)
     OR (old.terminal_completed_at_s IS NULL) != (new.terminal_completed_at_s IS NULL)
+    OR old.intent != new.intent
+    OR (old.delete_requested_at_s IS NULL) != (new.delete_requested_at_s IS NULL)
 BEGIN
     SELECT CASE WHEN
         (new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL
@@ -503,13 +516,27 @@ BEGIN
         +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL),
         completed=completed
         -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NOT NULL)
-        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NOT NULL) WHERE id=1;
+        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NOT NULL),
+        started=started
+        -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NULL AND old.intent='started' AND old.delete_requested_at_s IS NULL)
+        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL AND new.intent='started' AND new.delete_requested_at_s IS NULL),
+        delete_requested_unfinished=delete_requested_unfinished
+        -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NULL AND old.delete_requested_at_s IS NOT NULL)
+        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL AND new.delete_requested_at_s IS NOT NULL),
+        delete_requested_completed=delete_requested_completed
+        -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NOT NULL AND old.delete_requested_at_s IS NOT NULL)
+        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NOT NULL AND new.delete_requested_at_s IS NOT NULL)
+        WHERE id=1;
 END;
 CREATE TRIGGER download_jobs_counts_delete AFTER DELETE ON download_jobs
 WHEN old.removed_at_s IS NULL
 BEGIN
     UPDATE download_job_counts SET unfinished=unfinished-(old.terminal_completed_at_s IS NULL),
-        completed=completed-(old.terminal_completed_at_s IS NOT NULL) WHERE id=1;
+        completed=completed-(old.terminal_completed_at_s IS NOT NULL),
+        started=started-(old.terminal_completed_at_s IS NULL AND old.intent='started' AND old.delete_requested_at_s IS NULL),
+        delete_requested_unfinished=delete_requested_unfinished-(old.terminal_completed_at_s IS NULL AND old.delete_requested_at_s IS NOT NULL),
+        delete_requested_completed=delete_requested_completed-(old.terminal_completed_at_s IS NOT NULL AND old.delete_requested_at_s IS NOT NULL)
+        WHERE id=1;
 END;
 
 CREATE TRIGGER download_jobs_fixed_physical_storage BEFORE UPDATE OF storage_path_id, storage_directory_identity, storage_directory_marker_id ON download_jobs

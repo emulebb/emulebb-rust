@@ -1,5 +1,55 @@
 use super::*;
 
+#[tokio::test]
+async fn dashboard_counts_wait_for_sql_without_blocking_network_status_or_using_the_live_cohort() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    for (hash, intent) in [
+        ("61", emulebb_metadata::DownloadIntent::Started),
+        ("62", emulebb_metadata::DownloadIntent::Stopped),
+    ] {
+        core.metadata_store
+            .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+                file_hash: hash.repeat(16),
+                display_name: "retained.bin".into(),
+                expected_size_bytes: Some(1024),
+                category_id: None,
+                intent,
+                piece_size: 9_728_000,
+            })
+            .unwrap();
+    }
+    assert!(core.state.lock().await.transfers.is_empty());
+    let store = core.metadata_store.clone();
+    let (locked_send, locked_receive) = tokio::sync::oneshot::channel();
+    let (release_send, release_receive) = std::sync::mpsc::channel();
+    let holding = tokio::task::spawn_blocking(move || {
+        store
+            .update_settings_sections(&["contention-test"], |_| {
+                locked_send.send(()).unwrap();
+                release_receive
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    locked_receive.await.unwrap();
+    let reader = core.clone();
+    let mut reading = tokio::spawn(async move { reader.transfer_stats().await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut reading)
+            .await
+            .is_err()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), core.status())
+        .await
+        .unwrap();
+    release_send.send(()).unwrap();
+    holding.await.unwrap();
+    let counts = reading.await.unwrap().unwrap();
+    assert_eq!((counts.total, counts.active, counts.completed), (2, 1, 0));
+}
+
 fn atomic_settings_patch(value: serde_json::Value) -> AppSettingsUpdate {
     serde_json::from_value(value).unwrap()
 }

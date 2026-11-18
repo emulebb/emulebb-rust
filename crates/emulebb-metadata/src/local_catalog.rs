@@ -8,6 +8,8 @@ use crate::{
 use anyhow::Result;
 use rusqlite::{Row, params};
 
+const CATALOG_COUNT_SQL: &str = "SELECT count(*) FROM temp.session_library_catalog";
+
 // All eligible-copy readers compare both actual identity observations. This
 // fragment accepts only a source-code SQL alias, never request input.
 macro_rules! unexcluded_identity_sql {
@@ -243,7 +245,16 @@ impl MetadataStore {
         let tx = guard.transaction()?;
         crate::library_projection::refresh(&tx)?;
         let conn = &tx;
-        let total = if query.count_total {
+        let total = if !query.count_total {
+            0
+        } else if search.is_none() && priority.is_none() {
+            // WHY: the refreshed projection already contains exactly eligible
+            // contents. Joining every content again makes even a one-row poll
+            // scan the library and hold its metadata connection during writes.
+            conn.query_row(CATALOG_COUNT_SQL, [], |r| {
+                crate::sql_value::unsigned::<usize>(r, 0)
+            })?
+        } else {
             let sql = format!("SELECT count(*) {from}");
             conn.query_row(
                 &sql,
@@ -255,8 +266,6 @@ impl MetadataStore {
                 ],
                 |r| crate::sql_value::unsigned::<usize>(r, 0),
             )?
-        } else {
-            0
         };
         let sql = format!(
             "SELECT {COLUMNS}, cache.sort_key {from}

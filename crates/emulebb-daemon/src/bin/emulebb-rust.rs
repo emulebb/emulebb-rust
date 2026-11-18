@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -21,11 +20,6 @@ struct Cli {
         help = "Profile directory; defaults to the executable directory. Missing profiles are created. Relative paths use the caller's working directory."
     )]
     profile: Option<PathBuf>,
-    #[arg(
-        long,
-        help = "Override the REST/WebUI listener for this run (default 0.0.0.0:20017); persist it as rest.bind_addr in the bootstrap TOML"
-    )]
-    rest_bind_addr: Option<SocketAddr>,
     #[arg(long, help = "Override the finished-download directory for this run")]
     incoming_dir: Option<PathBuf>,
     #[arg(
@@ -103,9 +97,6 @@ async fn main() -> Result<()> {
         }
         None => DaemonProfile::load(cli.profile)?,
     };
-    if let Some(bind_addr) = cli.rest_bind_addr {
-        profile.rest.bind_addr = Some(bind_addr);
-    }
     if let Some(incoming_dir) = cli.incoming_dir {
         profile.incoming_dir = Some(incoming_dir);
     }

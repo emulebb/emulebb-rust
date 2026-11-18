@@ -244,11 +244,17 @@ pub(crate) async fn update_settings(
 }
 
 pub(crate) async fn status(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(status_response(&state).await)
+    match status_response(&state).await {
+        Ok(value) => api_ok(value).into_response(),
+        Err(error) => super::persistence::persistence_error(error),
+    }
 }
 
 pub(crate) async fn diagnostics(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(runtime_diagnostics_response(&state).await)
+    match runtime_diagnostics_response(&state).await {
+        Ok(value) => api_ok(value).into_response(),
+        Err(error) => super::persistence::persistence_error(error),
+    }
 }
 
 pub(crate) async fn vpn_guard(State(state): State<RestState>) -> impl IntoResponse {
@@ -277,15 +283,21 @@ pub(crate) async fn refresh_nat(State(state): State<RestState>) -> impl IntoResp
 
 pub(crate) async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     let status = state.core.status().await;
+    let transfers = match state.core.transfer_stats().await {
+        Ok(value) => value,
+        Err(error) => return super::persistence::persistence_error(error),
+    };
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
     let shared_hashing_count = state.core.shared_directories().await.hashing_count;
     api_ok(stats_response(
         &status,
+        &transfers,
         &upload_policy,
         &throughput,
         shared_hashing_count,
     ))
+    .into_response()
 }
 
 pub(crate) async fn snapshot(
@@ -297,7 +309,10 @@ pub(crate) async fn snapshot(
         Err(response) => return *response,
     };
     let limit = snapshot_limit(query.limit);
-    let status = status_response(&state).await;
+    let status = match status_response(&state).await {
+        Ok(value) => value,
+        Err(error) => return super::persistence::persistence_error(error),
+    };
     let network = state.core.network_binding_status();
     let kad = kad_response(
         &state.core.status().await.kad,
