@@ -29,7 +29,9 @@ impl PersistenceOwner {
         .and_then(|bytes| bytes.checked_add(core.transfer_root.capacity()))
         .and_then(|bytes| bytes.checked_add(core.profile_dir.capacity()))
         .and_then(|bytes| bytes.checked_add(core.incoming_dir.capacity()))
-        .and_then(|bytes| bytes.checked_mul(4))
+        // Cover prepared queue/spec/normalized SQL copies as well as cache,
+        // response, and the narrow runtime context before starting the drain.
+        .and_then(|bytes| bytes.checked_mul(6))
         .and_then(|bytes| bytes.checked_add(FIXED_CHARGE + std::mem::size_of::<EmulebbCore>()))
         .ok_or(PersistenceError::TooLarge)?;
         match self
