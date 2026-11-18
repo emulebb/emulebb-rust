@@ -302,3 +302,70 @@ async fn late_raw_occurrence_does_not_consult_removed_session_presentation() {
     assert_eq!(store.table_count("content_claim_observations").unwrap(), 1);
     owner.close_and_drain().await.unwrap();
 }
+
+#[tokio::test]
+async fn publication_uses_durable_independent_ed2k_and_kad_counts() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    let id = publication.search_id.clone();
+    for (origin, reporter, sources, complete, expected) in [
+        (
+            MetadataObservationOrigin::Kad,
+            "192.0.2.9:4672",
+            100,
+            2,
+            (100, 2),
+        ),
+        (
+            MetadataObservationOrigin::Server,
+            "192.0.2.1:4661",
+            60,
+            4,
+            (100, 4),
+        ),
+        (
+            MetadataObservationOrigin::Global,
+            "192.0.2.1:4661",
+            20,
+            3,
+            (100, 4),
+        ),
+        (
+            MetadataObservationOrigin::Server,
+            "192.0.2.2:4661",
+            50,
+            3,
+            (110, 7),
+        ),
+    ] {
+        events[0].origin = origin;
+        events[0].reporter_endpoint = Some(reporter.parse().unwrap());
+        events[0].metadata.source_count = Some(sources);
+        events[0].metadata.complete_source_count = Some(complete);
+        publication.result.sources = sources;
+        publication.result.complete_sources = complete;
+        let observation = &mut publication.result.observations[0];
+        observation.origin = origin.as_str().into();
+        observation.reporter_endpoint = Some(reporter.into());
+        observation.sources = sources;
+        observation.complete_sources = complete;
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+        let snapshot = state.lock().await;
+        let result = &snapshot.searches[&id].results[0];
+        assert_eq!((result.sources, result.complete_sources), expected);
+        let persisted = store
+            .search_result_header(id.parse().unwrap(), result.id.parse().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                persisted.summary.source_count,
+                persisted.summary.complete_source_count
+            ),
+            expected
+        );
+    }
+    owner.close_and_drain().await.unwrap();
+}

@@ -67,19 +67,17 @@ impl MetadataStore {
             "filename votes exceed batch bound"
         );
         self.write_content_observations(events, Some(projection))
-            .map(|(receipts, name)| {
-                name.map(|name| crate::MetadataSearchPublication {
-                    claim_id: receipts[0].claim_id,
-                    name,
-                })
-            })
+            .map(|(_, publication)| publication)
     }
 
     fn write_content_observations(
         &self,
         events: &[MetadataContentObservationEvent],
         projection: Option<&crate::MetadataSearchProjection>,
-    ) -> Result<(Vec<MetadataContentObservationReceipt>, Option<String>)> {
+    ) -> Result<(
+        Vec<MetadataContentObservationReceipt>,
+        Option<crate::MetadataSearchPublication>,
+    )> {
         ensure!(
             events.len() <= CONTENT_OBSERVATION_BATCH_ITEMS,
             "too many content observations"
@@ -181,12 +179,9 @@ impl MetadataStore {
             receipts.push(receipt);
         }
         let projected = match projection {
-            Some(projection) => crate::search_store::persist_projection(
-                &tx,
-                projection,
-                &receipts,
-                &events.iter().map(|e| e.observed_at_s).collect::<Vec<_>>(),
-            )?,
+            Some(projection) => {
+                crate::search_store::persist_projection(&tx, projection, &receipts, events)?
+            }
             None => None,
         };
         tx.commit().map_err(|error| {

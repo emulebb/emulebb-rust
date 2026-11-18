@@ -250,7 +250,7 @@ fn late_pages_seek_indexes_with_one_hundred_thousand_sessions_results_and_varian
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
         INSERT INTO content_claims(id,ed2k_hash,size_bytes,first_seen_at_s,last_seen_at_s)
         SELECT i,zeroblob(16),CAST(printf('%08d',i) AS BLOB),1,1 FROM n;
-        INSERT INTO search_results(session_id,claim_id,name,source_count,complete_source_count,source_client_id,source_client_port,
+        INSERT INTO search_results(session_id,claim_id,name,ed2k_source_count,ed2k_complete_source_count,source_client_id,source_client_port,
             file_type,media_artist,media_album,media_title,media_length_seconds,media_bitrate_kbps,media_codec,rating,aich_root,complete,directory)
         SELECT 100000,id,'sample.bin',1,0,NULL,NULL,'pro','','','',0,0,'',0,NULL,0,'' FROM content_claims;
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)

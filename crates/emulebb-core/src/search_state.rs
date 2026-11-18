@@ -66,8 +66,6 @@ pub(crate) fn search_to_metadata(search: &Search) -> MetadataSearchData {
 pub(crate) fn result_fields(result: &SearchResult) -> MetadataSearchResultFields {
     let source = result.source_client_id.zip(result.source_client_port);
     MetadataSearchResultFields {
-        source_count: result.sources,
-        complete_source_count: result.complete_sources,
         source_client_id: source.map(|(id, _)| id),
         source_client_port: source.map(|(_, port)| port),
         file_type: result.file_type.clone(),

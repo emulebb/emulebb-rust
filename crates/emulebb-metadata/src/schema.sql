@@ -981,8 +981,12 @@ CREATE TABLE search_results (
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
     claim_id INTEGER NOT NULL REFERENCES content_claims(id),
     name TEXT NOT NULL,
-    source_count INTEGER NOT NULL CHECK(source_count BETWEEN 0 AND 4294967295),
-    complete_source_count INTEGER NOT NULL CHECK(complete_source_count BETWEEN 0 AND 4294967295),
+    ed2k_source_count INTEGER NOT NULL DEFAULT 0 CHECK(ed2k_source_count BETWEEN 0 AND 4294967295),
+    ed2k_complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(ed2k_complete_source_count BETWEEN 0 AND 4294967295),
+    kad_source_count INTEGER NOT NULL DEFAULT 0 CHECK(kad_source_count BETWEEN 0 AND 4294967295),
+    kad_complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(kad_complete_source_count BETWEEN 0 AND 4294967295),
+    source_count INTEGER GENERATED ALWAYS AS (max(ed2k_source_count,kad_source_count)) STORED NOT NULL,
+    complete_source_count INTEGER GENERATED ALWAYS AS (max(ed2k_complete_source_count,kad_complete_source_count)) STORED NOT NULL,
     source_client_id INTEGER CHECK(source_client_id IS NULL OR source_client_id BETWEEN 0 AND 4294967295),
     source_client_port INTEGER CHECK(source_client_port IS NULL OR source_client_port BETWEEN 1 AND 65535),
     file_type TEXT NOT NULL,
@@ -1021,6 +1025,20 @@ CREATE TABLE search_result_observations (
     PRIMARY KEY(session_id, claim_id, observation_id),
     FOREIGN KEY(session_id, claim_id) REFERENCES search_results(session_id, claim_id) ON DELETE CASCADE,
     FOREIGN KEY(claim_id, observation_id) REFERENCES content_claim_observations(claim_id, id)
+) STRICT, WITHOUT ROWID;
+
+-- Reporter maxima permit incremental saturated totals without history scans.
+CREATE TABLE search_ed2k_reporter_maxima (
+    session_id INTEGER NOT NULL,
+    claim_id INTEGER NOT NULL,
+    reporter_endpoint TEXT NOT NULL,
+    unknown_origin TEXT NOT NULL,
+    source_count INTEGER NOT NULL CHECK(source_count BETWEEN 0 AND 4294967295),
+    complete_source_count INTEGER NOT NULL CHECK(complete_source_count BETWEEN 0 AND 4294967295),
+    PRIMARY KEY(session_id,claim_id,reporter_endpoint,unknown_origin),
+    FOREIGN KEY(session_id,claim_id) REFERENCES search_results(session_id,claim_id) ON DELETE CASCADE,
+    CHECK((reporter_endpoint!='' AND unknown_origin='') OR
+          (reporter_endpoint='' AND unknown_origin IN ('server','global')))
 ) STRICT, WITHOUT ROWID;
 
 -- Presentation votes are independent of raw metadata-variant and packet counts.

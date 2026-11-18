@@ -1,3 +1,4 @@
+mod availability;
 mod name_votes;
 mod pages;
 use crate::{
@@ -250,8 +251,8 @@ pub(crate) fn persist_projection(
     tx: &rusqlite::Transaction<'_>,
     projection: &MetadataSearchProjection,
     receipts: &[MetadataContentObservationReceipt],
-    observed_at: &[i64],
-) -> Result<Option<String>> {
+    events: &[crate::MetadataContentObservationEvent],
+) -> Result<Option<crate::MetadataSearchPublication>> {
     let collecting: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM search_sessions WHERE id=?1 AND status IN ('queued','running'))",
         [projection.session_id], |row| row.get(0))?;
@@ -268,24 +269,23 @@ pub(crate) fn persist_projection(
     );
     let s = &projection.fields;
     tx.execute(
-        "INSERT INTO search_results(session_id,claim_id,name,source_count,complete_source_count,
+        "INSERT INTO search_results(session_id,claim_id,name,
             source_client_id,source_client_port,file_type,media_artist,media_album,media_title,
             media_length_seconds,media_bitrate_kbps,media_codec,rating,aich_root,complete,directory)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
          ON CONFLICT(session_id,claim_id) DO UPDATE SET
-            name=excluded.name,source_count=excluded.source_count,
-            complete_source_count=excluded.complete_source_count,source_client_id=excluded.source_client_id,
+            name=excluded.name,source_client_id=excluded.source_client_id,
             source_client_port=excluded.source_client_port,file_type=excluded.file_type,
             media_artist=excluded.media_artist,media_album=excluded.media_album,media_title=excluded.media_title,
             media_length_seconds=excluded.media_length_seconds,media_bitrate_kbps=excluded.media_bitrate_kbps,
             media_codec=excluded.media_codec,rating=excluded.rating,aich_root=excluded.aich_root,
             complete=excluded.complete,directory=excluded.directory",
-        params![projection.session_id,claim_id,"",i64::from(s.source_count),i64::from(s.complete_source_count),
+        params![projection.session_id,claim_id,"",
             s.source_client_id.map(i64::from),s.source_client_port.map(i64::from),s.file_type,
             s.media_artist,s.media_album,s.media_title,i64::from(s.media_length_seconds),
             i64::from(s.media_bitrate_kbps),s.media_codec,i64::from(s.rating),encode_aich_root(&s.aich_hash)?,
             bool_to_i64(s.complete),s.directory])?;
-    for (receipt, seen) in receipts.iter().zip(observed_at) {
+    for (receipt, event) in receipts.iter().zip(events) {
         tx.execute(
             "INSERT INTO search_result_observations(session_id,claim_id,observation_id,
                 first_seen_at_s,last_seen_at_s,observation_count) VALUES(?1,?2,?3,?4,?4,1)
@@ -298,7 +298,7 @@ pub(crate) fn persist_projection(
                 projection.session_id,
                 claim_id,
                 receipt.observation_id,
-                seen
+                event.observed_at_s
             ],
         )?;
     }
@@ -307,13 +307,20 @@ pub(crate) fn persist_projection(
         "UPDATE search_results SET name=?3 WHERE session_id=?1 AND claim_id=?2",
         params![projection.session_id, claim_id, name],
     )?;
-    if let Some(last) = observed_at.iter().max() {
+    let (source_count, complete_source_count) =
+        availability::apply(tx, projection.session_id, claim_id, events)?;
+    if let Some(last) = events.iter().map(|event| event.observed_at_s).max() {
         tx.execute(
             "UPDATE search_sessions SET updated_at_s=max(updated_at_s,?2) WHERE id=?1",
             params![projection.session_id, last],
         )?;
     }
-    Ok(Some(name))
+    Ok(Some(crate::MetadataSearchPublication {
+        claim_id,
+        name,
+        source_count,
+        complete_source_count,
+    }))
 }
 
 pub(crate) fn encode_aich_root(value: &str) -> Result<Option<Vec<u8>>> {

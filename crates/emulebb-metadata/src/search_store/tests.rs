@@ -33,8 +33,6 @@ pub(super) fn sample_search() -> MetadataSearchData {
 }
 pub(super) fn fields() -> crate::MetadataSearchResultFields {
     crate::MetadataSearchResultFields {
-        source_count: 3,
-        complete_source_count: 0,
         source_client_id: None,
         source_client_port: None,
         file_type: "Pro".into(),

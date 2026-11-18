@@ -294,6 +294,8 @@ pub(super) async fn process(
         let mut result = prepared.result;
         result.id = committed.claim_id.to_string();
         result.name = committed.name;
+        result.sources = committed.source_count;
+        result.complete_sources = committed.complete_source_count;
         crate::search_state::publish_observation(
             &publication.state,
             &publication.search_id,

@@ -343,8 +343,6 @@ fn seed_recorded_search(store: &emulebb_metadata::MetadataStore, files: &[Indexe
                         },
                     }],
                     fields: MetadataSearchResultFields {
-                        source_count: sources,
-                        complete_source_count: 0,
                         source_client_id: None,
                         source_client_port: None,
                         file_type: file.content_type.clone(),

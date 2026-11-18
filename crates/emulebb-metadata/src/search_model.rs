@@ -58,11 +58,9 @@ pub struct MetadataSearchResultSummary {
     pub directory: String,
 }
 
-/// Presentation fields supplied by ingress; the database selects the name.
+/// Presentation fields supplied by ingress; the database selects name and counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchResultFields {
-    pub source_count: u32,
-    pub complete_source_count: u32,
     pub source_client_id: Option<u32>,
     pub source_client_port: Option<u16>,
     pub file_type: String,
@@ -104,6 +102,8 @@ impl MetadataSearchNameVote {
 pub struct MetadataSearchPublication {
     pub claim_id: i64,
     pub name: String,
+    pub source_count: u32,
+    pub complete_source_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
