@@ -1,15 +1,13 @@
-use std::collections::HashMap;
-
-use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use emulebb_metadata::{
-    MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultObservation,
-    MetadataSearchSpec, MetadataStore, normalized_search_query,
-};
-
 use crate::{
     Search, SearchProgress, SearchResult, SearchResultMedia, SearchResultObservation, SearchSpec,
 };
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use emulebb_metadata::{
+    MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultFields,
+    MetadataSearchSpec, MetadataStore, normalized_search_query,
+};
+use std::collections::HashMap;
 
 pub(crate) fn load_searches(metadata: &MetadataStore) -> Result<HashMap<String, Search>> {
     metadata
@@ -22,6 +20,7 @@ pub(crate) fn load_searches(metadata: &MetadataStore) -> Result<HashMap<String, 
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn persist_search(metadata: &MetadataStore, search: &Search) -> Result<()> {
     metadata.update_search(
         search.id.parse().context("invalid search identity")?,
@@ -29,14 +28,14 @@ pub(crate) fn persist_search(metadata: &MetadataStore, search: &Search) -> Resul
     )
 }
 
+#[cfg(test)]
 pub(crate) fn create_search(metadata: &MetadataStore, search: &Search) -> Result<String> {
     Ok(metadata
         .create_search(&search_to_metadata(search))?
         .to_string())
 }
 
-fn search_to_metadata(search: &Search) -> MetadataSearchData {
-    let updated_at_ms = search.updated_at.timestamp_millis();
+pub(crate) fn search_to_metadata(search: &Search) -> MetadataSearchData {
     MetadataSearchData {
         normalized_query: normalized_search_query(&search.spec.query),
         spec: MetadataSearchSpec {
@@ -58,54 +57,31 @@ fn search_to_metadata(search: &Search) -> MetadataSearchData {
         resolved_method: search.resolved_method.clone(),
         status: search.status.clone(),
         status_reason: search.status_reason.clone(),
-        created_at_ms: search.created_at.timestamp_millis(),
-        updated_at_ms,
-        completed_at_ms: (search.status == "completed").then_some(updated_at_ms),
-        results: search
-            .results
-            .iter()
-            .map(|result| search_result_to_metadata(result, updated_at_ms))
-            .collect(),
+        created_at_s: search.created_at.timestamp(),
+        updated_at_s: search.updated_at.timestamp(),
+        completed_at_s: (search.status == "completed").then(|| search.updated_at.timestamp()),
     }
 }
 
-fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> MetadataSearchResult {
-    let observations = if result.observations.is_empty() {
-        vec![MetadataSearchResultObservation {
-            origin: "unknown".to_string(),
-            reporter_endpoint: None,
-            name: result.name.clone(),
-            size_bytes: result.size_bytes,
-            source_count: result.sources,
-            complete_source_count: result.complete_sources,
-            source_client_id: result.source_client_id,
-            source_client_port: result.source_client_port,
-            file_type: result.file_type.clone(),
-            media_artist: result.media.artist.clone(),
-            media_album: result.media.album.clone(),
-            media_title: result.media.title.clone(),
-            media_length_seconds: result.media.length_seconds,
-            media_bitrate_kbps: result.media.bitrate_kbps,
-            media_codec: result.media.codec.clone(),
-            rating: result.rating,
-            aich_hash: result.aich_hash.clone(),
-            complete: result.complete,
-            directory: result.directory.clone(),
-            observed_at_ms,
-        }]
-    } else {
-        result
-            .observations
-            .iter()
-            .map(|observation| MetadataSearchResultObservation {
-                origin: observation.origin.clone(),
-                reporter_endpoint: observation.reporter_endpoint.clone(),
-                name: observation.name.clone(),
-                size_bytes: observation.size_bytes,
-                source_count: observation.sources,
-                complete_source_count: observation.complete_sources,
-                source_client_id: observation.source_client_id,
-                source_client_port: observation.source_client_port,
+pub(crate) fn result_fields(result: &SearchResult) -> Vec<MetadataSearchResultFields> {
+    result
+        .observations
+        .iter()
+        .map(|observation| {
+            let (useful, sources, complete_sources, _, rating) =
+                crate::rest_model::observation_quality(observation, &result.hash);
+            let source = observation
+                .source_client_id
+                .zip(observation.source_client_port);
+            MetadataSearchResultFields {
+                quality: emulebb_metadata::MetadataSearchNameQuality {
+                    useful,
+                    sources,
+                    complete_sources,
+                    rating,
+                },
+                source_client_id: source.map(|v| v.0),
+                source_client_port: source.map(|v| v.1),
                 file_type: observation.file_type.clone(),
                 media_artist: observation.media.artist.clone(),
                 media_album: observation.media.album.clone(),
@@ -117,84 +93,98 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
                 aich_hash: observation.aich_hash.clone(),
                 complete: observation.complete,
                 directory: observation.directory.clone(),
-                observed_at_ms: observation.observed_at.timestamp_millis(),
-            })
-            .collect()
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn projection_name_votes(
+    result: &SearchResult,
+) -> Result<Vec<emulebb_metadata::MetadataSearchNameVote>> {
+    use emulebb_metadata::{
+        MetadataObservationOrigin, MetadataSearchNameQuality, MetadataSearchNameVote,
     };
-    MetadataSearchResult {
-        file_hash: result.hash.clone(),
-        name: result.name.clone(),
-        size_bytes: result.size_bytes,
-        source_count: result.sources,
-        complete_source_count: result.complete_sources,
-        file_type: result.file_type.clone(),
-        media_artist: result.media.artist.clone(),
-        media_album: result.media.album.clone(),
-        media_title: result.media.title.clone(),
-        media_length_seconds: result.media.length_seconds,
-        media_bitrate_kbps: result.media.bitrate_kbps,
-        media_codec: result.media.codec.clone(),
-        rating: result.rating,
-        aich_hash: result.aich_hash.clone(),
-        complete: result.complete,
-        directory: result.directory.clone(),
-        observations,
-    }
+    result
+        .observations
+        .iter()
+        .map(|observation| {
+            let origin = match observation.origin.as_str() {
+                "server" => MetadataObservationOrigin::Server,
+                "global" => MetadataObservationOrigin::Global,
+                "kad" => MetadataObservationOrigin::Kad,
+                _ => anyhow::bail!("invalid search presentation origin"),
+            };
+            let (useful, sources, complete_sources, _, rating) =
+                crate::rest_model::observation_quality(observation, &result.hash);
+            Ok(MetadataSearchNameVote {
+                normalized_name: emulebb_ed2k::normalize_ed2k_file_name(&observation.name),
+                reporter_endpoint: observation
+                    .reporter_endpoint
+                    .as_ref()
+                    .map(|v| v.parse())
+                    .transpose()?,
+                origin,
+                quality: MetadataSearchNameQuality {
+                    useful,
+                    sources,
+                    complete_sources,
+                    rating,
+                },
+            })
+        })
+        .collect()
 }
 
 fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
-    let search_id = search.id.to_string();
-    let search = search.data;
-    let created_at = timestamp_ms(search.created_at_ms, "search created_at_ms")?;
-    let updated_at = timestamp_ms(search.updated_at_ms, "search updated_at_ms")?;
-    // WHY: a persisted "queued"/"running" search has no queue entry or
-    // background task after a restart — leaving the status as-is would show
-    // an immortal in-progress search that can never complete (the dishonest
-    // sibling of the silent completed-empty bug). Surface the truth instead.
-    let (status, status_reason) = match search.status.as_str() {
+    let id = search.id.to_string();
+    let header = search.data;
+    let created_at = timestamp_s(header.created_at_s, "search created_at_s")?;
+    let updated_at = timestamp_s(header.updated_at_s, "search updated_at_s")?;
+    let (status, status_reason) = match header.status.as_str() {
         "queued" | "running" => (
-            "error".to_string(),
-            Some("interrupted-by-restart".to_string()),
+            "error".to_owned(),
+            Some("interrupted-by-restart".to_owned()),
         ),
-        _ => (search.status, search.status_reason),
+        _ => (header.status, header.status_reason),
     };
+    let s = header.spec;
     let spec = SearchSpec {
-        query: search.spec.query,
-        method: search.spec.method,
-        r#type: search.spec.file_type,
-        extension: search.spec.extension,
-        min_size_bytes: search.spec.min_size_bytes,
-        max_size_bytes: search.spec.max_size_bytes,
-        min_availability: search.spec.min_availability,
-        min_complete_sources: search.spec.min_complete_sources,
-        min_bitrate_kbps: search.spec.min_bitrate_kbps,
-        min_length_seconds: search.spec.min_length_seconds,
-        codec: search.spec.codec,
-        title: search.spec.title,
-        album: search.spec.album,
-        artist: search.spec.artist,
+        query: s.query,
+        method: s.method,
+        r#type: s.file_type,
+        extension: s.extension,
+        min_size_bytes: s.min_size_bytes,
+        max_size_bytes: s.max_size_bytes,
+        min_availability: s.min_availability,
+        min_complete_sources: s.min_complete_sources,
+        min_bitrate_kbps: s.min_bitrate_kbps,
+        min_length_seconds: s.min_length_seconds,
+        codec: s.codec,
+        title: s.title,
+        album: s.album,
+        artist: s.artist,
     };
-    let file_type_filter = spec.r#type.clone();
-    let progress_phase = match status.as_str() {
+    let results = search
+        .results
+        .into_iter()
+        .map(|result| search_result_from_metadata(&id, &spec.r#type, result))
+        .collect::<Result<Vec<_>>>()?;
+    let phase = match status.as_str() {
         "completed" => "completed",
         "error" => "failed",
         "queued" => "queued",
         _ => "interrupted",
     };
     Ok(Search {
-        id: search_id.clone(),
+        id,
         spec,
-        resolved_method: search.resolved_method,
-        status,
+        resolved_method: header.resolved_method,
         status_reason,
-        progress: SearchProgress::new(progress_phase, 0, None, ""),
+        progress: SearchProgress::new(phase, 0, None, ""),
+        status,
         created_at,
         updated_at,
-        results: search
-            .results
-            .into_iter()
-            .map(|result| search_result_from_metadata(&search_id, &file_type_filter, result))
-            .collect::<Result<Vec<_>>>()?,
+        results,
     })
 }
 
@@ -206,70 +196,72 @@ fn search_result_from_metadata(
     let observations = result
         .observations
         .into_iter()
-        .map(|observation| {
+        .map(|member| {
+            let event = member.observation.event;
+            let m = event.metadata;
             Ok(SearchResultObservation {
-                origin: observation.origin,
-                reporter_endpoint: observation.reporter_endpoint,
-                name: observation.name,
-                size_bytes: observation.size_bytes,
-                sources: observation.source_count,
-                complete_sources: observation.complete_source_count,
-                source_client_id: observation.source_client_id,
-                source_client_port: observation.source_client_port,
-                file_type: observation.file_type,
+                origin: event.origin.as_str().to_owned(),
+                reporter_endpoint: event.reporter_endpoint.map(|v| v.to_string()),
+                name: m.name.unwrap_or_default(),
+                size_bytes: event.claim.size_bytes,
+                sources: m.source_count.unwrap_or_default(),
+                complete_sources: m.complete_source_count.unwrap_or_default(),
+                source_client_id: m.source_client_id,
+                source_client_port: m.source_client_port,
+                file_type: m.file_type.unwrap_or_default(),
                 media: SearchResultMedia {
-                    artist: observation.media_artist,
-                    album: observation.media_album,
-                    title: observation.media_title,
-                    length_seconds: observation.media_length_seconds,
-                    bitrate_kbps: observation.media_bitrate_kbps,
-                    codec: observation.media_codec,
+                    artist: m.media_artist.unwrap_or_default(),
+                    album: m.media_album.unwrap_or_default(),
+                    title: m.media_title.unwrap_or_default(),
+                    length_seconds: m.media_length_seconds.unwrap_or_default(),
+                    bitrate_kbps: m.media_bitrate_kbps.unwrap_or_default(),
+                    codec: m.media_codec.unwrap_or_default(),
                 },
-                rating: observation.rating,
-                aich_hash: observation.aich_hash,
-                complete: observation.complete,
-                directory: observation.directory,
-                observed_at: timestamp_ms(
-                    observation.observed_at_ms,
-                    "search result observation observed_at_ms",
+                rating: m.rating.unwrap_or_default(),
+                aich_hash: m
+                    .aich_root
+                    .map(|root| data_encoding::BASE32_NOPAD.encode(&root))
+                    .unwrap_or_default(),
+                complete: m.complete.unwrap_or_default(),
+                directory: m.directory.unwrap_or_default(),
+                observed_at: timestamp_s(
+                    member.last_seen_at_s,
+                    "search observation last_seen_at_s",
                 )?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let source = observations.iter().find_map(|observation| {
-        observation
-            .source_client_id
-            .zip(observation.source_client_port)
-    });
+    let s = result.summary;
     Ok(SearchResult {
-        search_id: search_id.to_string(),
-        r#type: file_type_filter.to_string(),
+        id: result.claim_id.to_string(),
+        search_id: search_id.to_owned(),
+        r#type: file_type_filter.to_owned(),
         hash: result.file_hash,
-        name: result.name,
         size_bytes: result.size_bytes,
-        sources: result.source_count,
-        complete_sources: result.complete_source_count,
-        source_client_id: source.map(|(client_id, _)| client_id),
-        source_client_port: source.map(|(_, client_port)| client_port),
-        file_type: result.file_type,
+        name: s.name,
+        sources: s.source_count,
+        complete_sources: s.complete_source_count,
+        source_client_id: s.source_client_id,
+        source_client_port: s.source_client_port,
+        file_type: s.file_type,
         media: SearchResultMedia {
-            artist: result.media_artist,
-            album: result.media_album,
-            title: result.media_title,
-            length_seconds: result.media_length_seconds,
-            bitrate_kbps: result.media_bitrate_kbps,
-            codec: result.media_codec,
+            artist: s.media_artist,
+            album: s.media_album,
+            title: s.media_title,
+            length_seconds: s.media_length_seconds,
+            bitrate_kbps: s.media_bitrate_kbps,
+            codec: s.media_codec,
         },
-        rating: result.rating,
-        aich_hash: result.aich_hash,
-        complete: result.complete,
-        directory: result.directory,
+        rating: s.rating,
+        aich_hash: s.aich_hash,
+        complete: s.complete,
+        directory: s.directory,
         observations,
     })
 }
 
-fn timestamp_ms(value: i64, label: &str) -> Result<DateTime<Utc>> {
-    DateTime::<Utc>::from_timestamp_millis(value).with_context(|| format!("invalid {label}"))
+fn timestamp_s(value: i64, label: &str) -> Result<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(value, 0).with_context(|| format!("invalid {label}"))
 }
 
 #[cfg(test)]
@@ -301,10 +293,10 @@ mod tests {
             "audio".to_string(),
             "00112233445566778899aabbccddeeff".to_string(),
             SearchResultObservation {
-                origin: "kad".to_string(),
+                origin: "global".to_string(),
                 reporter_endpoint: None,
                 name: "Example Track.flac".to_string(),
-                size_bytes: 8_192,
+                size_bytes: Some(8_192),
                 sources: 12,
                 complete_sources: 4,
                 source_client_id: None,
@@ -329,7 +321,7 @@ mod tests {
             id: String::new(),
             spec: spec.clone(),
             resolved_method: Some("global".to_string()),
-            status: "error".to_string(),
+            status: "running".to_string(),
             status_reason: Some("network-search-failed".to_string()),
             progress: SearchProgress::new("failed", 0, None, ""),
             created_at: now,
@@ -339,6 +331,43 @@ mod tests {
 
         search.id = create_search(&metadata, &search).unwrap();
         search.results[0].search_id.clone_from(&search.id);
+        let claim_id = metadata
+            .ingest_search_observations(
+                &[emulebb_metadata::MetadataContentObservationEvent {
+                    claim: emulebb_metadata::MetadataContentClaim {
+                        hash: hex::decode(&search.results[0].hash)
+                            .unwrap()
+                            .try_into()
+                            .unwrap(),
+                        size_bytes: Some(8192),
+                    },
+                    origin: emulebb_metadata::MetadataObservationOrigin::Global,
+                    reporter_endpoint: Some("192.0.2.4:4661".parse().unwrap()),
+                    metadata: emulebb_metadata::MetadataContentMetadata {
+                        name: Some("Example Track.flac".into()),
+                        source_count: Some(12),
+                        complete_source_count: Some(4),
+                        file_type: Some("Audio".into()),
+                        media_artist: Some("Example Artist".into()),
+                        media_album: Some("Example Album".into()),
+                        media_title: Some("Example Title".into()),
+                        media_length_seconds: Some(240),
+                        media_bitrate_kbps: Some(1411),
+                        media_codec: Some("flac".into()),
+                        ..Default::default()
+                    },
+                    observed_at_s: now.timestamp(),
+                }],
+                &emulebb_metadata::MetadataSearchProjection {
+                    session_id: search.id.parse().unwrap(),
+                    fields: result_fields(&search.results[0]),
+                    name_votes: projection_name_votes(&search.results[0]).unwrap(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        search.results[0].id = claim_id.claim_id.to_string();
+        search.status = "error".into();
         persist_search(&metadata, &search).unwrap();
         let searches = load_searches(&metadata).unwrap();
 
@@ -354,7 +383,7 @@ mod tests {
         assert_eq!(reloaded.results[0].media.length_seconds, 240);
         assert_eq!(reloaded.results[0].media.bitrate_kbps, 1_411);
         assert_eq!(reloaded.results[0].media.codec, "flac");
-        assert_eq!(reloaded.results[0].observations[0].origin, "kad");
+        assert_eq!(reloaded.results[0].observations[0].origin, "global");
         assert_eq!(
             reloaded.status_reason.as_deref(),
             Some("network-search-failed")
@@ -364,18 +393,12 @@ mod tests {
     }
 }
 
-/// Publish durable evidence only into an existing collecting session.
+/// Publish the already committed display projection without re-aggregating it.
 pub(crate) async fn publish_observation(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::CoreState>>,
     search_id: &str,
-    request: &crate::SearchCreate,
     result: SearchResult,
 ) {
-    let mut accepted = vec![result];
-    crate::search_query::apply_search_filters(&mut accepted, request);
-    let Some(result) = accepted.pop() else {
-        return;
-    };
     let mut state = state.lock().await;
     let Some(search) = state.searches.get_mut(search_id) else {
         return;
@@ -383,12 +406,8 @@ pub(crate) async fn publish_observation(
     if !matches!(search.status.as_str(), "queued" | "running") {
         return;
     }
-    if let Some(existing) = search
-        .results
-        .iter_mut()
-        .find(|existing| existing.hash == result.hash)
-    {
-        existing.merge_observations(result);
+    if let Some(existing) = search.results.iter_mut().find(|r| r.id == result.id) {
+        *existing = result;
     } else {
         search.results.push(result);
     }

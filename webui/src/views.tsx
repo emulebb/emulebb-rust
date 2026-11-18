@@ -675,7 +675,6 @@ export function SearchView(props: {
           <tbody>
             {results.map((result) => {
               const observations = result.observations ?? [];
-              const downloadable = (result.sizeBytes ?? 0) > 0;
               const mediaSummary = searchResultMediaSummary(result.media);
               const origins = [...new Set(observations.map((observation) => observation.origin))];
               const alternateNames = [...new Set(
@@ -690,7 +689,7 @@ export function SearchView(props: {
                   .filter((hash): hash is string => Boolean(hash))
               )];
               return (
-              <tr key={result.hash}>
+              <tr key={result.id}>
                 <td class="search-result-name-cell">
                   <strong>{result.displayName ?? result.hash}</strong>
                   {alternateNames.length > 0 && (
@@ -724,7 +723,7 @@ export function SearchView(props: {
                     </details>
                   )}
                 </td>
-                <td>{formatBytes(result.sizeBytes)}</td>
+                <td>{result.sizeBytes === null ? "Unknown" : formatBytes(result.sizeBytes)}</td>
                 <td>
                   {result.sources ?? result.availability ?? 0}
                   <span class="search-complete-sources">{result.completeSources ?? 0} complete</span>
@@ -736,11 +735,10 @@ export function SearchView(props: {
                 <td>
                   <button class="btn"
                     type="button"
-                    disabled={!downloadable}
-                    title={downloadable ? "Download this result" : "Download unavailable: file size was not reported"}
+                    title="Download this result"
                     onClick={() => void props.run(
                       () => createDownloadWithChoice((redownload) =>
-                        props.client.post(`searches/${props.selectedSearch?.id}/results/${result.hash}/operations/download`, {
+                        props.client.post(`searches/${props.selectedSearch?.id}/results/${result.id}/download`, {
                           intent: paused ? "stopped" : "started",
                           category: category || null,
                           redownload
@@ -750,7 +748,7 @@ export function SearchView(props: {
                     )}
                   >
                     <Download size={15} />
-                    {downloadable ? "Download" : "Missing size"}
+                    Download
                   </button>
                 </td>
               </tr>
@@ -813,7 +811,7 @@ function searchResultObservationEvidence(observation: SearchResultObservation): 
     ? `client ${observation.sourceClientId}:${observation.sourceClientPort}`
     : "";
   return [
-    observation.sizeBytes > 0 ? formatBytes(observation.sizeBytes) : "",
+    observation.sizeBytes === null ? "Unknown size" : formatBytes(observation.sizeBytes),
     observation.fileType && observation.fileType !== "unknown" ? `type ${observation.fileType}` : "",
     `${observation.sources} sources / ${observation.completeSources} complete`,
     observation.reporterEndpoint ? `reporter ${observation.reporterEndpoint}` : "",

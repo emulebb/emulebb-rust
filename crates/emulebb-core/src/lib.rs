@@ -296,7 +296,7 @@ use local_search_response::send_local_search_response;
 use local_search_response::split_stock_search_responses;
 pub use network_binding::NetworkBindingStatus;
 use network_status_defaults::{ed2k_starting_status, ed2k_stopped_status, kad_starting_status};
-use search_query::{SearchNetworkMethod, apply_search_filters, search_criteria_from_request};
+use search_query::{SearchNetworkMethod, search_criteria_from_request};
 use search_queue::{SearchQueue, SearchQueueLane};
 use search_queue_runtime::Ed2kServerSearchOutcome;
 use source_publish::{
@@ -455,7 +455,7 @@ pub struct EmulebbCore {
     /// to `stopping` when graceful teardown begins so a polling controller sees
     /// the shutdown instead of a hardcoded `running`.
     lifecycle: Arc<std::sync::atomic::AtomicU8>,
-    ed2k_network: Option<Ed2kNetworkConfig>,
+    ed2k_network: Option<Arc<Ed2kNetworkConfig>>,
     kad_local_store: Option<Arc<Mutex<KadLocalStore>>>,
     kad_snoop_queue: Option<Arc<Mutex<SnoopQueue>>>,
     ed2k_runtime: Arc<Mutex<Option<Ed2kRuntime>>>,
@@ -668,7 +668,7 @@ impl EmulebbCore {
                 root
             })
             .collect::<Vec<_>>();
-        let mut core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
+        let core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
         let passive_replay_enabled = ed2k_network
             .as_ref()
             .is_some_and(|network| network.kad_passive_replay_enabled);
@@ -754,7 +754,7 @@ impl EmulebbCore {
             delivery_cursor: Arc::new(Mutex::new(None)),
             cleanup_cursors: Arc::new(Mutex::new((None, None))),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            ed2k_network,
+            ed2k_network: ed2k_network.map(Arc::new),
             kad_local_store,
             kad_snoop_queue,
             ed2k_runtime: Arc::new(Mutex::new(None)),

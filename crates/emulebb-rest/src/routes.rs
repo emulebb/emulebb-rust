@@ -181,7 +181,7 @@ pub fn router_with_shutdown(
             post(reload_shared_directories),
         )
         .route(
-            "/api/v1/searches/{searchId}/results/{hash}/operations/download",
+            "/api/v1/searches/{searchId}/results/{resultId}/download",
             post(download_search_result),
         )
         .route("/api/v1/downloads", get(downloads).post(create_download))

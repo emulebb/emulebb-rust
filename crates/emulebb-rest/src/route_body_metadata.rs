@@ -315,9 +315,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         }
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
         ("PATCH", ["categories", _]) => Some(CATEGORY_PATCH),
-        ("POST", ["searches", _, "results", _, "operations", "download"]) => {
-            Some(SEARCH_RESULT_DOWNLOAD)
-        }
+        ("POST", ["searches", _, "results", _, "download"]) => Some(SEARCH_RESULT_DOWNLOAD),
         _ => None,
     }
 }
@@ -352,11 +350,7 @@ fn uses_category_selector_body(method: &str, path: &str) -> bool {
     };
     matches!(
         (method, segments.as_slice()),
-        ("PATCH", ["downloads", _])
-            | (
-                "POST",
-                ["searches", _, "results", _, "operations", "download"]
-            )
+        ("PATCH", ["downloads", _]) | ("POST", ["searches", _, "results", _, "download"])
     )
 }
 

@@ -20,7 +20,7 @@ describe("SearchView", () => {
       total: 1,
       offset: 0,
       limit: 100,
-      items: [{ hash, displayName: "Sample.bin", sizeBytes: 1 }]
+      items: [{ id: "11", hash, displayName: "Sample.bin", sizeBytes: 1 }]
     };
 
     render(
@@ -45,12 +45,12 @@ describe("SearchView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Download" }));
 
     await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
-    expect(post).toHaveBeenNthCalledWith(1, `searches/7/results/${hash}/operations/download`, {
+    expect(post).toHaveBeenNthCalledWith(1, `searches/7/results/11/download`, {
       intent: "started",
       category: null,
       redownload: false
     });
-    expect(post).toHaveBeenNthCalledWith(2, `searches/7/results/${hash}/operations/download`, {
+    expect(post).toHaveBeenNthCalledWith(2, `searches/7/results/11/download`, {
       intent: "started",
       category: null,
       redownload: true
@@ -72,8 +72,8 @@ describe("SearchView", () => {
       offset: 100,
       limit: 100,
       items: [
-        { hash: "00112233445566778899aabbccddeeff", displayName: "Result 101.bin" },
-        { hash: "ffeeddccbbaa99887766554433221100", displayName: "Result 102.bin" }
+        { id: "11", hash: "00112233445566778899aabbccddeeff", displayName: "Result 101.bin", sizeBytes: null },
+        { id: "12", hash: "ffeeddccbbaa99887766554433221100", displayName: "Result 102.bin", sizeBytes: 0 }
       ]
     };
 
@@ -97,10 +97,12 @@ describe("SearchView", () => {
     );
 
     expect(screen.getByText("Showing 101–102 of 250 results")).toBeInTheDocument();
-    for (const button of screen.getAllByRole("button", { name: "Missing size" })) {
-      expect(button).toBeDisabled();
+    for (const button of screen.getAllByRole("button", { name: "Download" })) {
+      expect(button).toBeEnabled();
     }
 
+    expect(screen.getByText("Unknown")).toBeInTheDocument();
+    expect(screen.getByText("0 B")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Previous search results page" }));
     fireEvent.click(screen.getByRole("button", { name: "Next search results page" }));
 
@@ -141,6 +143,7 @@ describe("SearchView", () => {
         artist: "Example Artist"
       },
       items: [{
+        id: "13",
         hash: "00112233445566778899aabbccddeeff",
         displayName: "Primary.flac",
         sizeBytes: 4096,

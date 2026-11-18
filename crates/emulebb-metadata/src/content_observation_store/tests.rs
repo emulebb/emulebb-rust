@@ -155,7 +155,7 @@ fn corpus_survives_search_clear_reopen_and_saturates_counts_without_real_overflo
         .ingest_content_observations(&[original.clone()])
         .unwrap()[0];
     store.connection().unwrap().execute_batch(
-        "INSERT INTO search_sessions(query,normalized_query,requested_method,status,created_at_ms,updated_at_ms)
+        "INSERT INTO search_sessions(query,normalized_query,requested_method,status,created_at_s,updated_at_s)
          VALUES('sample','sample','kad','completed',0,0)"
     ).unwrap();
     store.clear_searches().unwrap();

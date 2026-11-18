@@ -1,14 +1,17 @@
-use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
-
+mod availability;
+mod fields;
+mod name_votes;
+mod pages;
 use crate::{
+    MetadataContentObservationReceipt,
     search_model::{
-        MetadataSearch, MetadataSearchData, MetadataSearchResult, MetadataSearchResultObservation,
-        MetadataSearchSpec,
+        MetadataSearch, MetadataSearchData, MetadataSearchProjection, MetadataSearchResult,
+        MetadataSearchResultObservation, MetadataSearchResultSummary, MetadataSearchSpec,
     },
-    store::{bool_to_i64, decode_fixed_hex, unix_ms},
     text::normalize_search_text,
 };
+use anyhow::{Context, Result, ensure};
+use rusqlite::{OptionalExtension, params};
 
 impl super::MetadataStore {
     /// Allocate a never-reused session identity and commit its initial contents.
@@ -25,7 +28,6 @@ impl super::MetadataStore {
     }
 
     fn write_search(&self, id: Option<i64>, search: &MetadataSearchData) -> Result<i64> {
-        let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         // WHY: allocation and updates share the body writer, but a missing
@@ -39,8 +41,8 @@ impl super::MetadataStore {
                 file_type_filter, extension_filter, min_size_bytes, max_size_bytes,
                 min_availability, min_complete_sources, min_bitrate_kbps,
                 min_length_seconds, codec_filter, title_filter, album_filter,
-                artist_filter, status, status_reason, created_at_ms, updated_at_ms,
-                completed_at_ms
+                artist_filter, status, status_reason, created_at_s, updated_at_s,
+                completed_at_s
             )
             SELECT
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
@@ -65,8 +67,8 @@ impl super::MetadataStore {
                 artist_filter = excluded.artist_filter,
                 status = excluded.status,
                 status_reason = excluded.status_reason,
-                updated_at_ms = excluded.updated_at_ms,
-                completed_at_ms = excluded.completed_at_ms
+                updated_at_s = excluded.updated_at_s,
+                completed_at_s = excluded.completed_at_s
             RETURNING id
             "#,
                 params![
@@ -89,175 +91,14 @@ impl super::MetadataStore {
                     search.spec.artist,
                     search.status,
                     search.status_reason,
-                    search.created_at_ms,
-                    search.updated_at_ms,
-                    search.completed_at_ms,
+                    search.created_at_s,
+                    search.updated_at_s,
+                    search.completed_at_s,
                 ],
                 |row| row.get(0),
             )
             .optional()?
             .context("search no longer exists")?;
-        tx.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS incoming_search_result_ids(id INTEGER PRIMARY KEY);
-            DELETE FROM temp.incoming_search_result_ids;",
-        )?;
-        for result in &search.results {
-            let file_hash = decode_fixed_hex(&result.file_hash, 16, "search result ED2K hash")?;
-            let known_file_id = tx
-                .query_row(
-                    "SELECT id FROM known_files WHERE ed2k_hash = ?1",
-                    params![file_hash],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?;
-            tx.execute(
-                r#"
-                INSERT INTO search_results(
-                    session_id, known_file_id, ed2k_hash, name, size_bytes,
-                    source_count, complete_source_count, file_type, media_artist,
-                    media_album, media_title, media_length_seconds, media_bitrate_kbps,
-                    media_codec, rating, aich_root, complete, directory
-                )
-                VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
-                )
-                ON CONFLICT(session_id, ed2k_hash) DO UPDATE SET
-                    known_file_id = excluded.known_file_id,
-                    name = excluded.name,
-                    size_bytes = excluded.size_bytes,
-                    source_count = excluded.source_count,
-                    complete_source_count = excluded.complete_source_count,
-                    file_type = excluded.file_type,
-                    media_artist = excluded.media_artist,
-                    media_album = excluded.media_album,
-                    media_title = excluded.media_title,
-                    media_length_seconds = excluded.media_length_seconds,
-                    media_bitrate_kbps = excluded.media_bitrate_kbps,
-                    media_codec = excluded.media_codec,
-                    rating = excluded.rating,
-                    aich_root = excluded.aich_root,
-                    complete = excluded.complete,
-                    directory = excluded.directory
-                WHERE search_results.known_file_id IS NOT excluded.known_file_id OR
-                    search_results.name IS NOT excluded.name OR
-                    search_results.size_bytes IS NOT excluded.size_bytes OR
-                    search_results.source_count IS NOT excluded.source_count OR
-                    search_results.complete_source_count IS NOT excluded.complete_source_count OR
-                    search_results.file_type IS NOT excluded.file_type OR
-                    search_results.media_artist IS NOT excluded.media_artist OR
-                    search_results.media_album IS NOT excluded.media_album OR
-                    search_results.media_title IS NOT excluded.media_title OR
-                    search_results.media_length_seconds IS NOT excluded.media_length_seconds OR
-                    search_results.media_bitrate_kbps IS NOT excluded.media_bitrate_kbps OR
-                    search_results.media_codec IS NOT excluded.media_codec OR
-                    search_results.rating IS NOT excluded.rating OR
-                    search_results.aich_root IS NOT excluded.aich_root OR
-                    search_results.complete IS NOT excluded.complete OR
-                    search_results.directory IS NOT excluded.directory
-                "#,
-                params![
-                    session_id,
-                    known_file_id,
-                    file_hash,
-                    result.name,
-                    i64::try_from(result.size_bytes)?,
-                    i64::from(result.source_count),
-                    i64::from(result.complete_source_count),
-                    result.file_type,
-                    result.media_artist,
-                    result.media_album,
-                    result.media_title,
-                    i64::from(result.media_length_seconds),
-                    i64::from(result.media_bitrate_kbps),
-                    result.media_codec,
-                    i64::from(result.rating),
-                    encode_aich_root(&result.aich_hash)?,
-                    bool_to_i64(result.complete),
-                    result.directory,
-                ],
-            )?;
-            let result_id: i64 = tx.query_row(
-                "SELECT id FROM search_results WHERE session_id = ?1 AND ed2k_hash = ?2",
-                params![session_id, file_hash],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO temp.incoming_search_result_ids VALUES(?1)",
-                [result_id],
-            )?;
-            let observations = result
-                .observations
-                .iter()
-                .cloned()
-                .map(|mut observation| {
-                    if observation.observed_at_ms <= 0 {
-                        observation.observed_at_ms = now;
-                    }
-                    observation
-                })
-                .collect::<Vec<_>>();
-            let stored = load_search_result_observations(&tx, result_id)?;
-            let retained = if observations.starts_with(&stored) {
-                stored.len()
-            } else {
-                tx.execute(
-                    "DELETE FROM search_result_observations WHERE result_id = ?1",
-                    [result_id],
-                )?;
-                0
-            };
-            for observation in observations.iter().skip(retained) {
-                tx.execute(
-                    r#"
-                    INSERT INTO search_result_observations(
-                        result_id, origin, reporter_endpoint, name, size_bytes, source_count,
-                        complete_source_count, source_client_id, source_client_port,
-                        file_type, media_artist, media_album, media_title,
-                        media_length_seconds, media_bitrate_kbps, media_codec,
-                        rating, aich_root, complete, directory, observed_at_ms
-                    )
-                    VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
-                    )
-                    "#,
-                    params![
-                        result_id,
-                        observation.origin,
-                        observation.reporter_endpoint,
-                        observation.name,
-                        i64::try_from(observation.size_bytes)?,
-                        i64::from(observation.source_count),
-                        i64::from(observation.complete_source_count),
-                        observation.source_client_id.map(i64::from),
-                        observation.source_client_port.map(i64::from),
-                        observation.file_type,
-                        observation.media_artist,
-                        observation.media_album,
-                        observation.media_title,
-                        i64::from(observation.media_length_seconds),
-                        i64::from(observation.media_bitrate_kbps),
-                        observation.media_codec,
-                        i64::from(observation.rating),
-                        encode_aich_root(&observation.aich_hash)?,
-                        bool_to_i64(observation.complete),
-                        observation.directory,
-                        if observation.observed_at_ms > 0 {
-                            observation.observed_at_ms
-                        } else {
-                            now
-                        },
-                    ],
-                )?;
-            }
-        }
-        tx.execute(
-            "DELETE FROM search_results WHERE session_id = ?1
-            AND id NOT IN (SELECT id FROM temp.incoming_search_result_ids)",
-            [session_id],
-        )?;
-        tx.execute("DELETE FROM temp.incoming_search_result_ids", [])?;
         tx.commit()?;
         Ok(session_id)
     }
@@ -271,10 +112,10 @@ impl super::MetadataStore {
                    min_size_bytes, max_size_bytes, min_availability,
                    min_complete_sources, min_bitrate_kbps, min_length_seconds,
                    codec_filter, title_filter, album_filter, artist_filter,
-                   status, status_reason, created_at_ms, updated_at_ms,
-                   completed_at_ms
+                   status, status_reason, created_at_s, updated_at_s,
+                   completed_at_s
             FROM search_sessions
-            ORDER BY created_at_ms, id
+            ORDER BY created_at_s, id
             "#,
         )?;
         let sessions = stmt
@@ -302,17 +143,17 @@ impl super::MetadataStore {
                         resolved_method: row.get(4)?,
                         status: row.get(17)?,
                         status_reason: row.get(18)?,
-                        created_at_ms: row.get(19)?,
-                        updated_at_ms: row.get(20)?,
-                        completed_at_ms: row.get(21)?,
-                        results: Vec::new(),
+                        created_at_s: row.get(19)?,
+                        updated_at_s: row.get(20)?,
+                        completed_at_s: row.get(21)?,
                     },
+                    results: Vec::new(),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut searches = Vec::with_capacity(sessions.len());
         for mut search in sessions {
-            search.data.results = load_search_results(&conn, search.id)?;
+            search.results = load_search_results(&conn, search.id)?;
             searches.push(search);
         }
         Ok(searches)
@@ -338,117 +179,135 @@ fn load_search_results(
     session_id: i64,
 ) -> Result<Vec<MetadataSearchResult>> {
     let mut stmt = conn.prepare(
-        r#"
-        SELECT id, lower(hex(ed2k_hash)),
-               name, size_bytes, source_count, complete_source_count, file_type,
-               media_artist, media_album, media_title, media_length_seconds,
-               media_bitrate_kbps, media_codec, rating, aich_root, complete, directory
-        FROM search_results
-        WHERE session_id = ?1
-        ORDER BY id
-        "#,
+        "SELECT r.claim_id,c.ed2k_hash,c.size_bytes,r.name,r.source_count,r.complete_source_count,
+            r.source_client_id,r.source_client_port,r.file_type,r.media_artist,r.media_album,
+            r.media_title,r.media_length_seconds,r.media_bitrate_kbps,r.media_codec,r.rating,
+            r.aich_root,r.complete,r.directory
+         FROM search_results r JOIN content_claims c ON c.id=r.claim_id
+         WHERE r.session_id=?1 ORDER BY r.claim_id",
     )?;
-    let rows = stmt.query_map(params![session_id], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            MetadataSearchResult {
-                file_hash: row.get(1)?,
-                name: row.get(2)?,
-                size_bytes: crate::sql_value::unsigned::<u64>(row, 3)?,
-                source_count: row.get::<_, u32>(4)?,
-                complete_source_count: row.get::<_, u32>(5)?,
-                file_type: row.get(6)?,
-                media_artist: row.get(7)?,
-                media_album: row.get(8)?,
-                media_title: row.get(9)?,
-                media_length_seconds: row.get::<_, u32>(10)?,
-                media_bitrate_kbps: row.get::<_, u32>(11)?,
-                media_codec: row.get(12)?,
-                rating: row.get::<_, u8>(13)?,
-                aich_hash: data_encoding::BASE32_NOPAD
-                    .encode(&row.get::<_, Option<Vec<u8>>>(14)?.unwrap_or_default()),
-                complete: row.get::<_, i64>(15)? != 0,
-                directory: row.get(16)?,
-                observations: Vec::new(),
-            },
-        ))
-    })?;
-    let mut results = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    let positions = results
-        .iter()
-        .enumerate()
-        .map(|(position, (id, _))| (*id, position))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut observations = conn.prepare(
-        "SELECT o.origin, o.reporter_endpoint, o.name, o.size_bytes, o.source_count, o.complete_source_count,
-                o.source_client_id, o.source_client_port, o.file_type, o.media_artist,
-                o.media_album, o.media_title, o.media_length_seconds, o.media_bitrate_kbps,
-                o.media_codec, o.rating, o.aich_root, o.complete, o.directory, o.observed_at_ms, o.result_id
-         FROM search_results r JOIN search_result_observations o ON o.result_id = r.id
-         WHERE r.session_id = ?1 ORDER BY o.result_id, o.observed_at_ms, o.id")?;
-    let mut rows = observations.query([session_id])?;
+    let mut rows = stmt.query([session_id])?;
+    let mut results = Vec::new();
     while let Some(row) = rows.next()? {
-        let result_id: i64 = row.get(20)?;
-        let position = positions[&result_id];
-        results[position]
-            .1
-            .observations
-            .push(search_observation_from_row(row)?);
+        let root: Option<Vec<u8>> = row.get(16)?;
+        results.push(MetadataSearchResult {
+            claim_id: row.get(0)?,
+            file_hash: hex::encode(row.get::<_, Vec<u8>>(1)?),
+            size_bytes: decode_optional_u64(row.get(2)?, 2)?,
+            summary: MetadataSearchResultSummary {
+                name: row.get(3)?,
+                source_count: row.get(4)?,
+                complete_source_count: row.get(5)?,
+                source_client_id: row.get(6)?,
+                source_client_port: row.get(7)?,
+                file_type: row.get(8)?,
+                media_artist: row.get(9)?,
+                media_album: row.get(10)?,
+                media_title: row.get(11)?,
+                media_length_seconds: row.get(12)?,
+                media_bitrate_kbps: row.get(13)?,
+                media_codec: row.get(14)?,
+                rating: row.get(15)?,
+                aich_hash: root
+                    .map(|root| data_encoding::BASE32_NOPAD.encode(&root))
+                    .unwrap_or_default(),
+                complete: row.get(17)?,
+                directory: row.get(18)?,
+            },
+            observations: load_search_observations(conn, session_id, row.get(0)?)?,
+        });
     }
-    let results = results.into_iter().map(|(_, result)| result).collect();
     Ok(results)
 }
 
-fn load_search_result_observations(
+fn load_search_observations(
     conn: &rusqlite::Connection,
-    result_id: i64,
+    session_id: i64,
+    claim_id: i64,
 ) -> Result<Vec<MetadataSearchResultObservation>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT origin, reporter_endpoint, name, size_bytes, source_count, complete_source_count,
-               source_client_id, source_client_port, file_type, media_artist,
-               media_album, media_title, media_length_seconds,
-               media_bitrate_kbps, media_codec, rating, aich_root, complete,
-               directory, observed_at_ms
-        FROM search_result_observations
-        WHERE result_id = ?1
-        ORDER BY observed_at_ms, id
-        "#,
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {},m.first_seen_at_s,m.last_seen_at_s,m.observation_count
+         FROM search_result_observations m
+         JOIN content_claim_observations o ON o.id=m.observation_id AND o.claim_id=m.claim_id
+         JOIN content_claims c ON c.id=o.claim_id
+         WHERE m.session_id=?1 AND m.claim_id=?2 ORDER BY o.id",
+        crate::content_observation_store::COLUMNS
+    ))?;
+    let mut rows = stmt.query(params![session_id, claim_id])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        values.push(MetadataSearchResultObservation {
+            observation: crate::content_observation_store::observation_from_row(row)?,
+            first_seen_at_s: row.get(25)?,
+            last_seen_at_s: row.get(26)?,
+            observation_count: row.get(27)?,
+        });
+    }
+    Ok(values)
+}
+
+/// Record only collecting-session membership; corpus writes remain independent.
+pub(crate) fn persist_projection(
+    tx: &rusqlite::Transaction<'_>,
+    projection: &MetadataSearchProjection,
+    receipts: &[MetadataContentObservationReceipt],
+    events: &[crate::MetadataContentObservationEvent],
+) -> Result<Option<crate::MetadataSearchPublication>> {
+    let collecting: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM search_sessions WHERE id=?1 AND status IN ('queued','running'))",
+        [projection.session_id], |row| row.get(0))?;
+    if !collecting {
+        return Ok(None);
+    }
+    let claim_id = receipts
+        .first()
+        .context("search projection requires an observation")?
+        .claim_id;
+    ensure!(
+        receipts.iter().all(|r| r.claim_id == claim_id),
+        "search projection contains distinct claims"
+    );
+    tx.execute("INSERT INTO search_results(session_id,claim_id,name,source_client_id,source_client_port,
+        file_type,media_artist,media_album,media_title,media_length_seconds,media_bitrate_kbps,media_codec,
+        rating,aich_root,complete,directory) VALUES(?1,?2,'',NULL,NULL,'Unknown','','','',0,0,'',0,NULL,0,'')
+        ON CONFLICT(session_id,claim_id) DO NOTHING",params![projection.session_id,claim_id])?;
+    fields::apply(tx, projection.session_id, claim_id, &projection.fields)?;
+    for (receipt, event) in receipts.iter().zip(events) {
+        tx.execute(
+            "INSERT INTO search_result_observations(session_id,claim_id,observation_id,
+                first_seen_at_s,last_seen_at_s,observation_count) VALUES(?1,?2,?3,?4,?4,1)
+             ON CONFLICT(session_id,claim_id,observation_id) DO UPDATE SET
+                first_seen_at_s=min(first_seen_at_s,excluded.first_seen_at_s),
+                last_seen_at_s=max(last_seen_at_s,excluded.last_seen_at_s),
+                observation_count=CASE WHEN observation_count<9223372036854775807
+                    THEN observation_count+1 ELSE observation_count END",
+            params![
+                projection.session_id,
+                claim_id,
+                receipt.observation_id,
+                event.observed_at_s
+            ],
+        )?;
+    }
+    let name = name_votes::apply(tx, projection.session_id, claim_id, &projection.name_votes)?;
+    tx.execute(
+        "UPDATE search_results SET name=?3 WHERE session_id=?1 AND claim_id=?2",
+        params![projection.session_id, claim_id, name],
     )?;
-    let rows = stmt.query_map(params![result_id], search_observation_from_row)?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    availability::apply(tx, projection.session_id, claim_id, events)?;
+    if let Some(last) = events.iter().map(|event| event.observed_at_s).max() {
+        tx.execute(
+            "UPDATE search_sessions SET updated_at_s=max(updated_at_s,?2) WHERE id=?1",
+            params![projection.session_id, last],
+        )?;
+    }
+    Ok(Some(crate::MetadataSearchPublication {
+        claim_id,
+        summary: pages::committed_summary(tx, projection.session_id, claim_id)?,
+    }))
 }
 
-fn search_observation_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<MetadataSearchResultObservation> {
-    Ok(MetadataSearchResultObservation {
-        origin: row.get(0)?,
-        reporter_endpoint: row.get(1)?,
-        name: row.get(2)?,
-        size_bytes: crate::sql_value::unsigned::<u64>(row, 3)?,
-        source_count: row.get::<_, u32>(4)?,
-        complete_source_count: row.get::<_, u32>(5)?,
-        source_client_id: row.get::<_, Option<u32>>(6)?,
-        source_client_port: row.get::<_, Option<u16>>(7)?,
-        file_type: row.get(8)?,
-        media_artist: row.get(9)?,
-        media_album: row.get(10)?,
-        media_title: row.get(11)?,
-        media_length_seconds: row.get::<_, u32>(12)?,
-        media_bitrate_kbps: row.get::<_, u32>(13)?,
-        media_codec: row.get(14)?,
-        rating: row.get::<_, u8>(15)?,
-        aich_hash: data_encoding::BASE32_NOPAD
-            .encode(&row.get::<_, Option<Vec<u8>>>(16)?.unwrap_or_default()),
-        complete: row.get::<_, i64>(17)? != 0,
-        directory: row.get(18)?,
-        observed_at_ms: row.get(19)?,
-    })
-}
-
-fn encode_aich_root(value: &str) -> Result<Option<Vec<u8>>> {
+pub(crate) fn encode_aich_root(value: &str) -> Result<Option<Vec<u8>>> {
     if value.is_empty() {
         return Ok(None);
     }
@@ -461,7 +320,10 @@ fn encode_optional_u64(value: Option<u64>) -> Option<Vec<u8>> {
     value.map(|value| value.to_be_bytes().to_vec())
 }
 
-fn decode_optional_u64(value: Option<Vec<u8>>, column: usize) -> rusqlite::Result<Option<u64>> {
+pub(crate) fn decode_optional_u64(
+    value: Option<Vec<u8>>,
+    column: usize,
+) -> rusqlite::Result<Option<u64>> {
     value
         .map(|value| {
             let bytes: [u8; 8] = value.try_into().map_err(|value: Vec<u8>| {

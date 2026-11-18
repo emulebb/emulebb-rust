@@ -53,8 +53,13 @@ async fn observed_content_is_ordered_and_closing_never_replays_it() {
     assert_eq!(page.items[0].receipt.observation_count, 2);
 }
 
-#[tokio::test]
-async fn committed_search_observation_publishes_after_caller_disconnect() {
+pub(in crate::persistence_owner) async fn search_fixture() -> (
+    MetadataStore,
+    Arc<Mutex<CoreState>>,
+    Arc<PersistenceOwner>,
+    SearchPublication,
+    Vec<MetadataContentObservationEvent>,
+) {
     let (store, state, owner) = setup();
     let request = crate::SearchCreate {
         query: "sample query".into(),
@@ -106,6 +111,13 @@ async fn committed_search_observation_publishes_after_caller_disconnect() {
         request,
         result: *result,
     };
+    (store, state, owner, publication, observations)
+}
+
+#[tokio::test]
+async fn committed_search_observation_publishes_after_caller_disconnect() {
+    let (store, state, owner, publication, observations) = search_fixture().await;
+    let search_id = publication.search_id.clone();
     let gate = Arc::new(PublicationGate::default());
     *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
     let caller = {
@@ -140,5 +152,265 @@ async fn committed_search_observation_publishes_after_caller_disconnect() {
         1
     );
     assert_eq!(usage(&owner), (0, 0));
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn projection_capacity_refusal_does_not_retry_or_commit() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    for index in 0..64 {
+        let name = format!("{index}{}", "x".repeat(1024));
+        publication.result.name = name.clone();
+        publication.result.observations[0].name = name.clone();
+        events[0].metadata.name = Some(name);
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+    }
+    let held_bytes = MAX_BYTES - 64 * 1024;
+    let quota = {
+        let admission = owner.admission.lock().unwrap();
+        let mut quota = admission.quota.lock().unwrap();
+        quota.bytes += held_bytes;
+        Arc::clone(&admission.quota)
+    };
+    let held = ByteLease {
+        quota,
+        bytes: held_bytes,
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        owner.observe_content(&events, Some(&publication)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(PersistenceError::Busy)));
+    assert_eq!(usage(&owner), (0, held_bytes));
+    assert_eq!(store.table_count("content_claim_observations").unwrap(), 64);
+    let mut after = 0;
+    let mut seen = 0;
+    loop {
+        let page = store.content_observations_page(1, after, 100).unwrap();
+        assert!(page.items.iter().all(|r| r.receipt.observation_count == 1));
+        seen += page.items.len();
+        if let Some(last) = page.items.last() {
+            after = last.receipt.observation_id;
+        }
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(seen, 64);
+    assert_eq!(
+        state.lock().await.searches[&publication.search_id].results[0]
+            .observations
+            .len(),
+        64
+    );
+    drop(held);
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn same_hash_different_sizes_publish_distinct_claim_ids() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    for size in [None, Some(0), Some(1024), Some(2048)] {
+        publication.result.size_bytes = size;
+        publication.result.observations[0].size_bytes = size;
+        events[0].claim.size_bytes = size;
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+    }
+    let state = state.lock().await;
+    let results = &state.searches[&publication.search_id].results;
+    assert_eq!(results.len(), 4);
+    for (index, result) in results.iter().enumerate() {
+        assert!(!result.id.is_empty());
+        assert!(
+            results[..index]
+                .iter()
+                .all(|previous| previous.id != result.id)
+        );
+    }
+    drop(state);
+    assert_eq!(store.load_searches().unwrap()[0].results.len(), 4);
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn name_consensus_counts_each_reporter_once_across_changing_metadata() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    let id = publication.search_id.clone();
+    for (name, reporter, sources) in [
+        ("Alpha.bin", "192.0.2.1:4661", 3),
+        ("Beta.bin", "192.0.2.2:4661", 1),
+        ("Beta.bin", "192.0.2.3:4661", 1),
+    ]
+    .into_iter()
+    .chain((100..120).map(|sources| ("Alpha.bin", "192.0.2.1:4661", sources)))
+    {
+        publication.result.name = name.into();
+        publication.result.sources = sources;
+        publication.result.observations[0].name = name.into();
+        publication.result.observations[0].sources = sources;
+        publication.result.observations[0].reporter_endpoint = Some(reporter.into());
+        events[0].metadata.name = Some(name.into());
+        events[0].metadata.source_count = Some(sources);
+        events[0].reporter_endpoint = Some(reporter.parse().unwrap());
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+    }
+    let snapshot = state.lock().await;
+    assert_eq!(snapshot.searches[&id].results[0].name, "Beta.bin");
+    let claim = snapshot.searches[&id].results[0].id.parse().unwrap();
+    drop(snapshot);
+    assert_eq!(
+        store
+            .search_result_header(id.parse().unwrap(), claim)
+            .unwrap()
+            .unwrap()
+            .summary
+            .name,
+        "Beta.bin"
+    );
+    assert_eq!(store.table_count("search_name_reporters").unwrap(), 3);
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_raw_occurrence_does_not_consult_removed_session_presentation() {
+    let (store, state, owner, mut publication, events) = search_fixture().await;
+    let queue = Arc::new(parking_lot::Mutex::new(
+        crate::search_queue::SearchQueue::new(),
+    ));
+    owner
+        .remove_search_sessions(Some(publication.search_id.parse().unwrap()), &queue)
+        .await
+        .unwrap();
+    publication.result.observations[0].origin = "unused-after-session-removal".into();
+    owner
+        .observe_content(&events, Some(&publication))
+        .await
+        .unwrap();
+    assert!(state.lock().await.searches.is_empty());
+    assert_eq!(store.table_count("search_name_reporters").unwrap(), 0);
+    assert_eq!(store.table_count("content_claim_observations").unwrap(), 1);
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_uses_durable_independent_ed2k_and_kad_counts() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    let id = publication.search_id.clone();
+    for (origin, reporter, sources, complete, expected) in [
+        (
+            MetadataObservationOrigin::Kad,
+            "192.0.2.9:4672",
+            100,
+            2,
+            (100, 2),
+        ),
+        (
+            MetadataObservationOrigin::Server,
+            "192.0.2.1:4661",
+            60,
+            4,
+            (100, 4),
+        ),
+        (
+            MetadataObservationOrigin::Global,
+            "192.0.2.1:4661",
+            20,
+            3,
+            (100, 4),
+        ),
+        (
+            MetadataObservationOrigin::Server,
+            "192.0.2.2:4661",
+            50,
+            3,
+            (110, 7),
+        ),
+    ] {
+        events[0].origin = origin;
+        events[0].reporter_endpoint = Some(reporter.parse().unwrap());
+        events[0].metadata.source_count = Some(sources);
+        events[0].metadata.complete_source_count = Some(complete);
+        publication.result.sources = sources;
+        publication.result.complete_sources = complete;
+        let observation = &mut publication.result.observations[0];
+        observation.origin = origin.as_str().into();
+        observation.reporter_endpoint = Some(reporter.into());
+        observation.sources = sources;
+        observation.complete_sources = complete;
+        owner
+            .observe_content(&events, Some(&publication))
+            .await
+            .unwrap();
+        let snapshot = state.lock().await;
+        let result = &snapshot.searches[&id].results[0];
+        assert_eq!((result.sources, result.complete_sources), expected);
+        let persisted = store
+            .search_result_header(id.parse().unwrap(), result.id.parse().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                persisted.summary.source_count,
+                persisted.summary.complete_source_count
+            ),
+            expected
+        );
+    }
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_field_winners_publish_without_cached_observation_history() {
+    let (store, state, owner, mut publication, mut events) = search_fixture().await;
+    let id = publication.search_id.clone();
+    publication.result.observations[0].media.artist = "Sample Artist".into();
+    publication.result.observations[0].sources = 3;
+    events[0].metadata.media_artist = Some("Sample Artist".into());
+    events[0].metadata.source_count = Some(3);
+    owner
+        .observe_content(&events, Some(&publication))
+        .await
+        .unwrap();
+    state
+        .lock()
+        .await
+        .searches
+        .get_mut(&id)
+        .unwrap()
+        .results
+        .clear();
+    publication.result.observations[0].media.artist.clear();
+    publication.result.observations[0].media.codec = "flac".into();
+    publication.result.observations[0].sources = 9;
+    events[0].metadata.media_artist = None;
+    events[0].metadata.media_codec = Some("flac".into());
+    events[0].metadata.source_count = Some(9);
+    owner
+        .observe_content(&events, Some(&publication))
+        .await
+        .unwrap();
+    let snapshot = state.lock().await;
+    let result = &snapshot.searches[&id].results[0];
+    assert_eq!(result.media.artist, "Sample Artist");
+    assert_eq!(result.media.codec, "flac");
+    assert_eq!(result.observations.len(), 1);
+    let persisted = store
+        .search_result_header(id.parse().unwrap(), result.id.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.summary.media_artist, result.media.artist);
+    assert_eq!(persisted.summary.media_codec, result.media.codec);
+    drop(snapshot);
     owner.close_and_drain().await.unwrap();
 }

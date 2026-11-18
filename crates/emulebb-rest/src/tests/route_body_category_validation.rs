@@ -12,7 +12,7 @@ async fn category_selector_uses_name_grammar() {
         ("PATCH", "/api/v1/downloads/1", r#"{"category":%s}"#),
         (
             "POST",
-            "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
+            "/api/v1/searches/1/results/1/download",
             r#"{"category":%s}"#,
         ),
     ];
