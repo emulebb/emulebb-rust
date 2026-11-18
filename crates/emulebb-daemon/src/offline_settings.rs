@@ -1,6 +1,7 @@
 //! Stopped-profile single-key commands use the canonical typed settings store.
-use crate::DaemonProfile;
+use crate::{PROFILE_METADATA_FILE, ProfileLease};
 use anyhow::{Context, Result};
+use emulebb_metadata::MetadataStore;
 use emulebb_settings::product::{SettingKey, SettingsEdit};
 use std::path::PathBuf;
 
@@ -40,8 +41,14 @@ pub fn run_offline_settings(
             )
         }
     };
-    let profile = DaemonProfile::load_for_import(profile_dir)?;
-    let store = profile.open_metadata_store()?;
+    // WHY: explicit edits must remain available when startup configuration is
+    // invalid. Acquire ownership and initialize storage without loading runtime
+    // settings or parsing the control-service bootstrap.
+    let lease = ProfileLease::acquire(&profile_dir, true)?;
+    let store = MetadataStore::open_with_profile_lease(
+        lease.directory().join(PROFILE_METADATA_FILE),
+        lease.guard(),
+    )?;
     if let Some(edit) = edit {
         store.edit_app_settings(&edit)?;
         Ok(None)
