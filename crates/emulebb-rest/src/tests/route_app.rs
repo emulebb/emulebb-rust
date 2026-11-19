@@ -1073,3 +1073,58 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
+#[tokio::test]
+async fn root_watching_defaults_off_and_accepts_explicit_opt_in() {
+    let root =
+        std::env::temp_dir().join(format!("emulebb-root-watch-api-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let app = router(
+        core.clone(),
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    for watch_enabled in [false, true] {
+        let path = root.join(if watch_enabled {
+            "watched"
+        } else {
+            "unwatched"
+        });
+        std::fs::create_dir_all(&path).unwrap();
+        let mut body = json!({"path":path});
+        if watch_enabled {
+            body["watchEnabled"] = json!(true);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shared-directories/roots")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let expected =
+            emulebb_ed2k::long_path::normal_path_display(std::fs::canonicalize(&path).unwrap());
+        let returned = value["data"]["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["path"].as_str() == Some(expected.as_str()))
+            .unwrap();
+        assert_eq!(returned["watchEnabled"], watch_enabled);
+    }
+    core.drain_persistence().await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}

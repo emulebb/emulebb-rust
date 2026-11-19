@@ -26,6 +26,8 @@ pub struct SharedDirectoryRoot {
     pub accessible: bool,
 }
 
+/// Recognize a watch-only edit without changing root coverage or cached health.
+/// Such an edit refreshes subscriptions without scheduling a catalog scan.
 pub(crate) fn root_watch_policy_only_changed(
     expected: &[SharedDirectoryRoot],
     proposed: &[SharedDirectoryRoot],
@@ -45,7 +47,8 @@ pub(crate) fn root_watch_policy_only_changed(
 
 /// Consolidate recursive roots without inventing parents or altering native paths.
 /// Configured ancestors cover descendants unless an unavailable ancestor would
-/// hide an independently eligible child root.
+/// hide an independently eligible child root, or the child has its own watch
+/// opt-in beneath an unwatched ancestor.
 /// Imports and every user-facing root mutation use this same policy.
 pub fn consolidate_shared_directory_roots(
     roots: impl IntoIterator<Item = MetadataSharedDirectoryRoot>,
