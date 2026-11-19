@@ -1243,6 +1243,31 @@ mod tests {
     }
 
     #[test]
+    fn deleting_one_root_preserves_another_roots_observed_health() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join("emulebb-root-resource-health");
+        let alpha = base.join("alpha");
+        let beta = base.join("beta");
+        store
+            .replace_shared_directory_roots(&[
+                library_root_config(&alpha, false),
+                library_root_config(&beta, true),
+            ])
+            .unwrap();
+        let roots = store.library_root_page(0, 100).unwrap().items;
+        let alpha_id = roots.iter().find(|root| root.path == alpha).unwrap().id;
+        let beta_id = roots.iter().find(|root| root.path == beta).unwrap().id;
+        store.set_shared_root_accessible(&beta, false).unwrap();
+        let before = store.library_root(beta_id).unwrap().unwrap();
+        assert!(!before.accessible);
+        assert!(matches!(
+            store.delete_library_root(alpha_id).unwrap(),
+            crate::MetadataLibraryRootDelete::Deleted(_)
+        ));
+        assert_eq!(store.library_root(beta_id).unwrap(), Some(before));
+    }
+
+    #[test]
     fn root_resource_ids_retire_without_retargeting_or_reusing_path_history() {
         let mut store = MetadataStore::in_memory().unwrap();
         let path = std::env::temp_dir().join("emulebb-root-resource-history");

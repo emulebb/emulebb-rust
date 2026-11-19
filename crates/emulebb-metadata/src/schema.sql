@@ -325,6 +325,7 @@ CREATE TABLE shared_directory_roots (
 
 CREATE UNIQUE INDEX shared_directory_roots_active_path_idx
     ON shared_directory_roots(path_id) WHERE deleted_at_ms IS NULL;
+CREATE INDEX shared_directory_roots_path_idx ON shared_directory_roots(path_id);
 CREATE INDEX shared_directory_roots_active_id_idx
     ON shared_directory_roots(id) WHERE enabled = 1 AND deleted_at_ms IS NULL;
 

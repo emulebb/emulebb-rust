@@ -107,7 +107,7 @@ impl MetadataStore {
     pub fn delete_library_root(&self, id: i64) -> Result<crate::MetadataLibraryRootDelete> {
         ensure!(id > 0, "root id must be positive");
         let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(root) = library_root_on_connection(&tx, id)? else {
             return Ok(crate::MetadataLibraryRootDelete::Missing);
         };
@@ -122,7 +122,11 @@ impl MetadataStore {
             removed == 1,
             "active unmanaged root lacks explicit ownership"
         );
-        crate::store::refresh_shared_root_eligibility(&tx, unix_ms())?;
+        // WHY: retiring one root must not recompute other roots' observed health
+        // from origin snapshots, which can predate their latest availability probe.
+        let now = unix_ms();
+        tx.execute("UPDATE shared_directory_roots SET monitor_owned=0,shareable=0,accessible=0,enabled=0,deleted_at_ms=?2 WHERE id=?1", params![id, now])?;
+        tx.execute("UPDATE shared_file_memberships SET removed_at_ms=?2 WHERE root_id=?1 AND removed_at_ms IS NULL", params![id, now])?;
         tx.commit()?;
         Ok(crate::MetadataLibraryRootDelete::Deleted(root))
     }
