@@ -90,34 +90,43 @@ pub(super) fn from_values(
     let servers = &values.network.servers;
     let connections = &values.network.connections;
     let upload = &values.transfers.upload;
-    let mut ed2k = Ed2kRuntimeConfig::default();
     // Both discovery networks share the ED2K transport listeners. Disabling
     // server discovery must not remove TCP transfer service from a Kad-only node.
-    ed2k.listen_port = enabled.then_some(values.network.p2p.tcp_port);
-    ed2k.nickname = values.network.nickname.clone();
-    ed2k.obfuscation_enabled = values.security.obfuscation_enabled;
-    ed2k.connect_timeout_secs = connections.connect_timeout_seconds;
-    ed2k.callback_timeout_secs = connections.callback_timeout_seconds;
-    ed2k.server_connect_timeout_secs = servers.connect_timeout_seconds;
-    ed2k.reconnect_interval_secs = servers.reconnect_interval_seconds;
-    ed2k.reconnect_enabled = servers.auto_reconnect;
-    ed2k.safe_server_connect = servers.safe_connect;
-    ed2k.use_server_priorities = servers.use_priorities;
-    ed2k.auto_connect_static_only = servers.static_only;
-    ed2k.add_servers_from_server = servers.accept_server_list_updates;
-    ed2k.server_keepalive_minutes = servers.keepalive_minutes;
-    ed2k.session_rotation_secs = servers.session_rotation_seconds;
-    ed2k.dead_server_retries = servers
-        .dead_server_retries
-        .try_into()
-        .expect("validated retry count fits u32");
-    ed2k.max_connections = connections.max_connections as usize;
-    ed2k.max_new_connections_per_five_seconds =
-        connections.max_new_connections_per_five_seconds as usize;
-    ed2k.max_half_open_connections = connections.max_half_open_connections as usize;
-    ed2k.max_sources_per_file = values.transfers.max_sources_per_file as usize;
-    ed2k.max_parallel_download_peers = values.transfers.max_parallel_download_peers as usize;
-    ed2k.download_limit_bytes_per_sec = values.transfers.download_limit_bytes_per_second;
+    let mut ed2k = Ed2kRuntimeConfig {
+        listen_port: enabled.then_some(values.network.p2p.tcp_port),
+        nickname: values.network.nickname.clone(),
+        obfuscation_enabled: values.security.obfuscation_enabled,
+        connect_timeout_secs: connections.connect_timeout_seconds,
+        callback_timeout_secs: connections.callback_timeout_seconds,
+        server_connect_timeout_secs: servers.connect_timeout_seconds,
+        reconnect_interval_secs: servers.reconnect_interval_seconds,
+        reconnect_enabled: servers.auto_reconnect,
+        safe_server_connect: servers.safe_connect,
+        use_server_priorities: servers.use_priorities,
+        auto_connect_static_only: servers.static_only,
+        add_servers_from_server: servers.accept_server_list_updates,
+        server_keepalive_minutes: servers.keepalive_minutes,
+        session_rotation_secs: servers.session_rotation_seconds,
+        dead_server_retries: servers
+            .dead_server_retries
+            .try_into()
+            .expect("validated retry count fits u32"),
+        max_connections: connections.max_connections as usize,
+        max_new_connections_per_five_seconds: connections.max_new_connections_per_five_seconds
+            as usize,
+        max_half_open_connections: connections.max_half_open_connections as usize,
+        max_sources_per_file: values.transfers.max_sources_per_file as usize,
+        max_parallel_download_peers: values.transfers.max_parallel_download_peers as usize,
+        download_limit_bytes_per_sec: values.transfers.download_limit_bytes_per_second,
+        detect_tcp_error_flooder: values.security.tcp_error_flood_detection.enabled,
+        tcp_error_flooder_interval_minutes: values
+            .security
+            .tcp_error_flood_detection
+            .interval_seconds
+            / 60,
+        tcp_error_flooder_threshold: values.security.tcp_error_flood_detection.threshold,
+        ..Ed2kRuntimeConfig::default()
+    };
     ed2k.upload_queue.base_slots = upload.base_slots as usize;
     ed2k.upload_queue.elastic_percent = upload.elastic_percent;
     ed2k.upload_queue.upload_limit_bytes_per_sec = values.transfers.upload_limit_bytes_per_second;
@@ -125,10 +134,6 @@ pub(super) fn from_values(
     ed2k.upload_queue.waiting_capacity = upload.queue_capacity as usize;
     ed2k.upload_queue.session_transfer_percent = upload.session_transfer_percent;
     ed2k.upload_queue.session_time_limit_secs = upload.session_time_limit_seconds;
-    ed2k.detect_tcp_error_flooder = values.security.tcp_error_flood_detection.enabled;
-    ed2k.tcp_error_flooder_interval_minutes =
-        values.security.tcp_error_flood_detection.interval_seconds / 60;
-    ed2k.tcp_error_flooder_threshold = values.security.tcp_error_flood_detection.threshold;
     let mut nat = NatConfig::default();
     nat.enabled = values.network.nat.enabled;
     nat.require_initial_mapping = values.network.nat.require_initial_mapping;
