@@ -92,13 +92,6 @@ pub(crate) enum CategoryCommand {
         enabled: bool,
         sharing: CategorySharingContext,
     },
-    ReplaceRoots {
-        expected: Vec<crate::SharedDirectoryRoot>,
-        implicit: Vec<crate::SharedDirectoryRoot>,
-        proposed: Vec<crate::SharedDirectoryRoot>,
-        sharing: CategorySharingContext,
-        reload: Option<crate::shared_directories::ReloadReservation>,
-    },
 }
 
 pub(super) enum CategoryDbCommand {
@@ -113,10 +106,6 @@ pub(super) enum CategoryDbCommand {
     Create(Category, Arc<std::path::PathBuf>),
     Update(Category, Arc<std::path::PathBuf>),
     Delete(Category, Arc<std::path::PathBuf>, CategoryCacheMutation),
-    ReplaceRoots(
-        Vec<emulebb_metadata::MetadataSharedDirectoryRoot>,
-        Vec<emulebb_metadata::MetadataSharedDirectoryRoot>,
-    ),
     RootPage {
         root: RootMembershipScope,
         after: i64,
@@ -140,7 +129,6 @@ pub(super) enum CategoryWrite {
         >,
     ),
     Category(Option<MetadataCategory>),
-    Roots(bool),
     RootPage(Vec<(i64, [u8; 16])>),
     Copy(Option<emulebb_metadata::MetadataSharedCopyCandidate>),
     Marked(bool),
@@ -216,9 +204,6 @@ pub(super) fn execute(
             }
             Ok(CategoryWrite::Category(changed.then(|| metadata(&value))))
         }
-        CategoryDbCommand::ReplaceRoots(implicit, roots) => store
-            .replace_explicit_roots_if_implicit_matches(&implicit, &roots)
-            .map(CategoryWrite::Roots),
         CategoryDbCommand::RootPage { root, after } => match root {
             RootMembershipScope::Path(path) => store.category_root_hash_page(&path, after, 128),
             RootMembershipScope::Id(id) => store.library_root_hash_page(id, after, 128),
@@ -279,30 +264,6 @@ impl CategoryCommand {
             Self::Delete { sharing, .. } => sharing.incoming.as_os_str().len(),
             Self::PatchRootWatch { .. } | Self::DeleteRoot { .. } => 0,
             Self::CreateRoot { path, .. } => path.capacity(),
-            Self::ReplaceRoots {
-                expected,
-                implicit,
-                proposed,
-                sharing,
-                ..
-            } => {
-                let vectors =
-                    [expected, implicit, proposed]
-                        .into_iter()
-                        .fold(0usize, |sum, roots| {
-                            sum.saturating_add(
-                                roots
-                                    .capacity()
-                                    .saturating_mul(
-                                        std::mem::size_of::<crate::SharedDirectoryRoot>(),
-                                    ),
-                            )
-                        });
-                expected.iter().chain(implicit).chain(proposed).fold(
-                    vectors.saturating_add(sharing.incoming.as_os_str().len()),
-                    |sum, root| sum.saturating_add(root.path.capacity()),
-                )
-            }
         }
     }
 }
@@ -378,42 +339,6 @@ impl PersistenceOwner {
         }
     }
 
-    pub(crate) async fn replace_explicit_roots(
-        &self,
-        mut command: CategoryCommand,
-        core: Option<&crate::EmulebbCore>,
-    ) -> Result<bool, PersistenceError> {
-        const PUBLICATION_WORKSPACE: usize = 4 * 1024 * 1024;
-        let charge = command
-            .bytes()
-            .checked_mul(4)
-            .and_then(|n| n.checked_add(FIXED_CHARGE + PUBLICATION_WORKSPACE))
-            .ok_or(PersistenceError::TooLarge)?;
-        match self
-            .submit_reserved(charge, || {
-                if let (
-                    Some(core),
-                    CategoryCommand::ReplaceRoots {
-                        reload,
-                        expected,
-                        proposed,
-                        ..
-                    },
-                ) = (core, &mut command)
-                    && !crate::shared_directories::root_watch_policy_only_changed(
-                        expected, proposed,
-                    )
-                {
-                    *reload = Some(crate::shared_directories::reserve_root_reload(core)?);
-                }
-                Ok(Command::Category(command))
-            })
-            .await?
-        {
-            Response::Roots(result) => Ok(result),
-            _ => Err(PersistenceError::Worker),
-        }
-    }
     pub(crate) async fn category(
         &self,
         command: CategoryCommand,
@@ -446,141 +371,6 @@ impl PersistenceOwner {
             _ => Err(PersistenceError::Worker),
         }
     }
-}
-
-struct RootReplacement {
-    expected: Vec<crate::SharedDirectoryRoot>,
-    implicit: Vec<crate::SharedDirectoryRoot>,
-    proposed: Vec<crate::SharedDirectoryRoot>,
-    sharing: CategorySharingContext,
-    reload: Option<crate::shared_directories::ReloadReservation>,
-}
-
-async fn process_explicit_roots(
-    state: &Arc<Mutex<CoreState>>,
-    db: &mpsc::SyncSender<DbRequest>,
-    request: &mut Request,
-    continuation: &mut Option<CategoryContinuation>,
-    replacement: RootReplacement,
-    #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
-) -> Result<Response, PersistenceError> {
-    let RootReplacement {
-        expected,
-        implicit,
-        proposed,
-        sharing,
-        reload,
-    } = replacement;
-    let watch_only =
-        crate::shared_directories::root_watch_policy_only_changed(&expected, &proposed);
-    let root_mutation = sharing
-        .runtime
-        .begin_category_root_mutation()
-        .await
-        .map_err(|_| PersistenceError::Worker)?;
-    if state.lock().await.shared_directories != expected {
-        if let Some(epoch) = root_mutation.finish() {
-            sharing.runtime.finish_scoped_root_publication(epoch).await;
-        }
-        return Ok(Response::Roots(false));
-    }
-    let proposed_keys: std::collections::HashSet<_> = proposed
-        .iter()
-        .map(|root| {
-            (
-                root.path.as_str(),
-                root.monitor_owned,
-                root.shareable,
-                root.accessible,
-            )
-        })
-        .collect();
-    let removed: Vec<_> = expected
-        .iter()
-        .filter(|old| {
-            !proposed_keys.contains(&(
-                old.path.as_str(),
-                old.monitor_owned,
-                old.shareable,
-                old.accessible,
-            ))
-        })
-        .map(|root| std::path::PathBuf::from(&root.path))
-        .collect();
-    drop(proposed_keys);
-    let as_metadata = |roots: Vec<crate::SharedDirectoryRoot>| {
-        roots
-            .into_iter()
-            .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
-                path: root.path,
-                watch_enabled: root.watch_enabled,
-                monitor_owned: root.monitor_owned,
-                shareable: root.shareable,
-                accessible: root.accessible,
-            })
-            .collect()
-    };
-    let (response, receive) = oneshot::channel();
-    db.send(DbRequest {
-        command: DbCommand::Category(CategoryDbCommand::ReplaceRoots(
-            as_metadata(implicit),
-            as_metadata(proposed.clone()),
-        )),
-        response,
-    })
-    .map_err(|_| PersistenceError::Worker)?;
-    let DbResponse::Category(CategoryWrite::Roots(committed)) = receive
-        .await
-        .map_err(|_| PersistenceError::CommitUnknown)??
-    else {
-        return Err(PersistenceError::Worker);
-    };
-    if !committed {
-        if let Some(epoch) = root_mutation.finish() {
-            sharing.runtime.finish_scoped_root_publication(epoch).await;
-        }
-        return Ok(Response::Roots(false));
-    }
-    #[cfg(test)]
-    {
-        let gate = publication_gate.lock().unwrap().clone();
-        if let Some(gate) = gate {
-            gate.entered.notify_one();
-            gate.release.notified().await;
-        }
-    }
-    state.lock().await.shared_directories = proposed;
-    let scan_owned = reload.is_some();
-    if let Some(reload) = reload {
-        // The root transaction already committed. A terminal seal before this
-        // handoff must not turn a missing scan intent into a successful receipt.
-        reload
-            .arm()
-            .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
-    }
-    let clean_epoch = root_mutation.finish();
-    if scan_owned || watch_only {
-        sharing.root_change.watch_changed();
-    } else {
-        sharing.root_change.scan_required();
-    }
-    if removed.is_empty() {
-        if let Some(epoch) = clean_epoch {
-            sharing.runtime.finish_scoped_root_publication(epoch).await;
-        }
-    } else {
-        let lease = request
-            .permit
-            .transfer_bytes(CATEGORY_PROBE_BYTES)
-            .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
-        *continuation = Some(CategoryContinuation {
-            sharing,
-            roots: removed.into_iter().map(RootMembershipScope::Path).collect(),
-            lease,
-            clean_epoch,
-        });
-    }
-    Ok(Response::Roots(true))
 }
 
 pub(super) async fn process(
@@ -768,38 +558,13 @@ pub(super) async fn process(
             )
             .await;
         }
-        CategoryCommand::ReplaceRoots {
-            expected,
-            implicit,
-            proposed,
-            sharing,
-            reload,
-        } => {
-            return process_explicit_roots(
-                state,
-                db,
-                request,
-                continuation,
-                RootReplacement {
-                    expected,
-                    implicit,
-                    proposed,
-                    sharing,
-                    reload,
-                },
-                #[cfg(test)]
-                publication_gate,
-            )
-            .await;
-        }
         command => command,
     };
     let sharing = match &command {
         CategoryCommand::Create { sharing, .. }
         | CategoryCommand::Update { sharing, .. }
         | CategoryCommand::Delete { sharing, .. } => Some(sharing.clone()),
-        CategoryCommand::ReplaceRoots { .. }
-        | CategoryCommand::PatchRootWatch { .. }
+        CategoryCommand::PatchRootWatch { .. }
         | CategoryCommand::CreateRoot { .. }
         | CategoryCommand::DeleteRoot { .. } => {
             unreachable!()
@@ -856,8 +621,7 @@ pub(super) async fn process(
             CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => {
                 unreachable!()
             }
-            CategoryCommand::ReplaceRoots { .. }
-            | CategoryCommand::PatchRootWatch { .. }
+            CategoryCommand::PatchRootWatch { .. }
             | CategoryCommand::CreateRoot { .. }
             | CategoryCommand::DeleteRoot { .. } => {
                 unreachable!()

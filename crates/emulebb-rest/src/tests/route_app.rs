@@ -346,58 +346,6 @@ async fn event_stream_closes_without_replay_when_shutdown_is_already_requested()
 }
 
 #[tokio::test]
-async fn shared_root_api_consolidates_children_for_ui_and_direct_calls() {
-    let temp = unique_test_dir("recursive-roots");
-    let parent = temp.join("Shared");
-    let child = parent.join("Child");
-    let sibling = temp.join("Shared-Other");
-    std::fs::create_dir_all(&child).unwrap();
-    std::fs::create_dir(&sibling).unwrap();
-    let core =
-        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let app = router(
-        core.clone(),
-        RestServerSettings {
-            api_key: "secret".to_string(),
-            web_root_dir: None,
-        },
-    );
-    for (path, count) in [(&child, 1), (&parent, 1), (&child, 1), (&sibling, 2)] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/shared-directories/roots")
-                    .header("X-API-Key", "secret")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(json!({"path":path}).to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let value: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
-        assert_eq!(value["data"]["roots"].as_array().unwrap().len(), count);
-    }
-    let roots = core.shared_directories().await.roots;
-    assert!(
-        roots
-            .iter()
-            .any(|root| std::path::Path::new(&root.path).ends_with("Shared"))
-    );
-    assert!(
-        !roots
-            .iter()
-            .any(|root| std::path::Path::new(&root.path).ends_with("Child"))
-    );
-    core.stop_shared_directory_monitor().await.unwrap();
-    std::fs::remove_dir_all(temp).ok();
-}
-
-#[tokio::test]
 async fn shared_root_mutations_report_closed_persistence() {
     let root = unique_test_dir("closed-root-owner");
     let core =
@@ -410,25 +358,20 @@ async fn shared_root_mutations_report_closed_persistence() {
             web_root_dir: None,
         },
     );
-    let encoded = percent_encoding::utf8_percent_encode(
-        &root.to_string_lossy(),
-        percent_encoding::NON_ALPHANUMERIC,
-    )
-    .to_string();
     for (method, uri, body) in [
         (
             "PATCH",
-            "/api/v1/shared-directories".to_owned(),
-            json!({"confirmReplaceRoots":true,"roots":[{"path":root}]}).to_string(),
+            "/api/v1/library/roots/1".to_owned(),
+            json!({"watchEnabled":true}).to_string(),
         ),
         (
             "POST",
-            "/api/v1/shared-directories/roots".to_owned(),
+            "/api/v1/library/roots".to_owned(),
             json!({"path":root}).to_string(),
         ),
         (
             "DELETE",
-            format!("/api/v1/shared-directories/roots?path={encoded}"),
+            "/api/v1/library/roots/1".to_owned(),
             String::new(),
         ),
     ] {
@@ -917,8 +860,9 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
-    core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
+    core.create_library_root(&runtime_dir.display().to_string(), false)
         .await
+        .unwrap()
         .unwrap();
     core.share_local_file(LocalShareCreate {
         path: first_file.display().to_string(),
@@ -1072,59 +1016,4 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
-}
-#[tokio::test]
-async fn root_watching_defaults_off_and_accepts_explicit_opt_in() {
-    let root =
-        std::env::temp_dir().join(format!("emulebb-root-watch-api-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
-    let core =
-        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let app = router(
-        core.clone(),
-        RestServerSettings {
-            api_key: "secret".into(),
-            web_root_dir: None,
-        },
-    );
-    for watch_enabled in [false, true] {
-        let path = root.join(if watch_enabled {
-            "watched"
-        } else {
-            "unwatched"
-        });
-        std::fs::create_dir_all(&path).unwrap();
-        let mut body = json!({"path":path});
-        if watch_enabled {
-            body["watchEnabled"] = json!(true);
-        }
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/shared-directories/roots")
-                    .header("X-API-Key", "secret")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let value: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
-        let expected =
-            emulebb_ed2k::long_path::normal_path_display(std::fs::canonicalize(&path).unwrap());
-        let returned = value["data"]["roots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["path"].as_str() == Some(expected.as_str()))
-            .unwrap();
-        assert_eq!(returned["watchEnabled"], watch_enabled);
-    }
-    core.drain_persistence().await.unwrap();
-    std::fs::remove_dir_all(root).unwrap();
 }

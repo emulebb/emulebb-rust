@@ -42,7 +42,7 @@ impl EmulebbCore {
                 "searches".to_string(),
                 "servers".to_string(),
                 "sharedFiles".to_string(),
-                "sharedDirectories".to_string(),
+                "libraryRoots".to_string(),
                 "uploads".to_string(),
                 "logs".to_string(),
                 "categoriesRead".to_string(),

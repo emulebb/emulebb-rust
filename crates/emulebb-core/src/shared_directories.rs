@@ -14,7 +14,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-/// One configured shared-directory root exposed through the eMuleBB REST contract.
+/// Runtime descriptor used by library scanning and native subscriptions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedDirectoryRoot {
@@ -24,25 +24,6 @@ pub struct SharedDirectoryRoot {
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,
-}
-
-/// Recognize a watch-only edit without changing root coverage or cached health.
-/// Such an edit refreshes subscriptions without scheduling a catalog scan.
-pub(crate) fn root_watch_policy_only_changed(
-    expected: &[SharedDirectoryRoot],
-    proposed: &[SharedDirectoryRoot],
-) -> bool {
-    expected.len() == proposed.len()
-        && expected.iter().zip(proposed).all(|(old, new)| {
-            old.path == new.path
-                && old.monitor_owned == new.monitor_owned
-                && old.shareable == new.shareable
-                && old.accessible == new.accessible
-        })
-        && expected
-            .iter()
-            .zip(proposed)
-            .any(|(old, new)| old.watch_enabled != new.watch_enabled)
 }
 
 /// Consolidate recursive roots without inventing parents or altering native paths.
@@ -268,23 +249,6 @@ impl Default for SharedDirectoryReloadProgress {
             disks: Vec::new(),
         }
     }
-}
-
-/// Replacement request for the configured shared-directory roots.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SharedDirectoriesUpdate {
-    pub roots: Vec<SharedDirectoryRootUpdate>,
-    pub confirm_replace_roots: bool,
-}
-
-/// Shared-directory root input accepted by the REST API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SharedDirectoryRootUpdate {
-    pub path: String,
-    #[serde(default)]
-    pub watch_enabled: bool,
 }
 
 pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {

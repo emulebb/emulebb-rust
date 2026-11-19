@@ -18,7 +18,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use emulebb_core::{EmulebbCore, LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
+use emulebb_core::{EmulebbCore, LocalShare};
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::FileIndex;
 
@@ -102,15 +102,10 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
     )
     .unwrap();
 
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate {
-            watch_enabled: false,
-            path: configured_root.clone(),
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .expect("configuring the deep (>260) shared root must succeed via the verbatim form");
+    core.create_library_root(&(configured_root.clone()), false)
+        .await
+        .expect("configuring the deep (>260) shared root must succeed via the verbatim form")
+        .unwrap();
     let expected_display_root = fs::canonicalize(long_path(Path::new(&configured_root)))
         .map(|path| normal_path_display(path.display().to_string()))
         .expect("configured shared root should canonicalize");

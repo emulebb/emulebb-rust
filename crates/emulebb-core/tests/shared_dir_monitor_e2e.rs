@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use emulebb_core::{EmulebbCore, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
+use emulebb_core::EmulebbCore;
 use emulebb_index::FileIndex;
 
 /// Upper bound for the auto-pickup / auto-remove to land. The settle window is
@@ -75,18 +75,13 @@ async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
     )
     .unwrap();
 
-    // Configure the (initially empty) shared root. set_shared_directories already
+    // Configure the (initially empty) shared root. Root creation already
     // (re)starts the monitor; we also call start explicitly per the feature's
     // public entry to prove it is idempotent.
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate {
-            watch_enabled: true,
-            path: shared_root.display().to_string(),
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .unwrap();
+    core.create_library_root(&(shared_root.display().to_string()), true)
+        .await
+        .unwrap()
+        .unwrap();
     core.start_shared_directory_monitor().await;
 
     // WHY: the initial detached scan can otherwise satisfy pickup itself and

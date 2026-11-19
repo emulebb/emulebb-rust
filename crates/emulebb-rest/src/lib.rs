@@ -75,6 +75,9 @@ mod route_downloads_tests;
 #[path = "tests/route_entities.rs"]
 mod route_entities_tests;
 #[cfg(test)]
+#[path = "tests/route_library_roots.rs"]
+mod route_library_roots_tests;
+#[cfg(test)]
 #[path = "tests/route_library_tags.rs"]
 mod route_library_tags_tests;
 #[cfg(test)]

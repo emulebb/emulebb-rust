@@ -36,6 +36,13 @@ pub struct LibraryRootPage {
     pub next_id: Option<i64>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryScan {
+    pub hashing_count: i64,
+    pub reload_progress: crate::SharedDirectoryReloadProgress,
+}
+
 pub(crate) enum Query {
     Get(i64),
     Page { after: i64, limit: usize },
@@ -46,6 +53,13 @@ pub(crate) enum Value {
 }
 
 impl EmulebbCore {
+    /// Bounded cached scan status, independent of the configured root collection.
+    pub fn library_scan(&self) -> LibraryScan {
+        LibraryScan {
+            hashing_count: crate::shared_directories::hashing_count_snapshot(self),
+            reload_progress: self.shared_directory_reload_progress(),
+        }
+    }
     pub async fn library_root(&self, id: i64) -> Result<LibraryReply<Option<LibraryRoot>>> {
         ensure!(id > 0, "root id must be positive");
         let owner = self

@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use emulebb_core::{EmulebbCore, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
+use emulebb_core::EmulebbCore;
 use emulebb_index::FileIndex;
 use emulebb_metadata::NativePath;
 
@@ -34,15 +34,10 @@ async fn non_utf8_shared_path_survives_restart_rename_and_delete() {
             &transfer_root,
         )
         .unwrap();
-        core.set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate {
-                watch_enabled: false,
-                path: shared_root.display().to_string(),
-            }],
-            confirm_replace_roots: true,
-        })
-        .await
-        .unwrap();
+        core.create_library_root(&(shared_root.display().to_string()), false)
+            .await
+            .unwrap()
+            .unwrap();
         core.stop_shared_directory_monitor().await.unwrap();
 
         wait_for_detached_reload(&core).await;

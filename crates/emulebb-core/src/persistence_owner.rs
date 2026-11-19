@@ -147,7 +147,6 @@ enum Response {
             emulebb_ed2k::ed2k_transfer::RetainedRead<crate::DownloadSummary>,
         )>,
     ),
-    Roots(bool),
     RootWatch(Option<emulebb_metadata::MetadataLibraryRoot>),
     RootCreated(Option<emulebb_metadata::MetadataLibraryRoot>),
     RootDeleted(emulebb_metadata::MetadataLibraryRootDelete),

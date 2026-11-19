@@ -413,22 +413,6 @@ impl MetadataStore {
         Ok(())
     }
 
-    /// Commit explicit roots only if the implicit-root snapshot is still current.
-    pub fn replace_explicit_roots_if_implicit_matches(
-        &self,
-        expected: &[MetadataSharedDirectoryRoot],
-        roots: &[MetadataSharedDirectoryRoot],
-    ) -> Result<bool> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if Self::implicit_roots_on_connection(&tx)? != expected {
-            return Ok(false);
-        }
-        Self::replace_root_origins_in_transaction(&tx, roots, "explicit", unix_ms())?;
-        tx.commit()?;
-        Ok(true)
-    }
-
     pub fn search_index_by_origin(
         &self,
         query: &str,

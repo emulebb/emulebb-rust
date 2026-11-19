@@ -13,28 +13,39 @@ describe("canonical view mappings", () => {
     const client = new RestClient();
     const post = vi.spyOn(client, "post").mockResolvedValue({});
     const patch = vi.spyOn(client, "patch").mockResolvedValue({});
-    render(<SharingView directories={{ roots: [
-      { path: "/library", watchEnabled: false, accessible: true, shareable: true },
-      { path: "/intake", watchEnabled: true, accessible: true, shareable: true }
-    ] }} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
+    vi.spyOn(client, "getPage").mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
+    render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
     expect(screen.getByLabelText("Watch for changes")).not.toBeChecked();
     fireEvent.input(screen.getByRole("textbox", { name: "Server folder path" }), { target: { value: "/new" } });
     fireEvent.click(screen.getByLabelText("Watch for changes"));
     fireEvent.click(screen.getByRole("button", { name: "Add root" }));
-    await waitFor(() => expect(post).toHaveBeenCalledWith("shared-directories/roots", { path: "/new", watchEnabled: true }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("library/roots", { path: "/new", watchEnabled: true }));
     expect(post).toHaveBeenCalledOnce();
     expect(patch).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByLabelText("Watch for changes")).not.toBeChecked());
   });
 
+  it("updates a managed root watch policy by its ID", async () => {
+    const client = new RestClient();
+    vi.spyOn(client, "getPage").mockResolvedValue({ data: [
+      { id: "17", path: "/intake", watchEnabled: false, managed: true, accessible: true, shareable: true, lastScannedAt: null }
+    ], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
+    const patch = vi.spyOn(client, "patch").mockResolvedValue({});
+    render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
+    fireEvent.click(await screen.findByLabelText("Watch /intake"));
+    await waitFor(() => expect(patch).toHaveBeenCalledWith("library/roots/17", { watchEnabled: true }));
+    expect(screen.queryByTitle("Remove")).not.toBeInTheDocument();
+  });
+
   it("uses total shared-file diagnostics rather than a bounded snapshot page and does not invent shared bytes", () => {
+    vi.spyOn(RestClient.prototype, "getPage").mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     const { unmount } = render(<Overview snapshot={{ status: { runtimeDiagnostics: { sharedFileCount: 1001 } } }}
       stats={{ sharedFiles: 3, sharedBytes: 123 }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]}
-      sharedFiles={[{ hash: "synthetic", path: "/sample/shared.bin" }]} sharedDirectories={null} kad={{}} />);
+      sharedFiles={[{ hash: "synthetic", path: "/sample/shared.bin" }]} libraryScan={null} kad={{}} />);
     expect(screen.getByText("Shared").parentElement).toHaveTextContent("1001");
     expect(screen.getByText("Shared bytes").nextElementSibling).toHaveTextContent("n/a");
     unmount();
-    render(<SharingView directories={null} ignores={null} stats={{ sharedFiles: 3, sharedBytes: 123 }}
+    render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{ sharedFiles: 3, sharedBytes: 123 }}
       sharedFileCount={1001} sharedFiles={[{ hash: "synthetic", path: "/sample/shared.bin" }]} uploads={[]} uploadQueue={[]} client={new RestClient()} run={run} />);
     expect(screen.getByText("Shared Files").parentElement).toHaveTextContent("1001");
     expect(screen.getByText("Shared Bytes").parentElement).toHaveTextContent("n/a");

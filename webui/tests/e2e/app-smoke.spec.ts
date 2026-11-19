@@ -704,19 +704,19 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await page.getByRole("link", { name: "Sharing" }).click();
   const sharingPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Folders" }) });
   const addFolder = sharingPanel.getByRole("button", { name: "Add root" });
-  const initialSharedDirectoryPosts = requests.filter((request) => request.method === "POST" && request.path === "shared-directories/roots").length;
+  const initialSharedDirectoryPosts = requests.filter((request) => request.method === "POST" && request.path === "library/roots").length;
 
   await expect(addFolder).toBeDisabled();
   await sharingPanel.getByPlaceholder("Server folder path").fill("   ");
   await expect(sharingPanel.getByText("Folder path must not be empty.")).toBeVisible();
   await expect(addFolder).toBeDisabled();
-  expect(requests.filter((request) => request.method === "POST" && request.path === "shared-directories/roots").length).toBe(initialSharedDirectoryPosts);
+  expect(requests.filter((request) => request.method === "POST" && request.path === "library/roots").length).toBe(initialSharedDirectoryPosts);
 
   await sharingPanel.getByPlaceholder("Server folder path").fill(" C:\\More\\Shared ");
   await expect(sharingPanel.getByText("Folder path must not be empty.")).toHaveCount(0);
   await addFolder.click();
   await expect(page.getByText("Folder added")).toBeVisible();
-  const sharedDirectoryPost = requests.find((request) => request.method === "POST" && request.path === "shared-directories/roots");
+  const sharedDirectoryPost = requests.find((request) => request.method === "POST" && request.path === "library/roots");
   expect(sharedDirectoryPost).toBeDefined();
   expect(JSON.parse(sharedDirectoryPost?.body ?? "{}")).toEqual({ path: "C:\\More\\Shared", watchEnabled: false });
 
@@ -724,16 +724,16 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await ignoresPanel.getByRole("textbox", { name: "File name ignore pattern" }).fill(" *.private.bin ");
   await ignoresPanel.getByRole("button", { name: "Add pattern" }).click();
   await expect(page.getByText("Ignore pattern added")).toBeVisible();
-  const ignorePost = requests.find((request) => request.method === "POST" && request.path === "shared-directories/ignores");
+  const ignorePost = requests.find((request) => request.method === "POST" && request.path === "library/ignores");
   expect(JSON.parse(ignorePost?.body ?? "{}")).toEqual({ pattern: "*.private.bin" });
   await ignoresPanel.getByTitle("Remove pattern").first().click();
   await expect(page.getByText("Ignore pattern removed")).toBeVisible();
-  const ignoreDelete = requests.find((request) => request.method === "DELETE" && request.path === "shared-directories/ignores");
+  const ignoreDelete = requests.find((request) => request.method === "DELETE" && request.path === "library/ignores");
   expect(new URLSearchParams(ignoreDelete?.query ?? "").get("pattern")).toBe("*.private.bin");
 
   await sharingPanel.getByRole("button", { name: "Reload" }).click();
   await expect(page.getByText("Reload queued")).toBeVisible();
-  expect(requests.some((request) => request.method === "POST" && request.path === "shared-directories/operations/reload")).toBe(true);
+  expect(requests.some((request) => request.method === "POST" && request.path === "library/scan")).toBe(true);
 
   await page.getByRole("link", { name: "Shared Files", exact: true }).click();
   const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
@@ -746,9 +746,9 @@ test("shared folder add form validates root paths", async ({ page }) => {
   page.once("dialog", (dialog) => dialog.accept());
   await sharingPanel.getByTitle("Remove").first().click();
   await expect(page.getByText("Folder removed")).toBeVisible();
-  const sharedDirectoryDelete = requests.find((request) => request.method === "DELETE" && request.path === "shared-directories/roots");
+  const sharedDirectoryDelete = requests.find((request) => request.method === "DELETE" && request.path === "library/roots/1");
   expect(sharedDirectoryDelete).toBeDefined();
-  expect(new URLSearchParams(sharedDirectoryDelete?.query ?? "").get("path")).toBe("C:\\Sample\\Shared");
+  expect(sharedDirectoryDelete?.query).toBe("");
 });
 
 test("transfer add form validates eD2K link batches", async ({ page }) => {

@@ -2,10 +2,7 @@ mod kad_swarm_support;
 
 use std::time::Duration;
 
-use emulebb_core::{
-    DownloadCreate, DownloadCreateSource, LocalShare, SharedDirectoriesUpdate,
-    SharedDirectoryRootUpdate,
-};
+use emulebb_core::{DownloadCreate, DownloadCreateSource, LocalShare};
 use emulebb_kad_proto::{Ed2kHash, PublishEntry, Tag, TagValue, tag_name};
 use kad_swarm_support::{
     LocalKadSwarm, deterministic_payload, file_hash, free_lan_tcp_port, node_id, open_network_core,
@@ -336,15 +333,10 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
         true,
     );
     seed_core
-        .set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate {
-                watch_enabled: false,
-                path: shared_root.display().to_string(),
-            }],
-            confirm_replace_roots: true,
-        })
+        .create_library_root(&(shared_root.display().to_string()), false)
         .await
-        .expect("configure seed shared tree");
+        .expect("configure seed shared tree")
+        .unwrap();
     let shares = seed_core
         .reload_shared_directories()
         .await

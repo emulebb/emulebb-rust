@@ -127,7 +127,7 @@ mod download_controls;
 mod library_policy;
 mod library_roots;
 pub use library_policy::LibraryReply;
-pub use library_roots::{LibraryRoot, LibraryRootPage};
+pub use library_roots::{LibraryRoot, LibraryRootPage, LibraryScan};
 mod library_sharing;
 pub use library_sharing::{LibraryFileChange, LibrarySharingOutcome, LibrarySharingRequest};
 mod library_tags;
@@ -308,11 +308,11 @@ use upload_view::{upload_from_snapshot, upload_policy_metrics_from_capacity};
 
 use shared_dir_monitor::SharedDirMonitor;
 pub use shared_directories::{
-    SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryHashActiveFile,
-    SharedDirectoryHashDiskProgress, SharedDirectoryHashQueuedFile, SharedDirectoryHashRecentFile,
-    SharedDirectoryReloadProgress, SharedDirectoryRoot, SharedDirectoryRootUpdate,
-    SharedFileIgnorePattern, SharedFileIgnorePatternUpdate, SharedFileIgnoreRule,
-    SharedFileIgnoreRuleUpdate, SharedFileIgnores, consolidate_shared_directory_roots,
+    SharedDirectories, SharedDirectoryHashActiveFile, SharedDirectoryHashDiskProgress,
+    SharedDirectoryHashQueuedFile, SharedDirectoryHashRecentFile, SharedDirectoryReloadProgress,
+    SharedDirectoryRoot, SharedFileIgnorePattern, SharedFileIgnorePatternUpdate,
+    SharedFileIgnoreRule, SharedFileIgnoreRuleUpdate, SharedFileIgnores,
+    consolidate_shared_directory_roots,
 };
 use shared_directories::{
     is_shared_file_ignore_rule, load_shared_file_ignore_policy, reload_progress_snapshot,
@@ -535,7 +535,7 @@ pub struct EmulebbCore {
     >,
     category_probe_slot: Arc<Mutex<Option<CategoryProbeTask>>>,
     /// Files still pending the initial hash in the detached background reload
-    /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
+    /// worker; surfaced as `hashingCount` on `GET /library/scan`. Await-free
     /// atomic shared by the sync primitive and the worker (see `shared_directories`).
     shared_hashing_count: Arc<std::sync::atomic::AtomicI64>,
     /// Path-free live counters for the latest shared-directory reload plan.

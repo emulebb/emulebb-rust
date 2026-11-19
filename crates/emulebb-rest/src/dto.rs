@@ -58,12 +58,6 @@ pub(crate) struct SnapshotQuery {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SharedDirectoryRootQuery {
-    pub(crate) path: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SharedFileIgnorePatternQuery {
     pub(crate) pattern: Option<String>,
 }

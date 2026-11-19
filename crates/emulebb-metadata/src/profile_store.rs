@@ -1161,44 +1161,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_root_commit_rejects_stale_implicit_roots() {
-        let store = super::super::MetadataStore::in_memory().unwrap();
-        let incoming = Path::new("incoming");
-        let mut category = store
-            .create_category("Media", None, Some("old-root"), "", incoming)
-            .unwrap();
-        let expected = store.implicit_shared_directory_roots().unwrap();
-        category.destination_dir = Some("new-root".into());
-        store.update_category(&category, incoming).unwrap();
-        let explicit = crate::MetadataSharedDirectoryRoot {
-            path: "explicit".into(),
-            watch_enabled: false,
-            monitor_owned: false,
-            shareable: true,
-            accessible: true,
-        };
-        assert!(
-            !store
-                .replace_explicit_roots_if_implicit_matches(
-                    &expected,
-                    std::slice::from_ref(&explicit)
-                )
-                .unwrap()
-        );
-        assert!(store.shared_directory_roots().unwrap().is_empty());
-        let current = store.implicit_shared_directory_roots().unwrap();
-        assert!(
-            store
-                .replace_explicit_roots_if_implicit_matches(
-                    &current,
-                    std::slice::from_ref(&explicit)
-                )
-                .unwrap()
-        );
-        assert_eq!(store.shared_directory_roots().unwrap(), vec![explicit]);
-    }
-
-    #[test]
     fn category_allocator_does_not_reuse_deleted_committed_ids_after_reopen() {
         let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
             .join("tmp/category-metadata-tests")

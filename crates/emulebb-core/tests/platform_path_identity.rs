@@ -12,8 +12,6 @@ use std::path::Path;
 use emulebb_core::EmulebbCore;
 #[cfg(target_os = "macos")]
 use emulebb_core::LocalShareCreate;
-#[cfg(windows)]
-use emulebb_core::{SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
 use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
 use emulebb_index::FileIndex;
 
@@ -67,15 +65,10 @@ async fn case_sensitive_windows_directory_preserves_case_variant_files() {
         runtime_dir.join("transfers"),
     )
     .unwrap();
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate {
-            watch_enabled: false,
-            path: shared_root.display().to_string(),
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .unwrap();
+    core.create_library_root(&(shared_root.display().to_string()), false)
+        .await
+        .unwrap()
+        .unwrap();
     core.stop_shared_directory_monitor().await.unwrap();
 
     let mut shares = core.reload_shared_directories().await.unwrap();
@@ -178,8 +171,9 @@ async fn case_insensitive_macos_alias_keeps_one_native_file_identity() {
             &transfer_root,
         )
         .unwrap();
-        core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
+        core.create_library_root(&source_dir.display().to_string(), false)
             .await
+            .unwrap()
             .unwrap();
         let first = core
             .share_local_file(LocalShareCreate {

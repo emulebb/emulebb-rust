@@ -97,17 +97,13 @@ async fn watch_only_update_does_not_reserve_a_library_scan() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     configure_test_root(&core, &root).await;
     let execution = core.shared_reload_gate.lock().await;
+    let id = core.metadata_store.library_root_page(0, 100).unwrap().items[0].id;
     let result = core
-        .set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate {
-                path: root.display().to_string(),
-                watch_enabled: true,
-            }],
-            confirm_replace_roots: true,
-        })
+        .patch_library_root_watch(id, true)
         .await
+        .unwrap()
         .unwrap();
-    assert!(result.roots[0].watch_enabled);
+    assert!(result.watch_enabled);
     assert!(!core.shared_reload_running.load(Ordering::Acquire));
     assert!(!core.shared_reload_pending.load(Ordering::Acquire));
     drop(execution);
@@ -304,7 +300,7 @@ fn synthetic_windows_fingerprint(size_bytes: u64) -> NativeFileFingerprint {
 }
 
 #[tokio::test]
-async fn set_shared_directories_canonicalizes_configured_root() {
+async fn creation_canonicalizes_configured_root() {
     let root = scratch_dir("configured-root");
     let configured = root.join(".");
     let expected = fs::canonicalize(long_path(&root))
@@ -315,71 +311,15 @@ async fn set_shared_directories_canonicalizes_configured_root() {
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
 
-    let directories = core
-        .set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate {
-                watch_enabled: false,
-                path: configured.display().to_string(),
-            }],
-            confirm_replace_roots: true,
-        })
+    core.create_library_root(&(configured.display().to_string()), false)
         .await
+        .unwrap()
         .unwrap();
+    let directories = core.shared_directories().await;
 
     assert_eq!(directories.roots.len(), 1);
     assert_eq!(directories.roots[0].path, expected);
     fs::remove_dir_all(&root).ok();
-}
-
-#[tokio::test]
-async fn api_root_updates_collapse_recursive_children_and_keep_siblings() {
-    let temp = scratch_dir("api-recursive-roots");
-    let parent = temp.join("Shared");
-    let child = parent.join("Child");
-    let sibling = temp.join("Shared-Other");
-    fs::create_dir_all(&child).unwrap();
-    fs::create_dir(&sibling).unwrap();
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_shared_directory_root(child.to_str().unwrap(), false)
-        .await
-        .unwrap();
-    let added = core
-        .add_shared_directory_root(parent.to_str().unwrap(), false)
-        .await
-        .unwrap();
-    assert_eq!(added.roots.len(), 1);
-    assert!(Path::new(&added.roots[0].path).ends_with("Shared"));
-    let covered = core
-        .add_shared_directory_root(child.to_str().unwrap(), false)
-        .await
-        .unwrap();
-    assert_eq!(covered.roots, added.roots);
-    let replacement = core
-        .set_shared_directories(SharedDirectoriesUpdate {
-            confirm_replace_roots: true,
-            roots: [&child, &sibling, &parent, &child]
-                .into_iter()
-                .map(|path| SharedDirectoryRootUpdate {
-                    watch_enabled: false,
-                    path: path.display().to_string(),
-                })
-                .collect(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(replacement.roots.len(), 2);
-    assert!(
-        replacement
-            .roots
-            .iter()
-            .any(|root| Path::new(&root.path).ends_with("Shared"))
-    );
-    assert_eq!(
-        core.metadata_store.shared_directory_roots().unwrap().len(),
-        2
-    );
-    core.stop_shared_directory_monitor().await.unwrap();
-    fs::remove_dir_all(temp).ok();
 }
 
 #[tokio::test]
@@ -390,13 +330,13 @@ async fn api_does_not_add_children_already_shared_by_incoming() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap())
         .unwrap()
         .with_incoming_dir(temp.clone());
-    // A successfully scanned implicit parent may consolidate its child.
+    // A mandatory parent participates in creation overlap rejection.
     core.reload_shared_directories().await.unwrap();
     let result = core
-        .add_shared_directory_root(child.to_str().unwrap(), false)
+        .create_library_root(child.to_str().unwrap(), false)
         .await
         .unwrap();
-    assert!(result.roots.is_empty());
+    assert!(result.is_none());
     assert!(
         core.metadata_store
             .shared_directory_roots()
@@ -683,21 +623,6 @@ async fn concurrent_reload_drains_both_finish() {
 #[tokio::test]
 async fn cancelling_latest_reload_drain_preserves_first_waiter() {
     assert_concurrent_reload_drains(true).await;
-}
-
-#[test]
-fn shared_directory_root_update_rejects_retired_recursive_field() {
-    let error = serde_json::from_str::<SharedDirectoriesUpdate>(
-        r#"{"roots":[{"path":"C:/Shared","recursive":true}],"confirmReplaceRoots":true}"#,
-    )
-    .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("unknown field `recursive`, expected `path`"),
-        "unexpected error: {error}"
-    );
 }
 
 #[tokio::test]

@@ -14,9 +14,9 @@ use validators::{
     validate_app_settings_patch_body_fields, validate_category_create_body_fields,
     validate_category_patch_body_fields, validate_destructive_confirmation_body_field,
     validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
+    validate_library_root_create_body_fields, validate_library_root_patch_body_fields,
     validate_search_create_body_fields, validate_server_create_body_fields,
-    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
-    validate_shared_directory_root_body_fields, validate_shared_file_ignore_pattern_body_fields,
+    validate_server_patch_body_fields, validate_shared_file_ignore_pattern_body_fields,
     validate_shared_file_ignore_rule_body_fields, validate_shared_file_patch_body_fields,
     validate_url_import_body_fields,
 };
@@ -92,14 +92,16 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path_matches_shared_file(path) {
         return validate_shared_file_patch_body_fields(object);
     }
-    if method == "PATCH" && path == "/api/v1/shared-directories" {
-        validate_shared_directories_patch_body_fields(object)?;
-        return validate_destructive_confirmation_body(method, path, object);
+    if method == "POST" && path == "/api/v1/library/roots" {
+        return validate_library_root_create_body_fields(object);
     }
-    if method == "POST" && path == "/api/v1/shared-directories/roots" {
-        return validate_shared_directory_root_body_fields(object);
+    if method == "PATCH"
+        && api_segments(path)
+            .is_some_and(|segments| matches!(segments.as_slice(), ["library", "roots", _]))
+    {
+        return validate_library_root_patch_body_fields(object);
     }
-    if method == "POST" && path == "/api/v1/shared-directories/ignores" {
+    if method == "POST" && path == "/api/v1/library/ignores" {
         return validate_shared_file_ignore_pattern_body_fields(object);
     }
     if method == "PATCH" && path_matches_shared_file_ignore_rule(path) {
@@ -146,8 +148,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const DOWNLOAD_PATCH: &[&str] = &["name", "category", "sizeBytes"];
     const SEARCH_RESULT_DOWNLOAD: &[&str] = &["category", "intent", "redownload"];
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
-    const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
-    const SHARED_DIRECTORY_ROOT: &[&str] = &["path", "watchEnabled"];
+    const LIBRARY_ROOT_CREATE: &[&str] = &["path", "watchEnabled"];
+    const LIBRARY_ROOT_PATCH: &[&str] = &["watchEnabled"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
     const SHARED_FILE_IGNORE_RULE: &[&str] = &["enabled"];
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
@@ -255,13 +257,10 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "POST" && path == "/api/v1/downloads/remove" {
         return Some(DOWNLOAD_REMOVE);
     }
-    if method == "PATCH" && path == "/api/v1/shared-directories" {
-        return Some(SHARED_DIRECTORIES_PATCH);
+    if method == "POST" && path == "/api/v1/library/roots" {
+        return Some(LIBRARY_ROOT_CREATE);
     }
-    if method == "POST" && path == "/api/v1/shared-directories/roots" {
-        return Some(SHARED_DIRECTORY_ROOT);
-    }
-    if method == "POST" && path == "/api/v1/shared-directories/ignores" {
+    if method == "POST" && path == "/api/v1/library/ignores" {
         return Some(SHARED_FILE_IGNORE_PATTERN);
     }
     if method == "POST" && path == "/api/v1/app/shutdown" {
@@ -308,12 +307,12 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     let segments = api_segments(path)?;
     match (method, segments.as_slice()) {
+        ("PATCH", ["library", "roots", _]) => Some(LIBRARY_ROOT_PATCH),
+        ("POST", ["library", "scan"]) => Some(EMPTY),
         ("PATCH", ["downloads", _]) => Some(DOWNLOAD_PATCH),
         ("POST", ["downloads", _, "sources", _, "operations", _]) => Some(EMPTY),
         ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
-        ("PATCH", ["shared-directories", "ignores", "defaults", _]) => {
-            Some(SHARED_FILE_IGNORE_RULE)
-        }
+        ("PATCH", ["library", "ignores", "defaults", _]) => Some(SHARED_FILE_IGNORE_RULE),
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
         ("PATCH", ["categories", _]) => Some(CATEGORY_PATCH),
         ("POST", ["searches", _, "stop"]) => Some(EMPTY),
@@ -328,10 +327,7 @@ fn path_matches_shared_file(path: &str) -> bool {
 
 fn path_matches_shared_file_ignore_rule(path: &str) -> bool {
     api_segments(path).is_some_and(|segments| {
-        matches!(
-            segments.as_slice(),
-            ["shared-directories", "ignores", "defaults", _]
-        )
+        matches!(segments.as_slice(), ["library", "ignores", "defaults", _])
     })
 }
 
@@ -391,9 +387,6 @@ fn destructive_confirmation_field(
         }
         ("POST", "/api/v1/logs/operations/clear") => {
             Some(("confirmClearLogs", "confirmClearLogs must be true"))
-        }
-        ("PATCH", "/api/v1/shared-directories") => {
-            Some(("confirmReplaceRoots", "confirmReplaceRoots must be true"))
         }
         _ => None,
     }

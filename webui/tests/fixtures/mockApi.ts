@@ -125,6 +125,11 @@ export function mockSnapshotFixture(): typeof snapshot {
 }
 
 export function installMockApi(requests: RecordedApiRequest[]) {
+  let nextRootId = 3;
+  let roots = [
+    { id: "1", path: "C:\\Sample\\Shared", watchEnabled: false, managed: false, shareable: true, accessible: true, lastScannedAt: null },
+    { id: "2", path: longSharedRoot, watchEnabled: false, managed: true, shareable: true, accessible: true, lastScannedAt: null }
+  ];
   return async (route: Route): Promise<void> => {
     const request = route.request();
     const url = new URL(request.url());
@@ -144,6 +149,35 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       await route.fulfill({ status: valid ? 200 : 400, contentType: "application/json", body: JSON.stringify(valid
         ? { schema: "emulebb.diagnostic-bundle.v7", capturedAt: "2026-11-14T12:00:00Z", summary: { issueCount: 0 } }
         : { error: { code: "BAD_REQUEST", message: "A bounded maxBytes value is required" } }) });
+      return;
+    }
+    if (request.method() === "GET" && path === "library/roots") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: roots, meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
+      }) });
+      return;
+    }
+    if (request.method() === "POST" && path === "library/roots") {
+      const body = request.postDataJSON();
+      const root = { id: String(nextRootId++), path: body.path, watchEnabled: body.watchEnabled ?? false,
+        managed: false, shareable: true, accessible: true, lastScannedAt: null };
+      roots.push(root);
+      await route.fulfill({ status: 201, contentType: "application/json",
+        headers: { Location: `/api/v1/library/roots/${root.id}` }, body: JSON.stringify({ data: root }) });
+      return;
+    }
+    if (/^library\/roots\/[1-9][0-9]*$/.test(path)) {
+      const root = roots.find(value => value.id === path.split("/").at(-1));
+      if (!root) {
+        await route.fulfill({ status: 404, contentType: "application/json",
+          body: JSON.stringify({ error: { code: "NOT_FOUND", message: "Library root not found" } }) });
+      } else if (request.method() === "DELETE") {
+        roots = roots.filter(value => value.id !== root.id);
+        await route.fulfill({ status: 204, body: "" });
+      } else {
+        if (request.method() === "PATCH") root.watchEnabled = request.postDataJSON().watchEnabled;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: root }) });
+      }
       return;
     }
 
@@ -236,12 +270,8 @@ function dataFor(method: string, path: string): unknown {
       return { items: [] };
     case "logs":
       return { items: [{ timestamp: "2026-01-01T00:00:00Z", level: "INFO", message: "Sample log entry" }] };
-    case "shared-directories":
+    case "library/scan":
       return {
-        roots: [
-          { path: "C:\\Sample\\Shared", watchEnabled: false, shareable: true, accessible: true },
-          { path: longSharedRoot, watchEnabled: false, shareable: true, accessible: true }
-        ],
         hashingCount: 1,
         reloadProgress: {
           phase: "hashing",
@@ -324,7 +354,7 @@ function dataFor(method: string, path: string): unknown {
           ]
         }
       };
-    case "shared-directories/ignores":
+    case "library/ignores":
       return {
         custom: [{ pattern: "*.private.bin" }],
         defaults: [
@@ -567,7 +597,7 @@ function dataFor(method: string, path: string): unknown {
           )
         ],
         sectionResources: [
-          sectionResource("sharedDirectories", "/api/v1/shared-directories", "Sharing", "Shared root ownership and reload operations."),
+          sectionResource("libraryRoots", "/api/v1/library/roots", "Sharing", "Library root ownership and watch policy."),
           sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category destinations and temporary directories."),
           sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
           sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),

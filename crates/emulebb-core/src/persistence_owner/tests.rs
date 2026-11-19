@@ -95,20 +95,15 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
     let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
     let fault = rusqlite::Connection::open_with_flags(&uri, flags).unwrap();
     fault.execute_batch("CREATE TRIGGER root_failure BEFORE DELETE ON shared_directory_root_origins WHEN old.origin='explicit' BEGIN SELECT RAISE(ABORT,'injected root failure'); END;").unwrap();
-    let make = || category::CategoryCommand::ReplaceRoots {
-        expected: vec![root_row.clone()],
-        implicit: vec![],
-        proposed: vec![],
-        sharing: category::CategorySharingContext {
-            runtime: Arc::clone(&runtime),
-            incoming: Arc::new(root.join("incoming")),
-            root_change: Arc::default(),
-            probe_sender: std::sync::Weak::new(),
-        },
-        reload: None,
+    let root_id = store.library_root_page(0, 100).unwrap().items[0].id;
+    let sharing = || category::CategorySharingContext {
+        runtime: Arc::clone(&runtime),
+        incoming: Arc::new(root.join("incoming")),
+        root_change: Arc::default(),
+        probe_sender: std::sync::Weak::new(),
     };
     assert!(matches!(
-        owner.replace_explicit_roots(make(), None).await,
+        owner.delete_root(root_id, sharing()).await,
         Err(PersistenceError::Storage(_))
     ));
     assert_eq!(
@@ -122,80 +117,13 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
         Some(vec![true])
     );
     fault.execute_batch("DROP TRIGGER root_failure;").unwrap();
-    assert!(owner.replace_explicit_roots(make(), None).await.unwrap());
+    assert!(matches!(
+        owner.delete_root(root_id, sharing()).await.unwrap(),
+        emulebb_metadata::MetadataLibraryRootDelete::Deleted(_)
+    ));
     assert!(state.lock().await.shared_directories.is_empty());
     assert!(store.shared_directory_roots().unwrap().is_empty());
     owner.close_and_drain().await.unwrap();
-}
-
-#[tokio::test]
-async fn cancelled_explicit_root_writer_is_published_before_drain() {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-    let (store, state, owner) = setup();
-    let root = crate::unique_runtime_dir("cancel-root-writer");
-    let runtime = Arc::new(
-        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
-            &root.join("transfers"),
-            store.clone(),
-        )
-        .unwrap(),
-    );
-    let gate = Arc::new(PublicationGate::default());
-    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
-    let entered = gate.entered.notified();
-    tokio::pin!(entered);
-    entered.as_mut().enable();
-    let writer = {
-        let owner = Arc::clone(&owner);
-        let runtime = Arc::clone(&runtime);
-        let root = root.clone();
-        tokio::spawn(async move {
-            owner
-                .replace_explicit_roots(
-                    category::CategoryCommand::ReplaceRoots {
-                        expected: vec![],
-                        implicit: vec![],
-                        proposed: vec![crate::SharedDirectoryRoot {
-                            path: root.to_string_lossy().into_owned(),
-                            watch_enabled: false,
-                            monitor_owned: false,
-                            shareable: true,
-                            accessible: true,
-                        }],
-                        sharing: category::CategorySharingContext {
-                            runtime,
-                            incoming: Arc::new(root.join("incoming")),
-                            root_change: Arc::default(),
-                            probe_sender: std::sync::Weak::new(),
-                        },
-                        reload: None,
-                    },
-                    None,
-                )
-                .await
-        })
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
-        .await
-        .unwrap();
-    assert_eq!(store.shared_directory_roots().unwrap().len(), 1);
-    assert!(state.lock().await.shared_directories.is_empty());
-    writer.abort();
-    let _ = writer.await;
-    let mut drain = Box::pin(owner.close_and_drain());
-    assert!(
-        poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
-    gate.release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(5), drain)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(state.lock().await.shared_directories.len(), 1);
-    assert_eq!(usage(&owner), (0, 0));
 }
 
 #[tokio::test]
@@ -542,7 +470,7 @@ async fn sealed_reload_handoff_reports_committed_root_without_scan() {
     let writer = {
         let core = core.clone();
         let path = root.to_string_lossy().into_owned();
-        tokio::spawn(async move { core.add_shared_directory_root(&path, false).await })
+        tokio::spawn(async move { core.create_library_root(&path, false).await })
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
@@ -665,27 +593,31 @@ async fn explicit_root_continuation_reconciles_each_removed_root() {
                 publish: Default::default(),
             });
     }
-    let result = owner.replace_explicit_roots(
-        category::CategoryCommand::ReplaceRoots {
-            expected: roots,
-            implicit: vec![],
-            proposed: vec![],
-            sharing: category::CategorySharingContext {
+    let ids: Vec<_> = store
+        .library_root_page(0, 100)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|root| root.id)
+        .collect();
+    for id in ids {
+        let result = owner.delete_root(
+            id,
+            category::CategorySharingContext {
                 runtime: Arc::clone(&runtime),
                 incoming: Arc::new(base.join("incoming")),
                 root_change: Arc::default(),
                 probe_sender: std::sync::Weak::new(),
             },
-            reload: None,
-        },
-        None,
-    );
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), result)
-            .await
-            .unwrap()
-            .unwrap()
-    );
+        );
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), result)
+                .await
+                .unwrap()
+                .unwrap(),
+            emulebb_metadata::MetadataLibraryRootDelete::Deleted(_)
+        ));
+    }
     assert!(state.lock().await.shared_directories.is_empty());
     assert_eq!(runtime.shared_catalog_count().await, 0);
     owner.close_and_drain().await.unwrap();
