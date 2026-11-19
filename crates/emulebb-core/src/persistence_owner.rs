@@ -994,12 +994,11 @@ impl PersistenceOwner {
                     drop(permit);
                     let _ = released.send(());
                     let _ = response.send(result);
-                    if handoff.await.is_err() {
-                        if let Some(runtime) = kad_runtime.take() {
-                            if let Some(dht) = runtime.dht {
-                                dht.seal_persistence().await;
-                            }
-                        }
+                    if handoff.await.is_err()
+                        && let Some(runtime) = kad_runtime.take()
+                        && let Some(dht) = runtime.dht
+                    {
+                        dht.seal_persistence().await;
                     }
                 } else {
                     let _ = response.send(result);

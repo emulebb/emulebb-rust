@@ -181,7 +181,7 @@ impl LocalMutationRegistry {
         Self::spawn_unit(&mut state, lease, move |lease| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let root_cut = epoch.load(std::sync::atomic::Ordering::Acquire);
-                ensure!(root_cut % 2 == 0, LocalMutationError::Busy);
+                ensure!(root_cut.is_multiple_of(2), LocalMutationError::Busy);
                 let cut = metadata.capture_download_availability()?;
                 let (availability, present_file) =
                     scan(&metadata, &hash, &cut, &mut ScanBudget::default())?;

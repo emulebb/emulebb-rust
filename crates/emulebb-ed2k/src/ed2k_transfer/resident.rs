@@ -266,10 +266,10 @@ impl ResidentManifest {
     ) -> std::result::Result<ResidentDraft, (Self, anyhow::Error)> {
         // Reserve before consuming the pin: failed admission returns it intact.
         let mut this = self;
-        if let Some(allocation) = Arc::get_mut(&mut this.0) {
-            if let Err(error) = allocation.reservation.resize(MANIFEST_BYTES) {
-                return Err((this, error));
-            }
+        if let Some(allocation) = Arc::get_mut(&mut this.0)
+            && let Err(error) = allocation.reservation.resize(MANIFEST_BYTES)
+        {
+            return Err((this, error));
         }
         let allocation = match Arc::try_unwrap(this.0) {
             Ok(allocation) => allocation,

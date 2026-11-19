@@ -259,7 +259,7 @@ mod tests {
                 runtime.lock_manifest(job.token).await,
             )
             .unwrap();
-        let caller = tokio::spawn(async move { receipt.await });
+        let caller = tokio::spawn(receipt);
         tokio::time::timeout(std::time::Duration::from_secs(5), ready)
             .await
             .unwrap()

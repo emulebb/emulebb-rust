@@ -84,16 +84,16 @@ pub(super) async fn process_runtime(
                     .capture_routing_projection()
                     .await
                     .map_err(|_| PersistenceError::Worker)?;
-                if let Some((baseline, _)) = &mut runtime.baseline {
-                    if !projection.differs_from(baseline) {
-                        baseline.token = projection.token;
-                        if final_snapshot {
-                            runtime.finished = true;
-                            runtime.baseline = None;
-                            runtime.dht = None;
-                        }
-                        return Ok(Response::KadCheckpointed);
+                if let Some((baseline, _)) = &mut runtime.baseline
+                    && !projection.differs_from(baseline)
+                {
+                    baseline.token = projection.token;
+                    if final_snapshot {
+                        runtime.finished = true;
+                        runtime.baseline = None;
+                        runtime.dht = None;
                     }
+                    return Ok(Response::KadCheckpointed);
                 }
                 drop(projection);
                 let (projection, records) = dht
@@ -279,12 +279,11 @@ pub(super) fn merge_in_worker(
         if !contact
             .expires_at
             .is_some_and(|expiry| expiry <= std::time::SystemTime::now())
+            && !table.merge_restored_contact(contact).unwrap_or(false)
         {
-            if !table.merge_restored_contact(contact).unwrap_or(false) {
-                return Err(PersistenceError::Storage(
-                    "saved Kad contacts could not be re-admitted".into(),
-                ));
-            }
+            return Err(PersistenceError::Storage(
+                "saved Kad contacts could not be re-admitted".into(),
+            ));
         }
     }
     drop(seed);

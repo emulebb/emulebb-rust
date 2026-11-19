@@ -41,7 +41,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
             &file,
             hash,
             &fingerprint,
-            crate::NativeFileIdentityEvidence::new((&fingerprint).identity, None).unwrap(),
+            crate::NativeFileIdentityEvidence::new(fingerprint.identity, None).unwrap(),
         )
         .unwrap();
     store.connection().unwrap().execute_batch(
@@ -192,7 +192,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
             &file,
             hash,
             &replacement,
-            crate::NativeFileIdentityEvidence::new((&replacement).identity, None).unwrap(),
+            crate::NativeFileIdentityEvidence::new(replacement.identity, None).unwrap(),
         )
         .unwrap();
     store

@@ -88,10 +88,10 @@ pub(super) async fn process(
         .await;
     // Preserve persistence faults at the coordinator boundary; validation errors
     // stay domain errors and do not fault the owner or allocate a durable ID.
-    if let Err(error) = &outcome {
-        if let Some(error) = error.downcast_ref::<PersistenceError>() {
-            return Err(error.clone());
-        }
+    if let Err(error) = &outcome
+        && let Some(error) = error.downcast_ref::<PersistenceError>()
+    {
+        return Err(error.clone());
     }
     Ok(Response::SearchCreated(outcome))
 }

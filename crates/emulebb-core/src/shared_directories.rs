@@ -2078,11 +2078,11 @@ fn start_reload_worker(core: &EmulebbCore, state: &mut ReloadState) {
     // An exiting predecessor is retained by its successor, which joins it
     // before doing work. There can be only one worker and one exiting task.
     *slot = Some(tokio::spawn(async move {
-        if let Some(previous) = previous {
-            if let Err(error) = previous.await {
-                tracing::warn!(%error, "previous shared reload worker failed");
-                core.shared_reload_control.state.lock().unwrap().join_failed = true;
-            }
+        if let Some(previous) = previous
+            && let Err(error) = previous.await
+        {
+            tracing::warn!(%error, "previous shared reload worker failed");
+            core.shared_reload_control.state.lock().unwrap().join_failed = true;
         }
         loop {
             let notified = core.shared_reload_control.wake.notified();

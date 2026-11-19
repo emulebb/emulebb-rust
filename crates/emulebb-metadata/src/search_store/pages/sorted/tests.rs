@@ -75,13 +75,13 @@ fn every_sort_and_direction_matches_global_order_across_ties_unknown_zero_and_un
         packet.metadata.complete_source_count = Some(n % 2);
         let mut f = fields();
         f.rating = (n % 3) as u8;
-        f.file_type = if n % 2 == 0 { "doc" } else { "audio" }.into();
+        f.file_type = if n.is_multiple_of(2) { "doc" } else { "audio" }.into();
         f.media_artist = format!("Artist {}", n % 3);
         f.media_album = format!("Album {}", n % 2);
         f.media_title = names[index].into();
         f.media_length_seconds = n % 3;
         f.media_bitrate_kbps = n % 2;
-        f.media_codec = if n % 2 == 0 { "FLAC" } else { "opus" }.into();
+        f.media_codec = if n.is_multiple_of(2) { "FLAC" } else { "opus" }.into();
         let published = store
             .ingest_search_observations(
                 &[packet],

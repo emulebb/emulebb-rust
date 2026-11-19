@@ -24,9 +24,9 @@ impl LocalMutationRegistry {
             (1..=37).contains(&input.len()),
             LocalMutationError::TooLarge
         );
-        let bytes = input.iter().try_fold(
-            input.len() * std::mem::size_of::<StorageSpaceReservation>(),
-            |bytes, value| {
+        let bytes = input
+            .iter()
+            .try_fold(std::mem::size_of_val(input), |bytes, value| {
                 ensure!(
                     value.path.is_absolute(),
                     "storage probe path must be absolute"
@@ -34,8 +34,7 @@ impl LocalMutationRegistry {
                 bytes
                     .checked_add(value.path.capacity())
                     .ok_or_else(|| anyhow::anyhow!(LocalMutationError::TooLarge))
-            },
-        )?;
+            })?;
         ensure!(bytes <= INPUT_BYTES, LocalMutationError::TooLarge);
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         LocalMutationRegistry::reap(&mut state);

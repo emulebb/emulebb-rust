@@ -680,23 +680,23 @@ pub(super) async fn process(
     drop(state);
     let clean_epoch = root_mutation.and_then(|mutation| mutation.finish());
     drop(_category_fence);
-    if let Some(sharing) = sharing {
-        if root_changed {
-            sharing.root_change.notify_one();
-            if let Some(old_root) = old_root {
-                let lease = request
-                    .permit
-                    .transfer_bytes(CATEGORY_PROBE_BYTES)
-                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
-                *continuation = Some(CategoryContinuation {
-                    sharing,
-                    roots: vec![std::path::PathBuf::from(old_root)],
-                    lease,
-                    clean_epoch,
-                });
-            } else if let Some(epoch) = clean_epoch {
-                sharing.runtime.finish_scoped_root_publication(epoch).await;
-            }
+    if let Some(sharing) = sharing
+        && root_changed
+    {
+        sharing.root_change.notify_one();
+        if let Some(old_root) = old_root {
+            let lease = request
+                .permit
+                .transfer_bytes(CATEGORY_PROBE_BYTES)
+                .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+            *continuation = Some(CategoryContinuation {
+                sharing,
+                roots: vec![std::path::PathBuf::from(old_root)],
+                lease,
+                clean_epoch,
+            });
+        } else if let Some(epoch) = clean_epoch {
+            sharing.runtime.finish_scoped_root_publication(epoch).await;
         }
     }
     Ok(Response::Category(Ok(Some(category))))

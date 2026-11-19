@@ -200,7 +200,7 @@ impl LocalMutationRegistry {
                             .collect();
                         let stripe = eligibility.begin_mutation(&raw_hashes)?;
                         let cut = epoch.load(Ordering::Acquire);
-                        if cut % 2 != 0 {
+                        if !cut.is_multiple_of(2) {
                             drop(stripe);
                             drop(content_guards);
                             drop(job_guards);
@@ -281,28 +281,28 @@ impl LocalMutationRegistry {
                                     .get_mut(&token.job_id)
                                     .filter(|manifest| manifest.token == token)
                             });
-                            if let (Some(manifest), Some(aich)) = (current, projection.aich) {
-                                if manifest.aich_trust_generation < aich.generation {
-                                    let index = resident_writes
-                                        .iter()
-                                        .position(|(token, _)| *token == manifest.token)
-                                        .ok_or_else(|| {
-                                            anyhow!("ingest cache lacks preadmitted write credit")
-                                        })?;
-                                    let (_, permit) = resident_writes.swap_remove(index);
-                                    manifest.write_with(permit, |manifest| {
-                                        manifest.aich_root = aich.root;
-                                        manifest.aich_root_origin = aich
-                                            .origin
-                                            .as_deref()
-                                            .map(transfer::Ed2kAichRootOrigin::parse)
-                                            .transpose()?;
-                                        manifest.aich_trust_generation = aich.generation;
-                                        manifest.aich_hashset.clear();
-                                        manifest.aich_hashset_acquired = false;
-                                        Ok(())
+                            if let (Some(manifest), Some(aich)) = (current, projection.aich)
+                                && manifest.aich_trust_generation < aich.generation
+                            {
+                                let index = resident_writes
+                                    .iter()
+                                    .position(|(token, _)| *token == manifest.token)
+                                    .ok_or_else(|| {
+                                        anyhow!("ingest cache lacks preadmitted write credit")
                                     })?;
-                                }
+                                let (_, permit) = resident_writes.swap_remove(index);
+                                manifest.write_with(permit, |manifest| {
+                                    manifest.aich_root = aich.root;
+                                    manifest.aich_root_origin = aich
+                                        .origin
+                                        .as_deref()
+                                        .map(transfer::Ed2kAichRootOrigin::parse)
+                                        .transpose()?;
+                                    manifest.aich_trust_generation = aich.generation;
+                                    manifest.aich_hashset.clear();
+                                    manifest.aich_hashset_acquired = false;
+                                    Ok(())
+                                })?;
                             }
                         }
                     }
@@ -312,7 +312,7 @@ impl LocalMutationRegistry {
                     drop(_job_guards);
                     // The real prepared lease remains alive; no hashing or binding
                     // is replayed when fresh catalog evidence has to be retried.
-                    publication.publish_prepared_pair(&hashes, &_lease)?;
+                    publication.publish_prepared_pair(&hashes, _lease)?;
                     Ok(prepared.summary)
                 };
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));

@@ -184,7 +184,7 @@ mod tests {
                 guard,
             )
             .unwrap();
-        let caller = tokio::spawn(async move { receipt.await });
+        let caller = tokio::spawn(receipt);
         tokio::time::timeout(std::time::Duration::from_secs(5), ready)
             .await
             .unwrap()

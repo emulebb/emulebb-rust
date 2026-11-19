@@ -200,7 +200,7 @@ impl Ed2kTransferRuntime {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let epoch = self.category_root_epoch.load(Ordering::Acquire);
-            if epoch % 2 == 0 {
+            if epoch.is_multiple_of(2) {
                 return epoch;
             }
             notified.await;

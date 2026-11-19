@@ -171,11 +171,11 @@ impl ContentPublication {
         if self.epoch.load(Ordering::Acquire) != cut {
             return Ok(false);
         }
-        if let Some((hash, expected)) = self.watch {
-            if cut != expected.0 || !entries.finish_category_watch(hash, expected.1) {
-                self.stale_watch.set(true);
-                return Ok(true);
-            }
+        if let Some((hash, expected)) = self.watch
+            && (cut != expected.0 || !entries.finish_category_watch(hash, expected.1))
+        {
+            self.stale_watch.set(true);
+            return Ok(true);
         }
         for (hash, mut next) in replacements {
             if let (Some(previous), Some(next)) = (entries.entry_by_hash(&hash), next.as_mut()) {
@@ -229,7 +229,7 @@ impl ContentPublication {
                 ),
             };
             let mut cut = self.epoch.load(Ordering::Acquire);
-            if cut % 2 != 0 {
+            if !cut.is_multiple_of(2) {
                 drop(stripe);
                 drop(content);
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -265,7 +265,7 @@ impl ContentPublication {
                     };
                     let stripe = self.eligibility.begin_mutation(&[hash.0])?;
                     cut = self.epoch.load(Ordering::Acquire);
-                    if cut % 2 != 0 {
+                    if !cut.is_multiple_of(2) {
                         continue;
                     }
                     let Selection::Ready(next) = self.select(&text, prepared)? else {
@@ -296,7 +296,7 @@ impl ContentPublication {
         let text = hash.to_string();
         for _ in 0..100 {
             let cut = self.epoch.load(Ordering::Acquire);
-            if cut % 2 != 0 {
+            if !cut.is_multiple_of(2) {
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 continue;
             }
@@ -363,7 +363,7 @@ impl ContentPublication {
             }
             let stripe = self.eligibility.begin_mutation(&keys)?;
             let cut = self.epoch.load(Ordering::Acquire);
-            if cut % 2 != 0 {
+            if !cut.is_multiple_of(2) {
                 drop(stripe);
                 drop(guards);
                 std::thread::sleep(std::time::Duration::from_millis(5));

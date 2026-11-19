@@ -453,7 +453,7 @@ impl LocalMutationRegistry {
             let mut committed = false;
             let operation = || -> Result<usize> {
                 let epoch = root_epoch.load(std::sync::atomic::Ordering::Acquire);
-                if epoch % 2 != 0 {
+                if !epoch.is_multiple_of(2) {
                     return Err(LocalMutationError::Busy.into());
                 }
                 let parsed: emulebb_kad_proto::Ed2kHash = hash.parse()?;
@@ -511,10 +511,10 @@ impl LocalMutationRegistry {
                         job: None,
                     },
                 )?;
-                if changed > 0 {
-                    if let Some(invalidation) = invalidation {
-                        invalidation.commit()?;
-                    }
+                if changed > 0
+                    && let Some(invalidation) = invalidation
+                {
+                    invalidation.commit()?;
                 }
                 Ok(changed)
             };

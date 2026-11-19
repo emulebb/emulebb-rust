@@ -156,12 +156,10 @@ async fn drain_keyword_udp_responses(
                             server_endpoint: response_server.base_endpoint(),
                             file,
                         };
-                        if let Some(result_sink) = result_sink {
-                            if result_sink.send(observation.clone()).await.is_err() {
-                                return Some(anyhow::anyhow!(
-                                    "keyword search result consumer closed"
-                                ));
-                            }
+                        if let Some(result_sink) = result_sink
+                            && result_sink.send(observation.clone()).await.is_err()
+                        {
+                            return Some(anyhow::anyhow!("keyword search result consumer closed"));
                         }
                         results.push(observation);
                     }

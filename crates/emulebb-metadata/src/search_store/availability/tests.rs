@@ -169,7 +169,7 @@ fn failure_rolls_back_all_derived_and_raw_changes_then_explicit_retry_succeeds()
     };
     assert!(
         store
-            .ingest_search_observations(&[packet.clone()], &projection)
+            .ingest_search_observations(std::slice::from_ref(&packet), &projection)
             .is_err()
     );
     let loaded = store
@@ -209,7 +209,7 @@ fn claims_sessions_terminal_state_and_deletion_keep_availability_scoped() {
     let id = store.create_search(&sample_search()).unwrap();
     let other = store.create_search(&sample_search()).unwrap();
     let first = report(Origin::Server, None, Some(3), None);
-    ingest(&store, id, &[first.clone()]);
+    ingest(&store, id, std::slice::from_ref(&first));
     assert_eq!(
         counts(ingest(
             &store,

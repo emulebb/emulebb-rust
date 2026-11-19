@@ -973,14 +973,14 @@ impl EmulebbCore {
     /// Finish the final Kad snapshot while its source runtime is still owned.
     pub async fn finish_kad_persistence(&self) -> Result<()> {
         let mut runtime = self.ed2k_runtime.lock().await;
-        if let Some(runtime) = runtime.as_mut() {
-            if !runtime.kad_persistence_finished {
-                let persistence = self
-                    .persistence_owner
-                    .owner(&self.metadata_store, &self.state)?;
-                persistence.finish_kad(&runtime.dht).await?;
-                runtime.kad_persistence_finished = true;
-            }
+        if let Some(runtime) = runtime.as_mut()
+            && !runtime.kad_persistence_finished
+        {
+            let persistence = self
+                .persistence_owner
+                .owner(&self.metadata_store, &self.state)?;
+            persistence.finish_kad(&runtime.dht).await?;
+            runtime.kad_persistence_finished = true;
         }
         Ok(())
     }

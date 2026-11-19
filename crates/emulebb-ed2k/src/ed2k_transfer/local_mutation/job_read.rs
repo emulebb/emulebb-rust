@@ -128,11 +128,11 @@ impl LocalMutationRegistry {
         let (sender, receipt) = oneshot::channel();
         Self::spawn_unit(&mut state, lease, move |capacity| {
             #[cfg(test)]
-            if !matches!(request, JobRead::SelectExecution(_)) {
-                if let Some((reached, release)) = gate.take() {
-                    let _ = reached.send(());
-                    let _ = release.recv();
-                }
+            if !matches!(request, JobRead::SelectExecution(_))
+                && let Some((reached, release)) = gate.take()
+            {
+                let _ = reached.send(());
+                let _ = release.recv();
             }
             // WHY: callers can retain pages after worker completion/reaping. Move
             // the existing charge with the actual backing, never with its sender.
