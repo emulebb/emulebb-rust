@@ -25,6 +25,14 @@ fn complete_defaults_and_metadata_have_exactly_the_same_59_typed_leaves() {
     );
     let plain = serde_json::to_value(values).unwrap();
     let document = serde_json::to_value(&saved).unwrap();
+    // The Python fixture initializer consumes this generated snapshot. Product
+    // runtime code always uses the typed declaration, never this test fixture.
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/default-settings.json")).unwrap();
+    assert_eq!(
+        document, fixture,
+        "Regenerate the harness fixture from compiled setting metadata after changing defaults."
+    );
     for spec in specs {
         let pointer = format!("/{}", spec.key.replace('.', "/"));
         assert_eq!(plain.pointer(&pointer), Some(&spec.default_value));
