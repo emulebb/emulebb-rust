@@ -1,3 +1,6 @@
+import type { SettingsPatch, SettingsSnapshot } from "./settingsModel";
+export type { SettingsValue, SettingsValues, SavedSetting, SavedSettings, SettingsReadData, SettingsSnapshot, SettingsPatch, SettingRule, SettingField, BootstrapSettingSpec, SettingsSectionResourceSpec, SettingsSurface } from "./settingsModel";
+
 export type ApiEnvelope<T> = {
   data: T;
   meta?: Record<string, unknown>;
@@ -585,139 +588,7 @@ export type SharedFileIgnores = {
   [key: string]: unknown;
 };
 
-export type CoreSettings = {
-  uploadLimitKiBps?: number;
-  downloadLimitKiBps?: number;
-  maxConnections?: number;
-  maxConnectionsPerFiveSeconds?: number;
-  maxSourcesPerFile?: number;
-  uploadClientDataRate?: number;
-  baseUploadSlots?: number;
-  uploadSlotElasticPercent?: number;
-  queueSize?: number;
-  autoConnect?: boolean;
-  creditSystem?: boolean;
-  networkKademlia?: boolean;
-  networkEd2k?: boolean;
-  [key: string]: unknown;
-};
-
-export type HostnameLookupSettings = {
-  enabled?: boolean;
-  dnsServers?: string[];
-  cacheTtlSecs?: number;
-  maxLookupsPerTick?: number;
-  tickIntervalSecs?: number;
-  [key: string]: unknown;
-};
-
-export type DaemonSettings = {
-  incomingDir?: string | null;
-  p2pBindIp?: string | null;
-  p2pBindInterface?: string | null;
-  ed2kUserHash?: string | null;
-  hostnameLookup?: HostnameLookupSettings;
-  [key: string]: unknown;
-};
-
-export type Ed2kUploadQueueSettings = {
-  elasticUnderfillSecs?: number;
-  waitingTimeoutSecs?: number;
-  grantedTimeoutSecs?: number;
-  uploadTimeoutSecs?: number;
-  sessionTransferPercent?: number;
-  sessionTimeLimitSecs?: number;
-  [key: string]: unknown;
-};
-
-export type Ed2kSettings = {
-  listenPort?: number | null;
-  nickname?: string;
-  obfuscationEnabled?: boolean;
-  probeSearchTerm?: string | null;
-  connectTimeoutSecs?: number;
-  serverConnectTimeoutSecs?: number;
-  callbackTimeoutSecs?: number;
-  reconnectIntervalSecs?: number;
-  reconnectEnabled?: boolean;
-  safeServerConnect?: boolean;
-  useServerPriorities?: boolean;
-  autoConnectStaticOnly?: boolean;
-  serverKeepaliveMinutes?: number;
-  sessionRotationSecs?: number;
-  maxConcurrentDownloads?: number;
-  maxNewConnectionsPerFiveSeconds?: number;
-  maxHalfOpenConnections?: number;
-  maxSourcesPerFile?: number;
-  maxParallelDownloadPeers?: number;
-  keywordServerAttemptBudget?: number;
-  exactHashKeywordServerAttemptBudget?: number;
-  sourceServerAttemptBudget?: number;
-  uploadQueue?: Ed2kUploadQueueSettings;
-  downloadLimitBytesPerSec?: number;
-  minFreeConfigSpaceBytes?: number;
-  minFreeTransferSpaceBytes?: number;
-  minFreeIncomingSpaceBytes?: number;
-  enableUdpReask?: boolean;
-  publishEmuleRustIdentity?: boolean;
-  offerFilesCapabilityEnabled?: boolean;
-  detectTcpErrorFlooder?: boolean;
-  tcpErrorFlooderIntervalMinutes?: number;
-  tcpErrorFlooderThreshold?: number;
-  addServersFromServer?: boolean;
-  deadServerRetries?: number;
-  [key: string]: unknown;
-};
-
-export type KadSettings = {
-  listenPort?: number | null;
-  bootstrapMinRoutingContacts?: number;
-  localStoreEnabled?: boolean;
-  localStoreKeywordTtlSecs?: number;
-  localStoreSourceTtlSecs?: number;
-  localStoreNotesTtlSecs?: number;
-  localStoreKeywordCapacity?: number;
-  localStoreSourceCapacity?: number;
-  localStoreNotesCapacity?: number;
-  localStoreSourcePerFileCapacity?: number;
-  localStoreNotesPerFileCapacity?: number;
-  publishSharedFilesEnabled?: boolean;
-  republishIntervalSecs?: number;
-  publishContactFanout?: number;
-  udpFirewallCheckEnabled?: boolean;
-  udpFirewallCheckIntervalSecs?: number;
-  tcpFirewallCheckEnabled?: boolean;
-  tcpFirewallCheckIntervalSecs?: number;
-  buddyEnabled?: boolean;
-  routingMaintenanceEnabled?: boolean;
-  passiveReplayEnabled?: boolean;
-  [key: string]: unknown;
-};
-
-export type NatSettings = {
-  enabled?: boolean;
-  requireInitialMapping?: boolean;
-  backendOrder?: string[];
-  bindIp?: string | null;
-  pcpServerIp?: string | null;
-  igdIp?: string | null;
-  minissdpdSocket?: string | null;
-  ssdpLocalPort?: number | null;
-  discoveryTimeoutSecs?: number;
-  leaseDurationSecs?: number;
-  renewMarginSecs?: number;
-  externalIpOverride?: string | null;
-  [key: string]: unknown;
-};
-
 export type VpnGuardMode = "off" | "block";
-
-export type VpnGuardSettings = {
-  enabled?: boolean;
-  mode?: VpnGuardMode;
-  allowedPublicIpCidrs?: string;
-  [key: string]: unknown;
-};
 
 export type VpnGuardProbeStatus = {
   attempted?: boolean;
@@ -806,13 +677,6 @@ export type NatStatus = {
   [key: string]: unknown;
 };
 
-export type IpFilterSettings = {
-  enabled?: boolean;
-  path?: string | null;
-  level?: number;
-  [key: string]: unknown;
-};
-
 export type IpFilterStatus = {
   configured?: boolean;
   reloadable?: boolean;
@@ -820,70 +684,6 @@ export type IpFilterStatus = {
   level?: number;
   rangeCount?: number;
   [key: string]: unknown;
-};
-
-export type AppSettings = {
-  core?: CoreSettings;
-  daemon?: DaemonSettings;
-  ed2k?: Ed2kSettings;
-  kad?: KadSettings;
-  nat?: NatSettings;
-  vpnGuard?: VpnGuardSettings;
-  ipFilter?: IpFilterSettings;
-  [key: string]: unknown;
-};
-
-export type CoreSettingsUpdate = Partial<CoreSettings>;
-export type HostnameLookupSettingsUpdate = Partial<HostnameLookupSettings>;
-
-export type DaemonSettingsUpdate = Omit<Partial<DaemonSettings>, "hostnameLookup"> & {
-  hostnameLookup?: HostnameLookupSettingsUpdate;
-};
-
-export type Ed2kUploadQueueSettingsUpdate = Partial<Ed2kUploadQueueSettings>;
-
-export type Ed2kSettingsUpdate = Omit<Partial<Ed2kSettings>, "uploadQueue"> & {
-  uploadQueue?: Ed2kUploadQueueSettingsUpdate;
-};
-
-export type KadSettingsUpdate = Partial<KadSettings>;
-export type NatSettingsUpdate = Partial<NatSettings>;
-export type VpnGuardSettingsUpdate = Partial<VpnGuardSettings>;
-export type IpFilterSettingsUpdate = Partial<IpFilterSettings>;
-
-export type AppSettingsUpdate = {
-  core?: CoreSettingsUpdate;
-  daemon?: DaemonSettingsUpdate;
-  ed2k?: Ed2kSettingsUpdate;
-  kad?: KadSettingsUpdate;
-  nat?: NatSettingsUpdate;
-  vpnGuard?: VpnGuardSettingsUpdate;
-  ipFilter?: IpFilterSettingsUpdate;
-};
-
-export type SettingSurfaceClass = "normalControl" | "advancedControl" | "existingSectionResource" | "bootstrapOnly" | "notUserFacing";
-
-export type SettingSurfaceSpec = {
-  path: string;
-  class: SettingSurfaceClass;
-  restartRequired: boolean;
-  uiSection: string;
-  route: string;
-  description: string;
-};
-
-export type SettingsSectionResourceSpec = {
-  name: string;
-  class: "existingSectionResource";
-  route: string;
-  uiSection: string;
-  description: string;
-};
-
-export type SettingsSurface = {
-  settings: SettingSurfaceSpec[];
-  bootstrapSettings?: SettingSurfaceSpec[];
-  sectionResources: SettingsSectionResourceSpec[];
 };
 
 export type Snapshot = {
@@ -927,6 +727,16 @@ export class RestClient {
 
   setApiKey(apiKey: string): void {
     this.apiKey = apiKey.trim();
+  }
+
+  /** Preserve the opaque saved revision alongside coherent settings data. */
+  async getSettings(): Promise<SettingsSnapshot> {
+    return checkedSettingsSnapshot(await this.request<SettingsSnapshot>("GET", "settings", undefined, "json"));
+  }
+
+  /** Submit one CAS write without retry or revision conversion. */
+  async patchSettings(patch: SettingsPatch): Promise<SettingsSnapshot> {
+    return checkedSettingsSnapshot(await this.request<SettingsSnapshot>("PATCH", "settings", patch, "json"));
   }
 
   async get<T>(path: string): Promise<T> {
@@ -1039,6 +849,16 @@ export class RestClient {
     }
     return (responseKind === "json" ? value : value?.data) as T;
   }
+}
+
+function checkedSettingsSnapshot(value: SettingsSnapshot): SettingsSnapshot {
+  const revision = value?.meta?.settingsRevision;
+  if (typeof revision !== "string" || !/^[1-9][0-9]{0,18}$/.test(revision) || BigInt(revision) > 9223372036854775807n
+      || !isRecord(value.data?.saved) || !isRecord(value.data?.effective)
+      || !Array.isArray(value.data?.application?.pendingRestart) || !Array.isArray(value.data?.application?.failed)) {
+    throw new Error("Settings response is missing a valid saved revision or settings data.");
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -33,6 +33,14 @@ fn complete_defaults_and_metadata_have_exactly_the_same_59_typed_leaves() {
         document, fixture,
         "Regenerate the harness fixture from compiled setting metadata after changing defaults."
     );
+    let ui_fixture: Value = serde_json::from_str(include_str!(
+        "../../../../webui/tests/fixtures/settings-defaults.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        document, ui_fixture,
+        "Refresh the WebUI test snapshot from the canonical defaults fixture."
+    );
     for spec in specs {
         let pointer = format!("/{}", spec.key.replace('.', "/"));
         assert_eq!(plain.pointer(&pointer), Some(&spec.default_value));

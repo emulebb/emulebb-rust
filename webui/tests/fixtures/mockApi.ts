@@ -1,3 +1,4 @@
+import { settingsFixture, settingsSurfaceFixture, applySettingsFixture } from "./settings";
 import type { Route } from "@playwright/test";
 
 export type RecordedApiRequest = {
@@ -125,6 +126,7 @@ export function mockSnapshotFixture(): typeof snapshot {
 }
 
 export function installMockApi(requests: RecordedApiRequest[]) {
+  let currentSettings = settingsFixture();
   let nextRootId = 3;
   let roots = [
     { id: "1", path: "C:\\Sample\\Shared", watchEnabled: false, managed: false, shareable: true, accessible: true, lastScannedAt: null },
@@ -198,13 +200,23 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       await route.fulfill({ status: 207, contentType: "application/json", body: JSON.stringify({ data: request.postDataJSON().ids.map((id: string) => ({ id, status: "accepted", httpStatus: 202 })) }) });
       return;
     }
+    if (path === "settings") {
+      if (request.method() === "PATCH") {
+        const patch = request.postDataJSON();
+        if (patch.expectedRevision !== currentSettings.meta.settingsRevision) {
+          await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "SETTINGS_CONFLICT", message: "Saved settings changed; read the latest revision." } }) });
+          return;
+        }
+        currentSettings = applySettingsFixture(currentSettings, patch);
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(currentSettings) });
+      return;
+    }
     const data = request.method() === "GET" && path === "shared-files"
       ? url.searchParams.has("cursor")
         ? { items: [secondSharedFile], total: 2, nextCursor: null }
         : { items: snapshot.sharedFiles, total: 2, nextCursor: "second-page" }
-      : request.method() === "PATCH" && path === "app/settings"
-        ? mergeFixture(dataFor("GET", path), request.postDataJSON())
-        : dataFor(request.method(), path);
+      : dataFor(request.method(), path);
     if (data === eventStream) {
       await route.fulfill({
         status: 200,
@@ -237,21 +249,6 @@ export function installMockApi(requests: RecordedApiRequest[]) {
 }
 
 const eventStream = Symbol("eventStream");
-
-function mergeFixture(base: unknown, update: unknown): unknown {
-  if (!isRecord(base) || !isRecord(update)) {
-    return update;
-  }
-  const merged: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(update)) {
-    merged[key] = mergeFixture(merged[key], value);
-  }
-  return merged;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function dataFor(method: string, path: string): unknown {
   if (method !== "GET") {
@@ -490,223 +487,8 @@ function dataFor(method: string, path: string): unknown {
           error: null
         }
       };
-    case "app/settings/surface":
-      return {
-        settings: [
-          setting("core.uploadLimitKiBps", "normalControl", false),
-          setting("core.downloadLimitKiBps", "normalControl", false),
-          setting("core.maxConnections", "advancedControl", false),
-          setting("core.maxConnectionsPerFiveSeconds", "advancedControl", false),
-          setting("core.maxSourcesPerFile", "advancedControl", false),
-          setting("core.uploadClientDataRate", "advancedControl", false),
-          setting("core.baseUploadSlots", "normalControl", false),
-          setting("core.uploadSlotElasticPercent", "advancedControl", false),
-          setting("core.queueSize", "advancedControl", false),
-          setting("core.autoConnect", "normalControl", true),
-          setting("core.creditSystem", "normalControl", false),
-          setting("core.networkKademlia", "normalControl", true),
-          setting("core.networkEd2k", "normalControl", true),
-          setting("daemon.incomingDir", "normalControl", false),
-          setting("daemon.p2pBindIp", "normalControl", true),
-          setting("daemon.p2pBindInterface", "normalControl", true),
-          setting("daemon.ed2kUserHash", "notUserFacing", true),
-          setting("daemon.hostnameLookup.enabled", "advancedControl", false),
-          setting("daemon.hostnameLookup.dnsServers", "advancedControl", false),
-          setting("daemon.hostnameLookup.cacheTtlSecs", "advancedControl", false),
-          setting("daemon.hostnameLookup.maxLookupsPerTick", "advancedControl", false),
-          setting("daemon.hostnameLookup.tickIntervalSecs", "advancedControl", false),
-          setting("ed2k.listenPort", "normalControl", true),
-          setting("ed2k.nickname", "normalControl", true),
-          setting("ed2k.connectTimeoutSecs", "advancedControl", true),
-          setting("ed2k.serverConnectTimeoutSecs", "advancedControl", true),
-          setting("ed2k.callbackTimeoutSecs", "advancedControl", true),
-          setting("ed2k.reconnectIntervalSecs", "advancedControl", true),
-          setting("ed2k.serverKeepaliveMinutes", "advancedControl", true),
-          setting("ed2k.sessionRotationSecs", "advancedControl", true),
-          setting("ed2k.maxConcurrentDownloads", "advancedControl", true),
-          setting("ed2k.maxNewConnectionsPerFiveSeconds", "advancedControl", true),
-          setting("ed2k.maxHalfOpenConnections", "advancedControl", true),
-          setting("ed2k.maxSourcesPerFile", "advancedControl", true),
-          setting("ed2k.maxParallelDownloadPeers", "advancedControl", true),
-          setting("ed2k.downloadLimitBytesPerSec", "advancedControl", true),
-          setting("ed2k.minFreeConfigSpaceBytes", "normalControl", true),
-          setting("ed2k.minFreeTransferSpaceBytes", "normalControl", true),
-          setting("ed2k.minFreeIncomingSpaceBytes", "normalControl", true),
-          setting("ed2k.keywordServerAttemptBudget", "advancedControl", true),
-          setting("ed2k.exactHashKeywordServerAttemptBudget", "advancedControl", true),
-          setting("ed2k.sourceServerAttemptBudget", "advancedControl", true),
-          setting("ed2k.obfuscationEnabled", "normalControl", true),
-          setting("ed2k.reconnectEnabled", "normalControl", true),
-          setting("ed2k.safeServerConnect", "normalControl", true),
-          setting("ed2k.addServersFromServer", "normalControl", true),
-          setting("ed2k.useServerPriorities", "normalControl", true),
-          setting("ed2k.autoConnectStaticOnly", "normalControl", true),
-          setting("ed2k.enableUdpReask", "normalControl", true),
-          setting("ed2k.publishEmuleRustIdentity", "advancedControl", true),
-          setting("ed2k.offerFilesCapabilityEnabled", "advancedControl", true),
-          setting("ed2k.deadServerRetries", "advancedControl", true),
-          setting("ed2k.uploadQueue.elasticUnderfillSecs", "advancedControl", true),
-          setting("ed2k.uploadQueue.waitingTimeoutSecs", "advancedControl", true),
-          setting("ed2k.uploadQueue.grantedTimeoutSecs", "advancedControl", true),
-          setting("ed2k.uploadQueue.uploadTimeoutSecs", "advancedControl", true),
-          setting("ed2k.uploadQueue.sessionTransferPercent", "advancedControl", true),
-          setting("ed2k.uploadQueue.sessionTimeLimitSecs", "advancedControl", true),
-          setting("kad.listenPort", "normalControl", true),
-          setting("kad.bootstrapMinRoutingContacts", "advancedControl", true),
-          setting("kad.localStoreEnabled", "advancedControl", true),
-          setting("kad.publishSharedFilesEnabled", "normalControl", true),
-          setting("kad.republishIntervalSecs", "advancedControl", true),
-          setting("kad.publishContactFanout", "advancedControl", true),
-          setting("kad.udpFirewallCheckEnabled", "normalControl", true),
-          setting("kad.udpFirewallCheckIntervalSecs", "advancedControl", true),
-          setting("kad.tcpFirewallCheckEnabled", "normalControl", true),
-          setting("kad.tcpFirewallCheckIntervalSecs", "advancedControl", true),
-          setting("kad.buddyEnabled", "normalControl", true),
-          setting("kad.routingMaintenanceEnabled", "normalControl", true),
-          setting("nat.enabled", "normalControl", true),
-          setting("nat.requireInitialMapping", "advancedControl", true),
-          setting("nat.backendOrder", "advancedControl", true),
-          setting("nat.bindIp", "advancedControl", true),
-          setting("nat.pcpServerIp", "advancedControl", true),
-          setting("nat.igdIp", "advancedControl", true),
-          setting("nat.minissdpdSocket", "advancedControl", true),
-          setting("nat.ssdpLocalPort", "advancedControl", true),
-          setting("nat.discoveryTimeoutSecs", "advancedControl", true),
-          setting("nat.leaseDurationSecs", "advancedControl", true),
-          setting("nat.renewMarginSecs", "advancedControl", true),
-          setting("nat.externalIpOverride", "advancedControl", true),
-          setting("vpnGuard.enabled", "normalControl", true),
-          setting("vpnGuard.mode", "normalControl", true),
-          setting("vpnGuard.allowedPublicIpCidrs", "normalControl", true),
-          setting("ipFilter.enabled", "normalControl", true),
-          setting("ipFilter.path", "normalControl", true),
-          setting("ipFilter.level", "normalControl", true)
-        ],
-        bootstrapSettings: [
-          bootstrapSetting(
-            "rest.bind_addr",
-            "REST bind socket address. This remains bootstrap-only so the daemon can start safely."
-          ),
-          bootstrapSetting(
-            "rest.api_key",
-            "REST API key. This remains bootstrap-only and is not exposed through REST."
-          ),
-          bootstrapSetting(
-            "rest.web_root_dir",
-            "Optional WebUI root override used before the REST server starts."
-          )
-        ],
-        sectionResources: [
-          sectionResource("libraryRoots", "/api/v1/library/roots", "Sharing", "Library root ownership and watch policy."),
-          sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category destinations and temporary directories."),
-          sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
-          sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),
-          sectionResource("network", "/api/v1/network", "Network", "Live P2P port, binding, interface, and VPN Guard status."),
-          sectionResource("nat", "/api/v1/nat", "NAT", "Live NAT gateway, mapping, external address, error status, and refresh operation."),
-          sectionResource("ipFilter", "/api/v1/ip-filter", "IP Filter", "IP filter status and live reload operation."),
-          sectionResource("vpnGuard", "/api/v1/vpn-guard", "VPN Guard", "VPN Guard startup, binding, egress verdict, and probe operation."),
-          sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics and diagnostic operations."),
-          sectionResource("logs", "/api/v1/logs", "Logs", "Recent daemon log lines and retained-log clear operation.")
-        ]
-      };
-    case "app/settings":
-      return {
-        core: {
-          uploadLimitKiBps: 6200,
-          downloadLimitKiBps: 12207,
-          maxConnections: 500,
-          maxConnectionsPerFiveSeconds: 50,
-          maxSourcesPerFile: 600,
-          uploadClientDataRate: 32,
-          baseUploadSlots: 12,
-          uploadSlotElasticPercent: 80,
-          queueSize: 10000,
-          autoConnect: true,
-          creditSystem: true,
-          networkEd2k: true,
-          networkKademlia: true
-        },
-        daemon: {
-          incomingDir: "C:\\Sample\\Incoming",
-          hostnameLookup: {
-            enabled: false,
-            dnsServers: [],
-            cacheTtlSecs: 86400,
-            maxLookupsPerTick: 32,
-            tickIntervalSecs: 30
-          }
-        },
-        ed2k: {
-          listenPort: 20019,
-          nickname: "Sample Mule",
-          connectTimeoutSecs: 30,
-          serverConnectTimeoutSecs: 25,
-          callbackTimeoutSecs: 45,
-          reconnectIntervalSecs: 30,
-          serverKeepaliveMinutes: 0,
-          sessionRotationSecs: 0,
-          maxConcurrentDownloads: 500,
-          maxNewConnectionsPerFiveSeconds: 50,
-          maxHalfOpenConnections: 50,
-          maxSourcesPerFile: 600,
-          maxParallelDownloadPeers: 2,
-          downloadLimitBytesPerSec: 0,
-          minFreeConfigSpaceBytes: 1073741824,
-          minFreeTransferSpaceBytes: 5368709120,
-          minFreeIncomingSpaceBytes: 5368709120,
-          keywordServerAttemptBudget: 3,
-          exactHashKeywordServerAttemptBudget: 4,
-          sourceServerAttemptBudget: 3,
-          obfuscationEnabled: true,
-          reconnectEnabled: true,
-          safeServerConnect: false,
-          addServersFromServer: false,
-          useServerPriorities: true,
-          autoConnectStaticOnly: false,
-          enableUdpReask: true,
-          publishEmuleRustIdentity: false,
-          offerFilesCapabilityEnabled: true,
-          deadServerRetries: 1,
-          uploadQueue: {
-            elasticUnderfillSecs: 10,
-            waitingTimeoutSecs: 3600,
-            grantedTimeoutSecs: 30,
-            uploadTimeoutSecs: 90,
-            sessionTransferPercent: 90,
-            sessionTimeLimitSecs: 7200
-          }
-        },
-        kad: {
-          listenPort: 20020,
-          bootstrapMinRoutingContacts: 10,
-          localStoreEnabled: true,
-          publishSharedFilesEnabled: true,
-          republishIntervalSecs: 1800,
-          publishContactFanout: 12,
-          udpFirewallCheckEnabled: true,
-          udpFirewallCheckIntervalSecs: 3600,
-          tcpFirewallCheckEnabled: true,
-          tcpFirewallCheckIntervalSecs: 3600,
-          buddyEnabled: true,
-          routingMaintenanceEnabled: true
-        },
-        nat: {
-          enabled: true,
-          requireInitialMapping: false,
-          bindIp: "",
-          pcpServerIp: "",
-          backendOrder: ["pcp_natpmp", "upnp_miniupnpc"],
-          igdIp: "",
-          minissdpdSocket: "",
-          ssdpLocalPort: 1900,
-          discoveryTimeoutSecs: 5,
-          leaseDurationSecs: 3600,
-          renewMarginSecs: 300,
-          externalIpOverride: ""
-        },
-        vpnGuard: { enabled: false, mode: "block", allowedPublicIpCidrs: "" },
-        ipFilter: { enabled: false, level: 127 }
-      };
+    case "settings/surface":
+      return settingsSurfaceFixture;
     case "uploads":
       return { items: snapshot.uploads };
     case "uploads/active-upload-peer":
@@ -731,38 +513,6 @@ function dataFor(method: string, path: string): unknown {
     default:
       return undefined;
   }
-}
-
-function setting(path: string, classification: "normalControl" | "advancedControl" | "notUserFacing", restartRequired: boolean) {
-  return {
-    path,
-    class: classification,
-    restartRequired,
-    uiSection: "Settings",
-    route: "/api/v1/app/settings",
-    description: path
-  };
-}
-
-function bootstrapSetting(path: string, description: string) {
-  return {
-    path,
-    class: "bootstrapOnly",
-    restartRequired: true,
-    uiSection: "Bootstrap REST",
-    route: "emulebb-rust-settings.toml",
-    description
-  };
-}
-
-function sectionResource(name: string, route: string, uiSection: string, description: string) {
-  return {
-    name,
-    class: "existingSectionResource",
-    route,
-    uiSection,
-    description
-  };
 }
 
 function uploadScore(baseScore: number) {

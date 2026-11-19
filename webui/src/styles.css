@@ -1565,3 +1565,11 @@ td {
     margin: 0.5rem 0 0;
   }
 }
+
+/* Canonical settings remain readable on narrow operation-console layouts. */
+.setting-editor { min-width: 0; border: 1px solid var(--tblr-border-color); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.setting-editor legend { float: none; width: auto; margin: 0; padding: 0 4px; font-size: 0.95rem; font-weight: 600; }
+.setting-editor label { min-width: 0; }
+.setting-editor .setting-key { overflow-wrap: anywhere; }
+.setting-editor textarea { min-height: 80px; }
+.settings-application { margin: 12px 0; }

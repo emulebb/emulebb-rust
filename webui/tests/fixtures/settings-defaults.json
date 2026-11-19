@@ -1,0 +1,269 @@
+{
+  "network": {
+    "autoConnect": {
+      "mode": "default",
+      "value": true
+    },
+    "connections": {
+      "callbackTimeoutSeconds": {
+        "mode": "default",
+        "value": 45
+      },
+      "connectTimeoutSeconds": {
+        "mode": "default",
+        "value": 30
+      },
+      "maxConnections": {
+        "mode": "default",
+        "value": 500
+      },
+      "maxHalfOpenConnections": {
+        "mode": "default",
+        "value": 50
+      },
+      "maxNewConnectionsPerFiveSeconds": {
+        "mode": "default",
+        "value": 50
+      }
+    },
+    "ed2kEnabled": {
+      "mode": "default",
+      "value": true
+    },
+    "hostnameLookup": {
+      "dnsServers": {
+        "mode": "default",
+        "value": []
+      },
+      "enabled": {
+        "mode": "default",
+        "value": false
+      }
+    },
+    "kadEnabled": {
+      "mode": "default",
+      "value": true
+    },
+    "nat": {
+      "backendOrder": {
+        "mode": "default",
+        "value": [
+          "pcp-natpmp",
+          "upnp"
+        ]
+      },
+      "enabled": {
+        "mode": "default",
+        "value": true
+      },
+      "externalIpOverride": {
+        "mode": "default",
+        "value": null
+      },
+      "igdIp": {
+        "mode": "default",
+        "value": null
+      },
+      "pcpServerIp": {
+        "mode": "default",
+        "value": null
+      },
+      "requireInitialMapping": {
+        "mode": "default",
+        "value": false
+      }
+    },
+    "nickname": {
+      "mode": "default",
+      "value": "eMule"
+    },
+    "p2p": {
+      "bindInterface": {
+        "mode": "default",
+        "value": null
+      },
+      "bindIp": {
+        "mode": "default",
+        "value": null
+      },
+      "tcpPort": {
+        "mode": "default",
+        "value": 20019
+      },
+      "udpPort": {
+        "mode": "default",
+        "value": 20020
+      }
+    },
+    "servers": {
+      "acceptServerListUpdates": {
+        "mode": "default",
+        "value": false
+      },
+      "autoReconnect": {
+        "mode": "default",
+        "value": true
+      },
+      "connectTimeoutSeconds": {
+        "mode": "default",
+        "value": 25
+      },
+      "deadServerRetries": {
+        "mode": "default",
+        "value": 1
+      },
+      "keepaliveMinutes": {
+        "mode": "default",
+        "value": 0
+      },
+      "reconnectIntervalSeconds": {
+        "mode": "default",
+        "value": 30
+      },
+      "safeConnect": {
+        "mode": "default",
+        "value": false
+      },
+      "sessionRotationSeconds": {
+        "mode": "default",
+        "value": 0
+      },
+      "staticOnly": {
+        "mode": "default",
+        "value": false
+      },
+      "usePriorities": {
+        "mode": "default",
+        "value": true
+      }
+    }
+  },
+  "security": {
+    "ipFilter": {
+      "enabled": {
+        "mode": "default",
+        "value": false
+      },
+      "filePath": {
+        "mode": "default",
+        "value": null
+      },
+      "level": {
+        "mode": "default",
+        "value": 127
+      }
+    },
+    "obfuscationEnabled": {
+      "mode": "default",
+      "value": true
+    },
+    "tcpErrorFloodDetection": {
+      "enabled": {
+        "mode": "default",
+        "value": true
+      },
+      "intervalSeconds": {
+        "mode": "default",
+        "value": 3600
+      },
+      "threshold": {
+        "mode": "default",
+        "value": 10
+      }
+    },
+    "vpnGuard": {
+      "allowedPublicIpCidrs": {
+        "mode": "default",
+        "value": []
+      },
+      "mode": {
+        "mode": "default",
+        "value": "off"
+      }
+    }
+  },
+  "sharing": {
+    "kadPublishingEnabled": {
+      "mode": "default",
+      "value": true
+    },
+    "scanOnStartup": {
+      "mode": "default",
+      "value": true
+    }
+  },
+  "storage": {
+    "incomingDirectory": {
+      "mode": "default",
+      "value": "incoming"
+    },
+    "minFreeIncomingBytes": {
+      "mode": "default",
+      "value": 5368709120
+    },
+    "minFreeProfileBytes": {
+      "mode": "default",
+      "value": 1073741824
+    },
+    "minFreeTempBytes": {
+      "mode": "default",
+      "value": 5368709120
+    },
+    "tempDirectory": {
+      "mode": "default",
+      "value": "temp"
+    }
+  },
+  "transfers": {
+    "downloadLimitBytesPerSecond": {
+      "mode": "default",
+      "value": 12499968
+    },
+    "maxConcurrentDownloads": {
+      "mode": "default",
+      "value": null
+    },
+    "maxParallelDownloadPeers": {
+      "mode": "default",
+      "value": 2
+    },
+    "maxSourcesPerFile": {
+      "mode": "default",
+      "value": 600
+    },
+    "upload": {
+      "baseSlots": {
+        "mode": "default",
+        "value": 12
+      },
+      "creditSystemEnabled": {
+        "mode": "default",
+        "value": true
+      },
+      "elasticPercent": {
+        "mode": "default",
+        "value": 80
+      },
+      "queueCapacity": {
+        "mode": "default",
+        "value": 10000
+      },
+      "sessionTimeLimitSeconds": {
+        "mode": "default",
+        "value": 7200
+      },
+      "sessionTransferPercent": {
+        "mode": "default",
+        "value": 90
+      },
+      "targetClientRateBytesPerSecond": {
+        "mode": "default",
+        "value": 32768
+      }
+    },
+    "uploadLimitBytesPerSecond": {
+      "mode": "default",
+      "value": 6348800
+    }
+  }
+}
