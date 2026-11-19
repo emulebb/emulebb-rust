@@ -19,10 +19,28 @@ use walkdir::WalkDir;
 #[serde(rename_all = "camelCase")]
 pub struct SharedDirectoryRoot {
     pub path: String,
+    pub watch_enabled: bool,
     #[serde(skip)]
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,
+}
+
+pub(crate) fn root_watch_policy_only_changed(
+    expected: &[SharedDirectoryRoot],
+    proposed: &[SharedDirectoryRoot],
+) -> bool {
+    expected.len() == proposed.len()
+        && expected.iter().zip(proposed).all(|(old, new)| {
+            old.path == new.path
+                && old.monitor_owned == new.monitor_owned
+                && old.shareable == new.shareable
+                && old.accessible == new.accessible
+        })
+        && expected
+            .iter()
+            .zip(proposed)
+            .any(|(old, new)| old.watch_enabled != new.watch_enabled)
 }
 
 /// Consolidate recursive roots without inventing parents or altering native paths.
@@ -39,11 +57,14 @@ pub fn consolidate_shared_directory_roots(
         if combined.iter().any(|(parent_root, parent)| {
             key.starts_with(parent)
                 && (!eligible || (parent_root.shareable && parent_root.accessible))
+                && (!root.watch_enabled || parent_root.watch_enabled)
         }) {
             continue;
         }
         combined.retain(|(child_root, child)| {
-            !child.starts_with(&key) || (!eligible && child_root.shareable && child_root.accessible)
+            !child.starts_with(&key)
+                || (!eligible && child_root.shareable && child_root.accessible)
+                || (child_root.watch_enabled && !root.watch_enabled)
         });
         combined.push((root, key));
     }
@@ -259,11 +280,14 @@ pub struct SharedDirectoriesUpdate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SharedDirectoryRootUpdate {
     pub path: String,
+    #[serde(default)]
+    pub watch_enabled: bool,
 }
 
 pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {
     SharedDirectoryRoot {
         path: normal_path_display(&root.path),
+        watch_enabled: root.watch_enabled,
         monitor_owned: false,
         shareable: root.shareable,
         accessible: root.accessible,
@@ -275,6 +299,7 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
     let accessible = path.is_dir();
     SharedDirectoryRoot {
         path: normal_path_display(&root.path),
+        watch_enabled: root.watch_enabled,
         monitor_owned: root.monitor_owned,
         shareable: accessible,
         accessible,
@@ -343,6 +368,7 @@ pub(crate) async fn implicit_shared_directory_roots(
         .into_iter()
         .map(|root| SharedDirectoryRoot {
             path: root.path,
+            watch_enabled: root.watch_enabled,
             monitor_owned: root.monitor_owned,
             shareable: root.shareable,
             accessible: root.accessible,
@@ -1062,6 +1088,10 @@ pub(crate) async fn scan_shared_directory_roots(
                 }
             }
         }
+        // A watched child can coexist with an unwatched covering root. Keep
+        // both membership snapshots, but plan each normalized path only once.
+        files.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+        files.dedup_by(|left, right| left.key == right.key);
         Ok(SharedScanResult {
             files,
             root_files,

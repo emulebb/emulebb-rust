@@ -917,7 +917,7 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
-    core.add_shared_directory_root(&runtime_dir.display().to_string())
+    core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
         .await
         .unwrap();
     core.share_local_file(LocalShareCreate {

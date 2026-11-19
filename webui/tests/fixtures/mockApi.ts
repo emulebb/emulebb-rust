@@ -239,8 +239,8 @@ function dataFor(method: string, path: string): unknown {
     case "shared-directories":
       return {
         roots: [
-          { path: "C:\\Sample\\Shared", shareable: true, accessible: true },
-          { path: longSharedRoot, shareable: true, accessible: true }
+          { path: "C:\\Sample\\Shared", watchEnabled: false, shareable: true, accessible: true },
+          { path: longSharedRoot, watchEnabled: false, shareable: true, accessible: true }
         ],
         hashingCount: 1,
         reloadProgress: {

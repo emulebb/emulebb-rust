@@ -23,7 +23,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
-    core.add_shared_directory_root(&runtime_dir.display().to_string())
+    core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
         .await
         .unwrap();
     let share = core
@@ -217,7 +217,7 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
-    core.add_shared_directory_root(&runtime_dir.display().to_string())
+    core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
         .await
         .unwrap();
     let alpha = core

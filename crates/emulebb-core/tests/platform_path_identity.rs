@@ -69,6 +69,7 @@ async fn case_sensitive_windows_directory_preserves_case_variant_files() {
     .unwrap();
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate {
+            watch_enabled: false,
             path: shared_root.display().to_string(),
         }],
         confirm_replace_roots: true,
@@ -177,7 +178,7 @@ async fn case_insensitive_macos_alias_keeps_one_native_file_identity() {
             &transfer_root,
         )
         .unwrap();
-        core.add_shared_directory_root(&runtime_dir.display().to_string())
+        core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
             .await
             .unwrap();
         let first = core

@@ -10,6 +10,7 @@ pub(crate) async fn admit_local_share(runtime: &Ed2kTransferRuntime, root: &Path
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

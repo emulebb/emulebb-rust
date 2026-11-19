@@ -104,6 +104,7 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
 
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate {
+            watch_enabled: false,
             path: configured_root.clone(),
         }],
         confirm_replace_roots: true,

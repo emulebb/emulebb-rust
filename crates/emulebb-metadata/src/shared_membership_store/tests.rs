@@ -11,6 +11,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
     let file = nested.join("Sample.bin");
     let roots = [&root, &nested].map(|path| MetadataSharedDirectoryRoot {
         path: path.to_string_lossy().into_owned(),
+        watch_enabled: false,
         monitor_owned: false,
         shareable: true,
         accessible: true,

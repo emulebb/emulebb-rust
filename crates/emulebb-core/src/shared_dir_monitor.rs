@@ -398,7 +398,10 @@ where
     F: Fn(MonitorAction) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    if roots.is_empty() {
+    if roots
+        .iter()
+        .all(|root| !root.watch_enabled || !root.accessible)
+    {
         return None;
     }
 
@@ -432,7 +435,7 @@ where
 
     let mut watched_roots = Vec::new();
     for root in roots {
-        if !root.accessible {
+        if !root.watch_enabled || !root.accessible {
             continue;
         }
         let path = Path::new(&root.path);
@@ -821,6 +824,7 @@ pub(crate) async fn run_root_io(
                         .into_iter()
                         .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
                             path: root.path,
+                            watch_enabled: root.watch_enabled,
                             monitor_owned: root.monitor_owned,
                             shareable: root.shareable,
                             accessible: root.accessible,
@@ -834,6 +838,7 @@ pub(crate) async fn run_root_io(
                             (
                                 SharedDirectoryRoot {
                                     path: root.path,
+                                    watch_enabled: root.watch_enabled,
                                     monitor_owned: root.monitor_owned,
                                     shareable: root.shareable,
                                     accessible: root.accessible,
@@ -853,6 +858,7 @@ pub(crate) async fn run_root_io(
                         .into_iter()
                         .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
                             path: root.path,
+                            watch_enabled: root.watch_enabled,
                             monitor_owned: root.monitor_owned,
                             shareable: root.shareable,
                             accessible: root.accessible,
@@ -866,6 +872,7 @@ pub(crate) async fn run_root_io(
                             (
                                 SharedDirectoryRoot {
                                     path: root.path,
+                                    watch_enabled: root.watch_enabled,
                                     monitor_owned: root.monitor_owned,
                                     shareable: root.shareable,
                                     accessible: root.accessible,
@@ -1906,7 +1913,7 @@ mod tests {
         .unwrap();
         let root = crate::unique_runtime_dir("root-scan-owner");
         let execution = core.shared_reload_gate.lock().await;
-        core.add_shared_directory_root(&root.to_string_lossy())
+        core.add_shared_directory_root(&root.to_string_lossy(), false)
             .await
             .unwrap();
         core.shared_root_change.notified().await;
@@ -1959,6 +1966,21 @@ mod tests {
     use std::task::Poll;
     use std::time::Instant;
 
+    #[test]
+    fn unwatched_roots_do_not_create_a_native_monitor() {
+        let monitor = start_monitor(
+            &[SharedDirectoryRoot {
+                path: std::env::temp_dir().display().to_string(),
+                watch_enabled: false,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }],
+            |_| async { panic!("an unwatched root must not deliver actions") },
+        );
+        assert!(monitor.is_none());
+    }
+
     /// Model a missed native directory-registration event independently of
     /// kernel queue timing, then prove the existing consumer sees later writes.
     #[cfg(target_os = "linux")]
@@ -1981,6 +2003,7 @@ mod tests {
             &[SharedDirectoryRoot {
                 path: root.to_string_lossy().into_owned(),
                 accessible: true,
+                watch_enabled: true,
                 monitor_owned: false,
                 shareable: true,
             }],
@@ -2195,7 +2218,7 @@ mod tests {
             let core = Arc::clone(&core);
             let root = root.clone();
             tokio::spawn(async move {
-                core.add_shared_directory_root(&root.to_string_lossy())
+                core.add_shared_directory_root(&root.to_string_lossy(), false)
                     .await
             })
         };
@@ -2389,6 +2412,7 @@ mod tests {
     async fn configure_test_shared_root(core: &EmulebbCore, root: &Path) {
         core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
             path: root.display().to_string(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -2397,6 +2421,7 @@ mod tests {
         metadata
             .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
                 path: root.display().to_string(),
+                watch_enabled: false,
                 monitor_owned: false,
                 shareable: true,
                 accessible: true,

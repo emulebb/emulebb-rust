@@ -84,6 +84,7 @@ fn register_shared_test_job(store: &MetadataStore, id: crate::JobId) {
     roots
         .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -739,6 +740,7 @@ fn failed_partial_projection_rolls_back_shared_path_withdrawal() {
     store
         .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

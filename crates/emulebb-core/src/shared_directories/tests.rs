@@ -20,6 +20,7 @@ async fn configure_test_root(core: &EmulebbCore, root: &Path) {
     let path = root.display().to_string();
     core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
         path: path.clone(),
+        watch_enabled: false,
         monitor_owned: false,
         shareable: true,
         accessible: true,
@@ -28,11 +29,90 @@ async fn configure_test_root(core: &EmulebbCore, root: &Path) {
         .clone()
         .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
             path,
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
         }])
         .unwrap();
+}
+
+#[tokio::test]
+async fn watched_child_keeps_its_policy_without_duplicate_hash_planning() {
+    let parent = scratch_dir("watched-child");
+    let child = parent.join("intake");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(child.join("sample.bin"), b"one physical path").unwrap();
+    for child_first in [false, true] {
+        let mut roots = vec![
+            emulebb_metadata::MetadataSharedDirectoryRoot {
+                path: parent.display().to_string(),
+                watch_enabled: false,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            },
+            emulebb_metadata::MetadataSharedDirectoryRoot {
+                path: child.display().to_string(),
+                watch_enabled: true,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            },
+        ];
+        if child_first {
+            roots.reverse();
+        }
+        let retained = consolidate_shared_directory_roots(roots);
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained.iter().filter(|root| root.watch_enabled).count(), 1);
+        let roots = retained
+            .into_iter()
+            .map(|root| SharedDirectoryRoot {
+                path: root.path,
+                watch_enabled: root.watch_enabled,
+                monitor_owned: root.monitor_owned,
+                shareable: root.shareable,
+                accessible: root.accessible,
+            })
+            .collect();
+        let scan = scan_shared_directory_roots(roots, SharedFileIgnorePolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.root_files.len(), 2);
+        assert!(
+            scan.root_files
+                .iter()
+                .all(|(_, members)| members.len() == 1)
+        );
+    }
+    fs::remove_dir_all(parent).unwrap();
+}
+
+#[tokio::test]
+async fn watch_only_update_does_not_reserve_a_library_scan() {
+    let scratch = scratch_dir("watch-policy-only");
+    let root = PathBuf::from(normal_path_display(fs::canonicalize(&scratch).unwrap()));
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    configure_test_root(&core, &root).await;
+    let execution = core.shared_reload_gate.lock().await;
+    let result = core
+        .set_shared_directories(SharedDirectoriesUpdate {
+            roots: vec![SharedDirectoryRootUpdate {
+                path: root.display().to_string(),
+                watch_enabled: true,
+            }],
+            confirm_replace_roots: true,
+        })
+        .await
+        .unwrap();
+    assert!(result.roots[0].watch_enabled);
+    assert!(!core.shared_reload_running.load(Ordering::Acquire));
+    assert!(!core.shared_reload_pending.load(Ordering::Acquire));
+    drop(execution);
+    core.drain_persistence().await.unwrap();
+    fs::remove_dir_all(scratch).unwrap();
 }
 
 #[tokio::test]
@@ -238,6 +318,7 @@ async fn set_shared_directories_canonicalizes_configured_root() {
     let directories = core
         .set_shared_directories(SharedDirectoriesUpdate {
             roots: vec![SharedDirectoryRootUpdate {
+                watch_enabled: false,
                 path: configured.display().to_string(),
             }],
             confirm_replace_roots: true,
@@ -259,17 +340,17 @@ async fn api_root_updates_collapse_recursive_children_and_keep_siblings() {
     fs::create_dir_all(&child).unwrap();
     fs::create_dir(&sibling).unwrap();
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_shared_directory_root(child.to_str().unwrap())
+    core.add_shared_directory_root(child.to_str().unwrap(), false)
         .await
         .unwrap();
     let added = core
-        .add_shared_directory_root(parent.to_str().unwrap())
+        .add_shared_directory_root(parent.to_str().unwrap(), false)
         .await
         .unwrap();
     assert_eq!(added.roots.len(), 1);
     assert!(Path::new(&added.roots[0].path).ends_with("Shared"));
     let covered = core
-        .add_shared_directory_root(child.to_str().unwrap())
+        .add_shared_directory_root(child.to_str().unwrap(), false)
         .await
         .unwrap();
     assert_eq!(covered.roots, added.roots);
@@ -279,6 +360,7 @@ async fn api_root_updates_collapse_recursive_children_and_keep_siblings() {
             roots: [&child, &sibling, &parent, &child]
                 .into_iter()
                 .map(|path| SharedDirectoryRootUpdate {
+                    watch_enabled: false,
                     path: path.display().to_string(),
                 })
                 .collect(),
@@ -311,7 +393,7 @@ async fn api_does_not_add_children_already_shared_by_incoming() {
     // A successfully scanned implicit parent may consolidate its child.
     core.reload_shared_directories().await.unwrap();
     let result = core
-        .add_shared_directory_root(child.to_str().unwrap())
+        .add_shared_directory_root(child.to_str().unwrap(), false)
         .await
         .unwrap();
     assert!(result.roots.is_empty());
@@ -332,6 +414,7 @@ fn unavailable_configured_parent_still_covers_its_children() {
         consolidate_shared_directory_roots([parent.join("Child"), parent.clone()].map(|path| {
             MetadataSharedDirectoryRoot {
                 path: path.display().to_string(),
+                watch_enabled: false,
                 monitor_owned: false,
                 shareable: false,
                 accessible: false,
@@ -351,12 +434,14 @@ fn unavailable_parent_does_not_hide_an_available_child() {
     let roots = consolidate_shared_directory_roots([
         MetadataSharedDirectoryRoot {
             path: parent.display().to_string(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: false,
         },
         MetadataSharedDirectoryRoot {
             path: child.display().to_string(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -1141,6 +1226,7 @@ async fn root_scan_keeps_successful_membership_separate_from_offline_root() {
     let roots = [&available, &offline]
         .map(|path| SharedDirectoryRoot {
             path: path.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -1331,6 +1417,7 @@ async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
     core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
         path: root.display().to_string(),
+        watch_enabled: false,
         monitor_owned: false,
         shareable: true,
         accessible: true,
@@ -1339,6 +1426,7 @@ async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
         .clone()
         .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
             path: root.display().to_string(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

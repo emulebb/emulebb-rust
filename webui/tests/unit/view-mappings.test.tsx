@@ -9,6 +9,23 @@ afterEach(() => { vi.restoreAllMocks(); });
 const run = async (operation: () => Promise<unknown>) => { await operation(); };
 
 describe("canonical view mappings", () => {
+  it("changes one root watch policy while preserving other root choices", async () => {
+    const client = new RestClient();
+    const patch = vi.spyOn(client, "patch").mockResolvedValue({});
+    render(<SharingView directories={{ roots: [
+      { path: "/library", watchEnabled: false, accessible: true, shareable: true },
+      { path: "/intake", watchEnabled: true, accessible: true, shareable: true }
+    ] }} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
+    expect(screen.getByLabelText("Watch for changes")).not.toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Watch /library" }));
+    await waitFor(() => expect(patch).toHaveBeenCalledWith("shared-directories", {
+      confirmReplaceRoots: true, roots: [
+        { path: "/library", watchEnabled: true }, { path: "/intake", watchEnabled: true }
+      ]
+    }));
+    expect(patch).toHaveBeenCalledOnce();
+  });
+
   it("uses total shared-file diagnostics rather than a bounded snapshot page and does not invent shared bytes", () => {
     const { unmount } = render(<Overview snapshot={{ status: { runtimeDiagnostics: { sharedFileCount: 1001 } } }}
       stats={{ sharedFiles: 3, sharedBytes: 123 }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]}

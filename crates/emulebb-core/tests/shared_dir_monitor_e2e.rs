@@ -80,6 +80,7 @@ async fn live_monitor_auto_shares_relocates_and_removes_a_dropped_file() {
     // public entry to prove it is idempotent.
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate {
+            watch_enabled: true,
             path: shared_root.display().to_string(),
         }],
         confirm_replace_roots: true,

@@ -52,6 +52,7 @@ pub fn read_shared_directories(file: &Path) -> Result<Vec<MetadataSharedDirector
         paths.into_iter().map(|path| MetadataSharedDirectoryRoot {
             accessible: path.is_dir(),
             shareable: path.is_dir(),
+            watch_enabled: false,
             monitor_owned: false,
             path: emulebb_ed2k::long_path::normal_path_display(&path),
         }),
@@ -98,12 +99,14 @@ mod tests {
         db.replace_shared_directory_roots(&[
             MetadataSharedDirectoryRoot {
                 path: child,
+                watch_enabled: false,
                 monitor_owned: false,
                 accessible: false,
                 shareable: false,
             },
             MetadataSharedDirectoryRoot {
                 path: parent.to_string_lossy().into_owned(),
+                watch_enabled: false,
                 monitor_owned: false,
                 accessible: true,
                 shareable: true,

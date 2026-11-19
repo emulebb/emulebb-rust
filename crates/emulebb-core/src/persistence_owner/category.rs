@@ -281,8 +281,18 @@ impl PersistenceOwner {
             .ok_or(PersistenceError::TooLarge)?;
         match self
             .submit_reserved(charge, || {
-                if let (Some(core), CategoryCommand::ReplaceRoots { reload, .. }) =
-                    (core, &mut command)
+                if let (
+                    Some(core),
+                    CategoryCommand::ReplaceRoots {
+                        reload,
+                        expected,
+                        proposed,
+                        ..
+                    },
+                ) = (core, &mut command)
+                    && !crate::shared_directories::root_watch_policy_only_changed(
+                        expected, proposed,
+                    )
                 {
                     *reload = Some(crate::shared_directories::reserve_root_reload(core)?);
                 }
@@ -351,6 +361,8 @@ async fn process_explicit_roots(
         sharing,
         reload,
     } = replacement;
+    let watch_only =
+        crate::shared_directories::root_watch_policy_only_changed(&expected, &proposed);
     let root_mutation = sharing
         .runtime
         .begin_category_root_mutation()
@@ -391,6 +403,7 @@ async fn process_explicit_roots(
             .into_iter()
             .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
                 path: root.path,
+                watch_enabled: root.watch_enabled,
                 monitor_owned: root.monitor_owned,
                 shareable: root.shareable,
                 accessible: root.accessible,
@@ -436,7 +449,7 @@ async fn process_explicit_roots(
             .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
     }
     let clean_epoch = root_mutation.finish();
-    if scan_owned {
+    if scan_owned || watch_only {
         sharing.root_change.watch_changed();
     } else {
         sharing.root_change.scan_required();

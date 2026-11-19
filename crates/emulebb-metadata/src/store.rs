@@ -578,10 +578,10 @@ impl MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO shared_directory_roots(
-                    path_id, monitor_owned, shareable, accessible,
+                    path_id, monitor_owned, shareable, accessible, watch_enabled,
                     enabled, created_at_ms, deleted_at_ms
                 )
-                VALUES (?1, ?2, ?3, ?4, 1, ?5, NULL)
+                VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, NULL)
                 ON CONFLICT(path_id) DO NOTHING
                 "#,
                 params![
@@ -589,9 +589,18 @@ impl MetadataStore {
                     bool_to_i64(root.monitor_owned),
                     bool_to_i64(root.shareable),
                     bool_to_i64(root.accessible),
+                    bool_to_i64(root.watch_enabled),
                     now,
                 ],
             )?;
+            // Watch policy belongs to the physical root. Refreshing mandatory
+            // Incoming/category membership must not reset an operator choice.
+            if origin == "explicit" {
+                tx.execute(
+                    "UPDATE shared_directory_roots SET watch_enabled=?2 WHERE path_id=?1",
+                    params![path_id, bool_to_i64(root.watch_enabled)],
+                )?;
+            }
             tx.execute(
                 "INSERT INTO shared_directory_root_origins(
                     root_id, origin, monitor_owned, shareable, accessible
@@ -622,7 +631,8 @@ impl MetadataStore {
             SELECT local_paths.display_path,
                    shared_directory_root_origins.monitor_owned,
                    shared_directory_root_origins.shareable,
-                   shared_directory_root_origins.accessible
+                   shared_directory_root_origins.accessible,
+                   shared_directory_roots.watch_enabled
             FROM shared_directory_roots
             JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
             JOIN shared_directory_root_origins ON shared_directory_root_origins.root_id = shared_directory_roots.id
@@ -638,6 +648,7 @@ impl MetadataStore {
                 monitor_owned: row.get::<_, i64>(1)? != 0,
                 shareable: row.get::<_, i64>(2)? != 0,
                 accessible: row.get::<_, i64>(3)? != 0,
+                watch_enabled: row.get::<_, i64>(4)? != 0,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -654,7 +665,7 @@ impl MetadataStore {
         conn: &rusqlite::Connection,
     ) -> Result<Vec<MetadataSharedDirectoryRoot>> {
         let mut stmt = conn.prepare(
-            "SELECT p.display_path, r.monitor_owned, r.shareable, r.accessible
+            "SELECT p.display_path, r.monitor_owned, r.shareable, r.accessible, r.watch_enabled
              FROM shared_directory_roots r
              JOIN local_paths p ON p.id=r.path_id
              JOIN shared_directory_root_origins o ON o.root_id=r.id
@@ -667,6 +678,7 @@ impl MetadataStore {
                 monitor_owned: row.get::<_, i64>(1)? != 0,
                 shareable: row.get::<_, i64>(2)? != 0,
                 accessible: row.get::<_, i64>(3)? != 0,
+                watch_enabled: row.get::<_, i64>(4)? != 0,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1188,12 +1200,14 @@ mod tests {
             .replace_shared_directory_roots(&[
                 MetadataSharedDirectoryRoot {
                     path: "/tmp/alpha".to_string(),
+                    watch_enabled: false,
                     monitor_owned: false,
                     shareable: true,
                     accessible: true,
                 },
                 MetadataSharedDirectoryRoot {
                     path: "/tmp/beta".to_string(),
+                    watch_enabled: false,
                     monitor_owned: false,
                     shareable: true,
                     accessible: true,
@@ -1207,6 +1221,7 @@ mod tests {
         store
             .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
                 path: "/tmp/beta".to_string(),
+                watch_enabled: false,
                 monitor_owned: false,
                 shareable: true,
                 accessible: true,
@@ -1223,12 +1238,14 @@ mod tests {
         let path = "/tmp/overlapping-root".to_string();
         let explicit = MetadataSharedDirectoryRoot {
             path: path.clone(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: false,
             accessible: true,
         };
         let implicit = MetadataSharedDirectoryRoot {
             path,
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -1275,6 +1292,38 @@ mod tests {
             .unwrap();
         assert_eq!(retired.0, 0);
         assert!(retired.1.is_some());
+    }
+
+    #[test]
+    fn root_watch_policy_survives_implicit_refresh_and_explicitly_turns_off() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let mut root = MetadataSharedDirectoryRoot {
+            path: "/tmp/watch-policy".into(),
+            watch_enabled: true,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        };
+        store
+            .replace_shared_directory_roots(std::slice::from_ref(&root))
+            .unwrap();
+        let mut implicit = root.clone();
+        implicit.watch_enabled = false;
+        store
+            .replace_implicit_shared_directory_roots(&[implicit])
+            .unwrap();
+        assert!(store.shared_directory_roots().unwrap()[0].watch_enabled);
+        assert!(store.implicit_shared_directory_roots().unwrap()[0].watch_enabled);
+        root.watch_enabled = false;
+        store.replace_shared_directory_roots(&[root]).unwrap();
+        assert!(!store.shared_directory_roots().unwrap()[0].watch_enabled);
+        assert!(!store.implicit_shared_directory_roots().unwrap()[0].watch_enabled);
+        let connection = store.connection().unwrap();
+        assert!(
+            connection
+                .execute("UPDATE shared_directory_roots SET watch_enabled=2", [])
+                .is_err()
+        );
     }
 
     #[test]
