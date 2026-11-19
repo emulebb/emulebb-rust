@@ -1,7 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { SearchObservations } from "./searchObservations";
-import { LibraryTags } from "./libraryTags";
+import { FileTags, LibraryTags } from "./libraryTags";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
@@ -1387,6 +1387,7 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
             <button class="btn" type="submit" disabled={Boolean(ratingError)}><Save size={15} />Save</button>
           </form>
         )}
+        {selected && <FileTags client={props.client} hash={selected.hash} />}
         <h3>Comments</h3>
         <JsonPanel value={comments} />
       </section>

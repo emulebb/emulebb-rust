@@ -1,10 +1,82 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 import { RestClient, type CursorPage, type LibraryTag } from "../../src/api";
-import { LibraryTags } from "../../src/libraryTags";
+import { FileTags, LibraryTags } from "../../src/libraryTags";
 
 const page = (name: string, nextCursor: string | null = null): CursorPage<LibraryTag> => ({
   data: [{ name }], meta: { apiVersion: "2.0.0", nextCursor, hasMore: nextCursor !== null }
+});
+
+const emptyPage: CursorPage<LibraryTag> = {
+  data: [], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false }
+};
+const hash = "a".repeat(32);
+
+describe("content tag assignments", () => {
+  it("assigns an existing name to the selected hash and refreshes its bounded tag page", async () => {
+    const client = new RestClient();
+    const get = vi.spyOn(client, "getPage").mockResolvedValueOnce(emptyPage).mockResolvedValue(page("Alpha"));
+    const control = vi.spyOn(client, "controlLibraryTags").mockResolvedValue([{ hash, status: "accepted", httpStatus: 200 }]);
+    render(<FileTags client={client} hash={hash} />);
+    await screen.findByText("No assigned tags.");
+    fireEvent.input(screen.getByRole("textbox", { name: "Existing tag name" }), { target: { value: "Alpha" } });
+    fireEvent.click(screen.getByRole("button", { name: "Assign tag" }));
+    await screen.findByText("Tag assigned.");
+    await screen.findByText("Alpha");
+    expect(control).toHaveBeenCalledExactlyOnceWith("add", "Alpha", [hash]);
+    expect(get).toHaveBeenLastCalledWith(`library/files/${hash}/tags?limit=100`);
+    expect(screen.getByRole("textbox", { name: "Existing tag name" })).toHaveValue("");
+  });
+
+  it("removes an assignment through the bulk action without deleting the global tag", async () => {
+    const client = new RestClient();
+    vi.spyOn(client, "getPage").mockResolvedValueOnce(page("Alpha")).mockResolvedValue(emptyPage);
+    const control = vi.spyOn(client, "controlLibraryTags").mockResolvedValue([{ hash, status: "accepted", httpStatus: 200 }]);
+    const removeTag = vi.spyOn(client, "delete");
+    render(<FileTags client={client} hash={hash} />);
+    await screen.findByText("Alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Remove tag Alpha from this content" }));
+    await screen.findByText("Tag removed.");
+    await screen.findByText("No assigned tags.");
+    expect(control).toHaveBeenCalledExactlyOnceWith("remove", "Alpha", [hash]);
+    expect(removeTag).not.toHaveBeenCalled();
+  });
+
+  it("retains the input and current assignments when the bulk action fails", async () => {
+    const client = new RestClient();
+    const get = vi.spyOn(client, "getPage").mockResolvedValue(page("Alpha"));
+    vi.spyOn(client, "controlLibraryTags").mockRejectedValue(new Error("Tag not found"));
+    render(<FileTags client={client} hash={hash} />);
+    await screen.findByText("Alpha");
+    fireEvent.input(screen.getByRole("textbox", { name: "Existing tag name" }), { target: { value: "Missing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Assign tag" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Tag not found");
+    expect(screen.getByRole("textbox", { name: "Existing tag name" })).toHaveValue("Missing");
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+    expect(screen.queryByText("Tag assigned.")).not.toBeInTheDocument();
+    expect(get).toHaveBeenCalledOnce();
+  });
+
+  it("resets cursor and input on content selection and ignores the previous content's late page", async () => {
+    const client = new RestClient();
+    let resolve!: (value: CursorPage<LibraryTag>) => void;
+    const get = vi.spyOn(client, "getPage").mockResolvedValueOnce(page("Alpha", "older-scope"))
+      .mockReturnValueOnce(new Promise<CursorPage<LibraryTag>>((done) => { resolve = done; }))
+      .mockResolvedValue(page("Gamma"));
+    const { rerender } = render(<FileTags client={client} hash={hash} />);
+    await screen.findByText("Alpha");
+    fireEvent.input(screen.getByRole("textbox", { name: "Existing tag name" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    const nextHash = "b".repeat(32);
+    rerender(<FileTags client={client} hash={nextHash} />);
+    await screen.findByText("Gamma");
+    await act(async () => { resolve(page("Beta")); });
+    expect(screen.getByText("Gamma")).toBeInTheDocument();
+    expect(screen.queryByText("Beta")).not.toBeInTheDocument();
+    expect(get).toHaveBeenLastCalledWith(`library/files/${nextHash}/tags?limit=100`);
+    expect(screen.getByRole("textbox", { name: "Existing tag name" })).toHaveValue("");
+  });
 });
 
 describe("library tag management", () => {

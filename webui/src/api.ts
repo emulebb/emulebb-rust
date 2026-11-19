@@ -156,6 +156,8 @@ export type DownloadBatchItem = {
   error?: { code: string; message: string; details: unknown };
 };
 
+export type HashBatchItem = Omit<DownloadBatchItem, "id"> & { hash: string };
+
 export type DownloadEvent = {
   id: number;
   epoch: string;
@@ -943,6 +945,18 @@ export class RestClient {
     if (failed.length) {
       const first = failed[0];
       throw new RestError(failed.map((item) => `${item.id}: ${item.error?.message ?? "Operation failed"}`).join("; "),
+        first.httpStatus, first.error?.code, items);
+    }
+    return items;
+  }
+
+  /** Apply an explicit hash selection and surface per-item failures from HTTP 207. */
+  async controlLibraryTags(action: "add" | "remove", tag: string, hashes: string[]): Promise<HashBatchItem[]> {
+    const items = await this.post<HashBatchItem[]>(`library/files/tags/${action}`, { tag, hashes });
+    const failed = items.filter((item) => item.status === "failed");
+    if (failed.length) {
+      const first = failed[0];
+      throw new RestError(failed.map((item) => `${item.hash}: ${item.error?.message ?? "Operation failed"}`).join("; "),
         first.httpStatus, first.error?.code, items);
     }
     return items;
