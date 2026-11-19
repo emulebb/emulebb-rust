@@ -60,6 +60,12 @@ pub(crate) struct CategorySharingContext {
 }
 
 pub(crate) enum CategoryCommand {
+    CreateRoot {
+        path: String,
+        watch_enabled: bool,
+        sharing: CategorySharingContext,
+        reload: crate::shared_directories::ReloadReservation,
+    },
     DeleteRoot {
         id: i64,
         sharing: CategorySharingContext,
@@ -96,6 +102,7 @@ pub(crate) enum CategoryCommand {
 }
 
 pub(super) enum CategoryDbCommand {
+    CreateRoot(String, bool),
     DeleteRoot(i64),
     PatchRootWatch(i64, bool),
     PatchDownload {
@@ -123,6 +130,7 @@ pub(super) enum CategoryDbCommand {
 }
 
 pub(super) enum CategoryWrite {
+    RootCreated(Option<emulebb_metadata::MetadataLibraryRoot>),
     RootDeleted(emulebb_metadata::MetadataLibraryRootDelete),
     RootWatch(Option<emulebb_metadata::MetadataLibraryRoot>),
     DownloadPatched(
@@ -154,6 +162,9 @@ pub(super) fn execute(
     command: CategoryDbCommand,
 ) -> anyhow::Result<CategoryWrite> {
     match command {
+        CategoryDbCommand::CreateRoot(path, watch_enabled) => store
+            .create_library_root(std::path::Path::new(&path), watch_enabled, true)
+            .map(CategoryWrite::RootCreated),
         CategoryDbCommand::DeleteRoot(id) => store
             .delete_library_root(id)
             .map(CategoryWrite::RootDeleted),
@@ -267,6 +278,7 @@ impl CategoryCommand {
                 .saturating_add(sharing.incoming.as_os_str().len()),
             Self::Delete { sharing, .. } => sharing.incoming.as_os_str().len(),
             Self::PatchRootWatch { .. } | Self::DeleteRoot { .. } => 0,
+            Self::CreateRoot { path, .. } => path.capacity(),
             Self::ReplaceRoots {
                 expected,
                 implicit,
@@ -296,6 +308,33 @@ impl CategoryCommand {
 }
 
 impl PersistenceOwner {
+    pub(crate) async fn create_root(
+        &self,
+        path: String,
+        watch_enabled: bool,
+        core: &crate::EmulebbCore,
+    ) -> Result<Option<emulebb_metadata::MetadataLibraryRoot>, PersistenceError> {
+        let charge = path
+            .capacity()
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(FIXED_CHARGE + CATEGORY_PROBE_BYTES))
+            .ok_or(PersistenceError::TooLarge)?;
+        match self
+            .submit_reserved(charge, || {
+                Ok(Command::Category(CategoryCommand::CreateRoot {
+                    path,
+                    watch_enabled,
+                    sharing: core.category_sharing_context(),
+                    reload: crate::shared_directories::reserve_root_reload(core)?,
+                }))
+            })
+            .await?
+        {
+            Response::RootCreated(root) => Ok(root),
+            _ => Err(PersistenceError::Worker),
+        }
+    }
+
     pub(crate) async fn delete_root(
         &self,
         id: i64,
@@ -556,6 +595,60 @@ pub(super) async fn process(
         unreachable!()
     };
     let command = match command {
+        CategoryCommand::CreateRoot {
+            path,
+            watch_enabled,
+            sharing,
+            reload,
+        } => {
+            let mutation = sharing
+                .runtime
+                .begin_category_root_mutation()
+                .await
+                .map_err(|_| PersistenceError::Worker)?;
+            let (response, receive) = oneshot::channel();
+            db.send(DbRequest {
+                command: DbCommand::Category(CategoryDbCommand::CreateRoot(path, watch_enabled)),
+                response,
+            })
+            .map_err(|_| PersistenceError::Worker)?;
+            let DbResponse::Category(CategoryWrite::RootCreated(root)) = receive
+                .await
+                .map_err(|_| PersistenceError::CommitUnknown)??
+            else {
+                return Err(PersistenceError::Worker);
+            };
+            #[cfg(test)]
+            {
+                let gate = publication_gate.lock().unwrap().clone();
+                if let Some(gate) = gate {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+            }
+            if let Some(root) = &root {
+                state
+                    .lock()
+                    .await
+                    .shared_directories
+                    .push(crate::SharedDirectoryRoot {
+                        path: emulebb_metadata::NativePath::from(root.path.as_path())
+                            .display_path(),
+                        watch_enabled: root.watch_enabled,
+                        monitor_owned: false,
+                        shareable: root.shareable,
+                        accessible: root.accessible,
+                    });
+                reload
+                    .arm()
+                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+                sharing.root_change.watch_changed();
+            }
+            if let Some(epoch) = mutation.finish() {
+                sharing.runtime.finish_scoped_root_publication(epoch).await;
+            }
+            return Ok(Response::RootCreated(root));
+        }
         CategoryCommand::DeleteRoot { id, sharing } => {
             let mutation = sharing
                 .runtime
@@ -707,6 +800,7 @@ pub(super) async fn process(
         | CategoryCommand::Delete { sharing, .. } => Some(sharing.clone()),
         CategoryCommand::ReplaceRoots { .. }
         | CategoryCommand::PatchRootWatch { .. }
+        | CategoryCommand::CreateRoot { .. }
         | CategoryCommand::DeleteRoot { .. } => {
             unreachable!()
         }
@@ -764,6 +858,7 @@ pub(super) async fn process(
             }
             CategoryCommand::ReplaceRoots { .. }
             | CategoryCommand::PatchRootWatch { .. }
+            | CategoryCommand::CreateRoot { .. }
             | CategoryCommand::DeleteRoot { .. } => {
                 unreachable!()
             }

@@ -580,6 +580,30 @@ impl EmulebbCore {
             .await
     }
 
+    /// Create one canonical root without replacing the configured collection.
+    /// Duplicate or overlapping roots return no resource and preserve existing state.
+    pub async fn create_library_root(
+        &self,
+        path: &str,
+        watch_enabled: bool,
+    ) -> Result<Option<emulebb_metadata::MetadataLibraryRoot>> {
+        shared_directories::sync_implicit_shared_directory_roots(self).await?;
+        let crate::shared_dir_monitor::RootIoResult::Canonical(mut paths) =
+            crate::shared_dir_monitor::run_root_io(
+                self,
+                crate::shared_dir_monitor::RootIoRequest::Canonical(vec![path.to_owned()]),
+            )
+            .await?
+        else {
+            unreachable!()
+        };
+        let canonical = paths.pop().expect("one canonical root");
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.create_root(canonical, watch_enabled, self).await?)
+    }
+
     /// Retire one explicit root and reconcile affected hashes in bounded pages.
     /// Managed destinations remain owned by their settings or category.
     pub async fn delete_library_root(

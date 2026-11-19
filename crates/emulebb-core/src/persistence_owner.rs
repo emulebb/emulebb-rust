@@ -146,6 +146,7 @@ enum Response {
     ),
     Roots(bool),
     RootWatch(Option<emulebb_metadata::MetadataLibraryRoot>),
+    RootCreated(Option<emulebb_metadata::MetadataLibraryRoot>),
     RootDeleted(emulebb_metadata::MetadataLibraryRootDelete),
     KadLoaded(LeasedKadSnapshot),
     KadIdentity(KadNodeId),

@@ -1243,6 +1243,105 @@ mod tests {
     }
 
     #[test]
+    fn root_creation_rejects_overlaps_but_allows_siblings_and_retired_paths() {
+        let store = MetadataStore::in_memory().unwrap();
+        let parent = std::env::temp_dir().join("emulebb-root-overlap");
+        let path = parent.join("shared");
+        let child = path.join("rare");
+        let root = store
+            .create_library_root(&path, true, false)
+            .unwrap()
+            .unwrap();
+        for conflict in [&path, &parent, &child] {
+            assert!(
+                store
+                    .create_library_root(conflict, false, true)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(store.library_root(root.id).unwrap(), Some(root.clone()));
+        let sibling = store
+            .create_library_root(&parent.join("shared-other"), false, true)
+            .unwrap()
+            .unwrap();
+        assert_ne!(root.id, sibling.id);
+        store.delete_library_root(root.id).unwrap();
+        assert!(
+            store
+                .create_library_root(&child, false, true)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn concurrent_parent_and_child_creation_admits_only_one_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("metadata.sqlite");
+        let first = MetadataStore::open(&database).unwrap();
+        let second = MetadataStore::open(&database).unwrap();
+        let parent = directory.path().join("library");
+        let child = parent.join("rare");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writers: Vec<_> = [(first, parent), (second, child)]
+            .into_iter()
+            .map(|(store, path)| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .create_library_root(&path, false, true)
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+        let admitted = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .filter(|created| *created)
+            .count();
+        assert_eq!(admitted, 1);
+        assert_eq!(
+            MetadataStore::open(&database)
+                .unwrap()
+                .library_root_page(0, 100)
+                .unwrap()
+                .total,
+            1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_overlap_comparison_ignores_case_without_collapsing_siblings() {
+        let store = MetadataStore::in_memory().unwrap();
+        store
+            .create_library_root(Path::new(r"C:\Library\Shared"), false, true)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .create_library_root(Path::new(r"c:\library\SHARED\Rare"), false, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .create_library_root(Path::new(r"c:\LIBRARY"), false, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .create_library_root(Path::new(r"c:\Library\SharedOther"), false, true)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn creating_a_root_preserves_active_path_conflicts_and_allocates_a_fresh_id() {
         let mut store = MetadataStore::in_memory().unwrap();
         let path = std::env::temp_dir().join("emulebb-root-create");

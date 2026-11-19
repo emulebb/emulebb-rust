@@ -414,6 +414,54 @@ async fn managed_root_watch_edit_preserves_ownership_and_missing_id_is_absent() 
 }
 
 #[tokio::test]
+async fn canonical_root_creation_rejects_overlap_without_changing_existing_resources() {
+    let base = crate::unique_runtime_dir("root-create-owner");
+    let incoming = base.join("incoming");
+    let shared = base.join("shared");
+    let child = shared.join("rare");
+    std::fs::create_dir_all(&incoming).unwrap();
+    std::fs::create_dir_all(&child).unwrap();
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap()
+            .with_incoming_dir(incoming);
+    let execution = core.shared_reload_gate.lock().await;
+    // A mandatory destination participates in overlap rejection before any
+    // explicit root has been created.
+    assert!(
+        core.create_library_root(base.to_str().unwrap(), false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let created = core
+        .create_library_root(shared.to_str().unwrap(), true)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = core.state.lock().await.shared_directories.clone();
+    for path in [&base, &shared, &child] {
+        assert!(
+            core.create_library_root(path.to_str().unwrap(), false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(core.state.lock().await.shared_directories, before);
+    assert_eq!(
+        core.metadata_store.library_root(created.id).unwrap(),
+        Some(created)
+    );
+    assert_eq!(
+        core.metadata_store.library_root_page(0, 100).unwrap().total,
+        2
+    );
+    drop(execution);
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
 async fn cancelled_root_request_still_scans_committed_directory() {
     let core =
         crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
@@ -433,7 +481,7 @@ async fn cancelled_root_request_still_scans_committed_directory() {
     let writer = {
         let core = core.clone();
         let path = root.to_string_lossy().into_owned();
-        tokio::spawn(async move { core.add_shared_directory_root(&path, false).await })
+        tokio::spawn(async move { core.create_library_root(&path, false).await })
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await

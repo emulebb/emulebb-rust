@@ -40,6 +40,24 @@ fn library_root_on_connection(
     .map_err(Into::into)
 }
 
+fn root_paths_overlap(left: &Path, right: &Path) -> bool {
+    // Compare native components, so sibling names sharing a textual prefix do
+    // not overlap. Windows follows the existing root policy's case folding;
+    // undecodable native components retain exact equality.
+    left.components()
+        .zip(right.components())
+        .all(|(left, right)| {
+            if cfg!(windows) {
+                match (left.as_os_str().to_str(), right.as_os_str().to_str()) {
+                    (Some(left), Some(right)) => left.to_lowercase() == right.to_lowercase(),
+                    _ => left == right,
+                }
+            } else {
+                left == right
+            }
+        })
+}
+
 #[derive(Debug)]
 pub struct ObservedRootChanged;
 impl std::fmt::Display for ObservedRootChanged {
@@ -50,8 +68,9 @@ impl std::fmt::Display for ObservedRootChanged {
 impl std::error::Error for ObservedRootChanged {}
 
 impl MetadataStore {
-    /// Create one explicit root and return its committed identity. An active path
-    /// conflict leaves its policy, origins and observed health unchanged.
+    /// Create one explicit root at an already normalized absolute path and return
+    /// its committed identity. An active duplicate or ancestor/descendant conflict
+    /// leaves existing policies, origins and observed health unchanged.
     pub fn create_library_root(
         &self,
         path: &Path,
@@ -61,6 +80,17 @@ impl MetadataStore {
         ensure!(path.is_absolute(), "root path must be absolute");
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        {
+            // WHY: validate and insert under the same writer transaction, so
+            // simultaneous parent/child requests cannot both pass admission.
+            let mut roots = tx.prepare_cached("SELECT p.platform,p.native_path FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx JOIN local_paths p ON p.id=r.path_id WHERE r.enabled=1 AND r.deleted_at_ms IS NULL")?;
+            let paths = roots.query_map([], |row| crate::native_path::path_from_row(row, 0, 1))?;
+            for existing in paths {
+                if root_paths_overlap(path, &existing?) {
+                    return Ok(None);
+                }
+            }
+        }
         let path_id = crate::store::upsert_local_path(&tx, path)?;
         let inserted = tx.execute(
             "INSERT INTO shared_directory_roots(path_id,watch_enabled,accessible,created_at_ms)
