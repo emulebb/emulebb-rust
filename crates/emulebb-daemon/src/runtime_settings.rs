@@ -107,7 +107,10 @@ pub(super) fn from_values(
     ed2k.add_servers_from_server = servers.accept_server_list_updates;
     ed2k.server_keepalive_minutes = servers.keepalive_minutes;
     ed2k.session_rotation_secs = servers.session_rotation_seconds;
-    ed2k.dead_server_retries = servers.dead_server_retries;
+    ed2k.dead_server_retries = servers
+        .dead_server_retries
+        .try_into()
+        .expect("validated retry count fits u32");
     ed2k.max_connections = connections.max_connections as usize;
     ed2k.max_new_connections_per_five_seconds =
         connections.max_new_connections_per_five_seconds as usize;
@@ -124,7 +127,7 @@ pub(super) fn from_values(
     ed2k.upload_queue.session_time_limit_secs = upload.session_time_limit_seconds;
     ed2k.detect_tcp_error_flooder = values.security.tcp_error_flood_detection.enabled;
     ed2k.tcp_error_flooder_interval_minutes =
-        u64::from(values.security.tcp_error_flood_detection.interval_seconds / 60);
+        values.security.tcp_error_flood_detection.interval_seconds / 60;
     ed2k.tcp_error_flooder_threshold = values.security.tcp_error_flood_detection.threshold;
     let mut nat = NatConfig::default();
     nat.enabled = values.network.nat.enabled;
