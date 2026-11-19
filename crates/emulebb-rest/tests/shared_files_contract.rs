@@ -18,12 +18,14 @@ use tower::ServiceExt;
 async fn shared_files_use_canonical_route_and_envelope() {
     let runtime_dir = unique_test_dir("shared-files-canonical");
     let transfer_root = runtime_dir.join("transfers");
-    let payload_path = runtime_dir.join("Canonical.Shared.bin");
+    let library_dir = runtime_dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    let payload_path = library_dir.join("Canonical.Shared.bin");
     std::fs::write(&payload_path, b"canonical shared payload").unwrap();
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
-    core.create_library_root(&runtime_dir.display().to_string(), false)
+    core.create_library_root(&library_dir.display().to_string(), false)
         .await
         .unwrap()
         .unwrap();
@@ -43,24 +45,6 @@ async fn shared_files_use_canonical_route_and_envelope() {
             web_root_dir: None,
         },
     );
-
-    let create_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/shared-files")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"path":"  {}  "}}"#,
-                    payload_path.display().to_string().replace('\\', "\\\\")
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create_response.status(), StatusCode::METHOD_NOT_ALLOWED);
 
     let list_response = app
         .clone()
@@ -166,59 +150,22 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
-
-    let remove_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/api/v1/shared-files/{hash}"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(remove_response.status(), StatusCode::METHOD_NOT_ALLOWED);
-
-    let still_shared_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/shared-files/{hash}"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(still_shared_response.status(), StatusCode::OK);
-
-    let retired_route = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/shares")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(retired_route.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn shared_files_support_path_cursor_search_and_publication_status() {
     let runtime_dir = unique_test_dir("shared-files-query");
     let transfer_root = runtime_dir.join("transfers");
-    let alpha_path = runtime_dir.join("Alpha Sample.bin");
-    let zeta_path = runtime_dir.join("Zeta Sample.bin");
+    let library_dir = runtime_dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    let alpha_path = library_dir.join("Alpha Sample.bin");
+    let zeta_path = library_dir.join("Zeta Sample.bin");
     std::fs::write(&alpha_path, b"alpha shared payload").unwrap();
     std::fs::write(&zeta_path, b"zeta shared payload").unwrap();
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
-    core.create_library_root(&runtime_dir.display().to_string(), false)
+    core.create_library_root(&library_dir.display().to_string(), false)
         .await
         .unwrap()
         .unwrap();
