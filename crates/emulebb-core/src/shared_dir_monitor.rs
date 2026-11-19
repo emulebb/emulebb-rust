@@ -623,10 +623,10 @@ async fn run_category_probe(
         let matches = emulebb_ed2k::ed2k_transfer::category_copy_matches(&candidate);
         (candidate, matches, lease)
     }));
-    if let Some(task) = slot.as_mut() {
-        if let Ok(result) = task.await {
-            let _ = response.send(result);
-        }
+    if let Some(task) = slot.as_mut()
+        && let Ok(result) = task.await
+    {
+        let _ = response.send(result);
     }
     slot.take();
 }
@@ -1179,13 +1179,13 @@ pub(crate) async fn prepare_ingest_roots(
             }
             let root_path = PathBuf::from(root.path);
             let normalized = long_path(&root_path);
-            if let Ok(relative) = path.strip_prefix(&normalized) {
-                if !relative.as_os_str().is_empty() {
-                    matching.push(emulebb_metadata::MetadataIngestRoot {
-                        root: root_path,
-                        relative: relative.to_path_buf(),
-                    });
-                }
+            if let Ok(relative) = path.strip_prefix(&normalized)
+                && !relative.as_os_str().is_empty()
+            {
+                matching.push(emulebb_metadata::MetadataIngestRoot {
+                    root: root_path,
+                    relative: relative.to_path_buf(),
+                });
             }
         }
         if core.ed2k_transfers.root_observation_epoch().await == epoch {
@@ -1383,11 +1383,11 @@ async fn rebuild_shared_directory_watch(core: &EmulebbCore) {
     if core.lifecycle_state_name() != "running"
         || core.shared_monitor_stopped.load(Ordering::Acquire)
     {
-        if let Some(monitor) = slot.as_mut() {
-            if let Err(error) = monitor.stop().await {
-                core.shared_monitor_fault.store(true, Ordering::Release);
-                tracing::warn!(%error, "failed to join stopped shared monitor consumer");
-            }
+        if let Some(monitor) = slot.as_mut()
+            && let Err(error) = monitor.stop().await
+        {
+            core.shared_monitor_fault.store(true, Ordering::Release);
+            tracing::warn!(%error, "failed to join stopped shared monitor consumer");
         }
         slot.take();
     }

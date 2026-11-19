@@ -809,10 +809,8 @@ fn storage_failure() -> crate::DownloadJobStorageFailure {
 
 #[test]
 fn storage_failure_survives_reopen_stop_and_reopen_until_admitted_start() {
-    let root = std::path::PathBuf::from(std::env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT").unwrap())
-        .join("tmp")
-        .join(format!("storage-failure-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let root = profile.path().to_path_buf();
     let database = root.join("metadata.db");
     let store = MetadataStore::open(&database).unwrap();
     let first = store.admit_download_job(&request(120, None)).unwrap().job;
@@ -899,7 +897,6 @@ fn storage_failure_survives_reopen_stop_and_reopen_until_admitted_start() {
         Some(restarted)
     );
     drop(store);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -1024,6 +1024,28 @@ pub(super) fn log_search_result_page(endpoint: SocketAddr, results: &[Ed2kSearch
     );
 }
 
+/// Emit each decoded page before aggregation or a later terminal failure.
+pub(super) async fn emit_keyword_observations(
+    sink: Option<&mpsc::Sender<Ed2kServerSearchObservation>>,
+    server_endpoint: SocketAddr,
+    files: &[Ed2kSearchFile],
+) {
+    if let Some(sink) = sink {
+        for file in files {
+            if sink
+                .send(Ed2kServerSearchObservation {
+                    server_endpoint,
+                    file: file.clone(),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod callback_dispatch_tests {
     use super::*;
@@ -1268,27 +1290,5 @@ mod callback_dispatch_tests {
             )
             .is_none()
         );
-    }
-}
-
-/// Emit each decoded page before aggregation or a later terminal failure.
-pub(super) async fn emit_keyword_observations(
-    sink: Option<&mpsc::Sender<Ed2kServerSearchObservation>>,
-    server_endpoint: SocketAddr,
-    files: &[Ed2kSearchFile],
-) {
-    if let Some(sink) = sink {
-        for file in files {
-            if sink
-                .send(Ed2kServerSearchObservation {
-                    server_endpoint,
-                    file: file.clone(),
-                })
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
     }
 }

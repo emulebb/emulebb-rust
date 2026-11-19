@@ -199,10 +199,10 @@ impl MetadataStore {
             crate::local_catalog::catalog_entry,
         )?;
         let partial = Self::partial_share_on_connection(&tx, file_hash)?;
-        if let Some((epoch, expected)) = observed_root {
-            if epoch.load(std::sync::atomic::Ordering::Acquire) != expected {
-                return Err(ObservedRootChanged.into());
-            }
+        if let Some((epoch, expected)) = observed_root
+            && epoch.load(std::sync::atomic::Ordering::Acquire) != expected
+        {
+            return Err(ObservedRootChanged.into());
         }
         tx.commit()?;
         Ok(Some((entry, partial)))

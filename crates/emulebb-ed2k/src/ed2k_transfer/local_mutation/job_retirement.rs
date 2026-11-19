@@ -40,7 +40,7 @@ impl LocalMutationRegistry {
         let (sender, receipt) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
-        Self::spawn_unit(&mut state, capacity_lease, move |_capacity| {
+        Self::spawn_unit_reply(&mut state, capacity_lease, sender, move |_capacity| {
             let _lease = lease;
             let _lifecycle = lifecycle;
             let _job = job_guard;
@@ -119,8 +119,7 @@ impl LocalMutationRegistry {
                 Ok(Err(error)) => (Err(error), 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }
@@ -191,30 +190,29 @@ fn cleanup_removed_output(
     use emulebb_metadata::MetadataTransferDeliveryAttemptPhase;
     let token = snapshot.token;
     let attempt = metadata.download_job_delivery_attempt(token.job_id)?;
-    if let Some(attempt) = attempt.as_ref() {
-        if let Some(reservation) =
+    if let Some(attempt) = attempt.as_ref()
+        && let Some(reservation) =
             metadata.delivery_output_reservation(token.job_id, attempt.attempt_id)?
-        {
-            // An unproven partial direct output remains excluded. Missing output
-            // permits exact-snapshot barrier release, never authority adoption.
-            match std::fs::symlink_metadata(crate::long_path::long_path(&attempt.target_path)) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    transfer::fs_durability::sync_parent_directory_retained(&attempt.target_path)?;
-                    ensure!(
-                        metadata.release_recovered_delivery_output(
-                            token,
-                            &reservation,
-                            Some(attempt)
-                        )?,
-                        "reservation changed during cleanup"
-                    );
-                }
-                Err(error) => return Err(error.into()),
-                Ok(_) => anyhow::bail!(
-                    "unproven direct output remains excluded for job {}",
-                    token.job_id
-                ),
+    {
+        // An unproven partial direct output remains excluded. Missing output
+        // permits exact-snapshot barrier release, never authority adoption.
+        match std::fs::symlink_metadata(crate::long_path::long_path(&attempt.target_path)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                transfer::fs_durability::sync_parent_directory_retained(&attempt.target_path)?;
+                ensure!(
+                    metadata.release_recovered_delivery_output(
+                        token,
+                        &reservation,
+                        Some(attempt)
+                    )?,
+                    "reservation changed during cleanup"
+                );
             }
+            Err(error) => return Err(error.into()),
+            Ok(_) => anyhow::bail!(
+                "unproven direct output remains excluded for job {}",
+                token.job_id
+            ),
         }
     }
     if snapshot.delete_output {

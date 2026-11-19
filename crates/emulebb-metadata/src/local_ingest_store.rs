@@ -25,6 +25,13 @@ pub struct MetadataIngestRoot {
     pub relative: PathBuf,
 }
 
+/// Borrowed, jointly verified content and its prepared recovery/media data.
+pub struct MetadataLocalIngestContent<'a> {
+    pub content: &'a MetadataVerifiedLocalContent,
+    pub recovery: &'a MetadataAichRecoverySet,
+    pub media: &'a MetadataTransferMediaMetadata,
+}
+
 #[derive(Debug)]
 pub struct MetadataIngestPathChanged;
 impl std::fmt::Display for MetadataIngestPathChanged {
@@ -214,15 +221,18 @@ impl MetadataStore {
     /// transaction, including root, index and projection checks.
     pub fn commit_local_ingest(
         &self,
-        content: &MetadataVerifiedLocalContent,
-        recovery: &MetadataAichRecoverySet,
-        media: &MetadataTransferMediaMetadata,
+        prepared: MetadataLocalIngestContent<'_>,
         expected: Option<&MetadataLocalFileInstance>,
         expected_jobs: &[MetadataIngestJob],
         roots: &[MetadataIngestRoot],
         index_type: Option<&str>,
         root_epoch: (&AtomicU64, u64),
     ) -> Result<MetadataIngestCommit> {
+        let MetadataLocalIngestContent {
+            content,
+            recovery,
+            media,
+        } = prepared;
         ensure!(
             content.file_size == recovery.size
                 && content.aich_root.as_deref() == Some(hex::encode(recovery.root).as_str()),
@@ -261,7 +271,8 @@ impl MetadataStore {
                 );
             }
             ensure!(
-                root_epoch.1 % 2 == 0 && root_epoch.0.load(Ordering::Acquire) == root_epoch.1,
+                root_epoch.1.is_multiple_of(2)
+                    && root_epoch.0.load(Ordering::Acquire) == root_epoch.1,
                 ObservedRootChanged
             );
             Self::upsert_verified_local_content_tx(&tx, content, crate::store::unix_ms())?;

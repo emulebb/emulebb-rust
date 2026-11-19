@@ -70,13 +70,13 @@ pub use library_read_store::{
     LIBRARY_READ_MAX_BYTES, MetadataLibraryLocation, MetadataLibraryLocationPage,
 };
 mod local_catalog;
-pub use local_catalog::MetadataPartialOffer;
+pub use local_catalog::{MetadataPartialOffer, MetadataVerifiedShareBatch};
 mod local_file_store;
 mod local_ingest_store;
 pub use local_ingest_store::{
     MetadataIngestCommit, MetadataIngestCommitUncertain, MetadataIngestJob,
     MetadataIngestJobChanged, MetadataIngestPathChanged, MetadataIngestProjection,
-    MetadataIngestRoot,
+    MetadataIngestRoot, MetadataLocalIngestContent,
 };
 mod model;
 mod native_file;

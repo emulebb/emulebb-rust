@@ -82,7 +82,7 @@ pub struct DownloadAvailabilityAdmission<'a> {
 impl DownloadAvailabilityAdmission<'_> {
     pub(crate) fn check_root(&self) -> Result<()> {
         ensure!(
-            self.root_epoch.1 % 2 == 0
+            self.root_epoch.1.is_multiple_of(2)
                 && self.root_epoch.0.load(std::sync::atomic::Ordering::Acquire)
                     == self.root_epoch.1,
             MetadataAvailabilityChanged

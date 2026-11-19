@@ -328,18 +328,29 @@ impl PersistenceOwner {
     }
 }
 
-async fn process_explicit_roots(
-    state: &Arc<Mutex<CoreState>>,
-    db: &mpsc::SyncSender<DbRequest>,
-    request: &mut Request,
-    continuation: &mut Option<CategoryContinuation>,
+struct RootReplacement {
     expected: Vec<crate::SharedDirectoryRoot>,
     implicit: Vec<crate::SharedDirectoryRoot>,
     proposed: Vec<crate::SharedDirectoryRoot>,
     sharing: CategorySharingContext,
     reload: Option<crate::shared_directories::ReloadReservation>,
+}
+
+async fn process_explicit_roots(
+    state: &Arc<Mutex<CoreState>>,
+    db: &mpsc::SyncSender<DbRequest>,
+    request: &mut Request,
+    continuation: &mut Option<CategoryContinuation>,
+    replacement: RootReplacement,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    let RootReplacement {
+        expected,
+        implicit,
+        proposed,
+        sharing,
+        reload,
+    } = replacement;
     let root_mutation = sharing
         .runtime
         .begin_category_root_mutation()
@@ -489,11 +500,13 @@ pub(super) async fn process(
                 db,
                 request,
                 continuation,
-                expected,
-                implicit,
-                proposed,
-                sharing,
-                reload,
+                RootReplacement {
+                    expected,
+                    implicit,
+                    proposed,
+                    sharing,
+                    reload,
+                },
                 #[cfg(test)]
                 publication_gate,
             )
@@ -680,23 +693,23 @@ pub(super) async fn process(
     drop(state);
     let clean_epoch = root_mutation.and_then(|mutation| mutation.finish());
     drop(_category_fence);
-    if let Some(sharing) = sharing {
-        if root_changed {
-            sharing.root_change.notify_one();
-            if let Some(old_root) = old_root {
-                let lease = request
-                    .permit
-                    .transfer_bytes(CATEGORY_PROBE_BYTES)
-                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
-                *continuation = Some(CategoryContinuation {
-                    sharing,
-                    roots: vec![std::path::PathBuf::from(old_root)],
-                    lease,
-                    clean_epoch,
-                });
-            } else if let Some(epoch) = clean_epoch {
-                sharing.runtime.finish_scoped_root_publication(epoch).await;
-            }
+    if let Some(sharing) = sharing
+        && root_changed
+    {
+        sharing.root_change.notify_one();
+        if let Some(old_root) = old_root {
+            let lease = request
+                .permit
+                .transfer_bytes(CATEGORY_PROBE_BYTES)
+                .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+            *continuation = Some(CategoryContinuation {
+                sharing,
+                roots: vec![std::path::PathBuf::from(old_root)],
+                lease,
+                clean_epoch,
+            });
+        } else if let Some(epoch) = clean_epoch {
+            sharing.runtime.finish_scoped_root_publication(epoch).await;
         }
     }
     Ok(Response::Category(Ok(Some(category))))

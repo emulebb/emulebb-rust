@@ -219,7 +219,7 @@ impl ObfuscationLayer {
         self.peer_key_learning_enabled
             .store(false, Ordering::Release);
         let epoch = self.peer_key_epoch.load(Ordering::Acquire);
-        let next = epoch.checked_add(1).unwrap_or(u64::MAX);
+        let next = epoch.saturating_add(1);
         self.peer_key_epoch.store(next, Ordering::Release);
         if !keys.entries.is_empty() {
             keys.entries.clear();

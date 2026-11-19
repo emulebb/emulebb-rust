@@ -352,7 +352,8 @@ def release_stage_bin_dir(env: dict[str, str]) -> Path:
 def test_workspace_step() -> tuple[str, list[str]]:
     return (
         "workspace tests",
-        ["cargo", "test", "--workspace", "--locked"],
+        # Collect failures across crates without weakening the final exit status.
+        ["cargo", "test", "--workspace", "--locked", "--no-fail-fast"],
     )
 
 

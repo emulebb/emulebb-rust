@@ -126,13 +126,13 @@ impl LocalMutationRegistry {
         #[cfg(test)]
         let mut gate = state.publication_gate.take();
         let (sender, receipt) = oneshot::channel();
-        Self::spawn_unit(&mut state, lease, move |capacity| {
+        Self::spawn_unit_reply(&mut state, lease, sender, move |capacity| {
             #[cfg(test)]
-            if !matches!(request, JobRead::SelectExecution(_)) {
-                if let Some((reached, release)) = gate.take() {
-                    let _ = reached.send(());
-                    let _ = release.recv();
-                }
+            if !matches!(request, JobRead::SelectExecution(_))
+                && let Some((reached, release)) = gate.take()
+            {
+                let _ = reached.send(());
+                let _ = release.recv();
             }
             // WHY: callers can retain pages after worker completion/reaping. Move
             // the existing charge with the actual backing, never with its sender.
@@ -294,8 +294,7 @@ impl LocalMutationRegistry {
                 Ok(result) => (result, 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }

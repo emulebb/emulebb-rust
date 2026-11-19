@@ -1178,12 +1178,14 @@ impl Ed2kTransferRuntime {
                 let hash: Ed2kHash = file_hash.parse()?;
                 let manifest_guard = self.lock_content(file_hash).await;
                 let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
-                let receive = self.local_mutations.submit_withdrawal(
+                let receive = self.local_mutations.submit_path_mutation(
                     self,
                     file_hash,
-                    path,
-                    Some(expected),
-                    true,
+                    super::local_mutation::PathMutation::Withdraw {
+                        path,
+                        expected: Some(expected),
+                        queue_rehash: true,
+                    },
                     manifest_guard,
                     stripe_guard,
                 )?;

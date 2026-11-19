@@ -186,7 +186,7 @@ impl SharedEligibility {
             slot.take();
         }
         let epoch = self.root_epoch.load(Ordering::Acquire);
-        if epoch % 2 != 0 {
+        if !epoch.is_multiple_of(2) {
             return Ok(None);
         }
         let Some(mut stripes) = self
@@ -534,7 +534,7 @@ impl IndexedSharedCatalog {
                 return false;
             };
             provider.epoch() == epoch
-                && epoch % 2 == 0
+                && epoch.is_multiple_of(2)
                 && !provider.requires_revalidation()
                 && !provider.sealed.load(Ordering::Acquire)
                 && state.matches(stripes)
@@ -547,7 +547,7 @@ impl IndexedSharedCatalog {
                 return false;
             };
             provider.epoch() == epoch
-                && epoch % 2 == 0
+                && epoch.is_multiple_of(2)
                 && !provider.sealed.load(Ordering::Acquire)
                 && state.matches(stripes)
         })

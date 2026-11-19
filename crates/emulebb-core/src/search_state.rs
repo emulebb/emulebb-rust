@@ -127,6 +127,17 @@ pub(crate) fn projection_name_votes(
         .collect()
 }
 
+/// Publish activity only after the evidence and materialized summary commit.
+pub(crate) async fn publish_search_activity(
+    state: &std::sync::Arc<tokio::sync::Mutex<crate::CoreState>>,
+    search_id: &str,
+) {
+    let mut state = state.lock().await;
+    if let Some(search) = state.searches.get_mut(search_id) {
+        search.updated_at = chrono::Utc::now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,16 +267,5 @@ mod tests {
             observations.items[0].observation.event.origin.as_str(),
             "global"
         );
-    }
-}
-
-/// Publish activity only after the evidence and materialized summary commit.
-pub(crate) async fn publish_search_activity(
-    state: &std::sync::Arc<tokio::sync::Mutex<crate::CoreState>>,
-    search_id: &str,
-) {
-    let mut state = state.lock().await;
-    if let Some(search) = state.searches.get_mut(search_id) {
-        search.updated_at = chrono::Utc::now();
     }
 }

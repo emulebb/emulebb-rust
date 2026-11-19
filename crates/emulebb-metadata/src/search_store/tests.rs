@@ -112,7 +112,10 @@ fn header_transition_resolves_only_session_vote_hashes_and_rolls_back_on_error()
         .transition_search(session, &completed, &incoming)
         .unwrap();
     assert_eq!(receipt.result_count, 3);
-    assert_eq!(receipt.accepted_hashes, [hash.clone()]);
+    assert_eq!(
+        receipt.accepted_hashes.as_slice(),
+        std::slice::from_ref(&hash)
+    );
     let receipt = store
         .transition_search(empty_session, &completed, &incoming)
         .unwrap();

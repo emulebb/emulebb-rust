@@ -1361,7 +1361,7 @@ mod tests {
             client_id,
             None,
             4662,
-            download(&metadata, hash_byte),
+            download(metadata, hash_byte),
             Duration::from_secs(45),
         )
         .unwrap()
@@ -1378,7 +1378,7 @@ mod tests {
             17,
             user_hash,
             4662,
-            download(&metadata, hash_byte),
+            download(metadata, hash_byte),
             Duration::from_secs(45),
         )
         .unwrap()
