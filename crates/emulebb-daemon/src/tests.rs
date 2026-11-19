@@ -121,9 +121,9 @@ fn profile_with_ed2k_network(profile_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>
     DaemonProfile {
         profile_dir,
         p2p_bind_ip,
-        kad: KadSettings {
+        kad: KadRuntimePolicy {
             listen_port: Some(41002),
-            ..KadSettings::default()
+            ..KadRuntimePolicy::default()
         },
         ed2k,
         ..DaemonProfile::default()
@@ -210,11 +210,21 @@ fn write_private_settings(path: &std::path::Path, contents: &str) {
     file.write_all(contents.as_bytes()).unwrap();
 }
 
-fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_json::Value) {
-    let value_json = serde_json::to_string(&value).unwrap();
+fn edit_settings(metadata: &MetadataStore, values: serde_json::Value) {
     metadata
-        .put_setting_json(section, key, &value_json)
+        .edit_app_settings(&emulebb_settings::product::SettingsEdit {
+            set: serde_json::from_value(values).unwrap(),
+            ..Default::default()
+        })
         .unwrap();
+}
+
+fn host_storage(incoming: PathBuf, temp: PathBuf, shared: PathBuf) -> InitialProfileStorage {
+    InitialProfileStorage {
+        incoming_dir: incoming,
+        temp_dir: temp,
+        shared_dir: shared,
+    }
 }
 
 #[cfg(unix)]
@@ -246,13 +256,16 @@ fn retargeted_profile_alias_keeps_io_in_the_leased_directory() {
 
     let profile = DaemonProfile::load_owned(alias.clone(), lease, None).unwrap();
     let metadata = profile.open_metadata_store().unwrap();
-    put_setting(&metadata, "fixture", "leased", serde_json::json!(true));
+    edit_settings(
+        &metadata,
+        serde_json::json!({"network":{"nickname":"Sample Client"}}),
+    );
     let leased = fs::canonicalize(leased).unwrap();
     assert_eq!(profile.profile_dir, alias);
     assert!(leased.join(PROFILE_SETTINGS_FILE).is_file());
     assert_eq!(profile.metadata_path(), leased.join(PROFILE_METADATA_FILE));
     assert!(profile.metadata_path().is_file());
-    assert_eq!(profile.transfer_root(), leased.join("transfers"));
+    assert_eq!(profile.transfer_root(), leased.join("temp"));
     assert_eq!(profile.incoming_dir(), leased.join("incoming"));
     assert!(fs::read_dir(other).unwrap().next().is_none());
 }
@@ -295,15 +308,10 @@ fn default_profile_bootstrap_listens_on_all_ipv4_interfaces_and_seeds_network_po
     }
 
     let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    seed_default_profile_network_settings(&metadata).unwrap();
-    assert_eq!(
-        metadata.load_settings_section(SECTION_ED2K).unwrap(),
-        vec![("listenPort".to_string(), "20019".to_string())]
-    );
-    assert_eq!(
-        metadata.load_settings_section(SECTION_KAD).unwrap(),
-        vec![("listenPort".to_string(), "20020".to_string())]
-    );
+    let snapshot = metadata.load_app_settings().unwrap();
+    assert_eq!(snapshot.revision.get(), 1);
+    assert_eq!(snapshot.saved.values().network.p2p.tcp_port, 20019);
+    assert_eq!(snapshot.saved.values().network.p2p.udp_port, 20020);
 }
 
 #[cfg(unix)]
@@ -385,30 +393,16 @@ fn packaged_bootstrap_does_not_replace_existing_database_preferences() {
     );
     {
         let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-        metadata
-            .put_setting_json(SECTION_ED2K, "listenPort", "20119")
-            .unwrap();
-        metadata
-            .put_setting_json(SECTION_KAD, "listenPort", "20120")
-            .unwrap();
+        edit_settings(
+            &metadata,
+            serde_json::json!({"network":{"p2p":{"tcpPort":20119,"udpPort":20120}}}),
+        );
     }
 
     let profile = DaemonProfile::load(Some(profile_dir)).unwrap();
 
     assert_eq!(profile.ed2k.listen_port, Some(20119));
     assert_eq!(profile.kad.listen_port, Some(20120));
-}
-
-#[test]
-fn bootstrap_rest_rejects_retired_and_unknown_keys() {
-    for key in ["bindAddr", "apiKey", "webRootDir", "unexpected"] {
-        let text = format!("[rest]\n{key} = \"synthetic\"\n");
-        let error = toml::from_str::<DaemonBootstrapSettings>(&text).unwrap_err();
-        assert!(
-            error.to_string().contains("unknown field"),
-            "{key}: {error}"
-        );
-    }
 }
 
 #[test]
@@ -419,7 +413,7 @@ fn bootstrap_parse_errors_do_not_echo_secret_source_lines() {
     let secret = "synthetic-private-key-not-for-diagnostics";
     write_private_settings(
         &profile_dir.join(PROFILE_SETTINGS_FILE),
-        &format!("[rest]\napiKey = \"{secret}\"\n"),
+        &format!("[rest]\nextension = \"{secret}\"\n"),
     );
 
     let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
@@ -454,57 +448,71 @@ fn default_profile_candidate_is_the_executable_directory() {
 
 #[test]
 fn hosted_folder_defaults_are_canonical_and_never_reseed_operator_changes() {
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("profile");
-    let incoming = temp.path().join("Downloads/eMuleBB/Incoming");
-    let shared = temp.path().join("Downloads/eMuleBB/Shared");
-    let profile =
-        DaemonProfile::load_hosted(directory.clone(), incoming.clone(), shared.clone()).unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let directory = base.path().join("profile");
+    let incoming = base.path().join("Incoming");
+    let temp = base.path().join("Pieces");
+    let shared = base.path().join("Shared");
+    let profile = DaemonProfile::load_hosted(
+        directory.clone(),
+        host_storage(incoming.clone(), temp.clone(), shared.clone()),
+    )
+    .unwrap();
     assert_eq!(
         profile.incoming_dir(),
         PathBuf::from(emulebb_core::normal_path_display(
             incoming.canonicalize().unwrap()
         ))
     );
+    assert_eq!(
+        profile.transfer_root(),
+        PathBuf::from(emulebb_core::normal_path_display(
+            temp.canonicalize().unwrap()
+        ))
+    );
     let mut metadata = profile.open_metadata_store().unwrap();
     assert_eq!(metadata.shared_directory_roots().unwrap().len(), 1);
-    assert_eq!(
-        metadata.shared_directory_roots().unwrap()[0].path,
-        emulebb_core::normal_path_display(shared.canonicalize().unwrap())
+    let edited_incoming = base.path().join("operator-incoming");
+    let edited_temp = base.path().join("operator-temp");
+    edit_settings(
+        &metadata,
+        serde_json::json!({"storage":{"incomingDirectory":edited_incoming,"tempDirectory":edited_temp}}),
     );
-    let edited = temp.path().join("operator-incoming");
-    metadata
-        .put_setting_json(
-            SECTION_DAEMON,
-            "incomingDir",
-            &serde_json::to_string(&edited).unwrap(),
-        )
-        .unwrap();
+    let before = metadata.load_app_settings().unwrap();
     metadata.replace_shared_directory_roots(&[]).unwrap();
     drop(metadata);
     drop(profile);
-    let profile = DaemonProfile::load_hosted(directory, incoming, shared).unwrap();
-    assert_eq!(profile.incoming_dir(), edited);
-    assert!(
-        profile
-            .open_metadata_store()
-            .unwrap()
-            .shared_directory_roots()
-            .unwrap()
-            .is_empty()
-    );
+    let profile =
+        DaemonProfile::load_hosted(directory, host_storage(incoming, temp, shared)).unwrap();
+    assert_eq!(profile.incoming_dir(), edited_incoming);
+    assert_eq!(profile.transfer_root(), edited_temp);
+    let metadata = profile.open_metadata_store().unwrap();
+    assert_eq!(metadata.load_app_settings().unwrap(), before);
+    assert!(metadata.shared_directory_roots().unwrap().is_empty());
 }
 
 #[test]
 fn hosted_defaults_do_not_reinterpret_an_existing_unconfigured_profile() {
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("profile");
+    let base = tempfile::tempdir().unwrap();
+    let directory = base.path().join("profile");
     drop(DaemonProfile::load(Some(directory.clone())).unwrap());
-    let incoming = temp.path().join("not-created-incoming");
-    let shared = temp.path().join("not-created-shared");
-    let profile = DaemonProfile::load_hosted(directory, incoming.clone(), shared.clone()).unwrap();
-    assert!(profile.incoming_dir.is_none());
-    assert!(!incoming.exists() && !shared.exists());
+    let incoming = base.path().join("not-created-incoming");
+    let temp = base.path().join("not-created-temp");
+    let shared = base.path().join("not-created-shared");
+    let profile = DaemonProfile::load_hosted(
+        directory,
+        host_storage(incoming.clone(), temp.clone(), shared.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        profile.incoming_dir(),
+        profile.profile_io_dir().join("incoming")
+    );
+    assert_eq!(
+        profile.transfer_root(),
+        profile.profile_io_dir().join("temp")
+    );
+    assert!(!incoming.exists() && !temp.exists() && !shared.exists());
     assert!(
         profile
             .open_metadata_store()
@@ -517,21 +525,35 @@ fn hosted_defaults_do_not_reinterpret_an_existing_unconfigured_profile() {
 
 #[test]
 fn hosted_folder_initialization_retries_after_a_first_start_filesystem_failure() {
-    let root = tempfile::tempdir().unwrap();
-    let directory = root.path().join("profile");
-    let incoming = root.path().join("Incoming");
-    let shared = root.path().join("Shared");
+    let base = tempfile::tempdir().unwrap();
+    let directory = base.path().join("profile");
+    let incoming = base.path().join("Incoming");
+    let temp = base.path().join("Pieces");
+    let shared = base.path().join("Shared");
     fs::write(&shared, b"owned conflicting fixture").unwrap();
     assert!(
-        DaemonProfile::load_hosted(directory.clone(), incoming.clone(), shared.clone()).is_err()
+        DaemonProfile::load_hosted(
+            directory.clone(),
+            host_storage(incoming.clone(), temp.clone(), shared.clone())
+        )
+        .is_err()
     );
-    assert!(directory.join(PROFILE_METADATA_FILE).exists());
     fs::remove_file(&shared).unwrap();
-    let profile = DaemonProfile::load_hosted(directory, incoming.clone(), shared).unwrap();
+    let profile = DaemonProfile::load_hosted(
+        directory,
+        host_storage(incoming.clone(), temp.clone(), shared),
+    )
+    .unwrap();
     assert_eq!(
         profile.incoming_dir(),
         PathBuf::from(emulebb_core::normal_path_display(
             incoming.canonicalize().unwrap()
+        ))
+    );
+    assert_eq!(
+        profile.transfer_root(),
+        PathBuf::from(emulebb_core::normal_path_display(
+            temp.canonicalize().unwrap()
         ))
     );
     assert_eq!(
@@ -543,7 +565,6 @@ fn hosted_folder_initialization_retries_after_a_first_start_filesystem_failure()
             .len(),
         1
     );
-    assert_eq!(profile.ed2k.listen_port, Some(20019));
 }
 
 #[test]
@@ -561,488 +582,94 @@ fn load_for_import_creates_an_explicit_profile() {
 }
 
 #[test]
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "linear protocol orchestration flow"
-)]
-fn load_parses_bootstrap_toml_and_db_runtime_config() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(
+fn load_parses_bootstrap_and_canonical_sqlite_settings() {
+    let base = tempfile::tempdir().unwrap();
+    let directory = write_bootstrap_settings(base.path());
+    let metadata = MetadataStore::open(directory.join(PROFILE_METADATA_FILE)).unwrap();
+    edit_settings(
         &metadata,
-        SECTION_DAEMON,
-        "p2pBindIp",
-        serde_json::json!("192.0.2.10"),
+        serde_json::json!({
+            "network":{"nickname":"Sample Client","p2p":{"bindIp":"127.0.0.1","tcpPort":42001,"udpPort":42002},
+              "connections":{"maxConnections":321,"maxNewConnectionsPerFiveSeconds":20,"maxHalfOpenConnections":10,"connectTimeoutSeconds":31,"callbackTimeoutSeconds":46},
+              "nat":{"enabled":false,"backendOrder":["upnp"]},"servers":{"autoReconnect":false,"safeConnect":true,"usePriorities":false,"staticOnly":true,"keepaliveMinutes":45}},
+            "transfers":{"downloadLimitBytesPerSecond":2097152,"uploadLimitBytesPerSecond":1048576,"maxParallelDownloadPeers":3,
+              "upload":{"baseSlots":4,"queueCapacity":3000,"sessionTransferPercent":75,"sessionTimeLimitSeconds":3600}},
+            "storage":{"incomingDirectory":"finished","tempDirectory":"pieces"},
+            "sharing":{"scanOnStartup":false,"kadPublishingEnabled":false},
+            "security":{"obfuscationEnabled":false,"tcpErrorFloodDetection":{"intervalSeconds":120,"threshold":20}}
+        }),
     );
-    put_setting(
-        &metadata,
-        SECTION_DAEMON,
-        "p2pBindInterface",
-        serde_json::json!("Ethernet"),
+    let before = metadata.load_app_settings().unwrap();
+    drop(metadata);
+    let profile = DaemonProfile::load(Some(directory)).unwrap();
+    assert_eq!(
+        profile.rest_bind_addr().unwrap(),
+        "192.0.2.10:13301".parse().unwrap()
     );
-    put_setting(
-        &metadata,
-        SECTION_DAEMON,
-        "initialSharedDirectoryReload",
-        serde_json::json!(false),
+    assert_eq!(profile.p2p_bind_ip, Some(Ipv4Addr::LOCALHOST));
+    assert_eq!(profile.ed2k.listen_port, Some(42001));
+    assert_eq!(profile.kad.listen_port, Some(42002));
+    assert_eq!(profile.ed2k.nickname, "Sample Client");
+    assert_eq!(profile.ed2k.max_connections, 321);
+    assert_eq!(profile.ed2k.max_half_open_connections, 10);
+    assert_eq!(profile.ed2k.connect_timeout_secs, 31);
+    assert_eq!(profile.ed2k.callback_timeout_secs, 46);
+    assert_eq!(profile.ed2k.download_limit_bytes_per_sec, 2097152);
+    assert_eq!(
+        profile.ed2k.upload_queue.upload_limit_bytes_per_sec,
+        1048576
     );
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "listenPort",
-        serde_json::json!(41002),
-    );
-    metadata
-        .replace_kad_bootstrap_endpoints(&["192.0.2.30:41002".to_string()])
-        .unwrap();
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "bootstrapMinRoutingContacts",
-        serde_json::json!(3),
-    );
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "localStoreSourceTtlSecs",
-        serde_json::json!(21600),
-    );
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "localStoreKeywordCapacity",
-        serde_json::json!(20000),
-    );
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "localStoreSourceCapacity",
-        serde_json::json!(20000),
-    );
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "localStoreNotesCapacity",
-        serde_json::json!(5000),
-    );
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "republishIntervalSecs",
-        serde_json::json!(120),
-    );
-    put_setting(
-        &metadata,
-        SECTION_KAD,
-        "publishContactFanout",
-        serde_json::json!(5),
-    );
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "listenPort",
-        serde_json::json!(41001),
-    );
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "connectTimeoutSecs",
-        serde_json::json!(1),
-    );
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "reconnectIntervalSecs",
-        serde_json::json!(60),
-    );
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "serverKeepaliveMinutes",
-        serde_json::json!(25),
-    );
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "publishEmuleRustIdentity",
-        serde_json::json!(true),
-    );
-    put_setting(&metadata, SECTION_NAT, "enabled", serde_json::json!(true));
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "requireInitialMapping",
-        serde_json::json!(false),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "backendOrder",
-        serde_json::json!(["upnp_miniupnpc"]),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "bindIp",
-        serde_json::json!("192.0.2.11"),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "igdIp",
-        serde_json::json!("192.0.2.1"),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "minissdpdSocket",
-        serde_json::json!("/var/run/minissdpd.sock"),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "ssdpLocalPort",
-        serde_json::json!(1901),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "discoveryTimeoutSecs",
-        serde_json::json!(7),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "leaseDurationSecs",
-        serde_json::json!(1200),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "renewMarginSecs",
-        serde_json::json!(120),
-    );
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "externalIpOverride",
-        serde_json::json!("203.0.113.10"),
-    );
-
-    let profile = DaemonProfile::load(Some(profile_dir.clone())).unwrap();
-
-    assert_eq!(profile.profile_dir, profile_dir);
-    assert_eq!(profile.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
-    assert_eq!(profile.p2p_bind_interface.as_deref(), Some("Ethernet"));
+    assert_eq!(profile.ed2k.upload_queue.base_slots, 4);
+    assert_eq!(profile.ed2k.upload_queue.waiting_capacity, 3000);
+    assert_eq!(profile.ed2k.upload_queue.session_transfer_percent, 75);
+    assert_eq!(profile.ed2k.upload_queue.session_time_limit_secs, 3600);
+    assert_eq!(profile.ed2k.max_parallel_download_peers, 3);
+    assert!(!profile.ed2k.obfuscation_enabled);
+    assert!(!profile.ed2k.reconnect_enabled);
+    assert!(profile.ed2k.safe_server_connect);
+    assert!(!profile.ed2k.use_server_priorities);
+    assert!(profile.ed2k.auto_connect_static_only);
+    assert_eq!(profile.ed2k.server_keepalive_minutes, 45);
+    assert_eq!(profile.ed2k.tcp_error_flooder_interval_minutes, 2);
+    assert_eq!(profile.ed2k.tcp_error_flooder_threshold, 20);
+    assert!(!profile.nat.enabled);
+    assert_eq!(profile.nat.backend_order, vec!["upnp-miniupnpc"]);
     assert!(!profile.initial_shared_directory_reload);
+    assert!(!profile.kad.publish_shared_files_enabled);
     assert_eq!(
-        profile.rest.bind_addr,
-        Some("192.0.2.10:13301".parse().unwrap())
+        profile.incoming_dir(),
+        profile.profile_io_dir().join("finished")
     );
-    assert_eq!(profile.kad.listen_port, Some(41002));
-    assert_eq!(profile.kad_bootstrap_endpoints, ["192.0.2.30:41002"]);
-    assert_eq!(profile.kad.bootstrap_min_routing_contacts, 3);
-    assert!(profile.kad.local_store_enabled);
-    assert_eq!(profile.kad.local_store_keyword_ttl_secs, 86_400);
-    assert_eq!(profile.kad.local_store_source_ttl_secs, 21_600);
-    assert_eq!(profile.kad.local_store_notes_ttl_secs, 86_400);
-    assert_eq!(profile.kad.local_store_keyword_capacity, 20_000);
-    assert_eq!(profile.kad.local_store_source_capacity, 20_000);
-    assert_eq!(profile.kad.local_store_notes_capacity, 5_000);
-    assert!(profile.kad.publish_shared_files_enabled);
-    assert_eq!(profile.kad.republish_interval_secs, 120);
-    assert_eq!(profile.kad.publish_contact_fanout, 5);
-    assert!(!profile.kad.passive_replay_enabled);
-    assert_eq!(profile.ed2k.listen_port, Some(41001));
-    assert!(profile.ed2k.server_endpoints.is_empty());
-    assert_eq!(profile.ed2k.connect_timeout_secs, 1);
-    assert_eq!(profile.ed2k.reconnect_interval_secs, 60);
-    assert_eq!(profile.ed2k.server_keepalive_minutes, 25);
     assert_eq!(
-        profile.ed2k.keepalive_interval(),
-        Some(std::time::Duration::from_secs(25 * 60))
+        profile.transfer_root(),
+        profile.profile_io_dir().join("pieces")
     );
-    assert!(profile.ed2k.enable_udp_reask);
-    assert!(profile.ed2k.publish_emule_rust_identity);
-    assert!(profile.nat.enabled);
-    assert!(!profile.nat.require_initial_mapping);
-    assert_eq!(profile.nat.backend_order, ["upnp_miniupnpc".to_string()]);
-    assert_eq!(profile.nat.bind_ip.as_deref(), Some("192.0.2.11"));
-    assert_eq!(profile.nat.igd_ip.as_deref(), Some("192.0.2.1"));
     assert_eq!(
-        profile.nat.minissdpd_socket.as_deref(),
-        Some("/var/run/minissdpd.sock")
-    );
-    assert_eq!(profile.nat.ssdp_local_port, Some(1901));
-    assert_eq!(profile.nat.discovery_timeout_secs, 7);
-    assert_eq!(profile.nat.lease_duration_secs, 1200);
-    assert_eq!(profile.nat.renew_margin_secs, 120);
-    assert_eq!(
-        profile.nat.external_ip_override.as_deref(),
-        Some("203.0.113.10")
+        profile
+            .open_metadata_store()
+            .unwrap()
+            .load_app_settings()
+            .unwrap(),
+        before
     );
 }
 
 #[test]
-fn load_uses_runtime_defaults_for_existing_database_without_settings() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    // An existing empty database retains its settings; fresh databases seed ports.
-    drop(MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap());
-
-    let profile = DaemonProfile::load(Some(profile_dir)).unwrap();
-    let metadata = MetadataStore::open(profile.metadata_path()).unwrap();
-
-    assert!(!metadata.has_settings_section(SECTION_ED2K).unwrap());
-    assert_eq!(profile.ed2k.listen_port, None);
+fn transport_listeners_follow_the_admitted_networks() {
+    for (ed2k, kad) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut values = SettingsValues::default();
+        values.network.ed2k_enabled = ed2k;
+        values.network.kad_enabled = kad;
+        let projected = runtime_settings::from_values(values, Vec::new());
+        assert_eq!(projected.ed2k.listen_port.is_some(), ed2k || kad);
+        assert_eq!(projected.kad.listen_port.is_some(), ed2k || kad);
+    }
 }
 
 #[test]
-fn default_ed2k_settings_match_runtime_config_defaults() {
-    assert_eq!(
-        ed2k_runtime_config_from_settings(Ed2kSettings::default()),
-        Ed2kRuntimeConfig::default()
-    );
-}
-
-#[test]
-fn load_rejects_out_of_range_ed2k_free_space_floor() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "minFreeTransferSpaceBytes",
-        serde_json::json!(5_368_709_119_u64),
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-    assert!(
-        format!("{error:#}").contains(
-            "minFreeTransferSpaceBytes must be an unsigned number in the range 5368709120..5497558138880"
-        )
-    );
-}
-
-#[test]
-fn load_rejects_out_of_range_server_keepalive_minutes() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "serverKeepaliveMinutes",
-        serde_json::json!(1_441),
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-    assert!(format!("{error:#}").contains("serverKeepaliveMinutes must be in the range 0..1440"));
-}
-
-#[test]
-fn load_rejects_retired_ed2k_server_setting_keys() {
-    let key = "keepaliveSecs";
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(&metadata, SECTION_ED2K, key, serde_json::json!(1_200));
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-    assert!(
-        format!("{error:#}").contains(&format!("unknown field `{key}`")),
-        "unexpected error for {key}: {error:#}"
-    );
-}
-
-#[test]
-fn configured_ed2k_nickname_reaches_runtime_config() {
-    let settings = Ed2kSettings {
-        nickname: "  Sample User  ".to_string(),
-        ..Ed2kSettings::default()
-    };
-
-    assert_eq!(
-        ed2k_runtime_config_from_settings(settings).server_nickname(),
-        "Sample User"
-    );
-}
-
-#[test]
-fn default_upload_queue_settings_match_runtime_config_defaults() {
-    assert_eq!(
-        ed2k_upload_queue_runtime_config_from_settings(Ed2kUploadQueueSettings::default()),
-        Ed2kUploadQueueRuntimeConfig::default()
-    );
-}
-
-#[test]
-fn default_nat_settings_enable_best_effort_pcp_with_upnp_fallback() {
-    let config = nat_config_from_settings(NatSettings::default());
-
-    assert!(config.enabled);
-    assert!(!config.require_initial_mapping);
-    assert_eq!(config.backend_order, NatConfig::default().backend_order);
-}
-
-#[test]
-fn load_rejects_removed_upnp_igd_backend_without_mutating_profile() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "backendOrder",
-        serde_json::json!(["upnp_miniupnpc", "upnp_igd"]),
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-
-    assert!(
-        format!("{error:#}").contains("remove unsupported backend \"upnp_igd\""),
-        "unexpected error: {error:#}"
-    );
-    let rows = metadata.load_settings_section(SECTION_NAT).unwrap();
-    assert_eq!(
-        rows.into_iter()
-            .find(|(key, _)| key == "backendOrder")
-            .map(|(_, value)| value),
-        Some(r#"["upnp_miniupnpc","upnp_igd"]"#.to_string())
-    );
-}
-
-#[test]
-fn load_rejects_runtime_fields_in_bootstrap_toml() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = temp.path().join("profile");
-    fs::create_dir_all(&profile_dir).unwrap();
-    let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
-    write_private_settings(
-        &settings_path,
-        r#"
-p2pBindIp = "192.0.2.10"
-
-[rest]
-bind_addr = "192.0.2.10:13301"
-api_key = "secret"
-
-[ed2k]
-listenPort = 41001
-"#,
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("unknown field"),
-        "unexpected error: {error:#}"
-    );
-}
-
-#[test]
-fn load_rejects_retired_nat_backend_from_db_runtime_config() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(
-        &metadata,
-        SECTION_NAT,
-        "backendOrder",
-        serde_json::json!(["upnp_rupnp"]),
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-    assert!(
-        error.to_string().contains("invalid NAT config"),
-        "unexpected error: {error:#}"
-    );
-    assert!(
-        format!("{error:#}").contains("remove unsupported backend \"upnp_rupnp\""),
-        "unexpected error: {error:#}"
-    );
-}
-
-#[test]
-fn load_rejects_db_runtime_server_endpoints() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "serverEndpoints",
-        serde_json::json!(["192.0.2.20:4661"]),
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-
-    assert!(
-        error.to_string().contains("failed to load ed2k settings"),
-        "unexpected error: {error:#}"
-    );
-    assert!(
-        format!("{error:#}").contains("unknown field `serverEndpoints`"),
-        "unexpected error: {error:#}"
-    );
-}
-
-#[test]
-fn load_rejects_db_runtime_server_entries() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_settings(temp.path());
-    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
-    put_setting(
-        &metadata,
-        SECTION_ED2K,
-        "serverEntries",
-        serde_json::json!([
-            {
-                "host": "192.0.2.20",
-                "port": 4661,
-                "name": "emulebb-local-e2e"
-            }
-        ]),
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-
-    assert!(
-        format!("{error:#}").contains("unknown field `serverEntries`"),
-        "unexpected error: {error:#}"
-    );
-}
-
-#[test]
-fn load_rejects_retired_toml_preferences_section() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_dir = temp.path().join("profile");
-    fs::create_dir_all(&profile_dir).unwrap();
-    let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
-    write_private_settings(
-        &settings_path,
-        r#"
-[rest]
-bind_addr = "192.0.2.10:13301"
-api_key = "secret"
-
-[preferences]
-autoConnect = false
-"#,
-    );
-
-    let error = DaemonProfile::load(Some(profile_dir)).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("unknown field"),
-        "unexpected error: {error:#}"
-    );
-}
-
-#[test]
-fn kad_local_store_config_is_config_driven_and_clamped() {
+fn kad_internal_policy_bounds_local_store_resources() {
     let profile = DaemonProfile {
-        kad: KadSettings {
+        kad: KadRuntimePolicy {
             listen_port: Some(41002),
             local_store_enabled: false,
             local_store_keyword_ttl_secs: 0,
@@ -1051,7 +678,7 @@ fn kad_local_store_config_is_config_driven_and_clamped() {
             local_store_keyword_capacity: 0,
             local_store_source_capacity: 0,
             local_store_notes_capacity: 0,
-            ..KadSettings::default()
+            ..KadRuntimePolicy::default()
         },
         ..DaemonProfile::default()
     };
@@ -1070,7 +697,7 @@ fn kad_local_store_config_is_config_driven_and_clamped() {
 #[test]
 fn kad_local_store_defaults_follow_index_defaults() {
     let defaults = KadLocalStoreConfig::default();
-    let config = kad_local_store_config(&KadSettings::default());
+    let config = kad_local_store_config(&KadRuntimePolicy::default());
 
     assert_eq!(config.keyword_capacity, defaults.keyword_capacity);
     assert_eq!(config.source_capacity, defaults.source_capacity);
@@ -1237,11 +864,13 @@ fn web_root_dir_rejects_configured_directory_without_index() {
 #[test]
 fn ed2k_network_config_is_absent_without_listener_settings() {
     let temp = tempfile::tempdir().unwrap();
-    let profile = DaemonProfile {
+    let mut profile = DaemonProfile {
         profile_dir: temp.path().to_path_buf(),
         ..DaemonProfile::default()
     };
 
+    profile.ed2k.listen_port = None;
+    profile.kad.listen_port = None;
     assert!(
         profile
             .ed2k_network_config(&metadata_store(&profile))
@@ -1295,7 +924,7 @@ fn ed2k_network_config_requires_configured_kad_listen_port() {
         .ed2k_network_config(&metadata_store(&profile))
         .unwrap_err()
         .to_string();
-    assert!(error.contains("kad.listenPort is required"));
+    assert!(error.contains("network.p2p.udpPort is required"));
 }
 
 #[test]
@@ -1311,7 +940,7 @@ fn ed2k_network_config_requires_configured_ed2k_listen_port() {
         .ed2k_network_config(&metadata_store(&profile))
         .unwrap_err()
         .to_string();
-    assert!(error.contains("ed2k.listenPort is required"));
+    assert!(error.contains("network.p2p.tcpPort is required"));
 }
 
 #[test]
@@ -1380,47 +1009,18 @@ fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
 }
 
 #[test]
-fn ed2k_user_hash_uses_emule_markers() {
-    let hash = parse_user_hash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
-
-    assert_eq!(hash[5], 0x0E);
-    assert_eq!(hash[14], 0x6F);
-}
-
-#[test]
-fn ed2k_user_hash_rejects_emule_bad_hash_after_marker_normalization() {
-    let error = parse_user_hash("00000000000000000000000000000000")
-        .unwrap_err()
-        .to_string();
-
-    assert!(error.contains("bad hash"));
-}
-
-#[test]
-fn ed2k_network_config_normalizes_configured_user_hash() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut profile = profile_with_server(
-        temp.path().to_path_buf(),
-        Some("192.0.2.10".parse().unwrap()),
-    );
-    profile.ed2k_user_hash = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
-
-    let network = profile
-        .ed2k_network_config(&metadata_store(&profile))
+fn network_config_reuses_the_persisted_user_identity() {
+    let base = tempfile::tempdir().unwrap();
+    let profile = profile_with_server(base.path().to_path_buf(), Some(Ipv4Addr::LOCALHOST));
+    let metadata = metadata_store(&profile);
+    let identity = create_user_hash();
+    store_user_hash(&metadata, identity).unwrap();
+    let config = profile
+        .ed2k_network_config_from_interfaces(&metadata, &[iface("Loopback", "127.0.0.1")])
         .unwrap()
         .unwrap();
-
-    assert_eq!(network.user_hash[5], 0x0E);
-    assert_eq!(network.user_hash[14], 0x6F);
-    assert_eq!(
-        metadata_store(&profile)
-            .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
-            .unwrap()
-            .unwrap()
-            .public_identity
-            .unwrap(),
-        network.user_hash.to_vec()
-    );
+    assert_eq!(config.user_hash, identity);
+    assert_eq!(load_or_create_user_hash(&metadata).unwrap(), identity);
 }
 
 #[test]
@@ -1442,33 +1042,6 @@ fn load_or_create_user_hash_persists_emule_markers() {
     assert_eq!(hash[5], 0x0E);
     assert_eq!(hash[14], 0x6F);
     assert_eq!(persisted, hash);
-}
-
-#[test]
-fn load_or_create_user_hash_rewrites_markerless_sql_hash() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = MetadataStore::open(temp.path().join("metadata.sqlite")).unwrap();
-    store
-        .upsert_local_identity(&MetadataLocalIdentity {
-            identity_kind: ED2K_USER_HASH_IDENTITY_KIND.to_string(),
-            public_identity: Some(vec![0xaa; 16]),
-            private_secret: None,
-        })
-        .unwrap();
-
-    let hash = load_or_create_user_hash(&store).unwrap();
-
-    assert_eq!(hash[5], 0x0E);
-    assert_eq!(hash[14], 0x6F);
-    assert_eq!(
-        store
-            .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
-            .unwrap()
-            .unwrap()
-            .public_identity
-            .unwrap(),
-        hash.to_vec()
-    );
 }
 
 #[test]
@@ -1738,7 +1311,7 @@ fn ed2k_network_config_derives_nat_bind_from_configured_p2p_bind_ip() {
 
     assert_eq!(network.nat_config.bind_ip.as_deref(), Some("192.0.2.10"));
     assert!(network.nat_config.enabled);
-    assert!(network.nat_config.require_initial_mapping);
+    assert!(!network.nat_config.require_initial_mapping);
 }
 
 #[test]

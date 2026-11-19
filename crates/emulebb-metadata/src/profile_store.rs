@@ -28,7 +28,9 @@ pub(crate) fn seed_host_storage_defaults(
     storage: &crate::InitialProfileStorage,
 ) -> Result<()> {
     ensure!(
-        storage.incoming_dir.is_absolute() && storage.shared_dir.is_absolute(),
+        storage.incoming_dir.is_absolute()
+            && storage.temp_dir.is_absolute()
+            && storage.shared_dir.is_absolute(),
         "host folders must be absolute"
     );
     let now = unix_ms();
