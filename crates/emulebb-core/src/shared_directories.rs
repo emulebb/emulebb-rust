@@ -9,7 +9,10 @@ use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::IndexedSharedDirectoryRoot;
 use emulebb_kad_proto::Ed2kHash;
-use emulebb_metadata::{MetadataSharedDirectoryRoot, NativeFileFingerprint, NativePath};
+use emulebb_metadata::{
+    MetadataRootScanWatermark, MetadataSharedDirectoryRoot, MetadataStore, NativeFileFingerprint,
+    NativePath,
+};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -1011,6 +1014,7 @@ async fn scan_initial_publish_cohort(core: &EmulebbCore) -> Result<Vec<ScannedSh
 pub(crate) async fn scan_shared_directory_roots(
     roots: Vec<SharedDirectoryRoot>,
     policy: SharedFileIgnorePolicy,
+    metadata: MetadataStore,
 ) -> Result<SharedScanResult> {
     tokio::task::spawn_blocking(move || -> Result<SharedScanResult> {
         let mut files = Vec::new();
@@ -1019,6 +1023,7 @@ pub(crate) async fn scan_shared_directory_roots(
         let mut skipped_intake_count = 0;
         for root in roots {
             let root_path = PathBuf::from(&root.path);
+            let watermark = metadata.shared_root_scan_watermark(&root_path)?;
             if !std::fs::metadata(long_path(&root_path)).is_ok_and(|metadata| metadata.is_dir()) {
                 inaccessible_roots.push(root_path);
                 continue;
@@ -1035,7 +1040,11 @@ pub(crate) async fn scan_shared_directory_roots(
                         })
                         .collect();
                     files.extend(collected);
-                    root_files.push((root_path, members));
+                    root_files.push(ScannedRootSnapshot {
+                        root: root_path,
+                        watermark,
+                        files: members,
+                    });
                 }
                 Err(error) => {
                     tracing::warn!(root = %root.path, %error, "shared root scan failed");
@@ -1059,16 +1068,21 @@ pub(crate) async fn scan_shared_directory_roots(
 
 pub(crate) struct SharedScanResult {
     files: Vec<ScannedSharedFile>,
-    root_files: Vec<(PathBuf, Vec<ScannedRootMember>)>,
+    root_files: Vec<ScannedRootSnapshot>,
     inaccessible_roots: Vec<PathBuf>,
     skipped_intake_count: usize,
 }
 
 async fn persist_scanned_roots(
     core: &EmulebbCore,
-    root_files: Vec<(PathBuf, Vec<ScannedRootMember>)>,
+    root_files: Vec<ScannedRootSnapshot>,
 ) -> Result<()> {
-    for (root, files) in root_files {
+    for ScannedRootSnapshot {
+        root,
+        watermark,
+        files,
+    } in root_files
+    {
         let normalized_root = long_path(&root);
         let metadata = core.metadata_store.clone();
         let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
@@ -1079,7 +1093,7 @@ async fn persist_scanned_roots(
                 let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
                 Some((file.path, relative, fingerprint))
             });
-            metadata.replace_root_memberships(&root, members)
+            metadata.replace_root_memberships(&root, &watermark, members)
         })
         .await??;
     }
@@ -1091,6 +1105,12 @@ async fn persist_scanned_roots(
 struct ScannedRootMember {
     path: PathBuf,
     source_fingerprint: Option<NativeFileFingerprint>,
+}
+
+struct ScannedRootSnapshot {
+    root: PathBuf,
+    watermark: MetadataRootScanWatermark,
+    files: Vec<ScannedRootMember>,
 }
 
 #[derive(Debug, Clone)]
@@ -1149,7 +1169,8 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     // The recursive directory walk is synchronous and may be large, so the helper
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
     // worker thread.
-    let mut result = scan_shared_directory_roots(roots, policy).await?;
+    let mut result =
+        scan_shared_directory_roots(roots, policy, core.metadata_store.clone()).await?;
     // WHY: Interrupted direct-copy outputs can retain ordinary final names.
     // Keep them out of both the reload plan and root membership snapshots.
     result.files.retain(|file| {
@@ -1158,8 +1179,8 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
             .delivery_output_is_excluded(&file.path)
             .unwrap_or(true)
     });
-    for (_, files) in &mut result.root_files {
-        files.retain(|file| {
+    for root in &mut result.root_files {
+        root.files.retain(|file| {
             !core
                 .metadata_store
                 .delivery_output_is_excluded(&file.path)

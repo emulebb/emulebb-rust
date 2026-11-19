@@ -1176,6 +1176,7 @@ mod tests {
         store
             .replace_root_memberships(
                 &root,
+                &store.shared_root_scan_watermark(&root).unwrap(),
                 &[
                     (
                         first_path.clone(),
@@ -1390,7 +1391,13 @@ mod tests {
                 .unwrap();
             members.push((path, PathBuf::from(name), fingerprint(inode)));
         }
-        store.replace_root_memberships(&root, &members).unwrap();
+        store
+            .replace_root_memberships(
+                &root,
+                &store.shared_root_scan_watermark(&root).unwrap(),
+                &members,
+            )
+            .unwrap();
         let first = store
             .query_active_local_share_entries(&MetadataSharedFileQuery {
                 limit: 1,

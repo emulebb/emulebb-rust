@@ -553,9 +553,12 @@ impl MetadataStore {
     /// scanned local paths with their live fingerprints; a failed or incomplete
     /// scan must never call this. Only safely matched cache entries are admitted.
     /// Input is consumed within the transaction, without collecting a snapshot.
+    /// The watermark must precede the walk. Newer watcher loss keeps the scan
+    /// required flag set even when this membership transaction succeeds.
     pub fn replace_root_memberships<M>(
         &self,
         root: &Path,
+        watermark: &crate::MetadataRootScanWatermark,
         paths: impl IntoIterator<Item = M>,
     ) -> Result<()>
     where
@@ -586,6 +589,10 @@ impl MetadataStore {
             params![NativePath::platform(), native_root.storage_bytes()],
             |row| row.get(0),
         )?;
+        ensure!(
+            root_id == watermark.root_id,
+            "root was replaced during scan"
+        );
         let now = unix_ms();
         tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS scanned_membership_paths(path_id INTEGER PRIMARY KEY);
@@ -675,10 +682,20 @@ impl MetadataStore {
             elapsed_ms = started.elapsed().as_millis(),
             "root admission"
         );
+        // WHY: clear only losses covered by this walk, atomically with its
+        // memberships. At counter exhaustion keep the flag sticky, so a later
+        // loss can never compare equal to an earlier captured watermark.
         tx.execute(
-            "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_ms = ?2
+            "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_ms = ?2,
+             scan_required=CASE WHEN id=?3 AND watch_loss_revision=?4
+                AND watch_loss_revision<9223372036854775807 THEN 0 ELSE scan_required END
              WHERE id = ?1",
-            params![root_id, now],
+            params![
+                root_id,
+                now,
+                watermark.root_id,
+                watermark.watch_loss_revision
+            ],
         )?;
         tx.commit()?;
         Ok(())

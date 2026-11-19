@@ -640,6 +640,7 @@ mod tests {
         store
             .replace_root_memberships(
                 &root,
+                &store.shared_root_scan_watermark(&root).unwrap(),
                 &[(
                     alias.clone(),
                     PathBuf::from("different-leaf.bin"),

@@ -329,7 +329,13 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
             (root.join(&relative), relative, current.clone())
         })
         .collect::<Vec<_>>();
-    store.replace_root_memberships(&root, &scanned).unwrap();
+    store
+        .replace_root_memberships(
+            &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
+            &scanned,
+        )
+        .unwrap();
     assert_eq!(
         store
             .query_active_local_share_entries(&MetadataSharedFileQuery {
