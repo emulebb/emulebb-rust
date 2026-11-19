@@ -16,8 +16,8 @@ impl std::fmt::Display for NetworkStartupError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DefaultRouteUnavailable => formatter.write_str(
-                "p2pBindIp or p2pBindInterface is required because no default-route IPv4 interface was detected; \
-                 start with --p2p-bind-interface <NAME>, then save the P2P bind interface in WebUI Settings > Network",
+                "network.p2p.bindIp or network.p2p.bindInterface is required because no default-route IPv4 interface was detected; \
+                 while stopped, use --profile PATH settings set network.p2p.bindInterface NAME",
             ),
         }
     }

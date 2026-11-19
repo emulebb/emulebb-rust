@@ -1370,17 +1370,6 @@ async fn plan_incremental_reload(
     plan_incremental_reload_with_pruning(core, files, true).await
 }
 
-/// Accept imported hash matches and report pending work without payload reads.
-pub(crate) async fn reconcile_shared_files(
-    core: &EmulebbCore,
-) -> Result<SharedDirectoryReloadProgress> {
-    let _guard = core.shared_reload_gate.lock().await;
-    let scan = scan_shared_files(core).await?;
-    let mut plan = plan_incremental_reload_with_pruning(core, scan.files, false).await?;
-    plan.stats.skipped_intake_count = scan.skipped_intake_count;
-    Ok(plan.stats.into_diagnostics("idle", false, false))
-}
-
 async fn plan_incremental_reload_with_pruning(
     core: &EmulebbCore,
     files: Vec<ScannedSharedFile>,

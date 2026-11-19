@@ -1,6 +1,5 @@
 use std::{
     env, fs,
-    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
@@ -10,32 +9,28 @@ use std::{
 use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, ServerInfo, VpnGuardConfig};
 use emulebb_ed2k::{
-    NatConfig,
-    config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig},
-    detect_interfaces,
-    ed2k_tcp::Ed2kSecureIdent,
+    NatConfig, config::Ed2kRuntimeConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent,
     ipfilter::IpFilter,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
-use emulebb_metadata::{
-    InitialProfileStorage, MetadataLocalIdentity, MetadataStore, SCHEMA_VERSION,
-};
+pub use emulebb_metadata::InitialProfileStorage;
+use emulebb_metadata::{MetadataLocalIdentity, MetadataStore, SCHEMA_VERSION};
 use emulebb_rest::{RestServerSettings, router_with_shutdown};
-use emulebb_settings::{
-    DaemonSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
-    NatSettings, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
-    SECTION_VPN_GUARD, VpnGuardSettings, validate_ed2k_settings,
-};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Map, Value};
+use emulebb_settings::product::{SecurityIpFilterValues, SettingsValues};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 mod bind_config;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod container_profile;
 mod offline_settings;
+mod runtime_settings;
 pub use bind_config::NetworkStartupError;
 pub use offline_settings::{OfflineSettingsOperation, run_offline_settings};
+use runtime_settings::{KadRuntimePolicy, load_settings};
 mod discovery_bootstrap;
 pub mod host_bootstrap;
 mod listener_receipt;
@@ -43,7 +38,6 @@ pub mod logging;
 mod profile_import;
 mod profile_ownership;
 mod rest_listener;
-pub mod shared_directory_import;
 mod shutdown;
 pub mod support_diagnostics;
 mod vpn_guard_monitor;
@@ -74,30 +68,25 @@ const UNSAFE_REST_API_KEYS: &[&str] = &[
     "replace_with_32_or_more_random_characters",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct DaemonProfile {
     pub profile_dir: PathBuf,
-    /// Application-owned payload storage, separate from private metadata.
-    #[serde(skip)]
-    pub host_transfer_root: Option<PathBuf>,
+    pub temp_dir: PathBuf,
     /// Global finished-file delivery directory (eMule Incoming folder). When a
     /// completed transfer has no category path, its payload is materialized here
-    /// by its canonical name. Defaults to `<profile>/incoming` when unset.
-    pub incoming_dir: Option<PathBuf>,
+    /// by its canonical name. Relative values resolve against the profile.
+    pub incoming_dir: PathBuf,
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,
-    pub ed2k_user_hash: Option<String>,
     pub initial_shared_directory_reload: bool,
-    pub kad: KadSettings,
+    pub kad: KadRuntimePolicy,
     pub kad_bootstrap_endpoints: Vec<String>,
     pub ed2k: Ed2kRuntimeConfig,
     pub nat: NatConfig,
     pub rest: RestBootstrapSettings,
-    pub vpn_guard: VpnGuardSettings,
-    pub ip_filter: IpFilterSettings,
+    pub vpn_guard: VpnGuardConfig,
+    pub ip_filter: SecurityIpFilterValues,
     /// Runtime ownership shared with metadata handles; never a configuration key.
-    #[serde(skip)]
     #[doc(hidden)]
     pub profile_lease: Option<ProfileLease>,
 }
@@ -118,22 +107,21 @@ pub struct RestBootstrapSettings {
 
 impl Default for DaemonProfile {
     fn default() -> Self {
-        let daemon = DaemonSettings::default();
+        let settings = runtime_settings::from_values(SettingsValues::default(), Vec::new());
         Self {
             profile_dir: PathBuf::from("profile"),
-            host_transfer_root: None,
-            incoming_dir: daemon.incoming_dir,
-            p2p_bind_ip: daemon.p2p_bind_ip,
-            p2p_bind_interface: daemon.p2p_bind_interface,
-            ed2k_user_hash: daemon.ed2k_user_hash,
-            initial_shared_directory_reload: daemon.initial_shared_directory_reload,
-            kad: KadSettings::default(),
-            kad_bootstrap_endpoints: Vec::new(),
-            ed2k: Ed2kRuntimeConfig::default(),
-            nat: NatConfig::default(),
+            temp_dir: settings.temp_dir,
+            incoming_dir: settings.incoming_dir,
+            p2p_bind_ip: settings.p2p_bind_ip,
+            p2p_bind_interface: settings.p2p_bind_interface,
+            initial_shared_directory_reload: settings.initial_shared_directory_reload,
+            kad: settings.kad,
+            kad_bootstrap_endpoints: settings.kad_bootstrap_endpoints,
+            ed2k: settings.ed2k,
+            nat: settings.nat,
             rest: RestBootstrapSettings::default(),
-            vpn_guard: VpnGuardSettings::default(),
-            ip_filter: IpFilterSettings::default(),
+            vpn_guard: settings.vpn_guard,
+            ip_filter: settings.ip_filter,
             profile_lease: None,
         }
     }
@@ -156,9 +144,9 @@ impl DaemonProfile {
 
     /// Load an application profile, applying folder defaults only to a new database.
     /// Existing canonical settings and removed sharing roots are never reseeded.
-    pub fn load_hosted(profile_dir: PathBuf, incoming: PathBuf, shared: PathBuf) -> Result<Self> {
+    pub fn load_hosted(profile_dir: PathBuf, storage: InitialProfileStorage) -> Result<Self> {
         let lease = ProfileLease::acquire(&profile_dir, true)?;
-        Self::load_owned(profile_dir, lease, Some((incoming, shared)))
+        Self::load_owned(profile_dir, lease, Some(storage))
     }
 
     fn load_from_dir(profile_dir: PathBuf) -> Result<Self> {
@@ -171,7 +159,7 @@ impl DaemonProfile {
     fn load_owned(
         profile_dir: PathBuf,
         profile_lease: ProfileLease,
-        host_folders: Option<(PathBuf, PathBuf)>,
+        host_folders: Option<InitialProfileStorage>,
     ) -> Result<Self> {
         let settings_path = profile_lease.directory().join(PROFILE_SETTINGS_FILE);
         if !settings_path.exists() {
@@ -192,23 +180,27 @@ impl DaemonProfile {
             })?;
         let metadata_path = profile_lease.directory().join(PROFILE_METADATA_FILE);
         let opened = match host_folders {
-            Some((incoming, shared)) => MetadataStore::open_with_profile_lease_and_storage(
+            Some(storage) => MetadataStore::open_with_profile_lease_and_storage(
                 metadata_path,
                 profile_lease.guard(),
                 move || {
-                    anyhow::ensure!(
-                        incoming.is_absolute() && shared.is_absolute(),
-                        "host folders must be absolute"
-                    );
-                    fs::create_dir_all(&incoming)?;
-                    fs::create_dir_all(&shared)?;
+                    for path in [
+                        &storage.incoming_dir,
+                        &storage.temp_dir,
+                        &storage.shared_dir,
+                    ] {
+                        anyhow::ensure!(path.is_absolute(), "host folders must be absolute");
+                        fs::create_dir_all(path)?;
+                    }
+                    let canonical = |path: &Path| -> Result<PathBuf> {
+                        Ok(PathBuf::from(emulebb_core::normal_path_display(
+                            path.canonicalize()?,
+                        )))
+                    };
                     Ok(InitialProfileStorage {
-                        incoming_dir: PathBuf::from(emulebb_core::normal_path_display(
-                            incoming.canonicalize()?,
-                        )),
-                        shared_dir: PathBuf::from(emulebb_core::normal_path_display(
-                            shared.canonicalize()?,
-                        )),
+                        incoming_dir: canonical(&storage.incoming_dir)?,
+                        temp_dir: canonical(&storage.temp_dir)?,
+                        shared_dir: canonical(&storage.shared_dir)?,
                     })
                 },
             ),
@@ -220,18 +212,14 @@ impl DaemonProfile {
                 profile_dir.display()
             )
         })?;
-        if metadata.initialized_new_schema() {
-            seed_default_profile_network_settings(&metadata)?;
-        }
         let settings = load_settings(&metadata)?;
         let profile = Self {
             profile_dir,
-            host_transfer_root: None,
-            incoming_dir: settings.daemon.incoming_dir,
-            p2p_bind_ip: settings.daemon.p2p_bind_ip,
-            p2p_bind_interface: settings.daemon.p2p_bind_interface,
-            ed2k_user_hash: settings.daemon.ed2k_user_hash,
-            initial_shared_directory_reload: settings.daemon.initial_shared_directory_reload,
+            temp_dir: settings.temp_dir,
+            incoming_dir: settings.incoming_dir,
+            p2p_bind_ip: settings.p2p_bind_ip,
+            p2p_bind_interface: settings.p2p_bind_interface,
+            initial_shared_directory_reload: settings.initial_shared_directory_reload,
             kad: settings.kad,
             kad_bootstrap_endpoints: settings.kad_bootstrap_endpoints,
             ed2k: settings.ed2k,
@@ -274,18 +262,18 @@ impl DaemonProfile {
         )
     }
 
-    pub fn transfer_root(&self) -> PathBuf {
-        self.host_transfer_root
-            .clone()
-            .unwrap_or_else(|| self.profile_io_dir().join("transfers"))
+    fn product_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.profile_io_dir().join(path)
+        }
     }
-
-    /// Resolve the finished-file delivery directory: the configured
-    /// `incomingDir`, or `<profile>/incoming` by default.
+    pub fn transfer_root(&self) -> PathBuf {
+        self.product_path(&self.temp_dir)
+    }
     pub fn incoming_dir(&self) -> PathBuf {
-        self.incoming_dir
-            .clone()
-            .unwrap_or_else(|| self.profile_io_dir().join("incoming"))
+        self.product_path(&self.incoming_dir)
     }
 
     pub fn ed2k_network_config(
@@ -310,14 +298,7 @@ impl DaemonProfile {
         }
         let bind_ip = self.resolve_p2p_bind_ip_from_interfaces(detected_interfaces)?;
         let listen_port = self.resolve_ed2k_listen_port()?;
-        let user_hash = match self.ed2k_user_hash.as_deref() {
-            Some(value) => {
-                let user_hash = parse_user_hash(value)?;
-                store_user_hash(metadata, user_hash)?;
-                user_hash
-            }
-            None => load_or_create_user_hash(metadata)?,
-        };
+        let user_hash = load_or_create_user_hash(metadata)?;
         let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
         let ip_filter = self.load_ip_filter()?;
         let vpn_interface_bound = self.vpn_binding_confirmed(bind_ip, detected_interfaces);
@@ -360,7 +341,12 @@ impl DaemonProfile {
             ip_filter_path: self
                 .ip_filter
                 .enabled
-                .then(|| self.ip_filter.path.clone())
+                .then(|| {
+                    self.ip_filter
+                        .file_path
+                        .as_ref()
+                        .map(|path| self.product_path(path))
+                })
                 .flatten(),
             ip_filter_level: self.ip_filter.level,
         }))
@@ -372,10 +358,11 @@ impl DaemonProfile {
         if !self.ip_filter.enabled {
             return Ok(IpFilter::default());
         }
-        let Some(path) = self.ip_filter.path.as_ref() else {
+        let Some(path) = self.ip_filter.file_path.as_ref() else {
             return Ok(IpFilter::default());
         };
-        let body = std::fs::read_to_string(path)
+        let path = self.product_path(path);
+        let body = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read ipfilter.dat at {}", path.display()))?;
         let filter = IpFilter::parse(&body, self.ip_filter.level);
         info!(ranges = filter.len(), path = %path.display(), "loaded ip filter");
@@ -388,14 +375,14 @@ impl DaemonProfile {
 
     fn kad_bind_addr(&self, bind_ip: Ipv4Addr) -> Result<SocketAddr> {
         let Some(listen_port) = self.kad.listen_port else {
-            bail!("kad.listenPort is required when ED2K servers are configured");
+            bail!("network.p2p.udpPort is required when P2P is enabled");
         };
         Ok(SocketAddr::new(IpAddr::V4(bind_ip), listen_port))
     }
 
     fn resolve_ed2k_listen_port(&self) -> Result<u16> {
         let Some(listen_port) = self.ed2k.listen_port else {
-            bail!("ed2k.listenPort is required when ED2K servers are configured");
+            bail!("network.p2p.tcpPort is required when P2P is enabled");
         };
         Ok(listen_port)
     }
@@ -488,20 +475,10 @@ fn create_default_profile_bootstrap(
         .rest
         .bind_addr
         .context("canonical REST bind_addr is missing")?;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(settings_path)
-        .with_context(|| format!("failed to create {}", settings_path.display()))?;
-    file.write_all(text.as_bytes())
-        .with_context(|| format!("failed to write {}", settings_path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync {}", settings_path.display()))?;
+    let owned_directory = settings_path
+        .parent()
+        .context("bootstrap settings have no parent directory")?;
+    host_bootstrap::publish(owned_directory, text, host_bootstrap::Publication::Create)?;
     eprintln!("Created eMuleBB profile at {}", profile_dir.display());
     eprintln!("WebUI: http://{listener}/  API key: see emulebb-rust-settings.toml");
     Ok(())
@@ -543,16 +520,6 @@ fn validate_profile_settings_permissions(_settings_path: &std::path::Path) -> Re
     Ok(())
 }
 
-fn seed_default_profile_network_settings(metadata: &MetadataStore) -> Result<()> {
-    if !metadata.has_settings_section(SECTION_ED2K)? {
-        metadata.put_setting_json(SECTION_ED2K, "listenPort", "20019")?;
-    }
-    if !metadata.has_settings_section(SECTION_KAD)? {
-        metadata.put_setting_json(SECTION_KAD, "listenPort", "20020")?;
-    }
-    Ok(())
-}
-
 fn validate_web_root_dir(path: &std::path::Path, label: &str) -> Result<()> {
     if !path.is_dir() {
         bail!("{label} must be an existing directory: {}", path.display());
@@ -564,133 +531,7 @@ fn validate_web_root_dir(path: &std::path::Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-struct LoadedSettings {
-    daemon: DaemonSettings,
-    kad: KadSettings,
-    kad_bootstrap_endpoints: Vec<String>,
-    ed2k: Ed2kRuntimeConfig,
-    nat: NatConfig,
-    vpn_guard: VpnGuardSettings,
-    ip_filter: IpFilterSettings,
-}
-
-fn load_settings(metadata: &MetadataStore) -> Result<LoadedSettings> {
-    let daemon = load_section_settings(metadata, SECTION_DAEMON)
-        .context("failed to load daemon settings")?;
-    let kad =
-        load_section_settings(metadata, SECTION_KAD).context("failed to load kad settings")?;
-    let kad_bootstrap_endpoints = metadata
-        .load_kad_bootstrap_endpoints()
-        .context("failed to load Kad bootstrap endpoints")?;
-    let ed2k_settings: Ed2kSettings =
-        load_section_settings(metadata, SECTION_ED2K).context("failed to load ed2k settings")?;
-    validate_ed2k_settings(&ed2k_settings).context("invalid ed2k settings")?;
-    let nat_settings: NatSettings =
-        load_section_settings(metadata, SECTION_NAT).context("failed to load nat settings")?;
-    Ok(LoadedSettings {
-        daemon,
-        kad,
-        kad_bootstrap_endpoints,
-        ed2k: ed2k_runtime_config_from_settings(ed2k_settings),
-        nat: nat_config_from_settings(nat_settings),
-        vpn_guard: load_section_settings(metadata, SECTION_VPN_GUARD)
-            .context("failed to load vpn.guard settings")?,
-        ip_filter: load_section_settings(metadata, SECTION_IP_FILTER)
-            .context("failed to load ip.filter settings")?,
-    })
-}
-
-fn load_section_settings<T>(metadata: &MetadataStore, section: &str) -> Result<T>
-where
-    T: Default + DeserializeOwned,
-{
-    let mut object = Map::new();
-    for (key, value_json) in metadata.load_settings_section(section)? {
-        let value = serde_json::from_str::<Value>(&value_json)
-            .with_context(|| format!("{section}.{key} contains invalid JSON"))?;
-        if object.insert(key.clone(), value).is_some() {
-            bail!("duplicate setting row for {section}.{key}");
-        }
-    }
-    if object.is_empty() {
-        return Ok(T::default());
-    }
-    serde_json::from_value(Value::Object(object))
-        .with_context(|| format!("invalid settings section {section}"))
-}
-
-fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfig {
-    Ed2kRuntimeConfig {
-        egress_route: emulebb_ed2k::networking::EgressRoute::StrictInterface,
-        listen_port: settings.listen_port,
-        server_entries: Vec::new(),
-        server_endpoints: Vec::new(),
-        nickname: settings.nickname,
-        obfuscation_enabled: settings.obfuscation_enabled,
-        probe_search_term: settings.probe_search_term,
-        connect_timeout_secs: settings.connect_timeout_secs,
-        server_connect_timeout_secs: settings.server_connect_timeout_secs,
-        callback_timeout_secs: settings.callback_timeout_secs,
-        reconnect_interval_secs: settings.reconnect_interval_secs,
-        reconnect_enabled: settings.reconnect_enabled,
-        safe_server_connect: settings.safe_server_connect,
-        use_server_priorities: settings.use_server_priorities,
-        auto_connect_static_only: settings.auto_connect_static_only,
-        server_keepalive_minutes: settings.server_keepalive_minutes,
-        session_rotation_secs: settings.session_rotation_secs,
-        max_concurrent_downloads: settings.max_concurrent_downloads,
-        max_new_connections_per_five_seconds: settings.max_new_connections_per_five_seconds,
-        max_half_open_connections: settings.max_half_open_connections,
-        max_sources_per_file: settings.max_sources_per_file,
-        max_parallel_download_peers: settings.max_parallel_download_peers,
-        keyword_server_attempt_budget: settings.keyword_server_attempt_budget,
-        exact_hash_keyword_server_attempt_budget: settings.exact_hash_keyword_server_attempt_budget,
-        source_server_attempt_budget: settings.source_server_attempt_budget,
-        upload_queue: ed2k_upload_queue_runtime_config_from_settings(settings.upload_queue),
-        download_limit_bytes_per_sec: settings.download_limit_bytes_per_sec,
-        detect_tcp_error_flooder: settings.detect_tcp_error_flooder,
-        tcp_error_flooder_interval_minutes: settings.tcp_error_flooder_interval_minutes,
-        tcp_error_flooder_threshold: settings.tcp_error_flooder_threshold,
-        enable_udp_reask: settings.enable_udp_reask,
-        publish_emule_rust_identity: settings.publish_emule_rust_identity,
-        offer_files_capability_enabled: settings.offer_files_capability_enabled,
-        add_servers_from_server: settings.add_servers_from_server,
-        dead_server_retries: settings.dead_server_retries,
-    }
-}
-
-fn ed2k_upload_queue_runtime_config_from_settings(
-    settings: Ed2kUploadQueueSettings,
-) -> Ed2kUploadQueueRuntimeConfig {
-    Ed2kUploadQueueRuntimeConfig {
-        elastic_underfill_secs: settings.elastic_underfill_secs,
-        waiting_timeout_secs: settings.waiting_timeout_secs,
-        granted_timeout_secs: settings.granted_timeout_secs,
-        upload_timeout_secs: settings.upload_timeout_secs,
-        session_transfer_percent: settings.session_transfer_percent,
-        session_time_limit_secs: settings.session_time_limit_secs,
-        ..Ed2kUploadQueueRuntimeConfig::default()
-    }
-}
-
-fn nat_config_from_settings(settings: NatSettings) -> NatConfig {
-    NatConfig {
-        enabled: settings.enabled,
-        require_initial_mapping: settings.require_initial_mapping,
-        backend_order: settings.backend_order,
-        bind_ip: settings.bind_ip,
-        pcp_server_ip: settings.pcp_server_ip,
-        igd_ip: settings.igd_ip,
-        minissdpd_socket: settings.minissdpd_socket,
-        ssdp_local_port: settings.ssdp_local_port,
-        discovery_timeout_secs: settings.discovery_timeout_secs,
-        lease_duration_secs: settings.lease_duration_secs,
-        renew_margin_secs: settings.renew_margin_secs,
-        external_ip_override: settings.external_ip_override,
-    }
-}
-
-fn kad_local_store_config(settings: &KadSettings) -> KadLocalStoreConfig {
+fn kad_local_store_config(settings: &KadRuntimePolicy) -> KadLocalStoreConfig {
     KadLocalStoreConfig {
         enabled: settings.local_store_enabled,
         keyword_ttl: std::time::Duration::from_secs(settings.local_store_keyword_ttl_secs.max(1)),
@@ -909,9 +750,14 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
     if ed2k_network_configured {
         let connect_core = Arc::clone(&core);
         tokio::spawn(async move {
-            if !connect_core.core_settings().await.auto_connect {
-                return;
-            }
+            let settings = match connect_core.effective_settings().await {
+                Ok(settings) => settings,
+                Err(error) => {
+                    tracing::warn!(%error, "automatic connection requires coherent settings");
+                    return;
+                }
+            };
+            if !settings.network.auto_connect { return; }
             // Record Kad as desired before constructing the shared eD2K/Kad
             // runtime. The connect path applies this flag to the new DHT, so a
             // fresh profile starts both networks without a WebUI Start click.
@@ -1113,18 +959,6 @@ async fn log_regular_diagnostic_summary(core: &EmulebbCore) {
     );
 }
 
-fn parse_user_hash(value: &str) -> Result<[u8; 16]> {
-    let decoded = hex::decode(value.trim()).context("failed to decode ed2kUserHash")?;
-    let bytes: [u8; 16] = decoded
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("ed2kUserHash must be 16 bytes / 32 hex characters"))?;
-    let bytes = normalize_user_hash_markers(bytes);
-    if user_hash_is_bad(&bytes) {
-        bail!("ed2kUserHash must not be an eMule bad hash");
-    }
-    Ok(bytes)
-}
-
 const ED2K_USER_HASH_IDENTITY_KIND: &str = "ed2k-user-hash";
 const ED2K_SECURE_IDENT_IDENTITY_KIND: &str = "ed2k-secure-ident";
 
@@ -1133,11 +967,7 @@ fn load_or_create_user_hash(metadata: &MetadataStore) -> Result<[u8; 16]> {
         let Some(bytes) = identity.public_identity else {
             anyhow::bail!("stored ED2K user hash identity has no public identity");
         };
-        let normalized = parse_user_hash_bytes(&bytes)?;
-        if bytes.as_slice() != normalized {
-            store_user_hash(metadata, normalized)?;
-        }
-        return Ok(normalized);
+        return parse_user_hash_bytes(&bytes);
     }
     let bytes = create_user_hash();
     store_user_hash(metadata, bytes)?;
@@ -1172,17 +1002,10 @@ fn parse_user_hash_bytes(value: &[u8]) -> Result<[u8; 16]> {
     let bytes: [u8; 16] = value
         .try_into()
         .map_err(|_| anyhow::anyhow!("stored ED2K user hash must be 16 bytes"))?;
-    let bytes = normalize_user_hash_markers(bytes);
     if user_hash_is_bad(&bytes) {
         anyhow::bail!("stored ED2K user hash must not be an eMule bad hash");
     }
     Ok(bytes)
-}
-
-fn normalize_user_hash_markers(mut bytes: [u8; 16]) -> [u8; 16] {
-    bytes[5] = 0x0E;
-    bytes[14] = 0x6F;
-    bytes
 }
 
 fn user_hash_is_bad(bytes: &[u8; 16]) -> bool {
@@ -1193,7 +1016,9 @@ fn user_hash_is_bad(bytes: &[u8; 16]) -> bool {
 
 fn create_user_hash() -> [u8; 16] {
     loop {
-        let bytes = normalize_user_hash_markers(*uuid::Uuid::new_v4().as_bytes());
+        let mut bytes = *uuid::Uuid::new_v4().as_bytes();
+        bytes[5] = 0x0E;
+        bytes[14] = 0x6F;
         if !user_hash_is_bad(&bytes) {
             return bytes;
         }

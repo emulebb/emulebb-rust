@@ -15,18 +15,10 @@ use emulebb_daemon::{
 )]
 struct Cli {
     #[arg(
-        short,
         long,
-        help = "Profile directory; defaults to the executable directory. Missing profiles are created. Relative paths use the caller's working directory."
+        help = "Profile directory; defaults to the executable directory. Relative paths use the caller's working directory."
     )]
     profile: Option<PathBuf>,
-    #[arg(long, help = "Override the finished-download directory for this run")]
-    incoming_dir: Option<PathBuf>,
-    #[arg(
-        long,
-        help = "Bind P2P traffic to this named interface for this run; save the P2P bind interface in WebUI Settings > Network to persist it"
-    )]
-    p2p_bind_interface: Option<String>,
     #[command(subcommand)]
     command: Option<CliCommand>,
 }
@@ -38,21 +30,22 @@ enum CliCommand {
         #[command(subcommand)]
         operation: SettingsCommand,
     },
-    #[command(
-        about = "Reconcile imported/cached hashes with file metadata; never hash or start networking"
-    )]
-    ReconcileSharedFiles,
-    #[command(
-        about = "Merge a shared-directory text list, reuse live hashes, hash new or changed files offline, and exit"
-    )]
-    ImportSharedDirectories { file: PathBuf },
-    #[command(about = "Merge a portable SQLite eMule profile export and exit")]
-    ImportEmuleProfile {
-        #[arg(value_name = "MANIFEST")]
+    #[command(about = "Import supported external profile data while the daemon is stopped")]
+    Import {
+        #[command(subcommand)]
+        operation: ImportCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportCommand {
+    #[command(about = "Import a portable MFC profile export (SQLite)")]
+    Profile {
+        #[arg(value_name = "EXPORT")]
         manifest: PathBuf,
         #[arg(
             long,
-            help = "Import only portable hashes; keep the target's shared roots"
+            help = "Import only portable hashes and retain the selected profile's roots"
         )]
         hashes_only: bool,
     },
@@ -87,83 +80,22 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let mut profile = match cli.command.as_ref() {
-        Some(_) => {
-            let profile_dir = cli
-                .profile
-                .clone()
-                .context("--profile is required for offline profile operations")?;
-            DaemonProfile::load_for_import(profile_dir)?
-        }
-        None => DaemonProfile::load(cli.profile)?,
-    };
-    if let Some(incoming_dir) = cli.incoming_dir {
-        profile.incoming_dir = Some(incoming_dir);
-    }
-    if let Some(interface) = cli.p2p_bind_interface {
-        profile.p2p_bind_interface = Some(interface);
-    }
-    if let Some(CliCommand::ImportEmuleProfile {
-        manifest,
-        hashes_only,
+    if let Some(CliCommand::Import {
+        operation: ImportCommand::Profile {
+            manifest,
+            hashes_only,
+        },
     }) = cli.command
     {
+        let profile_dir = cli
+            .profile
+            .context("--profile is required for offline profile operations")?;
+        let profile = DaemonProfile::load_for_import(profile_dir)?;
         let summary = apply_profile_import(&profile, &manifest, hashes_only)?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
-    if matches!(
-        cli.command,
-        Some(CliCommand::ReconcileSharedFiles | CliCommand::ImportSharedDirectories { .. })
-    ) {
-        if let Some(CliCommand::ImportSharedDirectories { ref file }) = cli.command {
-            let store = profile.open_metadata_store()?;
-            emulebb_daemon::shared_directory_import::import_shared_directories(&store, file)?;
-        }
-        let core = emulebb_core::EmulebbCore::new(
-            BUILD_VERSION,
-            emulebb_index::FileIndex::from_metadata_store(profile.open_metadata_store()?),
-            profile.transfer_root(),
-        )?
-        .with_profile_dir(profile.profile_io_dir().to_path_buf())
-        .with_incoming_dir(profile.incoming_dir());
-        if matches!(
-            cli.command,
-            Some(CliCommand::ImportSharedDirectories { .. })
-        ) {
-            let reload = core.reload_shared_directories();
-            tokio::pin!(reload);
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                tokio::select! {
-                    result = &mut reload => { result?; break; }
-                    _ = interval.tick() => {
-                        // WHY: awaiting a root snapshot here can wait on the
-                        // reload future that this select must keep driving.
-                        let progress = core.shared_directory_reload_progress();
-                        let remaining = progress.planned_hash_count.saturating_sub(progress.hashed_count + progress.failed_hash_count);
-                        eprintln!("phase={}; hashed={}; remaining={}; reused={}",progress.phase,progress.hashed_count,remaining,progress.reused_count);
-                    }
-                }
-            }
-            let work = core.shared_directory_reload_progress();
-            let reconciliation = core.reconcile_shared_files().await?;
-            let metadata = profile.open_metadata_store()?;
-            let missing_recovery =
-                tokio::task::spawn_blocking(move || metadata.missing_live_aich_recovery_count())
-                    .await??;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"hashing":work,"reconciliation":reconciliation,"missingAichRecoverySets":missing_recovery})
-                )?
-            );
-            return Ok(());
-        }
-        let summary = core.reconcile_shared_files().await?;
-        println!("{}", serde_json::to_string_pretty(&summary)?);
-        return Ok(());
-    }
+    let profile = DaemonProfile::load(cli.profile)?;
     // Keep profile ownership until the final diagnostic writer has drained too.
     let profile_lease = profile.profile_lease.clone();
     let logging_guard = logging::init(profile.profile_io_dir())?;
@@ -174,4 +106,72 @@ async fn main() -> Result<()> {
     logging_guard.shutdown().await;
     drop(profile_lease);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn current_cli_shape_is_consistent_and_startup_has_one_profile_selector() {
+        Cli::command().debug_assert();
+        let cli = Cli::try_parse_from(["emulebb-rust", "--profile", "profile"]).unwrap();
+        assert_eq!(cli.profile, Some(PathBuf::from("profile")));
+        assert!(cli.command.is_none());
+        assert!(
+            Cli::try_parse_from(["emulebb-rust"])
+                .unwrap()
+                .profile
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn profile_import_uses_explicit_nested_resource_and_export_arguments() {
+        let cli = Cli::try_parse_from([
+            "emulebb-rust",
+            "--profile",
+            "profile",
+            "import",
+            "profile",
+            "export.sqlite",
+            "--hashes-only",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command,Some(CliCommand::Import {operation:ImportCommand::Profile {manifest,hashes_only:true}}) if manifest==PathBuf::from("export.sqlite"))
+        );
+    }
+
+    #[test]
+    fn settings_commands_accept_one_key_and_one_plain_or_inline_list_value() {
+        for value in ["Sample Client", r#"["pcp-natpmp","upnp"]"#] {
+            let cli = Cli::try_parse_from([
+                "emulebb-rust",
+                "--profile",
+                "profile",
+                "settings",
+                "set",
+                "network.nickname",
+                value,
+            ])
+            .unwrap();
+            assert!(
+                matches!(cli.command,Some(CliCommand::Settings {operation:SettingsCommand::Set {key,value:parsed}}) if key=="network.nickname" && parsed==value)
+            );
+        }
+        for operation in ["get", "reset"] {
+            let cli = Cli::try_parse_from([
+                "emulebb-rust",
+                "--profile",
+                "profile",
+                "settings",
+                operation,
+                "network.nickname",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Some(CliCommand::Settings { .. })));
+        }
+    }
 }

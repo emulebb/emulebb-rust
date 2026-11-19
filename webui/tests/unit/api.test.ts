@@ -1,8 +1,35 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { RestClient, RestError } from "../../src/api";
+import { settingsFixture } from "../fixtures/settings";
 
 describe("RestClient", () => {
+  it("keeps full-width saved revisions on settings reads and atomic writes", async () => {
+    const snapshot = settingsFixture();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse(snapshot));
+    const client = new RestClient({ fetch: fetchMock as unknown as typeof fetch });
+    await expect(client.getSettings()).resolves.toEqual(snapshot);
+    const patch = { expectedRevision: snapshot.meta.settingsRevision, set: { network: { nickname: "Sample Client" } }, reset: ["storage.tempDirectory"] };
+    await expect(client.patchSettings(patch)).resolves.toEqual(snapshot);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/settings");
+    expect(fetchMock.mock.calls[1]).toEqual(["/api/v1/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }]);
+  });
+
+  it.each([0, "0", "01", "1e6", "9223372036854775808"])("refuses an invalid saved revision %s", async (revision) => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ...settingsFixture(), meta: { settingsRevision: revision } }));
+    const client = new RestClient({ fetch: fetchMock as unknown as typeof fetch });
+    await expect(client.getSettings()).rejects.toThrow("valid saved revision");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("exposes a settings conflict without another read or write", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: { code: "SETTINGS_CONFLICT", message: "Saved settings changed." } }, { status: 409 }));
+    const client = new RestClient({ fetch: fetchMock as unknown as typeof fetch });
+    await expect(client.patchSettings({ expectedRevision: "9007199254740993", reset: ["storage.tempDirectory"] }))
+      .rejects.toMatchObject({ status: 409, code: "SETTINGS_CONFLICT" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("preserves ordered hash outcomes and sends tag changes through the bulk endpoint", async () => {
     const hashes = ["a".repeat(32), "b".repeat(32)];
     const data = [{ hash: hashes[0], status: "accepted", httpStatus: 200 },
