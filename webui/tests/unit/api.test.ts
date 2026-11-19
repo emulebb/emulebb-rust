@@ -81,7 +81,7 @@ describe("RestClient", () => {
     ) as unknown as typeof fetch;
     const client = new RestClient({ fetch: fetchMock });
 
-    await expect(client.patch("shared-directories", {})).rejects.toThrow("Path is required");
+    await expect(client.post("library/roots", {})).rejects.toThrow("Path is required");
   });
 
   it("surfaces a failed item in a successful HTTP 207 batch without retrying accepted work", async () => {

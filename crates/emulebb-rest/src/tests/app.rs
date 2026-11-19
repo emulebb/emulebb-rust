@@ -135,7 +135,7 @@ async fn app_returns_evelope_with_capabilities() {
     assert_eq!(value["data"]["capabilities"]["downloads"], true);
     assert_eq!(value["data"]["capabilities"]["downloads.sse"], true);
     assert_eq!(value["data"]["capabilities"]["downloads.sse.status"], true);
-    assert_eq!(value["data"]["capabilities"]["sharedDirectories"], true);
+    assert_eq!(value["data"]["capabilities"]["libraryRoots"], true);
     assert_eq!(value["data"]["capabilities"]["peerControls"], true);
     assert!(
         value["data"]["capabilities"]
@@ -617,8 +617,9 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
     std::fs::write(&payload_path, b"shared count payload").unwrap();
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
+    core.create_library_root(&runtime_dir.display().to_string(), false)
         .await
+        .unwrap()
         .unwrap();
     core.share_local_file(LocalShareCreate {
         path: payload_path.display().to_string(),

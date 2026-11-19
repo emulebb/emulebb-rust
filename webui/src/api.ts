@@ -453,12 +453,14 @@ export type SharedFilePublication = {
   kadSource: SharedFilePublishLane;
 };
 
-export type SharedDirectoryRoot = {
+export type LibraryRoot = {
+  id: string;
   path: string;
   watchEnabled: boolean;
-  shareable?: boolean;
-  accessible?: boolean;
-  [key: string]: unknown;
+  managed: boolean;
+  shareable: boolean;
+  accessible: boolean;
+  lastScannedAt: number | null;
 };
 
 export type SharedDirectoryReloadProgress = {
@@ -558,8 +560,7 @@ export type SharedDirectoryHashDiskProgress = {
   [key: string]: unknown;
 };
 
-export type SharedDirectories = {
-  roots?: SharedDirectoryRoot[];
+export type LibraryScan = {
   hashingCount?: number;
   reloadProgress?: SharedDirectoryReloadProgress;
   [key: string]: unknown;

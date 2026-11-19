@@ -12,7 +12,9 @@ use crate::{
 
 // A root path and its root row are each unique. Scalar lookups keep the
 // membership scan constrained to one root and ordered by the covering index.
-pub(crate) const CATEGORY_ROOT_HASH_PAGE_SQL: &str = "SELECT m.known_file_id,(SELECT k.ed2k_hash FROM known_files k WHERE k.id=m.known_file_id) FROM shared_file_memberships m INDEXED BY shared_file_memberships_root_content_idx WHERE m.root_id=(SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2) AND m.known_file_id>?3 GROUP BY m.known_file_id ORDER BY m.known_file_id LIMIT ?4";
+// WHY: category paths refer to their latest root instance, not the first retired
+// identity at that path. Explicit resource deletion uses an exact ID instead.
+pub(crate) const CATEGORY_ROOT_HASH_PAGE_SQL: &str = "SELECT m.known_file_id,(SELECT k.ed2k_hash FROM known_files k WHERE k.id=m.known_file_id) FROM shared_file_memberships m INDEXED BY shared_file_memberships_root_content_idx WHERE m.root_id=(SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2 ORDER BY r.id DESC LIMIT 1) AND m.known_file_id>?3 GROUP BY m.known_file_id ORDER BY m.known_file_id LIMIT ?4";
 
 /// Time spent acquiring the shared connection and executing a friend write.
 #[derive(Debug, Clone, Copy)]
@@ -665,8 +667,8 @@ fn sync_category_roots(tx: &rusqlite::Transaction<'_>, incoming: &Path) -> Resul
         "DELETE FROM shared_directory_root_origins WHERE origin='implicit'",
         [],
     )?;
-    tx.execute("INSERT INTO shared_directory_roots(path_id,monitor_owned,shareable,accessible,enabled,created_at_ms,deleted_at_ms) SELECT path_id,0,1,0,1,?2,NULL FROM (SELECT ?1 AS path_id UNION SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL) WHERE true ON CONFLICT(path_id) DO NOTHING", params![incoming_id, now])?;
-    tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) SELECT r.id,'implicit',0,1,r.accessible FROM shared_directory_roots r WHERE r.path_id=?1 OR r.path_id IN (SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL)", [incoming_id])?;
+    tx.execute("INSERT INTO shared_directory_roots(path_id,monitor_owned,shareable,accessible,enabled,created_at_ms,deleted_at_ms) SELECT path_id,0,1,0,1,?2,NULL FROM (SELECT ?1 AS path_id UNION SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL) WHERE true ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING", params![incoming_id, now])?;
+    tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) SELECT r.id,'implicit',0,1,r.accessible FROM shared_directory_roots r WHERE r.deleted_at_ms IS NULL AND (r.path_id=?1 OR r.path_id IN (SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL))", [incoming_id])?;
     refresh_shared_root_eligibility(tx, now)?;
     Ok(())
 }
@@ -1156,44 +1158,6 @@ mod tests {
                 .find(|root| root.path == "new-root")
                 .is_some_and(|root| !root.accessible)
         );
-    }
-
-    #[test]
-    fn explicit_root_commit_rejects_stale_implicit_roots() {
-        let store = super::super::MetadataStore::in_memory().unwrap();
-        let incoming = Path::new("incoming");
-        let mut category = store
-            .create_category("Media", None, Some("old-root"), "", incoming)
-            .unwrap();
-        let expected = store.implicit_shared_directory_roots().unwrap();
-        category.destination_dir = Some("new-root".into());
-        store.update_category(&category, incoming).unwrap();
-        let explicit = crate::MetadataSharedDirectoryRoot {
-            path: "explicit".into(),
-            watch_enabled: false,
-            monitor_owned: false,
-            shareable: true,
-            accessible: true,
-        };
-        assert!(
-            !store
-                .replace_explicit_roots_if_implicit_matches(
-                    &expected,
-                    std::slice::from_ref(&explicit)
-                )
-                .unwrap()
-        );
-        assert!(store.shared_directory_roots().unwrap().is_empty());
-        let current = store.implicit_shared_directory_roots().unwrap();
-        assert!(
-            store
-                .replace_explicit_roots_if_implicit_matches(
-                    &current,
-                    std::slice::from_ref(&explicit)
-                )
-                .unwrap()
-        );
-        assert_eq!(store.shared_directory_roots().unwrap(), vec![explicit]);
     }
 
     #[test]

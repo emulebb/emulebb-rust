@@ -169,27 +169,26 @@ pub fn router_with_shutdown(
             get(shared_file_ed2k_link),
         )
         .route(
-            "/api/v1/shared-directories",
-            get(shared_directories).patch(update_shared_directories),
+            "/api/v1/library/roots",
+            get(library_roots).post(create_library_root),
         )
         .route(
-            "/api/v1/shared-directories/roots",
-            post(add_shared_directory_root).delete(remove_shared_directory_root),
+            "/api/v1/library/roots/{id}",
+            get(library_root)
+                .patch(update_library_root)
+                .delete(delete_library_root),
         )
         .route(
-            "/api/v1/shared-directories/ignores",
+            "/api/v1/library/ignores",
             get(shared_file_ignores)
                 .post(add_shared_file_ignore_pattern)
                 .delete(remove_shared_file_ignore_pattern),
         )
         .route(
-            "/api/v1/shared-directories/ignores/defaults/{ruleKey}",
+            "/api/v1/library/ignores/defaults/{ruleKey}",
             axum::routing::patch(update_shared_file_ignore_rule),
         )
-        .route(
-            "/api/v1/shared-directories/operations/reload",
-            post(reload_shared_directories),
-        )
+        .route("/api/v1/library/scan", get(library_scan).post(scan_library))
         .route(
             "/api/v1/searches/{searchId}/results/{resultId}/download",
             post(download_search_result),

@@ -165,13 +165,17 @@ async fn removed_shared_root_survives_core_restart() {
     let runtime_dir = unique_test_dir("unshared-file");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
-    let source_path = runtime_dir.join("sample.bin");
+    let shared_root = runtime_dir.join("library");
+    fs::create_dir_all(&shared_root).unwrap();
+    let source_path = shared_root.join("sample.bin");
     fs::write(&source_path, b"synthetic share payload").unwrap();
 
     let file_hash = {
         let core = open_core(&metadata_path, &transfer_root);
-        core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
+        let root = core
+            .create_library_root(&shared_root.display().to_string(), false)
             .await
+            .unwrap()
             .unwrap();
         let share = core
             .share_local_file(LocalShareCreate {
@@ -181,9 +185,7 @@ async fn removed_shared_root_survives_core_restart() {
             .await
             .unwrap();
         let file_hash = share.hash.clone();
-        core.remove_shared_directory_root(&runtime_dir.display().to_string())
-            .await
-            .unwrap();
+        core.delete_library_root(root.id).await.unwrap();
         file_hash
     };
 

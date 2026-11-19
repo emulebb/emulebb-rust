@@ -83,13 +83,16 @@ async fn shared_local_file_is_not_surfaced_by_network_search_after_core_restart(
     let runtime_dir = unique_test_dir("shared-file-search-index");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
-    let payload_path = runtime_dir.join("Local.Searchable.Payload.bin");
+    let shared_root = runtime_dir.join("library");
+    fs::create_dir_all(&shared_root).unwrap();
+    let payload_path = shared_root.join("Local.Searchable.Payload.bin");
     fs::write(&payload_path, b"shared searchable payload").unwrap();
 
     {
         let core = open_core(&metadata_path, &transfer_root);
-        core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
+        core.create_library_root(&shared_root.display().to_string(), false)
             .await
+            .unwrap()
             .unwrap();
         core.share_local_file(LocalShareCreate {
             path: payload_path.display().to_string(),

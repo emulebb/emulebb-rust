@@ -95,20 +95,15 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
     let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
     let fault = rusqlite::Connection::open_with_flags(&uri, flags).unwrap();
     fault.execute_batch("CREATE TRIGGER root_failure BEFORE DELETE ON shared_directory_root_origins WHEN old.origin='explicit' BEGIN SELECT RAISE(ABORT,'injected root failure'); END;").unwrap();
-    let make = || category::CategoryCommand::ReplaceRoots {
-        expected: vec![root_row.clone()],
-        implicit: vec![],
-        proposed: vec![],
-        sharing: category::CategorySharingContext {
-            runtime: Arc::clone(&runtime),
-            incoming: Arc::new(root.join("incoming")),
-            root_change: Arc::default(),
-            probe_sender: std::sync::Weak::new(),
-        },
-        reload: None,
+    let root_id = store.library_root_page(0, 100).unwrap().items[0].id;
+    let sharing = || category::CategorySharingContext {
+        runtime: Arc::clone(&runtime),
+        incoming: Arc::new(root.join("incoming")),
+        root_change: Arc::default(),
+        probe_sender: std::sync::Weak::new(),
     };
     assert!(matches!(
-        owner.replace_explicit_roots(make(), None).await,
+        owner.delete_root(root_id, sharing()).await,
         Err(PersistenceError::Storage(_))
     ));
     assert_eq!(
@@ -122,80 +117,276 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
         Some(vec![true])
     );
     fault.execute_batch("DROP TRIGGER root_failure;").unwrap();
-    assert!(owner.replace_explicit_roots(make(), None).await.unwrap());
+    assert!(matches!(
+        owner.delete_root(root_id, sharing()).await.unwrap(),
+        emulebb_metadata::MetadataLibraryRootDelete::Deleted(_)
+    ));
     assert!(state.lock().await.shared_directories.is_empty());
     assert!(store.shared_directory_roots().unwrap().is_empty());
     owner.close_and_drain().await.unwrap();
 }
 
 #[tokio::test]
-async fn cancelled_explicit_root_writer_is_published_before_drain() {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-    let (store, state, owner) = setup();
-    let root = crate::unique_runtime_dir("cancel-root-writer");
-    let runtime = Arc::new(
-        emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime::load_or_create_with_metadata(
-            &root.join("transfers"),
-            store.clone(),
-        )
-        .unwrap(),
+async fn cancelled_root_deletion_reconciles_memberships_and_preserves_payload() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let root = crate::unique_runtime_dir("root-delete-owner");
+    let path = root.join("sample.bin");
+    std::fs::write(&path, b"root deletion preserves payload").unwrap();
+    let resource = core
+        .metadata_store
+        .create_library_root(&root, false, true)
+        .unwrap()
+        .unwrap();
+    let descriptor = crate::SharedDirectoryRoot {
+        path: emulebb_metadata::NativePath::from(root.as_path()).display_path(),
+        watch_enabled: false,
+        monitor_owned: false,
+        accessible: true,
+        shareable: true,
+    };
+    core.state.lock().await.shared_directories = vec![descriptor.clone()];
+    let shared = core
+        .ed2k_transfers
+        .ingest_local_file(&path, "sample.bin")
+        .await
+        .unwrap();
+    let native = emulebb_ed2k::long_path::long_path(&path);
+    let fingerprint = core
+        .metadata_store
+        .local_file_instance(&native)
+        .unwrap()
+        .unwrap()
+        .verified_fingerprint;
+    assert!(
+        core.ed2k_transfers
+            .admit_monitored_shared_path(
+                &shared.file_hash,
+                &root,
+                &native,
+                std::path::Path::new("sample.bin"),
+                &fingerprint,
+                None
+            )
+            .await
+            .unwrap()
     );
+    let hash: emulebb_kad_proto::Ed2kHash = shared.file_hash.parse().unwrap();
+    assert_eq!(
+        core.ed2k_transfers
+            .admit_shared_hashes(&[hash.0], true)
+            .await
+            .unwrap(),
+        Some(vec![true])
+    );
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
     let gate = Arc::new(PublicationGate::default());
     *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
     let entered = gate.entered.notified();
     tokio::pin!(entered);
     entered.as_mut().enable();
     let writer = {
-        let owner = Arc::clone(&owner);
-        let runtime = Arc::clone(&runtime);
-        let root = root.clone();
-        tokio::spawn(async move {
-            owner
-                .replace_explicit_roots(
-                    category::CategoryCommand::ReplaceRoots {
-                        expected: vec![],
-                        implicit: vec![],
-                        proposed: vec![crate::SharedDirectoryRoot {
-                            path: root.to_string_lossy().into_owned(),
-                            watch_enabled: false,
-                            monitor_owned: false,
-                            shareable: true,
-                            accessible: true,
-                        }],
-                        sharing: category::CategorySharingContext {
-                            runtime,
-                            incoming: Arc::new(root.join("incoming")),
-                            root_change: Arc::default(),
-                            probe_sender: std::sync::Weak::new(),
-                        },
-                        reload: None,
-                    },
-                    None,
-                )
-                .await
-        })
+        let core = core.clone();
+        tokio::spawn(async move { core.delete_library_root(resource.id).await })
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
         .unwrap();
-    assert_eq!(store.shared_directory_roots().unwrap().len(), 1);
-    assert!(state.lock().await.shared_directories.is_empty());
+    assert!(
+        core.metadata_store
+            .library_root(resource.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(core.state.lock().await.shared_directories, vec![descriptor]);
     writer.abort();
     let _ = writer.await;
-    let mut drain = Box::pin(owner.close_and_drain());
-    assert!(
-        poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
     gate.release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+    // Caller cancellation leaves the admitted reconciliation running. Wait for
+    // that owned request before issuing a separate daemon shutdown cancellation.
+    wait_for_slots(&owner, 0).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), owner.close_and_drain())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(state.lock().await.shared_directories.len(), 1);
+    assert!(core.state.lock().await.shared_directories.is_empty());
+    assert_eq!(
+        core.ed2k_transfers
+            .admit_shared_hashes(&[hash.0], true)
+            .await
+            .unwrap(),
+        Some(vec![false])
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"root deletion preserves payload"
+    );
     assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn cancelled_watch_edit_publishes_only_addressed_root_without_scan() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let base = crate::unique_runtime_dir("root-watch-owner");
+    let roots: Vec<_> = ["alpha", "beta"]
+        .into_iter()
+        .map(|name| crate::SharedDirectoryRoot {
+            path: base.join(name).to_string_lossy().into_owned(),
+            watch_enabled: false,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        })
+        .collect();
+    core.metadata_store
+        .clone()
+        .replace_shared_directory_roots(
+            &roots
+                .iter()
+                .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
+                    path: root.path.clone(),
+                    watch_enabled: root.watch_enabled,
+                    monitor_owned: root.monitor_owned,
+                    shareable: root.shareable,
+                    accessible: root.accessible,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    core.state.lock().await.shared_directories = roots.clone();
+    let id = core.metadata_store.library_root_page(0, 100).unwrap().items[0].id;
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let writer = {
+        let core = core.clone();
+        tokio::spawn(async move { core.patch_library_root_watch(id, true).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .unwrap();
+    assert!(
+        core.metadata_store
+            .library_root(id)
+            .unwrap()
+            .unwrap()
+            .watch_enabled
+    );
+    assert_eq!(core.state.lock().await.shared_directories, roots);
+    writer.abort();
+    let _ = writer.await;
+    gate.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), owner.close_and_drain())
+        .await
+        .unwrap()
+        .unwrap();
+    let cached = core.state.lock().await.shared_directories.clone();
+    assert!(cached[0].watch_enabled);
+    assert_eq!(cached[1], roots[1]);
+    assert!(!core.shared_reload_running.load(Ordering::Acquire));
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn managed_root_watch_edit_preserves_ownership_and_missing_id_is_absent() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let incoming = crate::unique_runtime_dir("managed-root-watch-owner");
+    core.metadata_store
+        .clone()
+        .replace_implicit_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
+            path: incoming.to_string_lossy().into_owned(),
+            watch_enabled: false,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+    let id = core.metadata_store.library_root_page(0, 100).unwrap().items[0].id;
+    let result = core
+        .patch_library_root_watch(id, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.managed && result.watch_enabled);
+    assert_eq!(
+        core.delete_library_root(id).await.unwrap(),
+        emulebb_metadata::MetadataLibraryRootDelete::Managed
+    );
+    assert_eq!(
+        core.delete_library_root(i64::MAX).await.unwrap(),
+        emulebb_metadata::MetadataLibraryRootDelete::Missing
+    );
+    assert_eq!(core.metadata_store.library_root(id).unwrap(), Some(result));
+    assert!(
+        core.patch_library_root_watch(i64::MAX, true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!core.shared_reload_running.load(Ordering::Acquire));
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
+async fn canonical_root_creation_rejects_overlap_without_changing_existing_resources() {
+    let base = crate::unique_runtime_dir("root-create-owner");
+    let incoming = base.join("incoming");
+    let shared = base.join("shared");
+    let child = shared.join("rare");
+    std::fs::create_dir_all(&incoming).unwrap();
+    std::fs::create_dir_all(&child).unwrap();
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap()
+            .with_incoming_dir(incoming);
+    let execution = core.shared_reload_gate.lock().await;
+    // A mandatory destination participates in overlap rejection before any
+    // explicit root has been created.
+    assert!(
+        core.create_library_root(base.to_str().unwrap(), false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let created = core
+        .create_library_root(shared.to_str().unwrap(), true)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = core.state.lock().await.shared_directories.clone();
+    for path in [&base, &shared, &child] {
+        assert!(
+            core.create_library_root(path.to_str().unwrap(), false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(core.state.lock().await.shared_directories, before);
+    assert_eq!(
+        core.metadata_store.library_root(created.id).unwrap(),
+        Some(created)
+    );
+    assert_eq!(
+        core.metadata_store.library_root_page(0, 100).unwrap().total,
+        2
+    );
+    drop(execution);
+    core.drain_persistence().await.unwrap();
 }
 
 #[tokio::test]
@@ -218,7 +409,7 @@ async fn cancelled_root_request_still_scans_committed_directory() {
     let writer = {
         let core = core.clone();
         let path = root.to_string_lossy().into_owned();
-        tokio::spawn(async move { core.add_shared_directory_root(&path, false).await })
+        tokio::spawn(async move { core.create_library_root(&path, false).await })
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
@@ -279,7 +470,7 @@ async fn sealed_reload_handoff_reports_committed_root_without_scan() {
     let writer = {
         let core = core.clone();
         let path = root.to_string_lossy().into_owned();
-        tokio::spawn(async move { core.add_shared_directory_root(&path, false).await })
+        tokio::spawn(async move { core.create_library_root(&path, false).await })
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
@@ -402,27 +593,31 @@ async fn explicit_root_continuation_reconciles_each_removed_root() {
                 publish: Default::default(),
             });
     }
-    let result = owner.replace_explicit_roots(
-        category::CategoryCommand::ReplaceRoots {
-            expected: roots,
-            implicit: vec![],
-            proposed: vec![],
-            sharing: category::CategorySharingContext {
+    let ids: Vec<_> = store
+        .library_root_page(0, 100)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|root| root.id)
+        .collect();
+    for id in ids {
+        let result = owner.delete_root(
+            id,
+            category::CategorySharingContext {
                 runtime: Arc::clone(&runtime),
                 incoming: Arc::new(base.join("incoming")),
                 root_change: Arc::default(),
                 probe_sender: std::sync::Weak::new(),
             },
-            reload: None,
-        },
-        None,
-    );
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), result)
-            .await
-            .unwrap()
-            .unwrap()
-    );
+        );
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), result)
+                .await
+                .unwrap()
+                .unwrap(),
+            emulebb_metadata::MetadataLibraryRootDelete::Deleted(_)
+        ));
+    }
     assert!(state.lock().await.shared_directories.is_empty());
     assert_eq!(runtime.shared_catalog_count().await, 0);
     owner.close_and_drain().await.unwrap();

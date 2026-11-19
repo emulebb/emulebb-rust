@@ -9,12 +9,6 @@ struct SharedFilePublicationContext {
     kad_diagnostics: KadPublishDiagnostics,
 }
 
-enum ExplicitRootEdit {
-    Replace(Vec<SharedDirectoryRoot>),
-    Add(String, bool),
-    Remove(String),
-}
-
 impl EmulebbCore {
     /// Reconcile cached hashes with target-native file metadata offline.
     /// Unresolved and changed files are counted but never read or hashed.
@@ -521,51 +515,14 @@ impl EmulebbCore {
         self.shared_file_ignores()
     }
 
-    pub async fn set_shared_directories(
-        &self,
-        request: SharedDirectoriesUpdate,
-    ) -> Result<SharedDirectories> {
-        ensure!(
-            request.confirm_replace_roots,
-            "confirmReplaceRoots must be true"
-        );
-        let watch_policies: Vec<_> = request
-            .roots
-            .iter()
-            .map(|root| root.watch_enabled)
-            .collect();
-        let paths = request.roots.into_iter().map(|root| root.path).collect();
-        let crate::shared_dir_monitor::RootIoResult::Canonical(paths) =
-            crate::shared_dir_monitor::run_root_io(
-                self,
-                crate::shared_dir_monitor::RootIoRequest::Canonical(paths),
-            )
-            .await?
-        else {
-            unreachable!()
-        };
-        let mut seen = HashSet::new();
-        let mut roots = Vec::new();
-        for (canonical_path, watch_enabled) in paths.into_iter().zip(watch_policies) {
-            if seen.insert(canonical_path.clone()) {
-                roots.push(SharedDirectoryRoot {
-                    path: canonical_path,
-                    watch_enabled,
-                    monitor_owned: false,
-                    shareable: true,
-                    accessible: true,
-                });
-            }
-        }
-        self.replace_shared_directory_roots(ExplicitRootEdit::Replace(roots))
-            .await
-    }
-
-    pub async fn add_shared_directory_root(
+    /// Create one canonical root without replacing the configured collection.
+    /// Duplicate or overlapping roots return no resource and preserve existing state.
+    pub async fn create_library_root(
         &self,
         path: &str,
         watch_enabled: bool,
-    ) -> Result<SharedDirectories> {
+    ) -> Result<Option<emulebb_metadata::MetadataLibraryRoot>> {
+        shared_directories::sync_implicit_shared_directory_roots(self).await?;
         let crate::shared_dir_monitor::RootIoResult::Canonical(mut paths) =
             crate::shared_dir_monitor::run_root_io(
                 self,
@@ -575,98 +532,42 @@ impl EmulebbCore {
         else {
             unreachable!()
         };
-        let canonical_path = paths.pop().expect("one canonical root");
-        self.replace_shared_directory_roots(ExplicitRootEdit::Add(canonical_path, watch_enabled))
-            .await
+        let canonical = paths.pop().expect("one canonical root");
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner.create_root(canonical, watch_enabled, self).await?)
     }
 
-    pub async fn remove_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
-        self.replace_shared_directory_roots(ExplicitRootEdit::Remove(path.to_owned()))
-            .await
-    }
-
-    async fn replace_shared_directory_roots(
+    /// Retire one explicit root and reconcile affected hashes in bounded pages.
+    /// Managed destinations remain owned by their settings or category.
+    pub async fn delete_library_root(
         &self,
-        edit: ExplicitRootEdit,
-    ) -> Result<SharedDirectories> {
-        tracing::debug!(phase = "implicitSync", "explicit root replacement");
-        shared_directories::sync_implicit_shared_directory_roots(self).await?;
-        tracing::debug!(phase = "preparation", "explicit root replacement");
-        loop {
-            let expected = self.state.lock().await.shared_directories.clone();
-            let roots = match &edit {
-                ExplicitRootEdit::Replace(roots) => roots.clone(),
-                ExplicitRootEdit::Add(path, watch_enabled) => {
-                    let mut roots = expected.clone();
-                    roots.push(SharedDirectoryRoot {
-                        path: path.clone(),
-                        watch_enabled: *watch_enabled,
-                        monitor_owned: false,
-                        shareable: true,
-                        accessible: true,
-                    });
-                    roots
-                }
-                ExplicitRootEdit::Remove(path) => {
-                    let crate::shared_dir_monitor::RootIoResult::Remaining(roots) =
-                        crate::shared_dir_monitor::run_root_io(
-                            self,
-                            crate::shared_dir_monitor::RootIoRequest::Remove(
-                                path.clone(),
-                                expected.clone(),
-                            ),
-                        )
-                        .await?
-                    else {
-                        unreachable!()
-                    };
-                    roots
-                }
-            };
-            let implicit = shared_directories::implicit_shared_directory_roots(self).await?;
-            let implicit_paths: HashSet<_> =
-                implicit.iter().map(|root| root.path.clone()).collect();
-            let first_explicit = implicit.len();
-            let candidates = implicit
-                .iter()
-                .cloned()
-                .chain(roots.iter().cloned())
-                .collect();
-            let crate::shared_dir_monitor::RootIoResult::Inspected(prepared) =
-                crate::shared_dir_monitor::run_root_io(
-                    self,
-                    crate::shared_dir_monitor::RootIoRequest::Replace(candidates, first_explicit),
-                )
-                .await?
-            else {
-                unreachable!()
-            };
-            let prepared = prepared
-                .into_iter()
-                .map(|(root, _)| root)
-                .filter(|root| !implicit_paths.contains(&root.path))
-                .collect::<Vec<_>>();
-            let owner = self
-                .persistence_owner
-                .owner(&self.metadata_store, &self.state)?;
-            tracing::debug!(phase = "ownerCommit", "explicit root replacement");
-            if owner
-                .replace_explicit_roots(
-                    crate::persistence_owner::category::CategoryCommand::ReplaceRoots {
-                        expected,
-                        implicit,
-                        proposed: prepared,
-                        sharing: self.category_sharing_context(),
-                        reload: None,
-                    },
-                    Some(self),
-                )
-                .await?
-            {
-                tracing::debug!(phase = "completed", "explicit root replacement");
-                return Ok(self.shared_directories().await);
-            }
-        }
+        id: i64,
+    ) -> Result<emulebb_metadata::MetadataLibraryRootDelete> {
+        ensure!(id > 0, "root id must be positive");
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .delete_root(id, self.category_sharing_context())
+            .await?)
+    }
+
+    /// Change one root's watch policy by immutable identity, including managed roots.
+    /// The admitted persistence owner completes publication even if the caller disconnects.
+    pub async fn patch_library_root_watch(
+        &self,
+        id: i64,
+        enabled: bool,
+    ) -> Result<Option<emulebb_metadata::MetadataLibraryRoot>> {
+        ensure!(id > 0, "root id must be positive");
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .patch_root_watch(id, enabled, self.category_sharing_context())
+            .await?)
     }
 
     /// Synchronous core primitive: scan + hash + share the whole library, blocking
@@ -803,18 +704,4 @@ pub(crate) fn canonical_shared_directory_root(path: &str) -> Result<String> {
         .with_context(|| format!("failed to inspect {}", canonical.display()))?;
     ensure!(metadata.is_dir(), "path is not a directory");
     Ok(normal_path_display(canonical.display().to_string()))
-}
-
-pub(crate) fn removable_shared_directory_root(path: &str) -> Result<String> {
-    let path = path.trim();
-    ensure!(!path.is_empty(), "path must not be empty");
-    match fs::canonicalize(long_path(Path::new(path))) {
-        Ok(canonical) => {
-            let metadata = fs::metadata(&canonical)
-                .with_context(|| format!("failed to inspect {}", canonical.display()))?;
-            ensure!(metadata.is_dir(), "path is not a directory");
-            Ok(normal_path_display(canonical.display().to_string()))
-        }
-        Err(_) => Ok(normal_path_display(path)),
-    }
 }

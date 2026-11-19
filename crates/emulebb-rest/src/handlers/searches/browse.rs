@@ -1,5 +1,6 @@
 //! Independent bounded session metadata and materialized result resources.
 use super::super::resource;
+use super::super::resource::identity;
 use super::*;
 use axum::response::Response;
 use emulebb_metadata::{
@@ -27,17 +28,6 @@ impl Paging {
         let anchor = anchor.map(|value| identity(&value)).transpose()?;
         Ok((limit, anchor))
     }
-}
-fn identity(value: &str) -> Result<i64, Box<Response>> {
-    value
-        .parse::<i64>()
-        .ok()
-        .filter(|id| *id > 0 && id.to_string() == value)
-        .ok_or_else(|| {
-            Box::new(resource::invalid(
-                "identity must be a positive decimal i64 string",
-            ))
-        })
 }
 fn missing() -> Response {
     api_error(

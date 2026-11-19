@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use emulebb_core::{EmulebbCore, LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
+use emulebb_core::{EmulebbCore, LocalShare};
 use emulebb_ed2k::long_path::normal_path_display;
 use emulebb_index::FileIndex;
 
@@ -23,15 +23,10 @@ async fn shared_directory_roots_survive_core_restart() {
             &transfer_root,
         )
         .unwrap();
-        core.set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate {
-                watch_enabled: true,
-                path: shared_root.display().to_string(),
-            }],
-            confirm_replace_roots: true,
-        })
-        .await
-        .unwrap();
+        core.create_library_root(&(shared_root.display().to_string()), true)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     let reloaded = EmulebbCore::new(
@@ -69,15 +64,10 @@ async fn shared_directory_reload_always_shares_folder_tree() {
         &transfer_root,
     )
     .unwrap();
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate {
-            watch_enabled: false,
-            path: shared_root.display().to_string(),
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .unwrap();
+    core.create_library_root(&(shared_root.display().to_string()), false)
+        .await
+        .unwrap()
+        .unwrap();
 
     let names = shared_file_names(core.reload_shared_directories().await.unwrap());
     assert_eq!(names, vec!["nested.bin", "top.bin"]);
@@ -98,16 +88,11 @@ async fn shared_directory_model_reports_configured_roots_only() {
         &transfer_root,
     )
     .unwrap();
-    let directories = core
-        .set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate {
-                watch_enabled: false,
-                path: shared_root.display().to_string(),
-            }],
-            confirm_replace_roots: true,
-        })
+    core.create_library_root(&(shared_root.display().to_string()), false)
         .await
+        .unwrap()
         .unwrap();
+    let directories = core.shared_directories().await;
 
     let expected_root = fs::canonicalize(&shared_root)
         .unwrap()
@@ -139,15 +124,10 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
             &transfer_root,
         )
         .unwrap();
-        core.set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate {
-                watch_enabled: false,
-                path: shared_root.display().to_string(),
-            }],
-            confirm_replace_roots: true,
-        })
-        .await
-        .unwrap();
+        core.create_library_root(&(shared_root.display().to_string()), false)
+            .await
+            .unwrap()
+            .unwrap();
         let shares = core.reload_shared_directories().await.unwrap();
         let first_share = require_share_by_name(&shares, "Persisted Unicode äöü.bin");
         core.stop_shared_directory_monitor().await.unwrap();
@@ -238,17 +218,12 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
         &transfer_root,
     )
     .unwrap();
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate {
-            watch_enabled: false,
-            path: shared_root.display().to_string(),
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .unwrap();
+    core.create_library_root(&(shared_root.display().to_string()), false)
+        .await
+        .unwrap()
+        .unwrap();
 
-    // `set_shared_directories` already kicked the initial detached reload, which
+    // `create_library_root` already kicked the initial detached reload, which
     // hashes the whole fresh library. Wait for that to complete and confirm the
     // entire library is shared WITHOUT the caller driving the hash path.
     wait_for_hashing_idle(&core).await;
@@ -348,15 +323,10 @@ async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() 
     .unwrap()
     .with_incoming_dir(incoming_dir.clone());
 
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate {
-            watch_enabled: false,
-            path: shared_root.display().to_string(),
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .unwrap();
+    core.create_library_root(&(shared_root.display().to_string()), false)
+        .await
+        .unwrap()
+        .unwrap();
 
     let shares = core.reload_shared_directories().await.unwrap();
     assert_eq!(shares.len(), payloads.len(), "every file must be shared");
@@ -429,16 +399,11 @@ async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
         &transfer_root,
     )
     .unwrap();
-    // `set_shared_directories` kicks the initial detached reload; let it finish.
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate {
-            watch_enabled: false,
-            path: shared_root.display().to_string(),
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .unwrap();
+    // `create_library_root` kicks the initial detached reload; let it finish.
+    core.create_library_root(&(shared_root.display().to_string()), false)
+        .await
+        .unwrap()
+        .unwrap();
     wait_for_shared_file_names(
         &core,
         vec![

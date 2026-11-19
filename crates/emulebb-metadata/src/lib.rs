@@ -120,7 +120,10 @@ pub use local_file_store::{
     MetadataLocalShareEntry, MetadataSharedFileCursor, MetadataSharedFilePage,
     MetadataSharedFileQuery, MetadataVerifiedLocalContent,
 };
-pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot};
+pub use model::{
+    MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataLibraryRoot, MetadataLibraryRootDelete,
+    MetadataLibraryRootPage, MetadataSharedDirectoryRoot,
+};
 pub use native_file::{
     NativeFileFingerprint, NativeFileIdentity, NativeFileIdentityEvidence, NativeFileTimestamp,
 };

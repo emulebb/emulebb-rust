@@ -823,54 +823,29 @@ async fn shared_file_patch_body_uses_canonical_comment_rating_validation() {
 }
 
 #[tokio::test]
-async fn shared_directories_patch_body_uses_canonical_root_validation() {
+async fn library_root_patch_requires_a_boolean_watch_policy() {
     let app = test_router();
-    let uri = "/api/v1/shared-directories";
-    let cases = [
-        (r#"{}"#, "roots must be an array"),
-        (r#"{"roots":"C:/Shared"}"#, "roots must be an array"),
-        (
-            r#"{"roots":[1],"confirmReplaceRoots":true}"#,
-            "shared-directory root must be an object with path",
-        ),
-        (
-            r#"{"roots":["   "],"confirmReplaceRoots":true}"#,
-            "shared-directory root must be an object with path",
-        ),
-        (
-            r#"{"roots":[{}],"confirmReplaceRoots":true}"#,
-            "path must be a non-empty string path",
-        ),
-        (
-            r#"{"roots":[{"path":1}],"confirmReplaceRoots":true}"#,
-            "path must be a non-empty string path",
-        ),
-        (
-            r#"{"roots":[{"path":"C:/Shared","unexpected":1}],"confirmReplaceRoots":true}"#,
-            "unknown shared-directory root field: unexpected",
-        ),
-        (
-            r#"{"roots":[{"path":"C:/Shared","watchEnabled":"true"}],"confirmReplaceRoots":true}"#,
-            "watchEnabled must be a boolean",
-        ),
-    ];
-
-    for (body, expected_message) in cases {
+    for body in [
+        r#"{}"#,
+        r#"{"watchEnabled":null}"#,
+        r#"{"watchEnabled":1}"#,
+        r#"{"watchEnabled":"true"}"#,
+    ] {
         assert_invalid_json_response(
             app.clone(),
             "PATCH",
-            uri,
+            "/api/v1/library/roots/1",
             body.to_string(),
-            expected_message,
+            "watchEnabled must be a boolean",
         )
         .await;
     }
 }
 
 #[tokio::test]
-async fn shared_directory_root_operation_body_uses_canonical_validation() {
+async fn library_root_create_body_uses_canonical_validation() {
     let app = test_router();
-    let uri = "/api/v1/shared-directories/roots";
+    let uri = "/api/v1/library/roots";
     let cases = [
         (r#"{}"#, "path must be a non-empty string path"),
         (r#"{"path":1}"#, "path must be a non-empty string path"),
@@ -894,7 +869,7 @@ async fn shared_directory_root_operation_body_uses_canonical_validation() {
 #[tokio::test]
 async fn shared_file_ignore_pattern_body_uses_canonical_validation() {
     let app = test_router();
-    let uri = "/api/v1/shared-directories/ignores";
+    let uri = "/api/v1/library/ignores";
     let cases = [
         (r#"{}"#, "pattern must be a non-empty string"),
         (r#"{"pattern":1}"#, "pattern must be a non-empty string"),
@@ -914,7 +889,7 @@ async fn shared_file_ignore_pattern_body_uses_canonical_validation() {
 #[tokio::test]
 async fn shared_file_ignore_rule_body_uses_canonical_validation() {
     let app = test_router();
-    let uri = "/api/v1/shared-directories/ignores/defaults/temporary-file";
+    let uri = "/api/v1/library/ignores/defaults/temporary-file";
     let cases = [
         (r#"{}"#, "enabled is required"),
         (r#"{"enabled":"true"}"#, "enabled must be a boolean"),
@@ -963,12 +938,6 @@ async fn destructive_confirmation_bodies_use_canonical_validation() {
             "/api/v1/logs/operations/clear",
             r#"{"confirmClearLogs":false}"#,
             "confirmClearLogs must be true",
-        ),
-        (
-            "PATCH",
-            "/api/v1/shared-directories",
-            r#"{"roots":[{"path":"C:/Shared"}],"confirmReplaceRoots":false}"#,
-            "confirmReplaceRoots must be true",
         ),
     ];
 
