@@ -1,6 +1,14 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 
+/** Navigate one bounded cursor page without accumulating earlier rows. */
+export function CursorControls(props: { cursor: string | null; nextCursor: string | null; loading: boolean; change: (cursor: string | null) => void }) {
+  return <div class="row-actions">
+    <button class="btn" type="button" disabled={props.loading || props.cursor === null} onClick={() => props.change(null)}>First page</button>
+    <button class="btn" type="button" disabled={props.loading || !props.nextCursor} onClick={() => props.change(props.nextCursor)}>Next page</button>
+  </div>;
+}
+
 /** Retain every table column while keeping overflow local and keyboard reachable. */
 export function TableScroll(props: { children: ComponentChildren; label?: string }) {
   const container = useRef<HTMLDivElement>(null);

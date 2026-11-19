@@ -151,7 +151,7 @@ fn score_breakdown() -> UploadScoreBreakdown {
 
 fn populated_upload(score_breakdown: Option<UploadScoreBreakdown>) -> Upload {
     Upload {
-        client_id: "0102030405060708090a0b0c0d0e0f10".to_string(),
+        id: "12345678-1234-4234-8234-123456789abc".to_string(),
         user_name: "peer".to_string(),
         user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
         client_software: "eMule".to_string(),
@@ -192,7 +192,7 @@ fn upload_serializes_without_queue_rank() {
         "Upload must not serialize `queueRank` (it belongs to source JSON)"
     );
     // Sanity: a representative contract field is present.
-    assert_eq!(value["clientId"], json!("0102030405060708090a0b0c0d0e0f10"));
+    assert_eq!(value["id"], json!("12345678-1234-4234-8234-123456789abc"));
 }
 
 #[test]

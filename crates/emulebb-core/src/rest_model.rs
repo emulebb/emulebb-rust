@@ -1201,7 +1201,7 @@ pub struct TransferComment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
-    pub client_id: String,
+    pub id: String,
     pub user_name: String,
     pub user_hash: Option<String>,
     pub client_software: String,

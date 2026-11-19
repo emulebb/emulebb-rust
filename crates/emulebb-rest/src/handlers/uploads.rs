@@ -45,9 +45,9 @@ pub(crate) async fn uploads(State(state): State<RestState>) -> impl IntoResponse
 
 pub(crate) async fn upload(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    upload_by_client_id(state, client_id, false).await
+    upload_by_id(state, id, false).await
 }
 
 pub(crate) async fn upload_queue(
@@ -74,17 +74,13 @@ pub(crate) async fn upload_queue(
 
 pub(crate) async fn upload_queue_client(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    upload_by_client_id(state, client_id, true).await
+    upload_by_id(state, id, true).await
 }
 
-pub(crate) async fn upload_by_client_id(
-    state: RestState,
-    client_id: String,
-    waiting_queue: bool,
-) -> Response {
-    match state.core.upload(&client_id, waiting_queue).await {
+pub(crate) async fn upload_by_id(state: RestState, id: String, waiting_queue: bool) -> Response {
+    match state.core.upload(&id, waiting_queue).await {
         Some(upload) if waiting_queue => api_ok(upload_queue_entry(upload)).into_response(),
         Some(upload) => api_ok(upload).into_response(),
         None if waiting_queue => api_error(
@@ -104,9 +100,9 @@ pub(crate) async fn upload_by_client_id(
 
 pub(crate) async fn upload_remove(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.core.remove_upload_client(&client_id).await {
+    match state.core.remove_upload_client(&id).await {
         Ok(Some(removed)) => api_ok(json!({"ok": true, "removed": removed})).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -125,9 +121,9 @@ pub(crate) async fn upload_remove(
 
 pub(crate) async fn upload_release_slot(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.core.release_upload_slot(&client_id).await {
+    match state.core.release_upload_slot(&id).await {
         Ok(Some(())) => api_ok(json!({"ok": true})).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -146,9 +142,9 @@ pub(crate) async fn upload_release_slot(
 
 pub(crate) async fn upload_add_friend(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.core.add_upload_client_friend(&client_id).await {
+    match state.core.add_upload_client_friend(&id).await {
         Ok(Some(friend)) => api_ok(friend).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -162,9 +158,9 @@ pub(crate) async fn upload_add_friend(
 
 pub(crate) async fn upload_remove_friend(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.core.remove_upload_client_friend(&client_id).await {
+    match state.core.remove_upload_client_friend(&id).await {
         Ok(Some(_friend)) => api_ok(json!({"ok": true})).into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "friend not found").into_response()
@@ -175,9 +171,9 @@ pub(crate) async fn upload_remove_friend(
 
 pub(crate) async fn upload_ban(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.core.ban_upload_client(&client_id).await {
+    match state.core.ban_upload_client(&id).await {
         Ok(Some(banned)) => api_ok(json!({"ok": true, "banned": banned})).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -196,9 +192,9 @@ pub(crate) async fn upload_ban(
 
 pub(crate) async fn upload_unban(
     State(state): State<RestState>,
-    Path(client_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.core.unban_upload_client(&client_id).await {
+    match state.core.unban_upload_client(&id).await {
         Ok(Some(banned)) => api_ok(json!({"ok": true, "banned": banned})).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -239,7 +235,7 @@ mod tests {
             cooldown_remaining_ms: 0,
         };
         let upload = Upload {
-            client_id: "0102030405060708090a0b0c0d0e0f10".to_string(),
+            id: "12345678-1234-4234-8234-123456789abc".to_string(),
             user_name: "peer".to_string(),
             user_hash: None,
             client_software: "eMule".to_string(),
@@ -284,7 +280,7 @@ mod tests {
     #[test]
     fn upload_queue_entry_serializes_wait_rank() {
         let upload = Upload {
-            client_id: "0102030405060708090a0b0c0d0e0f10".to_string(),
+            id: "12345678-1234-4234-8234-123456789abc".to_string(),
             user_name: "peer".to_string(),
             user_hash: None,
             client_software: "eMule".to_string(),

@@ -1015,7 +1015,7 @@ test("top refresh preserves the shared-files query, page, and selection", async 
   await expect(panel.getByText("Second Shared Sample.bin", { exact: true })).toBeVisible();
 
   const requestCount = requests.filter((request) => request.path === "shared-files").length;
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect.poll(() => requests.filter((request) => request.path === "shared-files").length).toBeGreaterThan(requestCount);
 
   const latest = requests.filter((request) => request.path === "shared-files").at(-1);

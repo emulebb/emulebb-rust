@@ -77,7 +77,7 @@ const snapshot = {
   kad: { enabled: true, connected: true, firewalled: false },
   uploads: [
     {
-      clientId: "active-upload-peer",
+      id: "12345678-1234-4234-8234-123456789abc",
       userName: "Active Upload Peer",
       uploadState: "uploading",
       uploading: true,
@@ -86,7 +86,7 @@ const snapshot = {
   ],
   uploadQueue: [
     {
-      clientId: "waiting-upload-peer",
+      id: "12345678-1234-4234-8234-123456789abd",
       userName: "Waiting Upload Peer",
       uploadState: "queued",
       waitingQueue: true,
@@ -147,6 +147,12 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       return;
     }
 
+    if (request.method() === "GET" && (path === "library/tags" || /^library\/files\/[0-9a-f]{32}\/tags$/.test(path))) {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: [{ name: "Alpha" }], meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
+      }) });
+      return;
+    }
     if (request.method() === "GET" && (path === "downloads" || /^downloads\/1\/(sources|parts|comments)$/.test(path))) {
       const data = path === "downloads"
         ? url.searchParams.get("view") === "completed" ? [] : mockDownloadFixture()

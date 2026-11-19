@@ -70,6 +70,12 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
         .await;
     assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
     assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let waiting_id = runtime.upload_queue_snapshot().await[1].id;
+    assert_eq!(
+        runtime.poll_upload_session(&waiting_handle, true).await,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+    assert_eq!(runtime.upload_queue_snapshot().await[1].id, waiting_id);
 
     runtime
         .apply_upload_queue_policy(&Ed2kUploadQueueRuntimeConfig {
@@ -91,6 +97,12 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
         runtime.poll_upload_session(&waiting_handle, true).await,
         Ed2kUploadSessionStatus::Granted
     );
+    let promoted = runtime
+        .upload_client_snapshot(&waiting_id.to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(promoted.id, waiting_id);
+    assert_eq!(promoted.phase, Ed2kUploadSessionPhaseSnapshot::Granted);
 }
 
 #[tokio::test]
@@ -278,11 +290,11 @@ async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
     assert_eq!(snapshot[1].file_hash, file_hash.to_string());
 
     let active = runtime
-        .upload_client_snapshot(&hex::encode([0x11; 16]), false)
+        .upload_client_snapshot(&snapshot[0].id.to_string(), false)
         .await
         .unwrap();
     let waiting = runtime
-        .upload_client_snapshot(&hex::encode([0x22; 16]), true)
+        .upload_client_snapshot(&snapshot[1].id.to_string(), true)
         .await
         .unwrap();
     assert_eq!(active.phase, snapshot[0].phase);
@@ -294,19 +306,19 @@ async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
     assert_eq!(waiting.file_hash, snapshot[1].file_hash);
     assert!(
         runtime
-            .upload_client_snapshot(&hex::encode([0x11; 16]), true)
+            .upload_client_snapshot(&snapshot[0].id.to_string(), true)
             .await
             .is_none()
     );
     assert!(
         runtime
-            .upload_client_snapshot(&hex::encode([0x22; 16]), false)
+            .upload_client_snapshot(&snapshot[1].id.to_string(), false)
             .await
             .is_none()
     );
     assert!(
         runtime
-            .upload_client_snapshot(&hex::encode([0x44; 16]), true)
+            .upload_client_snapshot(&uuid::Uuid::new_v4().to_string(), true)
             .await
             .is_none()
     );
@@ -705,18 +717,25 @@ async fn upload_queue_release_client_selects_waiter_or_active_slot() {
         .await;
     assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
 
-    assert!(runtime.release_upload_client("10.0.0.2:4662", true).await);
+    let entries = runtime.upload_queue_snapshot().await;
+    let active_id = entries[0].id.to_string();
+    let waiting_id = entries[1].id.to_string();
+    assert_ne!(active_id, waiting_id);
+    assert!(runtime.release_upload_client(&waiting_id, true).await);
     assert_eq!(
         runtime.poll_upload_session(&waiting_handle, true).await,
         Ed2kUploadSessionStatus::Stale
     );
 
-    assert!(
-        runtime
-            .release_upload_client("11111111111111111111111111111111", false)
-            .await
-    );
+    assert!(runtime.release_upload_client(&active_id, false).await);
     assert!(runtime.upload_queue_snapshot().await.is_empty());
+    let (_replacement, status) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 1), &file_hash)
+        .await;
+    assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+    let replacement_id = runtime.upload_queue_snapshot().await[0].id.to_string();
+    assert_ne!(replacement_id, active_id);
+    assert_ne!(replacement_id, waiting_id);
 }
 
 #[tokio::test]

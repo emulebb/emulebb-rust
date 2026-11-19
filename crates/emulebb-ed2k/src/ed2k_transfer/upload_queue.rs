@@ -474,6 +474,8 @@ struct Ed2kUploadQueuedRange {
 /// Read-only snapshot of one inbound upload queue session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kUploadQueueSnapshotEntry {
+    /// Ephemeral management identity retained for this queue entry's lifetime.
+    pub id: uuid::Uuid,
     pub ip: IpAddr,
     pub tcp_port: u16,
     /// Reask correlation/framing mirrored from the peer identity (see that struct).
@@ -548,6 +550,7 @@ impl Ed2kWaitingReaskLookup {
 
 #[derive(Debug, Clone)]
 struct Ed2kUploadSessionEntry {
+    public_id: uuid::Uuid,
     phase: Ed2kUploadSessionPhase,
     connection_id: u64,
     /// Whether a live connection currently owns this session. A waiter whose
@@ -986,6 +989,7 @@ impl Ed2kUploadQueueState {
         self.sessions.insert(
             key.clone(),
             Ed2kUploadSessionEntry {
+                public_id: uuid::Uuid::new_v4(),
                 phase,
                 connection_id,
                 connected: true,
@@ -1447,13 +1451,16 @@ impl Ed2kUploadQueueState {
         waiting_queue: bool,
         now: Instant,
     ) -> bool {
+        let Ok(id) = uuid::Uuid::try_parse(client_id) else {
+            return false;
+        };
         self.reap_expired_sessions(now);
         let Some(key) = self
             .sessions
             .iter()
-            .find(|(key, session)| {
+            .find(|(_, session)| {
                 let is_waiting = session.phase == Ed2kUploadSessionPhase::Waiting;
-                is_waiting == waiting_queue && upload_client_id_matches(&key.peer, client_id)
+                is_waiting == waiting_queue && session.public_id == id
             })
             .map(|(key, _session)| key.clone())
         else {
@@ -1777,22 +1784,17 @@ impl Ed2kUploadQueueState {
         waiting_queue: bool,
         now: Instant,
     ) -> Option<Ed2kUploadQueueSnapshotEntry> {
+        let id = uuid::Uuid::try_parse(client_id).ok()?;
         self.reap_expired_sessions(now);
-        // WHY: detail reads must not clone the whole queue or hydrate unrelated
-        // file manifests. Preserve list ordering when a peer has several entries.
+        // WHY: detail reads select one lifetime identity before cloning state
+        // or hydrating a file view, keeping unrelated queue data out of the read.
         self.sessions
             .iter()
-            .filter(|(key, session)| {
+            .find(|(_, session)| {
                 (session.phase == Ed2kUploadSessionPhase::Waiting) == waiting_queue
-                    && key
-                        .peer
-                        .user_hash
-                        .map(hex::encode)
-                        .unwrap_or_else(|| format!("{}:{}", key.peer.ip, key.peer.tcp_port))
-                        == client_id
+                    && session.public_id == id
             })
             .map(|(key, session)| self.snapshot_entry(key, session, now))
-            .min_by(Self::compare_snapshot_entries)
     }
 
     fn snapshot_entry(
@@ -1802,6 +1804,7 @@ impl Ed2kUploadQueueState {
         now: Instant,
     ) -> Ed2kUploadQueueSnapshotEntry {
         Ed2kUploadQueueSnapshotEntry {
+            id: session.public_id,
             ip: key.peer.ip,
             tcp_port: key.peer.tcp_port,
             udp_port: key.peer.udp_port,
@@ -3140,9 +3143,7 @@ mod rate_meter;
 mod score;
 pub(crate) use helpers::is_low_id_client_id;
 pub(super) use helpers::{credit_score_permille, upload_priority_score};
-use helpers::{
-    phase_snapshot, upload_client_id_matches, upload_snapshot_sort_key, upload_speed_bytes_per_sec,
-};
+use helpers::{phase_snapshot, upload_snapshot_sort_key, upload_speed_bytes_per_sec};
 use rate_meter::{AGGREGATE_RATE_WINDOW, PER_SLOT_RATE_WINDOW, WindowedRateMeter};
 use score::UploadScoreModifiers;
 

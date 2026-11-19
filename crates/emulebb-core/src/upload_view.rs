@@ -20,9 +20,6 @@ pub(crate) fn upload_from_snapshot(
     view: Option<&Ed2kFileServingView>,
 ) -> Upload {
     let user_hash = entry.user_hash.map(hex::encode);
-    let client_id = user_hash
-        .clone()
-        .unwrap_or_else(|| format!("{}:{}", entry.ip, entry.tcp_port));
     let requested_parts_total = view
         .map(|view| view.file_size.div_ceil(view.piece_size) as u32)
         .unwrap_or_default();
@@ -62,7 +59,7 @@ pub(crate) fn upload_from_snapshot(
         cooldown_remaining_ms: 0,
     };
     Upload {
-        client_id,
+        id: entry.id.to_string(),
         user_name: format!("{}:{}", entry.ip, entry.tcp_port),
         user_hash,
         client_software: entry
