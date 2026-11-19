@@ -334,6 +334,7 @@ pub(crate) struct SharedDirMonitor {
     /// native watcher without leaving an unowned thread.
     debouncer:
         Option<Debouncer<notify_debouncer_full::notify::RecommendedWatcher, RecommendedCache>>,
+    #[cfg(target_os = "linux")]
     watched_roots: Vec<PathBuf>,
     consumer: tokio::task::JoinHandle<()>,
 }
@@ -341,6 +342,7 @@ pub(crate) struct SharedDirMonitor {
 impl SharedDirMonitor {
     /// Restore native recursive coverage before the reconciliation scan.
     /// Existing registrations stay installed while new directories are added.
+    #[cfg(target_os = "linux")]
     fn refresh_watch_coverage(&mut self) -> usize {
         let Some(debouncer) = self.debouncer.as_mut() else {
             return 0;
@@ -467,6 +469,7 @@ where
     let consumer = tokio::spawn(run_consumer(action_rx, reconcile_required, apply));
     Some(SharedDirMonitor {
         debouncer: Some(debouncer),
+        #[cfg(target_os = "linux")]
         watched_roots,
         consumer,
     })
@@ -749,6 +752,7 @@ async fn reconcile_root_health(
 }
 
 pub(crate) enum RootIoRequest {
+    #[cfg(target_os = "linux")]
     RefreshWatchCoverage(Arc<tokio::sync::Mutex<Option<SharedDirMonitor>>>),
     Inspect(Vec<SharedDirectoryRoot>),
     InspectDelivery(Vec<SharedDirectoryRoot>, PathBuf, NativeFileFingerprint),
@@ -758,6 +762,7 @@ pub(crate) enum RootIoRequest {
 }
 
 pub(crate) enum RootIoResult {
+    #[cfg(target_os = "linux")]
     WatchesRefreshed(usize),
     Inspected(Vec<(SharedDirectoryRoot, bool)>),
     Canonical(Vec<String>),
@@ -802,6 +807,7 @@ pub(crate) async fn run_root_io(
             request => request,
         };
         match request {
+            #[cfg(target_os = "linux")]
             RootIoRequest::RefreshWatchCoverage(monitor) => {
                 let mut slot = monitor.blocking_lock();
                 Ok(RootIoResult::WatchesRefreshed(
@@ -1431,6 +1437,7 @@ async fn rebuild_shared_directory_watch(core: &EmulebbCore) {
                     // the existing watcher first so the scan bridges that gap.
                     // Use the tracked I/O owner: registration walks directories
                     // and must survive caller cancellation without an orphan job.
+                    #[cfg(target_os = "linux")]
                     match run_root_io(
                         &applier,
                         RootIoRequest::RefreshWatchCoverage(Arc::clone(
