@@ -45,17 +45,6 @@ CREATE TABLE app_settings (
     )
 ) STRICT;
 
-CREATE TABLE settings (
-    section TEXT NOT NULL,
-    key TEXT NOT NULL,
-    value_json TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-    PRIMARY KEY(section, key),
-    CHECK(length(trim(section)) > 0),
-    CHECK(length(trim(key)) > 0),
-    CHECK(json_valid(value_json))
-) STRICT, WITHOUT ROWID;
-
 CREATE TABLE categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
     name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(instr(name, char(0)) = 0 AND length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[A-Za-z0-9]' AND name NOT GLOB '*[^A-Za-z0-9-]*'),
