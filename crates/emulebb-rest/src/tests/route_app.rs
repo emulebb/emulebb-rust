@@ -33,7 +33,7 @@ async fn atomic_settings_response(app: &Router, method: &str, body: Value) -> (S
         .oneshot(
             Request::builder()
                 .method(method)
-                .uri("/api/v1/app/settings")
+                .uri("/api/v1/settings")
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(if method == "GET" {
@@ -50,263 +50,276 @@ async fn atomic_settings_response(app: &Router, method: &str, body: Value) -> (S
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-fn atomic_settings_rows(connection: &rusqlite::Connection) -> Vec<(String, String, String, i64)> {
+fn saved_settings_row(connection: &rusqlite::Connection) -> (i64, String) {
     connection
-        .prepare(
-            "SELECT section, key, value_json, updated_at_ms FROM settings ORDER BY section, key",
+        .query_row(
+            "SELECT revision,document_json FROM app_settings WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap()
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
 }
 
 #[tokio::test]
-async fn standalone_server_preferences_round_trip_through_sqlite_and_restart() {
-    for field in ["useServerPriorities", "autoConnectStaticOnly"] {
-        for value in [false, true] {
-            let (app, core, database, connection) = atomic_settings_router();
-            let (status, before) = atomic_settings_response(&app, "GET", Value::Null).await;
-            assert_eq!(status, StatusCode::OK);
-            let runtime_core = core.core_settings().await;
-            let mut expected = before["data"].clone();
-            expected["ed2k"][field] = json!(value);
-            let (status, patched) =
-                atomic_settings_response(&app, "PATCH", json!({"ed2k": {field: value}})).await;
-            assert_eq!(status, StatusCode::OK, "{field}={value}: {patched}");
-            assert_eq!(patched["data"], expected);
-            let (status, fetched) = atomic_settings_response(&app, "GET", Value::Null).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(fetched["data"], expected);
-            let persisted: String = connection
-                .query_row(
-                    "SELECT value_json FROM settings WHERE section = 'ed2k' AND key = ?1",
-                    [field],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(
-                serde_json::from_str::<Value>(&persisted).unwrap(),
-                json!(value)
-            );
-            assert_eq!(core.core_settings().await, runtime_core);
-
-            let rows = atomic_settings_rows(&connection);
-            for empty in [json!({}), json!({"ed2k": {}})] {
-                let (status, response) = atomic_settings_response(&app, "PATCH", empty).await;
-                assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-                assert_eq!(response["error"]["code"], "INVALID_ARGUMENT");
-                assert_eq!(atomic_settings_rows(&connection), rows);
-            }
-
-            // Reopen only after the original owner is dropped: these settings
-            // remain durable configuration for the next daemon startup.
-            drop(app);
-            drop(core);
-            drop(connection);
-            let restored = EmulebbCore::new(
-                "test",
-                FileIndex::open(database).unwrap(),
-                unique_test_dir("server-preferences-restart"),
-            )
-            .unwrap();
-            assert_eq!(
-                serde_json::to_value(restored.app_settings().await.unwrap()).unwrap(),
-                expected,
-            );
-        }
-    }
+async fn settings_get_captures_complete_saved_effective_and_application_state() {
+    let (app, core, _, sql) = atomic_settings_router();
+    let before = saved_settings_row(&sql);
+    let (status, read) = atomic_settings_response(&app, "GET", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["meta"]["settingsRevision"], "1");
+    assert_eq!(
+        read["data"]["saved"]["network"]["nickname"],
+        json!({"mode":"default","value":"eMule"})
+    );
+    assert_eq!(
+        read["data"]["effective"],
+        serde_json::to_value(core.effective_settings().await.unwrap()).unwrap()
+    );
+    assert_eq!(
+        read["data"]["application"],
+        json!({"pendingRestart":[],"failed":[]})
+    );
+    assert_eq!(read["data"].as_object().unwrap().len(), 3);
+    assert_eq!(read["data"]["saved"].as_object().unwrap().len(), 5);
+    assert_eq!(saved_settings_row(&sql), before);
 }
 
 #[tokio::test]
-async fn invalid_nat_boolean_with_valid_siblings_preserves_all_settings() {
-    let (app, core, _, connection) = atomic_settings_router();
-    let (_, before) = atomic_settings_response(&app, "GET", Value::Null).await;
-    let runtime_core = core.core_settings().await;
-    let rows = atomic_settings_rows(&connection);
-    for field in ["enabled", "requireInitialMapping"] {
-        let (status, rejected) = atomic_settings_response(
-            &app,
-            "PATCH",
-            json!({
-                "core": {"uploadLimitKiBps": 1024},
-                "ed2k": {"useServerPriorities": false},
-                "nat": {field: null, "leaseDurationSecs": 7200},
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-        assert_eq!(rejected["error"]["code"], "INVALID_ARGUMENT");
-        let (status, after) = atomic_settings_response(&app, "GET", Value::Null).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(after["data"], before["data"]);
-        assert_eq!(atomic_settings_rows(&connection), rows);
-        assert_eq!(core.core_settings().await, runtime_core);
-    }
-}
-
-#[tokio::test]
-async fn nullable_nat_addresses_can_still_be_cleared_and_remain_cleared_after_restart() {
-    let (app, core, database, connection) = atomic_settings_router();
-    let (_, before) = atomic_settings_response(&app, "GET", Value::Null).await;
-    let (status, seeded) = atomic_settings_response(
-        &app,
-        "PATCH",
-        json!({"nat": {
-            "bindIp": "192.0.2.10", "pcpServerIp": "192.0.2.1",
-            "igdIp": "192.0.2.2", "externalIpOverride": "198.51.100.24",
-        }}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{seeded}");
-    let fields = ["bindIp", "pcpServerIp", "igdIp", "externalIpOverride"];
-    for field in fields {
-        assert!(seeded["data"]["nat"][field].is_string());
-    }
-    let (status, cleared) = atomic_settings_response(
-        &app,
-        "PATCH",
-        json!({"nat": {
-            "bindIp": null, "pcpServerIp": null,
-            "igdIp": null, "externalIpOverride": null,
-        }}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{cleared}");
-    let mut expected = before["data"].clone();
-    for field in fields {
-        expected["nat"][field] = Value::Null;
-        let persisted: String = connection
-            .query_row(
-                "SELECT value_json FROM settings WHERE section = 'nat' AND key = ?1",
-                [field],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&persisted).unwrap(),
-            Value::Null
-        );
-    }
-    assert_eq!(cleared["data"], expected);
-    let (_, fetched) = atomic_settings_response(&app, "GET", Value::Null).await;
-    assert_eq!(fetched["data"], expected);
+async fn settings_patch_saves_restart_values_and_applies_only_admitted_live_values() {
+    let (app, core, database, _) = atomic_settings_router();
+    let (status,updated)=atomic_settings_response(&app,"PATCH",json!({"expectedRevision":"1","set":{
+        "network":{"nickname":"Sample Client","servers":{"usePriorities":false,"staticOnly":true}},
+        "transfers":{"uploadLimitBytesPerSecond":2097152,"upload":{"baseSlots":4,"queueCapacity":3000}}
+    }})).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["meta"]["settingsRevision"], "2");
+    assert_eq!(
+        updated["data"]["saved"]["network"]["nickname"],
+        json!({"mode":"custom","value":"Sample Client"})
+    );
+    assert_eq!(updated["data"]["effective"]["network"]["nickname"], "eMule");
+    assert_eq!(
+        updated["data"]["effective"]["transfers"]["uploadLimitBytesPerSecond"],
+        2097152
+    );
+    assert_eq!(
+        updated["data"]["application"]["pendingRestart"],
+        json!([
+            "network.nickname",
+            "network.servers.usePriorities",
+            "network.servers.staticOnly"
+        ])
+    );
     drop(app);
+    core.drain_persistence().await.unwrap();
     drop(core);
-    drop(connection);
     let restored = EmulebbCore::new(
         "test",
         FileIndex::open(database).unwrap(),
-        unique_test_dir("nullable-nat-restart"),
+        unique_test_dir("settings-restart"),
     )
     .unwrap();
-    assert_eq!(
-        serde_json::to_value(restored.app_settings().await.unwrap()).unwrap(),
-        expected,
-    );
+    let values = restored.effective_settings().await.unwrap();
+    assert_eq!(values.network.nickname, "Sample Client");
+    assert!(!values.network.servers.use_priorities);
+    assert!(values.network.servers.static_only);
+    assert_eq!(values.transfers.upload.base_slots, 4);
+    assert_eq!(values.transfers.upload.queue_capacity, 3000);
 }
 
 #[tokio::test]
-async fn settings_http_middleware_rejects_invalid_core_before_any_setting_changes() {
-    let (app, core, _, connection) = atomic_settings_router();
-    let before = core.app_settings().await.unwrap();
-    let rows = atomic_settings_rows(&connection);
-    let (status, response) = atomic_settings_response(
+async fn stale_settings_revision_returns_conflict_without_mutation() {
+    let (app, core, _, sql) = atomic_settings_router();
+    let change = json!({"expectedRevision":"1","set":{"transfers":{"upload":{"baseSlots":4}}}});
+    assert_eq!(
+        atomic_settings_response(&app, "PATCH", change.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let before = saved_settings_row(&sql);
+    let effective = core.effective_settings().await.unwrap();
+    let (status, error) = atomic_settings_response(&app, "PATCH", change).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["code"], "SETTINGS_CONFLICT");
+    assert_eq!(error["error"]["details"]["actualRevision"], "2");
+    assert_eq!(saved_settings_row(&sql), before);
+    assert_eq!(core.effective_settings().await.unwrap(), effective);
+}
+
+#[tokio::test]
+async fn nullable_values_arrays_omission_and_explicit_resets_preserve_saved_modes() {
+    let (app, _, _, _) = atomic_settings_router();
+    let (status,first)=atomic_settings_response(&app,"PATCH",json!({"expectedRevision":"1","set":{
+        "network":{"nat":{"pcpServerIp":"192.0.2.1","igdIp":"192.0.2.2","backendOrder":["upnp"]}}
+    }})).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, second) = atomic_settings_response(
         &app,
         "PATCH",
-        json!({
-            "nat": {"enabled": !before.nat.enabled}, "core": {"uploadLimitKiBps": 0},
-        }),
+        json!({"expectedRevision":"2","set":{
+        "network":{"nat":{"pcpServerIp":null}}
+    },"reset":["network.nat.backendOrder"]}),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(response["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(core.app_settings().await.unwrap(), before);
-    assert_eq!(core.core_settings().await, before.core);
-    assert_eq!(atomic_settings_rows(&connection), rows);
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let nat = &second["data"]["saved"]["network"]["nat"];
+    assert_eq!(nat["pcpServerIp"], json!({"mode":"default","value":null}));
+    assert_eq!(
+        nat["igdIp"],
+        first["data"]["saved"]["network"]["nat"]["igdIp"]
+    );
+    assert_eq!(
+        nat["backendOrder"],
+        json!({"mode":"default","value":["pcp-natpmp","upnp"]})
+    );
+    let (status, third) = atomic_settings_response(
+        &app,
+        "PATCH",
+        json!({"expectedRevision":"3","set":{"network":{"nat":{"igdIp":"192.0.2.2"}}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+    assert_eq!(third["meta"]["settingsRevision"], "4");
+    assert_eq!(third["data"], second["data"]);
 }
 
 #[tokio::test]
-async fn valid_settings_http_patch_rolls_back_every_section_when_later_sql_write_fails() {
-    let (app, core, database, connection) = atomic_settings_router();
-    let (_, before) = atomic_settings_response(&app, "GET", Value::Null).await;
-    let rows = atomic_settings_rows(&connection);
-    let old_core = core.core_settings().await;
-    let cache_ttl = before["data"]["daemon"]["hostnameLookup"]["cacheTtlSecs"]
-        .as_u64()
-        .unwrap()
-        .checked_add(1)
-        .unwrap();
-    let nat = !before["data"]["nat"]["enabled"].as_bool().unwrap();
-    let request = json!({
-        "core": {"uploadLimitKiBps": 1024},
-        "daemon": {"hostnameLookup": {"cacheTtlSecs": cache_ttl}}, "nat": {"enabled": nat},
-    });
-    assert!(
-        crate::route_body_metadata::validate_json_body_fields(
-            "PATCH",
-            "/api/v1/app/settings",
-            request.to_string().as_bytes(),
-        )
-        .is_ok(),
-        "rollback fixture must pass the current request-body validator: {request}",
-    );
-    // WHY: a rejected fixture never reaches SQLite. Prove identical HTTP
-    // admission separately, then isolate the later-section trigger as the fault.
-    let (control_app, _, _, _) = atomic_settings_router();
-    let (control_status, control_response) =
-        atomic_settings_response(&control_app, "PATCH", request.clone()).await;
+async fn settings_validation_reports_independent_issues_and_preserves_saved_and_effective_state() {
+    let (app, core, _, sql) = atomic_settings_router();
+    let before = saved_settings_row(&sql);
+    let effective = core.effective_settings().await.unwrap();
+    let (status,error)=atomic_settings_response(&app,"PATCH",json!({"expectedRevision":"1","set":{
+        "network":{"nickname":"","nat":{"enabled":"private-input"}},"transfers":{"upload":{"baseSlots":0}}
+    }})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["error"]["code"], "INVALID_ARGUMENT");
+    let issues = error["error"]["details"]["issues"].as_array().unwrap();
     assert_eq!(
-        control_status,
-        StatusCode::OK,
-        "identical request without the trigger: {control_response}",
+        issues
+            .iter()
+            .map(|v| v["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "network.nickname",
+            "network.nat.enabled",
+            "transfers.upload.baseSlots"
+        ]
     );
-    // NAT is written after core/daemon; all their rows must roll back together.
-    connection.execute_batch(
-        "CREATE TRIGGER synthetic_settings_failure BEFORE INSERT ON settings
-         WHEN NEW.section = 'nat' BEGIN SELECT RAISE(ABORT, 'synthetic later settings failure'); END;",
-    ).unwrap();
-    let (status, response) = atomic_settings_response(&app, "PATCH", request.clone()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "INVALID_ARGUMENT", "{response}");
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .is_some_and(|message| !message.trim().is_empty()),
-        "injected failure must retain the public error envelope: {response}",
-    );
-    assert_eq!(atomic_settings_rows(&connection), rows);
-    assert_eq!(core.core_settings().await, old_core);
-    let (_, after) = atomic_settings_response(&app, "GET", Value::Null).await;
-    assert_eq!(after["data"], before["data"]);
+    assert!(!error.to_string().contains("private-input"));
+    assert_eq!(saved_settings_row(&sql), before);
+    assert_eq!(core.effective_settings().await.unwrap(), effective);
+}
 
-    connection
-        .execute_batch("DROP TRIGGER synthetic_settings_failure")
+#[tokio::test]
+async fn settings_sql_failure_is_http_500_and_an_explicit_retry_can_commit() {
+    let (app, core, _, sql) = atomic_settings_router();
+    let before = saved_settings_row(&sql);
+    let effective = core.effective_settings().await.unwrap();
+    let request = json!({"expectedRevision":"1","set":{"network":{"nickname":"Sample Client"},"transfers":{"uploadLimitBytesPerSecond":1048576}}});
+    sql.execute_batch("CREATE TRIGGER synthetic_settings_failure BEFORE UPDATE ON app_settings BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    let (status, error) = atomic_settings_response(&app, "PATCH", request.clone()).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+    assert_eq!(error["error"]["code"], "PERSISTENCE_FAILED");
+    assert_eq!(saved_settings_row(&sql), before);
+    assert_eq!(core.effective_settings().await.unwrap(), effective);
+    sql.execute_batch("DROP TRIGGER synthetic_settings_failure;")
         .unwrap();
-    let (status, committed) = atomic_settings_response(&app, "PATCH", request).await;
-    assert_eq!(status, StatusCode::OK, "{committed}");
-    let mut expected = before["data"].clone();
-    expected["core"]["uploadLimitKiBps"] = json!(1024);
-    expected["daemon"]["hostnameLookup"]["cacheTtlSecs"] = json!(cache_ttl);
-    expected["nat"]["enabled"] = json!(nat);
-    assert_eq!(committed["data"], expected);
-    assert_eq!(core.core_settings().await.upload_limit_ki_bps, 1024);
-    drop(app);
-    drop(core);
-    drop(connection);
-    let restored = EmulebbCore::new(
-        "test",
-        FileIndex::open(database).unwrap(),
-        unique_test_dir("atomic-settings-restart"),
+    let (status, success) = atomic_settings_response(&app, "PATCH", request).await;
+    assert_eq!(status, StatusCode::OK, "{success}");
+    assert_eq!(success["meta"]["settingsRevision"], "2");
+}
+
+#[tokio::test]
+async fn uncertain_settings_commit_returns_http_503_and_blocks_further_coherent_reads() {
+    let (app, _, _, sql) = atomic_settings_router();
+    sql.execute_batch("CREATE TABLE synthetic_parent(id INTEGER PRIMARY KEY);
+        CREATE TABLE synthetic_child(id INTEGER REFERENCES synthetic_parent(id) DEFERRABLE INITIALLY DEFERRED);
+        CREATE TRIGGER synthetic_commit_failure AFTER UPDATE ON app_settings BEGIN INSERT INTO synthetic_child VALUES(1); END;").unwrap();
+    let (status, error) = atomic_settings_response(
+        &app,
+        "PATCH",
+        json!({"expectedRevision":"1","set":{"network":{"nickname":"Sample Client"}}}),
     )
-    .unwrap()
-    .app_settings()
-    .await
-    .unwrap();
-    assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+    assert_eq!(error["error"]["code"], "PERSISTENCE_UNAVAILABLE");
+    assert_eq!(
+        atomic_settings_response(&app, "GET", Value::Null).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn settings_revision_exhaustion_has_an_explicit_http_conflict_code() {
+    let (app, _, _, sql) = atomic_settings_router();
+    sql.execute("UPDATE app_settings SET revision=?1", [i64::MAX])
+        .unwrap();
+    let before = saved_settings_row(&sql);
+    let (status,error)=atomic_settings_response(&app,"PATCH",json!({"expectedRevision":i64::MAX.to_string(),"set":{"network":{"nickname":"Sample Client"}}})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "SETTINGS_REVISION_EXHAUSTED");
+    assert_eq!(saved_settings_row(&sql), before);
+}
+
+#[tokio::test]
+async fn restart_directory_settings_save_without_probing_or_creating_target_paths() {
+    let (app, _, _, _) = atomic_settings_router();
+    let target = unique_test_dir("settings-path").join("not-created");
+    assert!(!target.exists());
+    let (status, updated) = atomic_settings_response(
+        &app,
+        "PATCH",
+        json!({"expectedRevision":"1","set":{"storage":{"incomingDirectory":target}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(
+        updated["data"]["application"]["pendingRestart"],
+        json!(["storage.incomingDirectory"])
+    );
+    assert_eq!(
+        updated["data"]["effective"]["storage"]["incomingDirectory"],
+        "incoming"
+    );
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn oversized_saved_candidate_returns_http_413_before_any_sql_write() {
+    let (app, core, _, sql) = atomic_settings_router();
+    let before = saved_settings_row(&sql);
+    let effective = core.effective_settings().await.unwrap();
+    let body = json!({"expectedRevision":"1","set":{"storage":{
+        "incomingDirectory":"a".repeat(70000),"tempDirectory":"b".repeat(70000)
+    }}});
+    assert!(body.to_string().len() < emulebb_settings::product::MAX_PATCH_BYTES);
+    let (status, error) = atomic_settings_response(&app, "PATCH", body).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{error}");
+    assert_eq!(error["error"]["code"], "PAYLOAD_TOO_LARGE");
+    assert_eq!(saved_settings_row(&sql), before);
+    assert_eq!(core.effective_settings().await.unwrap(), effective);
+}
+
+#[tokio::test]
+async fn settings_after_persistence_shutdown_return_http_503() {
+    let (app, core, _, _) = atomic_settings_router();
+    assert_eq!(
+        atomic_settings_response(&app, "GET", Value::Null).await.0,
+        StatusCode::OK
+    );
+    core.drain_persistence().await.unwrap();
+    for (method, body) in [
+        ("GET", Value::Null),
+        (
+            "PATCH",
+            json!({"expectedRevision":"1","set":{"network":{"nickname":"Sample Client"}}}),
+        ),
+    ] {
+        let (status, error) = atomic_settings_response(&app, method, body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+        assert_eq!(error["error"]["code"], "PERSISTENCE_CLOSING");
+    }
 }
 
 #[tokio::test]
@@ -591,262 +604,6 @@ async fn diagnostic_crash_test_requires_confirmation() {
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn settings_use_typed_get_and_patch_route() {
-    let app = test_router();
-    let read = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(read.status(), StatusCode::OK);
-    let body = to_bytes(read.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["core"]["uploadLimitKiBps"], 6200);
-    assert!(value["data"]["core"].get("reconnect").is_none());
-    assert!(value["data"]["core"].get("safeServerConnect").is_none());
-    assert!(value["data"]["core"].get("addServersFromServer").is_none());
-    assert_eq!(value["data"]["daemon"]["p2pBindInterface"], Value::Null);
-    assert_eq!(value["data"]["ed2k"]["nickname"], "eMule");
-    assert_eq!(value["data"]["ed2k"]["obfuscationEnabled"], true);
-    assert_eq!(value["data"]["ed2k"]["useServerPriorities"], true);
-    assert_eq!(value["data"]["ed2k"]["autoConnectStaticOnly"], false);
-    assert_eq!(value["data"]["ed2k"]["reconnectEnabled"], true);
-    assert_eq!(value["data"]["ed2k"]["safeServerConnect"], false);
-    assert_eq!(value["data"]["ed2k"]["addServersFromServer"], false);
-    assert_eq!(value["data"]["ed2k"]["serverKeepaliveMinutes"], 0);
-    assert_eq!(
-        value["data"]["ed2k"]["minFreeConfigSpaceBytes"],
-        1_073_741_824_u64
-    );
-    assert_eq!(
-        value["data"]["ed2k"]["minFreeTransferSpaceBytes"],
-        5_368_709_120_u64
-    );
-    assert_eq!(
-        value["data"]["ed2k"]["minFreeIncomingSpaceBytes"],
-        5_368_709_120_u64
-    );
-    assert_eq!(value["data"]["kad"]["bootstrapMinRoutingContacts"], 10);
-    assert_eq!(value["data"]["core"]["autoConnect"], true);
-    assert_eq!(value["data"]["nat"]["enabled"], true);
-    assert_eq!(value["data"]["nat"]["requireInitialMapping"], false);
-    assert_eq!(value["data"]["vpnGuard"]["enabled"], false);
-    assert_eq!(value["data"]["ipFilter"]["level"], 127);
-
-    let update = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"baseUploadSlots":4,"queueSize":3000,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me","ed2kUserHash":"00112233440e66778899aabbccdd6fff"},"ed2k":{"nickname":"Phase B Mule","reconnectEnabled":false,"safeServerConnect":true,"addServersFromServer":true,"serverKeepaliveMinutes":20,"useServerPriorities":false,"autoConnectStaticOnly":true,"minFreeConfigSpaceBytes":2147483648,"minFreeTransferSpaceBytes":6442450944,"minFreeIncomingSpaceBytes":7516192768},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"8.8.8.0/24 1.1.1.1"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(update.status(), StatusCode::OK);
-    let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["core"]["uploadLimitKiBps"], 2048);
-    assert_eq!(value["data"]["core"]["uploadClientDataRate"], 64);
-    assert_eq!(value["data"]["core"]["baseUploadSlots"], 4);
-    assert_eq!(value["data"]["core"]["queueSize"], 3000);
-    assert_eq!(value["data"]["core"]["networkEd2k"], false);
-    assert_eq!(value["data"]["daemon"]["p2pBindInterface"], "hide.me");
-    assert_eq!(value["data"]["ed2k"]["nickname"], "Phase B Mule");
-    assert_eq!(value["data"]["ed2k"]["reconnectEnabled"], false);
-    assert_eq!(value["data"]["ed2k"]["safeServerConnect"], true);
-    assert_eq!(value["data"]["ed2k"]["addServersFromServer"], true);
-    assert_eq!(value["data"]["ed2k"]["serverKeepaliveMinutes"], 20);
-    assert_eq!(value["data"]["ed2k"]["useServerPriorities"], false);
-    assert_eq!(value["data"]["ed2k"]["autoConnectStaticOnly"], true);
-    assert_eq!(
-        value["data"]["ed2k"]["minFreeConfigSpaceBytes"],
-        2_147_483_648_u64
-    );
-    assert_eq!(
-        value["data"]["ed2k"]["minFreeTransferSpaceBytes"],
-        6_442_450_944_u64
-    );
-    assert_eq!(
-        value["data"]["ed2k"]["minFreeIncomingSpaceBytes"],
-        7_516_192_768_u64
-    );
-    assert_eq!(
-        value["data"]["daemon"]["ed2kUserHash"],
-        "00112233440e66778899aabbccdd6fff"
-    );
-    assert_eq!(value["data"]["vpnGuard"]["enabled"], true);
-    assert_eq!(value["data"]["vpnGuard"]["mode"], "block");
-    assert_eq!(
-        value["data"]["vpnGuard"]["allowedPublicIpCidrs"],
-        "8.8.8.0/24 1.1.1.1"
-    );
-    assert_eq!(value["data"]["nat"]["enabled"], true);
-
-    let empty_patch = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(empty_patch.status(), StatusCode::BAD_REQUEST);
-
-    let unknown_section = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"legacyNetwork":{}}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(unknown_section.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(unknown_section.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(
-        value["error"]["message"],
-        "unknown JSON field: legacyNetwork"
-    );
-
-    let unknown_core_key = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"core":{"unsupportedSetting":true}}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(unknown_core_key.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(unknown_core_key.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(
-        value["error"]["message"],
-        "unknown settings.core field: unsupportedSetting"
-    );
-
-    let removed_core_route = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/app/core_settings")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(removed_core_route.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn settings_patch_rejects_incoming_dir_that_is_not_directory() {
-    let app = test_router();
-    let temp = unique_test_dir("settings-incoming-dir-file");
-    let file = temp.join("not-a-directory.txt");
-    std::fs::write(&file, b"not a directory").unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    json!({"daemon":{"incomingDir": file.display().to_string()}}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(value["error"]["message"], "incomingDir is not a directory");
-    std::fs::remove_dir_all(temp).ok();
-}
-
-#[tokio::test]
-async fn settings_patch_preserves_unspecified_section_fields() {
-    let app = test_router();
-
-    let initial = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"nat":{"backendOrder":["pcp_natpmp","upnp_miniupnpc"],"pcpServerIp":"192.0.2.1","leaseDurationSecs":7200,"externalIpOverride":"198.51.100.24"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(initial.status(), StatusCode::OK);
-
-    let partial = app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/settings")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"nat":{"enabled":true}}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(partial.status(), StatusCode::OK);
-    let body = to_bytes(partial.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["nat"]["enabled"], true);
-    assert_eq!(
-        value["data"]["nat"]["backendOrder"],
-        json!(["pcp_natpmp", "upnp_miniupnpc"])
-    );
-    assert_eq!(value["data"]["nat"]["pcpServerIp"], "192.0.2.1");
-    assert_eq!(value["data"]["nat"]["leaseDurationSecs"], 7200);
-    assert_eq!(value["data"]["nat"]["externalIpOverride"], "198.51.100.24");
 }
 
 #[tokio::test]

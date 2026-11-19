@@ -112,6 +112,8 @@ mod callback_tracker;
 mod categories;
 mod category_api;
 mod core_settings;
+mod settings;
+pub use settings::{SettingsMutationError, SettingsSnapshot};
 mod core_state;
 mod delivery;
 mod diag_ed2k_server_udp;
@@ -214,14 +216,7 @@ mod upload_api;
 mod upload_view;
 mod views;
 pub mod vpn_guard;
-#[cfg(test)]
-use core_settings::default_core_settings;
-use core_settings::{
-    apply_core_settings_update, core_settings_update_is_empty,
-    ed2k_download_coordinator_config_from_core_settings,
-    ed2k_download_limit_bytes_per_sec_from_core_settings,
-    ed2k_upload_queue_policy_from_core_settings, initial_ed2k_upload_queue_policy,
-};
+use core_settings::{ed2k_download_coordinator_config, ed2k_upload_queue_policy};
 pub(crate) use core_state::{CoreState, KadAichSearchVotes};
 #[cfg(feature = "packet-diagnostics")]
 pub use diagnostic_protocol_fixture::{
@@ -329,14 +324,6 @@ pub use build_identity::{
 use download_task_supervisor::DownloadTaskSupervisor;
 pub use emulebb_ed2k::NatStatusSnapshot;
 pub use emulebb_ed2k::normalize_ed2k_file_name;
-pub use emulebb_settings::{
-    AppSettings, AppSettingsUpdate, CORE_SETTING_SPECS, CoreSettingFieldKind, CoreSettingSpec,
-    CoreSettings, CoreSettingsUpdate, MAX_FREE_SPACE_BYTES, MIN_FREE_CONFIG_SPACE_BYTES,
-    MIN_FREE_INCOMING_SPACE_BYTES, MIN_FREE_TRANSFER_SPACE_BYTES, SettingSurfaceClass,
-    SettingSurfaceSpec, SettingsSectionResourceSpec, app_settings_surface_inventory,
-    app_settings_update_is_empty, bootstrap_settings_surface_inventory, core_setting_field,
-    core_settings_schema, settings_section_resource_inventory,
-};
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadCreate,
     DownloadCreateSource, DownloadFileNameObservation, DownloadSource, DownloadSourceMetrics,
@@ -573,7 +560,6 @@ pub struct EmulebbCore {
     search_queue: Arc<parking_lot::Mutex<SearchQueue>>,
     download_events: Arc<download_events::DownloadEvents>,
     /// Orders settings commit and runtime publication, including canceled waiters.
-    settings_update_order: Arc<Mutex<()>>,
     persistence_owner: Arc<persistence_owner::PersistenceSlot>,
     #[cfg(test)]
     kad_startup_gate: Arc<std::sync::Mutex<Option<Arc<network_api::KadStartupGate>>>>,
@@ -635,8 +621,6 @@ impl EmulebbCore {
         }
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let metadata_store = index.metadata_store();
-        let has_persisted_core_settings =
-            profile_state::has_persisted_core_settings(&metadata_store)?;
         let shared_directories = index
             .shared_directory_roots()?
             .into_iter()
@@ -648,18 +632,25 @@ impl EmulebbCore {
             })
             .collect::<Vec<_>>();
         let core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
+        let ordinary_download_limit = core_state
+            .settings
+            .values()
+            .transfers
+            .max_concurrent_downloads;
         let passive_replay_enabled = ed2k_network
             .as_ref()
             .is_some_and(|network| network.kad_passive_replay_enabled);
-        let upload_queue_policy = initial_ed2k_upload_queue_policy(
+        let upload_queue_policy = ed2k_upload_queue_policy(
             ed2k_network
                 .as_ref()
                 .map(|network| &network.ed2k.upload_queue),
-            has_persisted_core_settings,
-            &core_state.core_settings,
+            core_state.settings.values(),
         );
-        let download_limit_bytes_per_sec =
-            ed2k_download_limit_bytes_per_sec_from_core_settings(&core_state.core_settings);
+        let download_limit_bytes_per_sec = core_state
+            .settings
+            .values()
+            .transfers
+            .download_limit_bytes_per_second;
         let transfer_config = Ed2kRuntimeConfig {
             upload_queue: upload_queue_policy,
             download_limit_bytes_per_sec,
@@ -678,16 +669,19 @@ impl EmulebbCore {
                 &transfer_config,
             )?
         };
-        // Drive the shared download coordinator from live REST settings.core
-        // (maxConnections / maxConnectionsPerFiveSeconds / maxSourcesPerFile),
-        // like the download throttle, so REST core setting changes apply to the
-        // global connection budget + per-file source caps.
-        ed2k_transfers.apply_download_coordinator_config(
-            ed2k_download_coordinator_config_from_core_settings(&core_state.core_settings),
+        // Connection budgets and source caps use the same admitted settings capture.
+        ed2k_transfers.apply_download_coordinator_config(ed2k_download_coordinator_config(
+            core_state.settings.values(),
+        ));
+        // Upload scoring uses the admitted credit-system choice.
+        ed2k_transfers.set_credit_system_enabled(
+            core_state
+                .settings
+                .values()
+                .transfers
+                .upload
+                .credit_system_enabled,
         );
-        // Apply the credit-system toggle at startup too (eMule
-        // thePrefs.GetCreditSystem()); update_core_settings keeps it live thereafter.
-        ed2k_transfers.set_credit_system_enabled(core_state.core_settings.credit_system);
         let kad_local_store = ed2k_network.as_ref().map(|network| {
             let mut store = KadLocalStore::new(network.kad_local_store);
             match metadata_store
@@ -787,11 +781,12 @@ impl EmulebbCore {
             hostname_lookup_cache: Arc::new(hostname_lookup::HostNameLookupCache::default()),
             search_queue: Arc::new(parking_lot::Mutex::new(SearchQueue::new())),
             download_events: Arc::new(download_events::DownloadEvents::default()),
-            settings_update_order: Arc::new(Mutex::new(())),
             persistence_owner: Arc::new(persistence_owner::PersistenceSlot::default()),
             #[cfg(test)]
             kad_startup_gate: Arc::new(std::sync::Mutex::new(None)),
-            download_attempts: Arc::new(DownloadAttemptControl::default()),
+            download_attempts: Arc::new(DownloadAttemptControl::with_limit(
+                ordinary_download_limit,
+            )),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -2766,7 +2761,15 @@ impl EmulebbCore {
     }
 
     async fn ed2k_dht_node(&self) -> Option<DhtNode> {
-        if !self.state.lock().await.core_settings.network_kademlia {
+        if !self
+            .state
+            .lock()
+            .await
+            .settings
+            .values()
+            .network
+            .kad_enabled
+        {
             return None;
         }
         self.ed2k_runtime
@@ -3394,7 +3397,15 @@ impl EmulebbCore {
     }
 
     async fn kad_status(&self, manual_running: bool) -> NetworkStatus {
-        if !self.state.lock().await.core_settings.network_kademlia {
+        if !self
+            .state
+            .lock()
+            .await
+            .settings
+            .values()
+            .network
+            .kad_enabled
+        {
             return kad_status_from_running(false);
         }
         if !manual_running {

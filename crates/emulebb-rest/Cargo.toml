@@ -22,6 +22,7 @@ chrono.workspace = true
 emulebb-diagnostics = { path = "../emulebb-diagnostics" }
 emulebb-core = { path = "../emulebb-core" }
 emulebb-metadata = { path = "../emulebb-metadata" }
+emulebb-settings = { path = "../emulebb-settings" }
 futures-util.workspace = true
 http-body-util.workspace = true
 hex.workspace = true

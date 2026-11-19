@@ -98,8 +98,10 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
     let unified_run = unified_run_selection(&runtime_diagnostics);
     let writer_issues = diagnostic_writer_issues(&runtime_diagnostics);
     let writer_issue_count = writer_issues.len() as u64;
-    let settings = match state.core.app_settings().await {
-        Ok(settings) => serde_json::to_value(settings)?,
+    let settings = match state.core.settings().await {
+        Ok(settings) => {
+            json!({"data":settings.value().data(),"meta":{"apiVersion":"v1","settingsRevision":settings.value().revision()}})
+        }
         Err(error) => json!({
             "available": false,
             "error": error.to_string(),

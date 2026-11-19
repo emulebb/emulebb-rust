@@ -40,19 +40,17 @@ async fn retained_category_entry_wakes_the_real_server_publish_pump() {
     network.ed2k.offer_files_capability_enabled = false;
     let core = EmulebbCore::new_with_network(
         "test",
-        FileIndex::in_memory().unwrap(),
+        test_index_with_settings(
+            FileIndex::in_memory().unwrap(),
+            serde_json::json!({"network": {"kadEnabled": false}}),
+        ),
         root.join("transfers"),
         Some(network),
     )
     .unwrap();
     // WHY: Kad or UDP reask would start public STUN probes even with NAT
     // mapping disabled. This fixture owns only its loopback eD2K server.
-    core.update_core_settings(CoreSettingsUpdate {
-        network_kademlia: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
-    .unwrap();
+
     configure_test_shared_root(&core, &shared_path).await;
     let share = core
         .share_local_file(LocalShareCreate {

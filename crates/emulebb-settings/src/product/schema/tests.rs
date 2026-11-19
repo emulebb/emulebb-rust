@@ -47,6 +47,28 @@ fn complete_schemas_match_actual_serde_shapes_and_all_canonical_keys() {
         );
         assert_eq!(saved["required"], json!(["mode", "value"]));
     }
+    // Keep a compiled contract artifact for documentation generation. No
+    // independent field/default catalog is introduced by the OpenAPI tooling.
+    if let Some(output) = std::env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT") {
+        let output = std::path::PathBuf::from(output);
+        assert!(
+            output.is_absolute() && output.is_dir(),
+            "invalid inherited output root"
+        );
+        if let Some(workspace) = std::env::var_os("EMULEBB_WORKSPACE_ROOT") {
+            assert!(
+                !output.starts_with(std::path::PathBuf::from(workspace)),
+                "output root must be outside sources"
+            );
+        }
+        let directory = output.join("reports/settings-schema");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("settings-surface.json"),
+            serde_json::to_vec_pretty(&crate::settings_surface()).unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 #[test]

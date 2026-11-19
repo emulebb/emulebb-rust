@@ -160,9 +160,8 @@ use tokio_util::sync::CancellationToken;
 use emulebb_metadata::NativeFileFingerprint;
 
 use crate::{
-    Category, CoreSettings, Friend, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot,
-    Transfer, download_source_registry::DownloadSourceRegistry,
-    ed2k_dead_source_list::DeadSourceList,
+    Category, Friend, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot, Transfer,
+    download_source_registry::DownloadSourceRegistry, ed2k_dead_source_list::DeadSourceList,
 };
 
 /// Last settled on-disk identity observed for one monitored shared path.
@@ -186,7 +185,7 @@ pub(crate) struct CoreState {
     pub(crate) search_cancels: HashMap<String, CancellationToken>,
     pub(crate) kad_aich_search_votes: KadAichVoteCache,
     pub(crate) transfers: HashMap<String, Transfer>,
-    pub(crate) core_settings: CoreSettings,
+    pub(crate) settings: crate::settings::RuntimeSettings,
     pub(crate) categories: BTreeMap<i64, Category>,
     pub(crate) friends: BTreeMap<String, Friend>,
     pub(crate) servers: HashMap<String, ServerInfo>,

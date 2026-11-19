@@ -70,8 +70,7 @@ pub struct Ed2kRuntimeConfig {
     /// transfers, consulted by the shared download coordinator before opening a
     /// new peer connection (eMule `thePrefs.GetMaxConnections()`, default 500
     /// from `GetRecommendedMaxConnections`). 0 disables the concurrent cap.
-    /// This is the wired meaning of the former dead `max_concurrent_downloads`.
-    pub max_concurrent_downloads: usize,
+    pub max_connections: usize,
     /// Maximum new outgoing source connections admitted per 5s window (eMule
     /// `thePrefs.GetMaxConperFive()`, default 50). 0 disables the rate limiter.
     pub max_new_connections_per_five_seconds: usize,
@@ -280,7 +279,7 @@ impl Default for Ed2kRuntimeConfig {
             server_keepalive_minutes: 0,
             session_rotation_secs: 0,
             // eMuleBB MFC broadband connection/source defaults.
-            max_concurrent_downloads: 500,
+            max_connections: 500,
             max_new_connections_per_five_seconds: 50,
             // eMule GetDefaultMaxHalfConnections (Preferences.h:1132).
             max_half_open_connections: 50,
@@ -336,7 +335,7 @@ mod tests {
 
         // Global download coordinator caps follow the eMuleBB MFC broadband
         // operational profile.
-        assert_eq!(config.max_concurrent_downloads, 500);
+        assert_eq!(config.max_connections, 500);
         assert_eq!(config.max_new_connections_per_five_seconds, 50);
         // eMule GetDefaultMaxHalfConnections (Preferences.h:1132).
         assert_eq!(config.max_half_open_connections, 50);

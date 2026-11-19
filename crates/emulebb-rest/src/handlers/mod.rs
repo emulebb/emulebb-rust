@@ -38,14 +38,16 @@ pub(crate) use library_tags::{
     add_library_file_tags, create_library_tag, delete_library_tag, library_file_tags, library_tag,
     library_tags, remove_library_file_tags,
 };
+mod settings;
+pub(crate) use settings::{settings, settings_surface, update_settings};
 pub(crate) mod servers;
 pub(crate) mod shared_files;
 pub(crate) mod uploads;
 
 pub(crate) use app::{
     app, capabilities, capture_diagnostic_bundle, diagnostics, event_status, events, nat, network,
-    probe_vpn_guard, refresh_nat, settings, settings_surface, shutdown_app, snapshot, stats,
-    status, trigger_diagnostic_crash_test, update_settings, vpn_guard,
+    probe_vpn_guard, refresh_nat, shutdown_app, snapshot, stats, status,
+    trigger_diagnostic_crash_test, vpn_guard,
 };
 pub(crate) use categories::{
     categories, category, create_category, delete_category, update_category,

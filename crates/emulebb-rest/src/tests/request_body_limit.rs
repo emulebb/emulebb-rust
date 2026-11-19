@@ -173,3 +173,62 @@ fn counting_stream_body(
     });
     Body::from_stream(body)
 }
+
+#[tokio::test]
+async fn settings_enforce_their_256_kib_limit_before_buffering_and_parsing() {
+    use emulebb_settings::product::MAX_PATCH_BYTES;
+    let app = test_router();
+    let mut body =
+        br#"{"expectedRevision":"1","set":{"network":{"nickname":"Sample Client"}}}"#.to_vec();
+    body.resize(MAX_PATCH_BYTES, b' ');
+    let accepted = app
+        .clone()
+        .oneshot(
+            Request::patch("/api/v1/settings")
+                .header("X-API-Key", "secret")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_LENGTH, MAX_PATCH_BYTES)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let declared = app
+        .clone()
+        .oneshot(
+            Request::patch("/api/v1/settings")
+                .header("X-API-Key", "secret")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_LENGTH, MAX_PATCH_BYTES + 1)
+                .body(counting_stream_body(polls.clone(), 1, 1))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response_error_code(declared).await, "PAYLOAD_TOO_LARGE");
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    for length in [None, Some("1")] {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut request = Request::patch("/api/v1/settings")
+            .header("X-API-Key", "secret")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(length) = length {
+            request = request.header(header::CONTENT_LENGTH, length);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .body(counting_stream_body(polls.clone(), 64 * 1024, 8))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response_error_code(response).await, "PAYLOAD_TOO_LARGE");
+        assert!(polls.load(Ordering::SeqCst) <= 5);
+    }
+}

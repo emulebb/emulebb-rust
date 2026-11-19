@@ -23,11 +23,13 @@ async fn dashboard_counts_wait_for_sql_without_blocking_network_status_or_using_
     let (locked_send, locked_receive) = tokio::sync::oneshot::channel();
     let (release_send, release_receive) = std::sync::mpsc::channel();
     let holding = tokio::task::spawn_blocking(move || {
+        // Deliberately hold the real SQLite mutex behind a projection callback.
+        // No journal-mode changes or synthetic settings API are needed.
         store
-            .update_settings_sections(&["contention-test"], |_| {
+            .with_library_sharing_policy(&"ff".repeat(16), |_| {
                 locked_send.send(()).unwrap();
                 release_receive
-                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .recv_timeout(Duration::from_secs(5))
                     .unwrap();
                 Ok(())
             })
@@ -50,305 +52,83 @@ async fn dashboard_counts_wait_for_sql_without_blocking_network_status_or_using_
     assert_eq!((counts.total, counts.active, counts.completed), (2, 1, 0));
 }
 
-fn atomic_settings_patch(value: serde_json::Value) -> AppSettingsUpdate {
-    serde_json::from_value(value).unwrap()
-}
-
-async fn wait_for_atomic_settings_commit(core: &EmulebbCore, key: &str, value: &str) {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if core
-                .metadata_store
-                .load_setting_json("core", key)
-                .unwrap()
-                .as_deref()
-                == Some(value)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("settings transaction did not reach its commit barrier");
-}
-
-#[tokio::test]
-async fn invalid_direct_settings_candidate_changes_neither_sql_nor_runtime() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let before = core.app_settings().await.unwrap();
-    let core_rows = core.metadata_store.load_settings_section("core").unwrap();
-    let nat_rows = core.metadata_store.load_settings_section("nat").unwrap();
-    let error = core
-        .update_app_settings(atomic_settings_patch(serde_json::json!({
-            "nat": {"enabled": !before.nat.enabled}, "core": {"uploadLimitKiBps": 0},
-        })))
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("uploadLimitKiBps"));
-    assert_eq!(core.app_settings().await.unwrap(), before);
-    assert_eq!(core.core_settings().await, before.core);
-    assert_eq!(
-        core.metadata_store.load_settings_section("core").unwrap(),
-        core_rows
-    );
-    assert_eq!(
-        core.metadata_store.load_settings_section("nat").unwrap(),
-        nat_rows
-    );
-}
-
-#[tokio::test]
-async fn concurrent_settings_patches_preserve_disjoint_fields_and_omitted_sections() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let before = core.app_settings().await.unwrap();
-    let lease = if before.nat.lease_duration_secs == 7200 {
-        3600
-    } else {
-        7200
-    };
-    let first = atomic_settings_patch(serde_json::json!({"nat": {"enabled": !before.nat.enabled}}));
-    let second = atomic_settings_patch(serde_json::json!({"nat": {"leaseDurationSecs": lease}}));
-    let (first, second) = tokio::join!(
-        core.update_app_settings(first),
-        core.update_app_settings(second)
-    );
-    first.unwrap();
-    second.unwrap();
-    let after = core.app_settings().await.unwrap();
-    assert_eq!(after.nat.enabled, !before.nat.enabled);
-    assert_eq!(after.nat.lease_duration_secs, lease);
-    assert_eq!(after.nat.backend_order, before.nat.backend_order);
-    assert_eq!(after.core, before.core);
-    assert_eq!(after.daemon, before.daemon);
-    assert_eq!(after.ed2k, before.ed2k);
-    assert_eq!(after.kad, before.kad);
-    assert_eq!(after.vpn_guard, before.vpn_guard);
-    assert_eq!(after.ip_filter, before.ip_filter);
-}
-
-#[tokio::test]
-async fn canceled_settings_waiter_cannot_abandon_committed_runtime_publication() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    // Hold the existing state lock so the owned task commits, then waits before
-    // publishing any core state or awaited driver policy.
-    let state_barrier = core.state.lock().await;
-    let updater = core.clone();
-    let waiter = tokio::spawn(async move {
-        updater
-            .update_app_settings(atomic_settings_patch(serde_json::json!({
-                "core": {"uploadLimitKiBps": 1024, "downloadLimitKiBps": 2048},
-            })))
-            .await
-    });
-    wait_for_atomic_settings_commit(&core, "uploadLimitKiBps", "1024").await;
-    waiter.abort();
-    assert!(waiter.await.unwrap_err().is_cancelled());
-    drop(state_barrier);
-    // The ordered read waits for the detached completion task, including its
-    // runtime effects, rather than merely observing the committed SQL rows.
-    let committed = tokio::time::timeout(std::time::Duration::from_secs(2), core.app_settings())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(core.core_settings().await, committed.core);
-    assert_eq!(
-        core.ed2k_transfers
-            .upload_queue_policy_snapshot()
-            .await
-            .upload_limit_bytes_per_sec,
-        1024 * 1024
-    );
-    assert_eq!(
-        core.ed2k_transfers.download_limit_bytes_per_sec().await,
-        2048 * 1024
-    );
-}
-
-#[tokio::test]
-async fn canceled_queued_settings_request_writes_nothing() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let before = core.app_settings().await.unwrap();
-    let order = Arc::clone(&core.settings_update_order).lock_owned().await;
-    let updater = core.clone();
-    let (entered, waiting) = tokio::sync::oneshot::channel();
-    let waiter = tokio::spawn(async move {
-        entered.send(()).unwrap();
-        updater
-            .update_app_settings(atomic_settings_patch(serde_json::json!({
-                "core": {"uploadLimitKiBps": 1024},
-            })))
-            .await
-    });
-    waiting.await.unwrap();
-    waiter.abort();
-    assert!(waiter.await.unwrap_err().is_cancelled());
-    drop(order);
-    assert_eq!(core.app_settings().await.unwrap(), before);
-    assert!(
-        core.metadata_store
-            .load_settings_section("core")
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn concurrent_core_requests_publish_in_committed_order_after_a_blocked_update() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let state_barrier = core.state.lock().await;
-    let first_core = core.clone();
-    let first = tokio::spawn(async move {
-        first_core
-            .update_core_settings(CoreSettingsUpdate {
-                upload_limit_ki_bps: Some(1024),
-                ..CoreSettingsUpdate::default()
-            })
-            .await
-    });
-    wait_for_atomic_settings_commit(&core, "uploadLimitKiBps", "1024").await;
-    let second_core = core.clone();
-    let second = tokio::spawn(async move {
-        second_core
-            .update_core_settings(CoreSettingsUpdate {
-                download_limit_ki_bps: Some(2048),
-                ..CoreSettingsUpdate::default()
-            })
-            .await
-    });
-    drop(state_barrier);
-    first.await.unwrap().unwrap();
-    second.await.unwrap().unwrap();
-    let committed = core.app_settings().await.unwrap();
-    assert_eq!(committed.core.upload_limit_ki_bps, 1024);
-    assert_eq!(committed.core.download_limit_ki_bps, 2048);
-    assert_eq!(core.core_settings().await, committed.core);
-    assert_eq!(
-        core.ed2k_transfers.download_limit_bytes_per_sec().await,
-        2048 * 1024
-    );
-}
-
 #[test]
-fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
-    let mut core_settings = default_core_settings();
-    core_settings.base_upload_slots = 11;
-    core_settings.queue_size = 6_000;
+fn upload_queue_policy_uses_canonical_values_and_preserves_internal_timeouts() {
+    let mut values = emulebb_settings::product::SettingsValues::default();
+    values.transfers.upload.base_slots = 11;
+    values.transfers.upload.queue_capacity = 6_000;
+    values.transfers.upload.session_transfer_percent = 45;
+    values.transfers.upload.session_time_limit_seconds = 1_234;
     let base = Ed2kUploadQueueRuntimeConfig {
-        base_slots: 3,
-        elastic_percent: 15,
-        upload_limit_bytes_per_sec: 512 * 1024,
-        elastic_underfill_bytes_per_sec: 16 * 1024,
-        elastic_underfill_secs: 10,
-        waiting_capacity: 512,
         waiting_timeout_secs: 44,
         granted_timeout_secs: 22,
         upload_timeout_secs: 88,
-        session_transfer_percent: 45,
-        session_time_limit_secs: 1_234,
+        ..Default::default()
     };
-
-    let policy = ed2k_upload_queue_policy_from_core_settings(Some(&base), &core_settings);
-
+    let policy = ed2k_upload_queue_policy(Some(&base), &values);
     assert_eq!(policy.base_slots, 11);
-    assert_eq!(
-        policy.elastic_percent,
-        core_settings.upload_slot_elastic_percent
-    );
-    assert_eq!(
-        policy.upload_limit_bytes_per_sec,
-        u64::from(core_settings.upload_limit_ki_bps) * 1024
-    );
-    assert_eq!(
-        policy.elastic_underfill_bytes_per_sec,
-        u64::from(core_settings.upload_client_data_rate) * 1024
-    );
     assert_eq!(policy.waiting_capacity, 6_000);
-    assert_eq!(policy.waiting_timeout_secs, 44);
-    assert_eq!(policy.granted_timeout_secs, 22);
-    assert_eq!(policy.upload_timeout_secs, 88);
-    // Session rotation caps are queue-policy knobs, not settings.core-derived:
-    // a core settings update must pass them through untouched.
-    assert_eq!(policy.session_transfer_percent, 45);
-    assert_eq!(policy.session_time_limit_secs, 1_234);
-}
-
-#[test]
-fn initial_upload_queue_policy_always_derives_owned_fields_from_core_settings() {
-    let core_settings = default_core_settings();
-    let base = Ed2kUploadQueueRuntimeConfig {
-        base_slots: 3,
-        elastic_percent: 15,
-        upload_limit_bytes_per_sec: 512 * 1024,
-        elastic_underfill_bytes_per_sec: 16 * 1024,
-        elastic_underfill_secs: 10,
-        waiting_capacity: 512,
-        waiting_timeout_secs: 44,
-        granted_timeout_secs: 22,
-        upload_timeout_secs: 88,
-        session_transfer_percent: 45,
-        session_time_limit_secs: 1_234,
-    };
-
-    let policy = initial_ed2k_upload_queue_policy(Some(&base), false, &core_settings);
-
-    assert_eq!(policy.base_slots, core_settings.base_upload_slots as usize);
     assert_eq!(
         policy.elastic_percent,
-        core_settings.upload_slot_elastic_percent
+        values.transfers.upload.elastic_percent
     );
     assert_eq!(
         policy.upload_limit_bytes_per_sec,
-        u64::from(core_settings.upload_limit_ki_bps) * 1024
+        values.transfers.upload_limit_bytes_per_second
     );
     assert_eq!(
         policy.elastic_underfill_bytes_per_sec,
-        u64::from(core_settings.upload_client_data_rate) * 1024
+        values.transfers.upload.target_client_rate_bytes_per_second
     );
-    assert_eq!(policy.waiting_capacity, core_settings.queue_size as usize);
-    assert_eq!(policy.waiting_timeout_secs, base.waiting_timeout_secs);
-    assert_eq!(policy.granted_timeout_secs, base.granted_timeout_secs);
-    assert_eq!(policy.upload_timeout_secs, base.upload_timeout_secs);
     assert_eq!(
-        policy.session_transfer_percent,
-        base.session_transfer_percent
+        (
+            policy.waiting_timeout_secs,
+            policy.granted_timeout_secs,
+            policy.upload_timeout_secs
+        ),
+        (44, 22, 88)
     );
-    assert_eq!(policy.session_time_limit_secs, base.session_time_limit_secs);
+    assert_eq!(
+        (
+            policy.session_transfer_percent,
+            policy.session_time_limit_secs
+        ),
+        (45, 1_234)
+    );
 }
 
 #[tokio::test]
-async fn persisted_core_settings_configure_upload_queue_on_startup() {
-    let transfer_root = unique_runtime_dir("emulebb-core-upload-queue-startup-core_settings");
-    let metadata = MetadataStore::open(transfer_root.join("metadata.sqlite")).unwrap();
-    let mut core_settings = default_core_settings();
-    core_settings.base_upload_slots = 2;
-    core_settings.queue_size = 3_000;
-    profile_state::persist_core_settings(&metadata, &core_settings).unwrap();
-    let index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
-
-    let core = EmulebbCore::new("test", index, transfer_root.join("transfers")).unwrap();
+async fn persisted_settings_configure_upload_queue_on_startup() {
+    let root = unique_runtime_dir("canonical-upload-startup");
+    let index = test_index_with_settings(
+        FileIndex::open(root.join("metadata.sqlite")).unwrap(),
+        serde_json::json!({"transfers":{"upload":{"baseSlots":2,"queueCapacity":3000}}}),
+    );
+    let core = EmulebbCore::new("test", index, root.join("transfers")).unwrap();
     let policy = core.ed2k_transfers.upload_queue_policy_snapshot().await;
-
     assert_eq!(policy.base_slots, 2);
     assert_eq!(policy.waiting_capacity, 3_000);
 }
 
 #[tokio::test]
-async fn core_settings_update_reconfigures_live_upload_queue() {
+async fn settings_update_reconfigures_live_upload_queue() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-
-    let core_settings = core
-        .update_core_settings(CoreSettingsUpdate {
-            base_upload_slots: Some(4),
-            queue_size: Some(4_000),
-            ..CoreSettingsUpdate::default()
-        })
-        .await
-        .unwrap();
+    let updated = update_test_settings(
+        &core,
+        serde_json::json!({"transfers":{"upload":{"baseSlots":4,"queueCapacity":4000}}}),
+    )
+    .await;
     let policy = core.ed2k_transfers.upload_queue_policy_snapshot().await;
-
-    assert_eq!(core_settings.base_upload_slots, 4);
-    assert_eq!(core_settings.queue_size, 4_000);
+    assert_eq!(
+        updated
+            .value()
+            .data()
+            .effective()
+            .transfers
+            .upload
+            .base_slots,
+        4
+    );
     assert_eq!(policy.base_slots, 4);
     assert_eq!(policy.waiting_capacity, 4_000);
 }
@@ -402,61 +182,45 @@ fn ip_filter_reload_status_reflects_live_reparsed_ranges() {
 }
 
 #[tokio::test]
-async fn default_core_settings_match_the_master() {
-    // FIX 6: defaults aligned to srchybrid/CoreSettings.cpp +
-    // PreferenceValidationSeams.h.
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let core_settings = core.core_settings().await;
-    assert_eq!(core_settings.upload_limit_ki_bps, 6200);
-    assert_eq!(core_settings.download_limit_ki_bps, 12207);
-    assert_eq!(core_settings.max_connections, 500);
-    assert_eq!(core_settings.max_connections_per_five_seconds, 50);
-    assert_eq!(core_settings.max_sources_per_file, 600);
-    assert_eq!(core_settings.base_upload_slots, 12);
-    assert_eq!(core_settings.upload_slot_elastic_percent, 80);
-    assert_eq!(core_settings.queue_size, 10000);
-    assert!(core_settings.auto_connect);
-}
-
-#[test]
-fn core_settings_json_rejects_retired_ed2k_server_policy_keys() {
-    for key in ["reconnect", "safeServerConnect", "addServersFromServer"] {
-        let mut value = serde_json::to_value(default_core_settings()).unwrap();
-        value[key] = serde_json::json!(true);
-
-        let error = serde_json::from_value::<CoreSettings>(value).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("unknown field `{key}`")),
-            "unexpected error for {key}: {error}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn network_kademlia_disabled_refuses_kad_bootstrap() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    // Disable the Kademlia network (eMule thePrefs.GetNetworkKademlia() == false).
-    core.update_core_settings(CoreSettingsUpdate {
-        network_kademlia: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
-    .unwrap();
-    let err = core
+async fn network_enable_changes_require_restart_before_runtime_admission() {
+    let index = test_index_with_settings(
+        FileIndex::in_memory().unwrap(),
+        serde_json::json!({"network":{"kadEnabled":false}}),
+    );
+    let metadata = index.metadata_store();
+    let core = EmulebbCore::new_in_memory("test", index).unwrap();
+    let error = core.bootstrap_kad("203.0.113.9", 4672).await.unwrap_err();
+    assert!(error.to_string().contains("Kademlia network is disabled"));
+    let updated =
+        update_test_settings(&core, serde_json::json!({"network":{"kadEnabled":true}})).await;
+    assert!(!updated.value().data().effective().network.kad_enabled);
+    assert!(updated.value().data().saved().values().network.kad_enabled);
+    assert!(
+        updated
+            .value()
+            .data()
+            .application()
+            .pending_restart()
+            .iter()
+            .any(|key| key.as_str() == "network.kadEnabled")
+    );
+    drop(updated);
+    core.drain_persistence().await.unwrap();
+    drop(core);
+    let restarted =
+        EmulebbCore::new_in_memory("test", FileIndex::from_metadata_store(metadata)).unwrap();
+    assert!(
+        restarted
+            .effective_settings()
+            .await
+            .unwrap()
+            .network
+            .kad_enabled
+    );
+    let error = restarted
         .bootstrap_kad("203.0.113.9", 4672)
         .await
-        .expect_err("Kad bootstrap must be refused when networkKademlia=false");
-    assert!(err.to_string().contains("Kademlia network is disabled"));
-    // Re-enabling lets Kad start again.
-    core.update_core_settings(CoreSettingsUpdate {
-        network_kademlia: Some(true),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
-    .unwrap();
-    let error = core.bootstrap_kad("203.0.113.9", 4672).await.unwrap_err();
+        .unwrap_err();
     assert!(error.to_string().contains("runtime is not running"));
 }
 
@@ -507,16 +271,18 @@ async fn vpn_guard_allows_kad_start_until_public_ip_disproves_allowed_cidr() {
 
 #[tokio::test]
 async fn network_ed2k_disabled_refuses_server_connect() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let core = EmulebbCore::new_in_memory(
+        "test",
+        test_index_with_settings(
+            FileIndex::in_memory().unwrap(),
+            serde_json::json!({"network": {"ed2kEnabled": false}}),
+        ),
+    )
+    .unwrap();
     // Disable the eD2k network (eMule thePrefs.GetNetworkED2K() == false): the
     // server connect is refused on the core setting gate (before any network
     // config / VPN-guard checks).
-    core.update_core_settings(CoreSettingsUpdate {
-        network_ed2k: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
-    .unwrap();
+
     let err = core
         .connect_ed2k()
         .await
@@ -1291,13 +1057,16 @@ async fn final_kad_capture_survives_timed_out_network_cleanup() {
 #[tokio::test]
 async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() {
     let transfer_root = unique_runtime_dir("emulebb-core-kad-disabled-runtime-status");
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
-    core.update_core_settings(CoreSettingsUpdate {
-        network_kademlia: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
+    let core = EmulebbCore::new(
+        "test",
+        test_index_with_settings(
+            FileIndex::in_memory().unwrap(),
+            serde_json::json!({"network": {"kadEnabled": false}}),
+        ),
+        &transfer_root,
+    )
     .unwrap();
+
     let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
     let dht = DhtNode::new(DhtConfig {
         bind_addr: Some("0.0.0.0:0".parse().unwrap()),

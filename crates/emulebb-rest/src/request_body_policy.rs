@@ -28,19 +28,24 @@ impl BufferedApiRequestBody {
 }
 
 pub(crate) async fn enforce_api_request_body_limit(request: Request<Body>, next: Next) -> Response {
-    if declared_body_is_oversized(&request) {
-        return payload_too_large_response();
+    let maximum = if request.uri().path() == "/api/v1/settings" {
+        emulebb_settings::product::MAX_PATCH_BYTES
+    } else {
+        MAX_API_REQUEST_BODY_BYTES
+    };
+    if declared_body_is_oversized(&request, maximum) {
+        return payload_too_large_response(maximum);
     }
 
     let (mut parts, body) = request.into_parts();
-    let body = match to_bytes(body, MAX_API_REQUEST_BODY_BYTES).await {
+    let body = match to_bytes(body, maximum).await {
         Ok(body) => body,
         Err(error)
             if error
                 .source()
                 .is_some_and(|source| source.is::<LengthLimitError>()) =>
         {
-            return payload_too_large_response();
+            return payload_too_large_response(maximum);
         }
         Err(error) => {
             return api_error(
@@ -58,20 +63,20 @@ pub(crate) async fn enforce_api_request_body_limit(request: Request<Body>, next:
     next.run(Request::from_parts(parts, Body::from(body))).await
 }
 
-fn declared_body_is_oversized(request: &Request<Body>) -> bool {
+fn declared_body_is_oversized(request: &Request<Body>, maximum: usize) -> bool {
     request
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > MAX_API_REQUEST_BODY_BYTES as u64)
+        .is_some_and(|length| length > maximum as u64)
 }
 
-fn payload_too_large_response() -> Response {
+fn payload_too_large_response(maximum: usize) -> Response {
     api_error(
         StatusCode::PAYLOAD_TOO_LARGE,
         "PAYLOAD_TOO_LARGE",
-        format!("request body exceeds the {MAX_API_REQUEST_BODY_BYTES}-byte limit"),
+        format!("request body exceeds the {maximum}-byte limit"),
     )
     .into_response()
 }

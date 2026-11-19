@@ -1,5 +1,5 @@
 //! App lifecycle, diagnostics, settings, and dashboard REST handlers
-//! (`/app`, `/app/shutdown`, `/app/settings`, `/diagnostics/*`, `/status`,
+//! (`/app`, `/app/shutdown`, `/diagnostics/*`, `/status`,
 //! `/stats`, `/snapshot`).
 
 use axum::{
@@ -15,10 +15,7 @@ use futures_util::stream;
 use serde_json::json;
 use std::convert::Infallible;
 
-use emulebb_core::{
-    AppSettingsUpdate, DownloadEvent, DownloadEventResetReason, app_settings_surface_inventory,
-    bootstrap_settings_surface_inventory, settings_section_resource_inventory,
-};
+use emulebb_core::{DownloadEvent, DownloadEventResetReason};
 use tokio::sync::broadcast;
 
 use crate::diagnostic_bundle::{
@@ -194,53 +191,6 @@ pub(crate) async fn trigger_diagnostic_crash_test(body: Bytes) -> impl IntoRespo
         std::process::abort();
     });
     api_ok(json!({"ok": true})).into_response()
-}
-
-pub(crate) async fn settings(State(state): State<RestState>) -> impl IntoResponse {
-    match state.core.app_settings().await {
-        Ok(settings) => api_ok(settings).into_response(),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            error.to_string(),
-        )
-        .into_response(),
-    }
-}
-
-pub(crate) async fn settings_surface() -> impl IntoResponse {
-    api_ok(json!({
-        "settings": app_settings_surface_inventory(),
-        "bootstrapSettings": bootstrap_settings_surface_inventory(),
-        "sectionResources": settings_section_resource_inventory(),
-    }))
-}
-
-pub(crate) async fn update_settings(
-    State(state): State<RestState>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let request = match parse_required_json_body::<AppSettingsUpdate>(&body) {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    match state.core.update_app_settings(request).await {
-        Ok(settings) => api_ok(settings).into_response(),
-        Err(error) if emulebb_core::EmulebbCore::settings_update_was_committed(&error) => {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                error.to_string(),
-            )
-            .into_response()
-        }
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            error.to_string(),
-        )
-        .into_response(),
-    }
 }
 
 pub(crate) async fn status(State(state): State<RestState>) -> impl IntoResponse {
