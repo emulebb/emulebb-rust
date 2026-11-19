@@ -164,9 +164,10 @@ test("mobile forms, row actions and direct diagnostic buttons preserve request m
   await page.getByRole("button", { name: "Start", exact: true }).click();
   await expect.poll(() => requests.some((request) => request.method === "POST" && request.path === "searches")).toBe(true);
   await page.goto("/settings");
+  await page.getByLabel("Use default for Incoming directory", { exact: true }).uncheck();
   await page.getByLabel("Incoming directory", { exact: true }).fill("/storage/emulated/0/Download/Sample/Incoming");
   await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect.poll(() => requests.some((request) => request.method === "PATCH" && request.path === "app/settings")).toBe(true);
+  await expect.poll(() => requests.some((request) => request.method === "PATCH" && request.path === "settings")).toBe(true);
   await noPageOverflow(page);
   await page.goto("/diagnostics");
   const download = page.waitForEvent("download");

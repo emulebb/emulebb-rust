@@ -24,6 +24,7 @@ const TRANSFER_SOURCE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// Canonical host folder values to commit together with a newly initialized schema.
 pub struct InitialProfileStorage {
     pub incoming_dir: PathBuf,
+    pub temp_dir: PathBuf,
     pub shared_dir: PathBuf,
 }
 
@@ -255,6 +256,8 @@ impl MetadataStore {
             let mut edit = emulebb_settings::product::SettingsEdit::default();
             edit.set.storage.incoming_directory =
                 emulebb_settings::product::PartialValue::Set(storage.incoming_dir.clone());
+            edit.set.storage.temp_directory =
+                emulebb_settings::product::PartialValue::Set(storage.temp_dir.clone());
             settings = settings.edited(&edit)?;
             crate::profile_store::seed_host_storage_defaults(&tx, &storage)?;
         }
@@ -856,6 +859,7 @@ mod tests {
             None,
             Some(Box::new(move || {
                 Ok(InitialProfileStorage {
+                    temp_dir: incoming.with_extension("temp"),
                     incoming_dir: incoming,
                     shared_dir: shared,
                 })
@@ -866,6 +870,14 @@ mod tests {
         let canonical = store.load_app_settings().unwrap();
         assert_eq!(canonical.revision.get(), 1);
         assert_eq!(canonical.saved.storage.incoming_directory.value, wanted);
+        assert_eq!(
+            canonical.saved.storage.temp_directory.value,
+            wanted.with_extension("temp")
+        );
+        assert_eq!(
+            canonical.saved.storage.temp_directory.mode,
+            emulebb_settings::product::ValueMode::Custom
+        );
         assert_eq!(
             canonical.saved.storage.incoming_directory.mode,
             emulebb_settings::product::ValueMode::Custom

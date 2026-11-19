@@ -24,7 +24,7 @@ import {
 } from "lucide-preact";
 import {
   AppInfo,
-  AppSettings,
+  SettingsSnapshot,
   Category,
   Friend,
   IpFilterStatus,
@@ -67,7 +67,6 @@ import {
   Overview,
   SearchView,
   ServersView,
-  SettingsView,
   SharedFilesView,
   SharingView,
   TransfersView,
@@ -76,6 +75,7 @@ import {
 } from "./views";
 import "@tabler/core/dist/css/tabler.min.css";
 import "./styles.css";
+import { SettingsView } from "./settings";
 
 const API_KEY_STORAGE = "emulebb.webui.apiKey";
 const SNAPSHOT_LIMIT = 500;
@@ -167,7 +167,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [natStatus, setNatStatus] = useState<NatStatus | null>(null);
   const [ipFilterStatus, setIpFilterStatus] = useState<IpFilterStatus | null>(null);
   const [vpnGuardStatus, setVpnGuardStatus] = useState<VpnGuardStatus | null>(null);
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [settingsSurface, setSettingsSurface] = useState<SettingsSurface | null>(null);
   const [settingsSectionTarget, setSettingsSectionTarget] = useState<string | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -437,12 +437,12 @@ export function App({ appearance }: { appearance: Appearance }) {
     const loadSettings = async () => {
       try {
         const [nextSettings, nextNetworkStatus, nextNatStatus, nextIpFilterStatus, nextVpnGuardStatus, nextSettingsSurface] = await Promise.all([
-          client.get<AppSettings>("app/settings"),
+          client.getSettings(),
           client.get<NetworkStatus>("network"),
           client.get<NatStatus>("nat"),
           client.get<IpFilterStatus>("ip-filter"),
           client.get<VpnGuardStatus>("vpn-guard"),
-          client.get<SettingsSurface>("app/settings/surface")
+          client.get<SettingsSurface>("settings/surface")
         ]);
         if (!cancelled) {
           setSettings(nextSettings);

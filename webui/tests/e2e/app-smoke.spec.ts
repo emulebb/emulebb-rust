@@ -71,7 +71,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect.poll(async () => page.locator(".brand-version").evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeLessThanOrEqual(12);
   expect(requests.some((request) => request.method === "GET" && request.path === "snapshot")).toBe(true);
   expect(requests.some((request) => request.method === "GET" && request.path === "events/status")).toBe(false);
-  expect(requests.some((request) => request.method === "GET" && request.path === "app/settings")).toBe(false);
+  expect(requests.some((request) => request.method === "GET" && request.path === "settings")).toBe(false);
   expect(requests.some((request) => request.method === "GET" && request.path.startsWith("upload-queue"))).toBe(false);
 
   await statusToolbar.getByRole("button", { name: "Transfers: 1 unfinished", exact: true }).click();
@@ -211,7 +211,7 @@ test("recovers from a stale API key without a manual refresh", async ({ page }) 
   await page.getByRole("link", { name: "Network" }).click();
   await expect(page.getByRole("heading", { name: "Network Health" })).toBeVisible();
   await expect
-    .poll(() => requests.some((request) => request.path === "app/settings" && request.headers["x-api-key"] === "fresh-key"))
+    .poll(() => requests.some((request) => request.path === "settings" && request.headers["x-api-key"] === "fresh-key"))
     .toBe(true);
 
   await page.getByTitle("Change API key").click();
@@ -1027,185 +1027,43 @@ test("top refresh preserves the shared-files query, page, and selection", async 
   await expect(page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) }).getByText("Second Shared Sample.bin")).toBeVisible();
 });
 
-test("settings use dirty state and advanced surface metadata", async ({ page }) => {
+test("settings preserve modes, exact revisions and application status", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
-
   await page.goto("/");
   await page.getByRole("link", { name: "Settings" }).click();
-  const settingsPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Settings" }) });
-
-  await expect(settingsPanel.getByRole("heading", { name: "Storage" })).toBeVisible();
+  const settingsPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Settings", exact: true }) });
+  await expect(settingsPanel.getByRole("heading", { name: "Storage", exact: true })).toBeVisible();
   await expect(settingsPanel.getByRole("heading", { name: "Bootstrap REST" })).toBeVisible();
-  await expect(settingsPanel.getByText("rest.bind_addr")).toBeVisible();
-  await expect(settingsPanel.getByText("rest.api_key")).toBeVisible();
-  await expect(settingsPanel.getByText("emulebb-rust-settings.toml").first()).toBeVisible();
-  await expect(settingsPanel.getByRole("heading", { name: "Transfers" })).toBeVisible();
-  await expect(settingsPanel.getByRole("heading", { name: "Network" })).toBeVisible();
-  await expect(settingsPanel.getByRole("heading", { name: "VPN Guard" })).toBeVisible();
-  await expect(settingsPanel.getByRole("checkbox", { name: /^Auto connect(?:\s|$)/ })).toBeChecked();
-
-  await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
-  await expect(settingsPanel.getByText("eD2K half-open connections")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Concurrent downloads")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Keyword server attempts")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Server connect timeout seconds")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Startup base upload slots")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Bootstrap contact floor")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Discovery timeout seconds")).toHaveCount(0);
-  await settingsPanel.getByLabel(/Advanced/).check();
-  const natSection = settingsPanel.locator('[data-settings-section="nat"]');
-  await expect(natSection.getByRole("checkbox", { name: /^NAT(?:\s|$)/ })).toBeChecked();
-  await expect(natSection.getByRole("checkbox", { name: /^Require initial NAT mapping(?:\s|$)/ })).not.toBeChecked();
-  await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
-  await expect(settingsPanel.getByLabel("eD2K half-open connections")).toBeVisible();
-  await expect(settingsPanel.getByLabel("Concurrent downloads")).toBeVisible();
-  await expect(settingsPanel.getByLabel("Keyword server attempts")).toBeVisible();
-  await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
-  await expect(settingsPanel.getByLabel("Base upload slots")).toHaveValue("12");
-  await expect(settingsPanel.getByLabel("Upload client KiB/s")).toHaveValue("32");
-  await expect(settingsPanel.getByLabel("Queue size")).toHaveValue("10000");
-  await expect(settingsPanel.getByLabel("Startup base upload slots")).toHaveCount(0);
-  await expect(settingsPanel.getByLabel("Waiting queue capacity")).toHaveCount(0);
-  await expect(settingsPanel.getByLabel("Bootstrap contact floor")).toBeVisible();
-  await expect(settingsPanel.getByLabel("DNS tick seconds")).toBeVisible();
-  await expect(settingsPanel.getByLabel("Discovery timeout seconds")).toBeVisible();
-
-  const save = settingsPanel.getByRole("button", { name: "Save" });
-  const revert = settingsPanel.getByRole("button", { name: "Revert" });
+  await expect(settingsPanel.getByText("rest.api_key", { exact: true })).toBeVisible();
+  const save = settingsPanel.getByRole("button", { name: "Save", exact: true });
   await expect(save).toBeDisabled();
-  await expect(revert).toBeDisabled();
-
-  const nickname = settingsPanel.getByLabel("eD2K nickname");
-  await expect(nickname).toHaveValue("Sample Mule");
-  const configFloor = settingsPanel.getByLabel("Minimum free profile/config bytes");
-  await expect(configFloor).toHaveValue("1073741824");
-  await nickname.fill("x".repeat(51));
-  await expect(settingsPanel.getByText("eD2K nickname must be at most 50 characters.")).toBeVisible();
+  await settingsPanel.getByLabel("Use default for Connections · Max connections", { exact: true }).uncheck();
+  const connections = settingsPanel.getByLabel("Connections · Max connections", { exact: true });
+  await connections.fill("0");
+  await expect(settingsPanel.getByText("Enter a whole number from 1 to 2147483647, in steps of 1.")).toBeVisible();
   await expect(save).toBeDisabled();
-  await nickname.fill("Sample Mule");
-  await expect(settingsPanel.getByText("eD2K nickname must be at most 50 characters.")).toHaveCount(0);
-
-  await settingsPanel.getByLabel("Max connections").fill("2147483648");
-  await expect(settingsPanel.getByText("Max connections must be between 1 and 2147483647.")).toBeVisible();
+  await connections.fill("501");
+  await settingsPanel.getByLabel("Use default for Incoming directory", { exact: true }).uncheck();
+  await settingsPanel.getByLabel("Incoming directory", { exact: true }).fill("C:\\Changed\\Incoming");
+  await settingsPanel.getByRole("button", { name: "Revert", exact: true }).click();
   await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("Max connections").fill("500");
-  await expect(settingsPanel.getByText("Max connections must be between 1 and 2147483647.")).toHaveCount(0);
-  await configFloor.fill("1073741823");
-  await expect(settingsPanel.getByText("Minimum free profile/config bytes must be between 1073741824 and 5497558138880.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await configFloor.fill("1073741824");
-  await expect(settingsPanel.getByText("Minimum free profile/config bytes must be between 1073741824 and 5497558138880.")).toHaveCount(0);
-  await settingsPanel.getByLabel("eD2K listen port").fill("70000");
-  await expect(settingsPanel.getByText("eD2K listen port must be between 1 and 65535.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("eD2K listen port").fill("4662");
-  await expect(settingsPanel.getByText("eD2K listen port must be between 1 and 65535.")).toHaveCount(0);
-  await settingsPanel.getByLabel("DNS tick seconds").fill("4");
-  await expect(settingsPanel.getByText("DNS tick seconds must be at least 5.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("DNS tick seconds").fill("30");
-  await expect(settingsPanel.getByText("DNS tick seconds must be at least 5.")).toHaveCount(0);
-  await settingsPanel.getByLabel("P2P bind IP").fill("not-an-ip");
-  await expect(settingsPanel.getByText("P2P bind IP must be an IPv4 address.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("P2P bind IP").fill("192.0.2.10");
-  await expect(settingsPanel.getByText("P2P bind IP must be an IPv4 address.")).toHaveCount(0);
-  await settingsPanel.getByLabel("UDP firewall interval seconds").fill("59");
-  await expect(settingsPanel.getByText("UDP firewall interval seconds must be at least 60.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("UDP firewall interval seconds").fill("3600");
-  await expect(settingsPanel.getByText("UDP firewall interval seconds must be at least 60.")).toHaveCount(0);
-  await settingsPanel.getByLabel("Dead server retries").fill("11");
-  await expect(settingsPanel.getByText("Dead server retries must be between 1 and 10.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("Dead server retries").fill("1");
-  await expect(settingsPanel.getByText("Dead server retries must be between 1 and 10.")).toHaveCount(0);
-  await settingsPanel.getByLabel("Base upload slots").fill("0");
-  await expect(settingsPanel.getByText("Base upload slots must be between 1 and 64.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("Base upload slots").fill("12");
-  await expect(settingsPanel.getByText("Base upload slots must be between 1 and 64.")).toHaveCount(0);
-  await settingsPanel.getByLabel("NAT bind IP").fill("not-an-ip");
-  await expect(settingsPanel.getByText("NAT bind IP must be an IPv4 address.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("NAT bind IP").fill("192.0.2.11");
-  await expect(settingsPanel.getByText("NAT bind IP must be an IPv4 address.")).toHaveCount(0);
-  await settingsPanel.getByLabel("Allowed public CIDRs").fill("192.0.2.0/24");
-  await expect(settingsPanel.getByText("Allowed public CIDRs must contain only public IPv4 CIDRs or host addresses.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("Allowed public CIDRs").fill("8.8.8.0/24 1.1.1.1");
-  await expect(settingsPanel.getByText("Allowed public CIDRs must contain only public IPv4 CIDRs or host addresses.")).toHaveCount(0);
-  await settingsPanel.getByLabel("Concurrent downloads").fill("0");
-  await settingsPanel.getByLabel("eD2K new connections / 5s").fill("0");
-  await settingsPanel.getByLabel("eD2K half-open connections").fill("0");
-  await settingsPanel.getByLabel("eD2K source cap").fill("0");
-  await settingsPanel.getByLabel("Server keepalive minutes").fill("1441");
-  await expect(settingsPanel.getByText("Server keepalive minutes must be between 0 and 1440.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await settingsPanel.getByLabel("Server keepalive minutes").fill("0");
-  await settingsPanel.getByLabel("Session transfer %").fill("0");
-  await settingsPanel.getByLabel("Session time limit seconds").fill("0");
-  await expect(save).toBeEnabled();
-  await expect(settingsPanel.getByText("Concurrent downloads must be at least 1.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("eD2K new connections / 5s must be at least 1.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("eD2K half-open connections must be at least 1.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("eD2K source cap must be at least 1.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Server keepalive minutes must be between 0 and 1440.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Session transfer % must be between 1 and 100.")).toHaveCount(0);
-  await expect(settingsPanel.getByText("Session time limit seconds must be at least 1.")).toHaveCount(0);
-  await revert.click();
-  await expect(save).toBeDisabled();
-  const metricValue = (label: string) => page.locator(".metric").filter({ has: page.getByText(label, { exact: true }) }).locator("strong");
-  await expect(metricValue("Bind")).toHaveText("resolved");
-  await expect(metricValue("Interface")).toHaveText("Test Adapter");
-  await expect(metricValue("NAT")).toHaveText("Enabled");
-  await expect(metricValue("Gateway")).toHaveText("Discovered");
-  await expect(metricValue("Mappings")).toHaveText("2");
-  await expect(metricValue("Guard")).toHaveText("Enabled");
-  await expect(metricValue("Egress")).toHaveText("Verified 203.0.113.10");
-  await expect(metricValue("Configured")).toHaveText("Yes");
-  await expect(metricValue("Reloadable")).toHaveText("Yes");
-  await expect(metricValue("Ranges")).toHaveText("3");
-  await expect(settingsPanel.getByLabel("VPN Guard mode")).toHaveValue("block");
-
-  await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
-  await expect(save).toBeEnabled();
-  await expect(revert).toBeEnabled();
-
-  await revert.click();
-  await expect(settingsPanel.getByLabel("Incoming directory")).toHaveValue("C:\\Sample\\Incoming");
-  await expect(save).toBeDisabled();
-
-  await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
-  await settingsPanel.getByLabel("eD2K nickname").fill("Phase B Mule");
-  await configFloor.fill("2147483648");
-  await settingsPanel.getByLabel("Use server priorities").uncheck();
-  await settingsPanel.getByLabel("Auto-connect static servers only").check();
-  await settingsPanel.getByLabel("Reconnect after disconnect").uncheck();
-  await settingsPanel.getByLabel("Safe server connect").check();
-  await settingsPanel.getByLabel("Add servers from server").check();
-  await settingsPanel.getByLabel("Server keepalive minutes").fill("20");
+  await expect(settingsPanel.getByLabel("Incoming directory", { exact: true })).toHaveValue("incoming");
+  await settingsPanel.getByLabel("Use default for Incoming directory", { exact: true }).uncheck();
+  await settingsPanel.getByLabel("Incoming directory", { exact: true }).fill("C:\\Changed\\Incoming");
   await save.click();
-  await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
   await expect(save).toBeDisabled();
-  await expect(settingsPanel.getByLabel("Incoming directory")).toHaveValue("C:\\Changed\\Incoming");
-  await expect(settingsPanel.getByLabel("eD2K nickname")).toHaveValue("Phase B Mule");
-  const settingsPatch = requests.find((request) => request.method === "PATCH" && request.path === "app/settings");
-  expect(settingsPatch).toBeDefined();
-  expect(JSON.parse(settingsPatch?.body ?? "{}")).toEqual({
-    daemon: { incomingDir: "C:\\Changed\\Incoming" },
-    ed2k: {
-      nickname: "Phase B Mule",
-      minFreeConfigSpaceBytes: 2147483648,
-      reconnectEnabled: false,
-      safeServerConnect: true,
-      addServersFromServer: true,
-      serverKeepaliveMinutes: 20,
-      useServerPriorities: false,
-      autoConnectStaticOnly: true
-    }
-  });
+  await expect(settingsPanel.getByText("Saved changes require a daemon restart.")).toBeVisible();
+  await expect(settingsPanel.getByText("Running: incoming")).toBeVisible();
+  const write = requests.find((request) => request.method === "PATCH" && request.path === "settings");
+  expect(JSON.parse(write?.body ?? "{}")).toEqual({ expectedRevision: "9007199254740993", set: { storage: { incomingDirectory: "C:\\Changed\\Incoming" } } });
+  await settingsPanel.getByLabel("Use default for Incoming directory", { exact: true }).check();
+  await save.click();
+  await expect.poll(() => requests.filter((request) => request.method === "PATCH" && request.path === "settings").length).toBe(2);
+  const reset = requests.filter((request) => request.method === "PATCH" && request.path === "settings")[1];
+  expect(JSON.parse(reset.body ?? "{}")).toEqual({ expectedRevision: "9007199254740994", reset: ["storage.incomingDirectory"] });
+  await expect(settingsPanel.getByText("Saved changes require a daemon restart.")).toHaveCount(0);
+  const metricValue = (label: string) => page.locator(".metric").filter({ has: page.getByText(label, { exact: true }) }).locator("strong");
   await settingsPanel.getByRole("button", { name: "Reload IP filter" }).click();
   await expect(page.getByText("IP filter reloaded")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "ip-filter/operations/reload")).toBe(true);

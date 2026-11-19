@@ -7,7 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use emulebb_daemon::{DaemonProfile, RestBootstrapSettings, ShutdownRequest, host_bootstrap};
+use emulebb_daemon::{
+    DaemonProfile, InitialProfileStorage, RestBootstrapSettings, ShutdownRequest, host_bootstrap,
+};
 use jni::{
     Env, native_method,
     objects::{JObject, JString},
@@ -303,10 +305,15 @@ fn run_attempt(
     shutdown: &ShutdownRequest,
     readiness_reported: &mut bool,
 ) -> Result<()> {
-    let mut profile =
-        DaemonProfile::load_hosted(profile_dir.into(), incoming_dir.into(), shared_dir.into())?;
+    let profile = DaemonProfile::load_hosted(
+        profile_dir.into(),
+        InitialProfileStorage {
+            incoming_dir: incoming_dir.into(),
+            temp_dir: transfer_root.into(),
+            shared_dir: shared_dir.into(),
+        },
+    )?;
     ensure_process_logging(profile.profile_io_dir())?;
-    profile.host_transfer_root = Some(transfer_root.into());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

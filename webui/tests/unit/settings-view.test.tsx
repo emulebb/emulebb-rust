@@ -1,161 +1,122 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { useState } from "preact/hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RestClient, RestError, type SettingsSnapshot } from "../../src/api";
+import { SettingsView } from "../../src/settings";
+import { savedSetting, setSetting } from "../../src/settingsModel";
+import { applySettingsFixture, settingsFixture, settingsSurfaceFixture } from "../fixtures/settings";
 
-import { type AppSettings, RestClient, type SettingsSurface } from "../../src/api";
-import { SettingsView } from "../../src/views";
+afterEach(() => vi.restoreAllMocks());
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
+function mount(initial = settingsFixture()) {
+  const client = new RestClient();
+  let current = initial;
+  const patch = vi.spyOn(client, "patchSettings").mockImplementation(async (edit) => {
+    current = applySettingsFixture(current, edit);
+    return current;
+  });
+  const read = vi.spyOn(client, "getSettings").mockResolvedValue(initial);
+  const saved = vi.fn();
+  function Host() {
+    const [snapshot, setSnapshot] = useState(initial);
+    return <SettingsView settings={snapshot} surface={settingsSurfaceFixture}
+      networkStatus={null} natStatus={null} ipFilterStatus={null} vpnGuardStatus={null} focusedSection={null}
+      client={client} run={async (operation) => { try { await operation(); } catch { /* Parent displays the same error. */ } }}
+      onSettingsSaved={(next) => { saved(next); setSnapshot(next); }} openSection={() => undefined} />;
+  }
+  render(<Host />);
+  return { patch, read, saved };
+}
+const useCustom = (label: string) => fireEvent.click(screen.getByLabelText(`Use default for ${label}`));
+const fill = (label: string, value: string) => fireEvent.input(screen.getByLabelText(label, { exact: true }), { target: { value } });
+const save = () => fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
 
-describe("SettingsView ED2K server policy", () => {
-  it("writes only ED2K-owned server controls and validates keepalive minutes", async () => {
-    const client = new RestClient();
-    const patch = vi.spyOn(client, "patch").mockResolvedValue(settings);
+describe("canonical settings", () => {
+  it("resets a custom leaf and shows saved versus running state", async () => {
+    const snapshot = settingsFixture();
+    Object.assign(savedSetting(snapshot.data.saved, "storage.incomingDirectory"), { mode: "custom", value: "custom-incoming" });
+    setSetting(snapshot.data.effective, "storage.incomingDirectory", "custom-incoming");
+    const { patch } = mount(snapshot);
+    useCustom("Incoming directory");
+    save();
+    await waitFor(() => expect(patch).toHaveBeenCalledWith({ expectedRevision: "9007199254740993", reset: ["storage.incomingDirectory"] }));
+    await waitFor(() => expect(screen.getByText("Saved changes require a daemon restart.")).toBeInTheDocument());
+    expect(screen.getByText("Running: custom-incoming")).toBeInTheDocument();
+    expect(screen.getByLabelText("Incoming directory", { exact: true })).toHaveValue("incoming");
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
+  });
 
-    render(
-      <SettingsView
-        settings={settings}
-        surface={surface}
-        networkStatus={null}
-        natStatus={null}
-        ipFilterStatus={null}
-        vpnGuardStatus={null}
-        focusedSection={null}
-        client={client}
-        run={async (operation) => { await operation(); }}
-        onSettingsSaved={() => undefined}
-        openSection={() => undefined}
-      />
-    );
+  it("keeps nullable automatic selection distinct from a custom integer", async () => {
+    const { patch } = mount();
+    useCustom("Max concurrent downloads");
+    expect(screen.getByLabelText("Not set for Max concurrent downloads")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("Not set for Max concurrent downloads"));
+    fill("Max concurrent downloads", "16");
+    save();
+    await waitFor(() => expect(patch).toHaveBeenCalledWith({ expectedRevision: "9007199254740993", set: { transfers: { maxConcurrentDownloads: 16 } } }));
+    await waitFor(() => expect(screen.getByLabelText("Use default for Max concurrent downloads")).toBeEnabled());
+    useCustom("Max concurrent downloads");
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Save$/ })).toBeEnabled());
+    save();
+    await waitFor(() => expect(patch).toHaveBeenLastCalledWith({ expectedRevision: "9007199254740994", reset: ["transfers.maxConcurrentDownloads"] }));
+  });
 
-    expect(screen.getByRole("checkbox", { name: /^Reconnect after disconnect/ })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /^Safe server connect/ })).not.toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /^Add servers from server/ })).not.toBeChecked();
-    expect(screen.queryByRole("checkbox", { name: /^Reconnect$/ })).not.toBeInTheDocument();
+  it("validates metadata bounds and sends only the edited nested keys", async () => {
+    const { patch } = mount();
+    useCustom("Servers · Keepalive minutes");
+    fill("Servers · Keepalive minutes", "1441");
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
+    expect(patch).not.toHaveBeenCalled();
+    fill("Servers · Keepalive minutes", "20");
+    useCustom("Servers · Safe connect");
+    fireEvent.click(screen.getByLabelText("Servers · Safe connect", { exact: true }));
+    save();
+    await waitFor(() => expect(patch).toHaveBeenCalledWith({ expectedRevision: "9007199254740993",
+      set: { network: { servers: { keepaliveMinutes: 20, safeConnect: true } } } }));
+  });
 
-    fireEvent.click(screen.getByLabelText(/Advanced/));
-    const keepalive = screen.getByLabelText(/^Server keepalive minutes/);
-    expect(keepalive).toHaveValue("0");
-    fireEvent.input(keepalive, { target: { value: "1441" } });
-    expect(screen.getByText("Server keepalive minutes must be between 0 and 1440.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  it("retains edits on conflict and reloads only after an explicit discard", async () => {
+    const { patch, read } = mount();
+    patch.mockRejectedValueOnce(new RestError("Saved settings changed.", 409, "SETTINGS_CONFLICT"));
+    useCustom("Nickname"); fill("Nickname", "Sample Client"); save();
+    await waitFor(() => expect(screen.getByText(/Your edits are kept/)).toBeInTheDocument());
+    expect(screen.getByLabelText("Nickname", { exact: true })).toHaveValue("Sample Client");
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
+    expect(read).not.toHaveBeenCalled();
+    expect(patch).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Discard and reload" }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByLabelText("Nickname", { exact: true })).toHaveValue("eMule"));
+    expect(patch).toHaveBeenCalledTimes(1);
+  });
 
-    fireEvent.input(keepalive, { target: { value: "20" } });
-    fireEvent.click(screen.getByRole("checkbox", { name: /^Reconnect after disconnect/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /^Safe server connect/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /^Add servers from server/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  it("does not retry an unknown save outcome", async () => {
+    const { patch, read } = mount();
+    patch.mockRejectedValueOnce(new TypeError("Connection lost"));
+    useCustom("Temp directory"); fill("Temp directory", "custom-temp"); save();
+    await waitFor(() => expect(screen.getByText(/Read the current settings before another save/)).toBeInTheDocument());
+    expect(screen.getByLabelText("Temp directory", { exact: true })).toHaveValue("custom-temp");
+    expect(read).not.toHaveBeenCalled();
+    expect(patch).toHaveBeenCalledTimes(1);
+  });
 
-    await waitFor(() => {
-      expect(patch).toHaveBeenCalledWith("app/settings", {
-        ed2k: {
-          reconnectEnabled: false,
-          safeServerConnect: true,
-          addServersFromServer: true,
-          serverKeepaliveMinutes: 20
-        }
-      });
-    });
+  it("admits at most one save while its response is pending", async () => {
+    const { patch } = mount();
+    let complete!: (value: SettingsSnapshot) => void;
+    patch.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    useCustom("Nickname"); fill("Nickname", "Sample Client"); save(); save();
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    complete(applySettingsFixture(settingsFixture(), { expectedRevision: "9007199254740993", set: { network: { nickname: "Sample Client" } } }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled());
+  });
+
+  it("reports live application failure without claiming that saved values are running", () => {
+    const snapshot = settingsFixture();
+    Object.assign(savedSetting(snapshot.data.saved, "transfers.uploadLimitBytesPerSecond"), { mode: "custom", value: 4000 });
+    snapshot.data.application.failed = [{ key: "transfers.uploadLimitBytesPerSecond", code: "APPLY_FAILED", message: "Runtime application failed", truncated: false }];
+    mount(snapshot);
+    expect(screen.getByText(/Runtime application failed/)).toBeInTheDocument();
+    expect(screen.getByText("Running: 6348800")).toBeInTheDocument();
+    expect(screen.getByText("rest.api_key")).toBeInTheDocument();
   });
 });
-
-const settings: AppSettings = {
-  core: {
-    uploadLimitKiBps: 6200,
-    downloadLimitKiBps: 12207,
-    maxConnections: 500,
-    maxConnectionsPerFiveSeconds: 50,
-    maxSourcesPerFile: 600,
-    uploadClientDataRate: 32,
-    baseUploadSlots: 12,
-    uploadSlotElasticPercent: 80,
-    queueSize: 10000,
-    autoConnect: true,
-    creditSystem: true,
-    networkKademlia: true,
-    networkEd2k: true
-  },
-  daemon: {
-    hostnameLookup: {
-      cacheTtlSecs: 86400,
-      maxLookupsPerTick: 32,
-      tickIntervalSecs: 30
-    }
-  },
-  ed2k: {
-    nickname: "Sample Mule",
-    connectTimeoutSecs: 30,
-    serverConnectTimeoutSecs: 25,
-    callbackTimeoutSecs: 45,
-    reconnectIntervalSecs: 30,
-    reconnectEnabled: true,
-    safeServerConnect: false,
-    addServersFromServer: false,
-    serverKeepaliveMinutes: 0,
-    sessionRotationSecs: 0,
-    maxConcurrentDownloads: 500,
-    maxNewConnectionsPerFiveSeconds: 50,
-    maxHalfOpenConnections: 50,
-    maxSourcesPerFile: 600,
-    maxParallelDownloadPeers: 2,
-    keywordServerAttemptBudget: 3,
-    exactHashKeywordServerAttemptBudget: 4,
-    sourceServerAttemptBudget: 3,
-    downloadLimitBytesPerSec: 0,
-    minFreeConfigSpaceBytes: 1073741824,
-    minFreeTransferSpaceBytes: 5368709120,
-    minFreeIncomingSpaceBytes: 5368709120,
-    deadServerRetries: 1,
-    uploadQueue: {
-      elasticUnderfillSecs: 10,
-      waitingTimeoutSecs: 3600,
-      grantedTimeoutSecs: 5,
-      uploadTimeoutSecs: 30,
-      sessionTransferPercent: 90,
-      sessionTimeLimitSecs: 7200
-    }
-  },
-  kad: {
-    bootstrapMinRoutingContacts: 10,
-    republishIntervalSecs: 1800,
-    publishContactFanout: 12,
-    udpFirewallCheckIntervalSecs: 3600,
-    tcpFirewallCheckIntervalSecs: 3600
-  },
-  nat: {
-    backendOrder: ["pcp_natpmp", "upnp_miniupnpc"],
-    discoveryTimeoutSecs: 5,
-    leaseDurationSecs: 3600,
-    renewMarginSecs: 300
-  },
-  vpnGuard: {
-    allowedPublicIpCidrs: ""
-  },
-  ipFilter: {
-    level: 127
-  }
-};
-
-const surface: SettingsSurface = {
-  settings: [
-    setting("core.autoConnect", "normalControl"),
-    setting("ed2k.reconnectEnabled", "normalControl"),
-    setting("ed2k.safeServerConnect", "normalControl"),
-    setting("ed2k.addServersFromServer", "normalControl"),
-    setting("ed2k.serverKeepaliveMinutes", "advancedControl")
-  ],
-  bootstrapSettings: [],
-  sectionResources: []
-};
-
-function setting(path: string, fieldClass: "normalControl" | "advancedControl") {
-  return {
-    path,
-    class: fieldClass,
-    restartRequired: true,
-    uiSection: "Servers",
-    route: "/api/v1/app/settings",
-    description: "Synthetic settings test field."
-  } as const;
-}

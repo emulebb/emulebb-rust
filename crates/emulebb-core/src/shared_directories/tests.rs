@@ -940,7 +940,7 @@ async fn added_path_reuses_accepted_live_identity_without_stock_lookup_or_payloa
 }
 
 #[tokio::test]
-async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart() {
+async fn trusted_stock_hash_survives_normal_scans_and_restart() {
     let root = scratch_dir("trusted-stock-restart");
     let shared = root.join("shared");
     fs::create_dir(&shared).unwrap();
@@ -976,10 +976,6 @@ async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart(
             source_evidence(&source, fingerprint.as_ref().unwrap()),
         )])
         .unwrap();
-    let report = core.reconcile_shared_files().await.unwrap();
-    assert_eq!(report.reused_count, 1);
-    assert_eq!(report.planned_hash_count, 0);
-    assert_eq!(report.completed_read_bytes, 0);
     assert_eq!(
         core.metadata_store.active_shared_content_count().unwrap(),
         0
@@ -1002,17 +998,18 @@ async fn trusted_stock_hash_survives_offline_reconciliation_startup_and_restart(
     drop(core);
 
     let restarted = EmulebbCore::new("test", FileIndex::open(&db).unwrap(), &transfers).unwrap();
-    let report = restarted.reconcile_shared_files().await.unwrap();
-    assert_eq!(report.reused_count, 1);
-    assert_eq!(report.planned_hash_count, 0);
     let shares = restarted.reload_shared_directories().await.unwrap();
     assert_eq!(shares[0].hash, expected_hash);
 
     fs::write(&source, b"changed stock payload").unwrap();
-    let changed = restarted.reconcile_shared_files().await.unwrap();
+    let scan = scan_shared_files(&restarted).await.unwrap();
+    let plan = plan_incremental_reload(&restarted, scan.files)
+        .await
+        .unwrap();
+    assert_eq!(plan.to_hash.len(), 1);
+    let changed = plan.stats;
     assert_eq!(changed.changed_count, 1);
     assert_eq!(changed.planned_hash_count, 1);
-    assert_eq!(changed.hashed_count, 0);
     assert!(
         restarted
             .ed2k_transfers

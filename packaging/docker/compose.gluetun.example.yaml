@@ -27,7 +27,6 @@ services:
       PUID: "1000"
       PGID: "1000"
       TZ: UTC
-      EMULEBB_RUST_P2P_INTERFACE: tun0
     volumes:
       - emulebb-rust-config:/config
       - emulebb-rust-data:/data
