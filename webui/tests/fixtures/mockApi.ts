@@ -149,7 +149,7 @@ export function installMockApi(requests: RecordedApiRequest[]) {
 
     if (request.method() === "GET" && (path === "library/tags" || /^library\/files\/[0-9a-f]{32}\/tags$/.test(path))) {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
-        data: [{ name: "Alpha" }], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false }
+        data: [{ name: "Alpha" }], meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
       }) });
       return;
     }

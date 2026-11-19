@@ -4,11 +4,11 @@ import { RestClient, type CursorPage, type LibraryTag } from "../../src/api";
 import { FileTags, LibraryTags } from "../../src/libraryTags";
 
 const page = (name: string, nextCursor: string | null = null): CursorPage<LibraryTag> => ({
-  data: [{ name }], meta: { apiVersion: "2.0.0", nextCursor, hasMore: nextCursor !== null }
+  data: [{ name }], meta: { apiVersion: "v1", nextCursor, hasMore: nextCursor !== null }
 });
 
 const emptyPage: CursorPage<LibraryTag> = {
-  data: [], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false }
+  data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
 };
 const hash = "a".repeat(32);
 
@@ -133,7 +133,7 @@ describe("library tag management", () => {
   it("requires deletion confirmation and refreshes after a successful deletion", async () => {
     const client = new RestClient();
     const get = vi.spyOn(client, "getPage").mockResolvedValueOnce(page("Alpha"))
-      .mockResolvedValue({ data: [], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } });
+      .mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     const remove = vi.spyOn(client, "delete").mockResolvedValue(undefined);
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     render(<LibraryTags client={client} />);
