@@ -1,49 +1,15 @@
-//! Live shared-directory monitoring (auto-pickup) for the configured shared
-//! roots (eMule's `CSharedFileList` directory auto-monitor parity).
+//! Optional recursive shared-directory watching with settled, bounded action batches.
 //!
-//! # Design
+//! Known path changes use the verified share/remove/relocate owners. Event loss,
+//! failed subscriptions and observation gaps persist scan-required state against
+//! captured root IDs. They never schedule a full scan. Explicit/startup scans
+//! acknowledge only losses covered by their captured scan watermark.
 //!
-//! The OS file-system watcher (`notify`) is inherently blocking/callback driven
-//! and runs on its **own thread**; the rest of the core is async (tokio). We
-//! bridge the two with the established pattern:
-//!
-//! ```text
-//!   notify watcher thread --(debounced batches)--> bounded mpsc --> tokio consumer task
-//! ```
-//!
-//! * **Debouncing.** A single logical change (a file copied in, an editor's
-//!   save-and-rename, a directory delete) produces a *burst* of raw FS events.
-//!   We run the events through `notify-debouncer-full`, which collapses a burst
-//!   into settled events. The settle window also means we never act on a file
-//!   that is still being written: we only hash it once its events have settled.
-//! * **Recursive per root.** Each configured root is watched recursively,
-//!   matching the manual full-tree scan.
-//! * **Root availability.** A separate two-second check withdraws complete
-//!   offers when a root disappears and schedules a verified reload when it
-//!   returns, including when the OS watcher drops a mount event.
-//! * **Thread -> channel -> tokio bridge.** The debouncer's event handler is a
-//!   small closure that classifies the settled events into [`MonitorAction`]s
-//!   (the pure decision -- share vs. remove) and forwards them over a bounded
-//!   `tokio::sync::mpsc` channel. Overflow collapses into one authoritative
-//!   reconciliation request instead of accumulating unbounded path work. The
-//!   async consumer applies each action via the existing share / un-share core
-//!   paths so MD4/AICH/catalog stay consistent.
-//! * **Graceful degradation.** Watching one root can fail (a vanished path; on
-//!   Linux a large recursive tree can exhaust the inotify watch limit). We log
-//!   and continue with the other roots rather than crashing the daemon: that
-//!   root simply degrades to scan-on-demand (the manual
-//!   `reload_shared_directories` fallback still covers it).
-//!
-//! The OS watcher itself is impossible to unit-test deterministically, so the
-//! testable seam is [`classify_event`] / [`actions_for_events`]: given a settled
-//! debounced event, decide whether it means *share this path* or *drop this
-//! path*. The tests exercise that decision plus the consumer's in-order
-//! forwarding to the applier, which is the single authority on whether a
-//! Share/Remove actually has an effect.
-
+//! The native debouncer still owns upstream event/cache state; the admission and
+//! coalescing limits here bound the downstream path work, not that upstream cache.
 use anyhow::Context;
 use emulebb_metadata::NativeFileFingerprint;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,8 +33,7 @@ use crate::shared_directories::{SharedDirectoryRoot, load_shared_file_ignore_pol
 const SETTLE_WINDOW: Duration = Duration::from_secs(2);
 
 /// Maximum settled path actions retained while the serial async applier is
-/// busy. Normal bursts stay on the direct path; larger bursts collapse into a
-/// full reconciliation so memory use is independent of watcher event volume.
+/// busy. Larger settled bursts collapse into a scan-required notice.
 const ACTION_CHANNEL_CAPACITY: usize = 256;
 
 const TARGETED_REHASH_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -105,12 +70,12 @@ impl RootChangeSignal {
 /// `notify` 8.x uses one fixed 16 KiB `ReadDirectoryChangesW` buffer for a
 /// recursive Windows watch. Even a modest settled mutation burst can mean an
 /// earlier buffer overflow was silently dropped (renames are especially costly
-/// because they contribute old-name and new-name records). Follow such a burst
-/// with one incremental scan. A single-file operation keeps the direct fast
+/// because they contribute old-name and new-name records). Flag such a burst
+/// for an explicit scan. A single-file operation keeps the direct fast
 /// path; two settled actions are enough to protect against the very short tail
 /// that Windows can deliver after discarding an overflowed buffer.
 #[cfg(target_os = "windows")]
-const WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD: usize = 2;
+const WINDOWS_EVENT_BURST_LOSS_THRESHOLD: usize = 2;
 
 /// The decision distilled from a settled debounced event: what the consumer
 /// should do with a given path. This is the pure, unit-testable core of the
@@ -127,10 +92,9 @@ pub(crate) enum MonitorAction {
     /// A file moved within a watched tree. Content identity is preserved, so
     /// the applier can relocate the persisted source path without rehashing.
     Rename { from: PathBuf, to: PathBuf },
-    /// The backend reported only one side of a rename. Reconcile the complete
-    /// configured tree because an OS watcher buffer may have dropped adjacent
-    /// events from the same burst.
-    Reconcile,
+    /// Known/possible loss for these paths. Empty means unknown scope; the
+    /// captured subscribed root IDs are flagged for an explicit scan.
+    ScanRequired(Vec<PathBuf>),
 }
 
 /// Classify a single settled debounced event into zero or more actions.
@@ -141,7 +105,7 @@ pub(crate) enum MonitorAction {
 /// * `Remove` -> the path no longer holds the content it had, so drop it.
 /// * A paired rename carries `[from, to]`: relocate the source identity without
 ///   rehashing unchanged content.
-/// * An unpaired rename requests one incremental reconciliation scan. It may be
+/// * An unpaired rename flags its paths for an explicit scan. It may be
 ///   a legitimate move across the watch boundary, or evidence that the native
 ///   watcher dropped the other side of a larger burst.
 ///
@@ -150,7 +114,7 @@ pub(crate) enum MonitorAction {
 /// actually touches the filesystem.
 pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
     if event.need_rescan() {
-        return vec![MonitorAction::Reconcile];
+        return vec![MonitorAction::ScanRequired(event.paths.clone())];
     }
     // Map every path of the event to the same action variant.
     let map_paths = |variant: fn(PathBuf) -> MonitorAction| -> Vec<MonitorAction> {
@@ -174,7 +138,9 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
             // An unpaired rename is also the only portable signal left after
             // a native watcher buffer overflow. A full incremental scan is
             // required to discover every path the kernel could not report.
-            RenameMode::To | RenameMode::From => vec![MonitorAction::Reconcile],
+            RenameMode::To | RenameMode::From => {
+                vec![MonitorAction::ScanRequired(event.paths.clone())]
+            }
             // Some backends label a paired [from, to] event as Any/Other. Keep
             // that pair when present; a single ambiguous path needs the same
             // reconciliation safety net as an unpaired From/To event.
@@ -184,7 +150,7 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
                         from: from.clone(),
                         to: to.clone(),
                     }],
-                    _ => vec![MonitorAction::Reconcile],
+                    _ => vec![MonitorAction::ScanRequired(event.paths.clone())],
                 }
             }
         },
@@ -202,10 +168,15 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
         let mut actions = actions;
         let catalog_action_count = actions
             .iter()
-            .filter(|action| !matches!(action, MonitorAction::Reconcile))
+            .filter(|action| !matches!(action, MonitorAction::ScanRequired(_)))
             .count();
-        if catalog_action_count >= WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD {
-            actions.push(MonitorAction::Reconcile);
+        if catalog_action_count >= WINDOWS_EVENT_BURST_LOSS_THRESHOLD {
+            actions.push(MonitorAction::ScanRequired(
+                events
+                    .iter()
+                    .flat_map(|event| event.paths.iter().cloned())
+                    .collect(),
+            ));
         }
         actions
     }
@@ -221,12 +192,14 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
 /// the same file while the serial hashing consumer is busy. Keeping only the
 /// last intent avoids redundant full-file reads and also bounds the pending
 /// work to the number of distinct paths. Paired renames remain atomic actions;
-/// duplicate pairs and reconciliation requests are collapsed independently
+/// duplicate pairs and loss notices are collapsed independently
 /// from final per-path intents.
 fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
     let mut by_path: HashMap<PathBuf, (usize, MonitorAction)> = HashMap::new();
     let mut renames: HashMap<(PathBuf, PathBuf), (usize, MonitorAction)> = HashMap::new();
-    let mut reconcile = None;
+    let mut loss_sequence = None;
+    let mut loss_paths = HashSet::new();
+    let mut global_loss = false;
     for (sequence, action) in actions.into_iter().enumerate() {
         match &action {
             MonitorAction::Share(path) | MonitorAction::Remove(path) => {
@@ -235,15 +208,12 @@ fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
             MonitorAction::Rename { from, to } => {
                 renames.insert((from.clone(), to.clone()), (sequence, action));
             }
-            MonitorAction::Reconcile => reconcile = Some((sequence, action)),
+            MonitorAction::ScanRequired(paths) => {
+                loss_sequence = Some(sequence);
+                global_loss |= paths.is_empty();
+                loss_paths.extend(paths.iter().cloned());
+            }
         }
-    }
-    // Reconciliation is the sole authority for a burst. Running the individual
-    // actions beside a detached reload can interleave two catalog writers and
-    // leave the durable rows ahead of the in-memory catalog. The full scan sees
-    // the final settled filesystem state, so the per-path work is redundant.
-    if reconcile.is_some() {
-        return vec![MonitorAction::Reconcile];
     }
     // A backend can emit a paired rename plus a redundant destination Modify.
     // Relocation already compares the final destination identity and rehashes
@@ -264,25 +234,43 @@ fn coalesce_actions(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
     }
     let mut coalesced = by_path.into_values().collect::<Vec<_>>();
     coalesced.extend(renames.into_values());
-    coalesced.extend(reconcile);
+    if let Some(sequence) = loss_sequence {
+        let mut paths = if global_loss {
+            Vec::new()
+        } else {
+            loss_paths.into_iter().collect::<Vec<_>>()
+        };
+        paths.sort_unstable();
+        coalesced.push((sequence, MonitorAction::ScanRequired(paths)));
+    }
     coalesced.sort_by_key(|(sequence, _)| *sequence);
     coalesced.into_iter().map(|(_, action)| action).collect()
 }
 
 /// Non-blocking ingress from the watcher callback into the async consumer.
 ///
-/// Once the bounded queue fills, the first overflow latches a reconciliation
-/// request. Further callbacks skip redundant path actions until the consumer
-/// drains the queue and takes ownership of that request. The filesystem scan
-/// then observes the authoritative final state for every skipped action.
+/// Overflow latches one unknown-scope loss notice. Further callbacks skip path
+/// actions until the consumer takes ownership of that notice. Recovery is an
+/// explicit scan; no callback waits for database work or starts a scan.
+#[derive(Clone)]
 struct MonitorIngress {
     action_tx: Sender<MonitorAction>,
-    reconcile_required: Arc<AtomicBool>,
+    scan_required: Arc<AtomicBool>,
+    native_faulted: Arc<AtomicBool>,
 }
 
 impl MonitorIngress {
+    fn require_scan(&self) {
+        self.scan_required.store(true, Ordering::Release);
+        // A loss can arrive without a queued path event (for example, an OS
+        // rescan notice). Wake the consumer without blocking the callback.
+        let _ = self
+            .action_tx
+            .try_send(MonitorAction::ScanRequired(Vec::new()));
+    }
+
     fn try_send_actions(&self, actions: impl IntoIterator<Item = MonitorAction>) {
-        if self.reconcile_required.load(Ordering::Acquire) {
+        if self.scan_required.load(Ordering::Acquire) {
             return;
         }
 
@@ -293,12 +281,12 @@ impl MonitorIngress {
                 Err(TrySendError::Full(_)) => {
                     // WHY: blocking the notify callback can stall the platform
                     // watcher, while retaining every path permits remote/local
-                    // mutation bursts to grow memory without bound. One full
-                    // scan preserves eventual final intent for the whole burst.
-                    if !self.reconcile_required.swap(true, Ordering::AcqRel) {
+                    // mutation bursts to grow memory without bound. Persist
+                    // uncertainty so an explicit scan can recover dropped work.
+                    if !self.scan_required.swap(true, Ordering::AcqRel) {
                         tracing::warn!(
                             capacity = ACTION_CHANNEL_CAPACITY,
-                            "shared-directory watcher ingress overflowed; scheduling reconciliation",
+                            "shared-directory watcher ingress overflowed; explicit scan required",
                         );
                     }
                     return;
@@ -312,14 +300,15 @@ fn monitor_action_channel(
     capacity: usize,
 ) -> (MonitorIngress, Receiver<MonitorAction>, Arc<AtomicBool>) {
     let (action_tx, action_rx) = tokio::sync::mpsc::channel(capacity);
-    let reconcile_required = Arc::new(AtomicBool::new(false));
+    let scan_required = Arc::new(AtomicBool::new(false));
     (
         MonitorIngress {
             action_tx,
-            reconcile_required: Arc::clone(&reconcile_required),
+            scan_required: Arc::clone(&scan_required),
+            native_faulted: Arc::new(AtomicBool::new(false)),
         },
         action_rx,
-        reconcile_required,
+        scan_required,
     )
 }
 
@@ -334,13 +323,37 @@ pub(crate) struct SharedDirMonitor {
     /// native watcher without leaving an unowned thread.
     debouncer:
         Option<Debouncer<notify_debouncer_full::notify::RecommendedWatcher, RecommendedCache>>,
-    #[cfg(target_os = "linux")]
     watched_roots: Vec<PathBuf>,
+    binding_ids: Arc<Vec<(PathBuf, i64)>>,
+    native_faulted: Arc<AtomicBool>,
     consumer: tokio::task::JoinHandle<()>,
+    stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl SharedDirMonitor {
-    /// Restore native recursive coverage before the reconciliation scan.
+    fn matches(&self, roots: &[SharedDirectoryRoot], ids: &[(PathBuf, i64)]) -> bool {
+        if self.debouncer.is_none()
+            || self.native_faulted.load(Ordering::Acquire)
+            || self.binding_ids.as_slice() != ids
+        {
+            return false;
+        }
+        let mut expected = roots
+            .iter()
+            .filter(|root| root.watch_enabled && root.accessible)
+            .map(|root| monitor_shared_key(Path::new(&root.path)))
+            .collect::<Vec<_>>();
+        let mut actual = self
+            .watched_roots
+            .iter()
+            .map(|path| monitor_shared_key(path))
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        expected == actual
+    }
+
+    /// Restore native recursive coverage before an explicit/startup scan.
     /// Existing registrations stay installed while new directories are added.
     #[cfg(target_os = "linux")]
     fn refresh_watch_coverage(&mut self) -> usize {
@@ -360,11 +373,10 @@ impl SharedDirMonitor {
         refreshed
     }
 
-    /// Stop the monitor: drop it so the debouncer's `Drop` stops the OS watcher
-    /// thread and the [`SharedDirMonitor`] `Drop` aborts the consumer task.
+    /// Stop native callbacks, cancel ordinary path work and join final loss writes.
     pub(crate) async fn stop(&mut self) -> anyhow::Result<()> {
+        self.stop.send_replace(true);
         self.debouncer.take();
-        self.consumer.abort();
         match (&mut self.consumer).await {
             Ok(()) => Ok(()),
             Err(error) if error.is_cancelled() => Ok(()),
@@ -386,10 +398,8 @@ impl Drop for SharedDirMonitor {
 ///
 /// `apply` receives each [`MonitorAction`] and applies it (share / remove) on
 /// the async side; it is the bridge back into the core's existing share / unshare
-/// paths. Returns `None` only when *no* root could be watched (all failed) -- in
-/// that case the daemon falls back entirely to scan-on-demand. A partial success
-/// (some roots watched, some failed) still returns a monitor for the ones that
-/// worked.
+/// paths. Returns `None` when no accessible root opts into watching. Failed
+/// subscriptions retain an owned consumer so their loss notices are persisted.
 pub(crate) fn start_monitor<F, Fut>(
     roots: &[SharedDirectoryRoot],
     apply: F,
@@ -407,17 +417,43 @@ where
 
     // notify watcher thread -> tokio consumer bridge. The debouncer's event
     // handler runs on the watcher thread; it must not block. A full bounded
-    // queue therefore latches one authoritative reconciliation instead of
-    // waiting or retaining unbounded per-path work.
-    let (ingress, action_rx, reconcile_required) = monitor_action_channel(ACTION_CHANNEL_CAPACITY);
+    // queue therefore latches one loss notice instead of waiting or retaining
+    // work proportional to the mutation volume.
+    let (ingress, action_rx, scan_required) = monitor_action_channel(ACTION_CHANNEL_CAPACITY);
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    let native_faulted = Arc::clone(&ingress.native_faulted);
 
+    let error_ingress = ingress.clone();
     let handler = move |result: DebounceEventResult| match result {
         Ok(events) => {
+            if events.iter().any(|event| event.need_rescan()) {
+                ingress.native_faulted.store(true, Ordering::Release);
+            }
+            // WHY: bound allocation before flattening/coalescing a settled
+            // batch. An oversized batch has unknown loss scope, so flag every
+            // subscribed root instead of allocating work proportional to it.
+            if events.len() > ACTION_CHANNEL_CAPACITY
+                || events.iter().map(|event| event.paths.len()).sum::<usize>()
+                    > ACTION_CHANNEL_CAPACITY
+            {
+                ingress.require_scan();
+                return;
+            }
             ingress.try_send_actions(coalesce_actions(actions_for_events(&events)));
         }
         Err(errors) => {
+            ingress.native_faulted.store(true, Ordering::Release);
+            if errors.len() > ACTION_CHANNEL_CAPACITY {
+                ingress.require_scan();
+                return;
+            }
             for error in errors {
                 tracing::warn!(error = %error, "shared-directory watcher reported an error");
+                if error.paths.len() > ACTION_CHANNEL_CAPACITY {
+                    ingress.require_scan();
+                    return;
+                }
+                ingress.try_send_actions([MonitorAction::ScanRequired(error.paths)]);
             }
         }
     };
@@ -429,7 +465,15 @@ where
                 error = %error,
                 "failed to create shared-directory watcher; auto-pickup disabled (scan-on-demand still works)",
             );
-            return None;
+            error_ingress.try_send_actions([MonitorAction::ScanRequired(Vec::new())]);
+            return Some(SharedDirMonitor {
+                debouncer: None,
+                watched_roots: Vec::new(),
+                binding_ids: Arc::new(Vec::new()),
+                native_faulted,
+                consumer: tokio::spawn(run_consumer(action_rx, scan_required, stop_rx, apply)),
+                stop,
+            });
         }
     };
 
@@ -450,6 +494,8 @@ where
                 );
             }
             Err(error) => {
+                error_ingress
+                    .try_send_actions([MonitorAction::ScanRequired(vec![path.to_path_buf()])]);
                 // Graceful degradation: one unwatchable root (vanished path, or
                 // on Linux the inotify watch limit on a huge recursive tree) must
                 // not crash the daemon. Log and continue; that root degrades to
@@ -463,18 +509,17 @@ where
         }
     }
 
-    if watched_roots.is_empty() {
-        // No root could be watched -- nothing to consume; drop the debouncer.
-        drop(debouncer);
-        return None;
-    }
-
-    let consumer = tokio::spawn(run_consumer(action_rx, reconcile_required, apply));
+    // Registration closes the unobserved interval before this subscription.
+    // A scan already in flight must not acknowledge that interval accidentally.
+    error_ingress.try_send_actions([MonitorAction::ScanRequired(watched_roots.clone())]);
+    let consumer = tokio::spawn(run_consumer(action_rx, scan_required, stop_rx, apply));
     Some(SharedDirMonitor {
         debouncer: Some(debouncer),
-        #[cfg(target_os = "linux")]
         watched_roots,
+        binding_ids: Arc::new(Vec::new()),
+        native_faulted,
         consumer,
+        stop,
     })
 }
 
@@ -499,7 +544,8 @@ where
 /// coalescing is intentionally stateless: the applier remains authoritative.
 async fn run_consumer<F, Fut>(
     mut action_rx: Receiver<MonitorAction>,
-    reconcile_required: Arc<AtomicBool>,
+    scan_required: Arc<AtomicBool>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
     apply: F,
 ) where
     F: Fn(MonitorAction) -> Fut + Send + 'static,
@@ -507,24 +553,40 @@ async fn run_consumer<F, Fut>(
 {
     while let Some(first) = action_rx.recv().await {
         let mut pending = vec![first];
-        while let Ok(action) = action_rx.try_recv() {
-            pending.push(action);
+        for _ in 1..ACTION_CHANNEL_CAPACITY {
+            match action_rx.try_recv() {
+                Ok(action) => pending.push(action),
+                Err(_) => break,
+            }
         }
 
-        if reconcile_required.load(Ordering::Acquire) {
+        if scan_required.load(Ordering::Acquire) {
             // Keep the latch set while draining so watcher callbacks continue
-            // collapsing into this same authoritative scan. Clearing it before
-            // the await lets events that happen during reconciliation queue for
-            // a subsequent final-intent pass.
+            // collapsing into this loss episode. Clear before the await so a
+            // newer episode can advance the durable revision independently.
             while action_rx.try_recv().is_ok() {}
-            reconcile_required.store(false, Ordering::Release);
-            apply(MonitorAction::Reconcile).await;
+            scan_required.store(false, Ordering::Release);
+            apply(MonitorAction::ScanRequired(Vec::new())).await;
             continue;
         }
 
         for action in coalesce_actions(pending) {
-            apply(action).await;
+            if matches!(action, MonitorAction::ScanRequired(_)) {
+                apply(action).await;
+            } else if !*stop.borrow() {
+                tokio::select! {
+                    biased;
+                    _ = stop.changed() => {},
+                    _ = apply(action) => {},
+                }
+            }
         }
+    }
+    if *stop.borrow() {
+        // WHY: stopping drops unsettled debouncer state and opens an observation
+        // gap. Persist that uncertainty before joining the consumer; ordinary
+        // path work is cancelled, while admitted SQL remains owned and drained.
+        apply(MonitorAction::ScanRequired(Vec::new())).await;
     }
 }
 
@@ -756,7 +818,10 @@ async fn reconcile_root_health(
 
 pub(crate) enum RootIoRequest {
     #[cfg(target_os = "linux")]
-    RefreshWatchCoverage(Arc<tokio::sync::Mutex<Option<SharedDirMonitor>>>),
+    RefreshWatchCoverage(
+        Arc<tokio::sync::Mutex<Option<SharedDirMonitor>>>,
+        tokio::sync::OwnedMutexGuard<()>,
+    ),
     Inspect(Vec<SharedDirectoryRoot>),
     InspectDelivery(Vec<SharedDirectoryRoot>, PathBuf, NativeFileFingerprint),
     Canonical(Vec<String>),
@@ -808,7 +873,7 @@ pub(crate) async fn run_root_io(
         };
         match request {
             #[cfg(target_os = "linux")]
-            RootIoRequest::RefreshWatchCoverage(monitor) => {
+            RootIoRequest::RefreshWatchCoverage(monitor, _gate) => {
                 let mut slot = monitor.blocking_lock();
                 Ok(RootIoResult::WatchesRefreshed(
                     slot.as_mut()
@@ -1336,16 +1401,77 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
     rebuild_shared_directory_watch(core).await;
 }
 
+async fn watched_root_identities(core: &EmulebbCore) -> anyhow::Result<Vec<(PathBuf, i64)>> {
+    let mut roots = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = core.library_root_page(after, 100).await?;
+        for root in &page.value().roots {
+            if root.watch_enabled {
+                roots.push((monitor_shared_key(Path::new(&root.path)), root.id.parse()?));
+            }
+        }
+        match page.value().next_id {
+            Some(next) => after = next,
+            None => return Ok(roots),
+        }
+    }
+}
+
+/// Re-arm native coverage only as part of an explicit/startup scan, using the
+/// same gate order as rebuild/stop before the tracked root I/O worker.
+#[cfg(target_os = "linux")]
+pub(crate) async fn refresh_shared_watch_for_scan(core: &EmulebbCore) -> anyhow::Result<()> {
+    // Retain the gate inside the tracked job: cancellation must not let a
+    // rebuild hold the monitor while waiting for this job to lock that monitor.
+    let gate = Arc::clone(&core.shared_watcher_gate).lock_owned().await;
+    if core.shared_monitor_stopped.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    match run_root_io(
+        core,
+        RootIoRequest::RefreshWatchCoverage(Arc::clone(&core.shared_dir_monitor), gate),
+    )
+    .await?
+    {
+        RootIoResult::WatchesRefreshed(roots) => {
+            tracing::debug!(roots, "refreshed native watch coverage for explicit scan");
+            Ok(())
+        }
+        _ => unreachable!(),
+    }
+}
+
+async fn mark_watcher_loss(
+    core: &EmulebbCore,
+    roots: &[(PathBuf, i64)],
+    paths: &[PathBuf],
+) -> anyhow::Result<()> {
+    let paths = paths
+        .iter()
+        .map(|path| monitor_shared_key(path))
+        .collect::<Vec<_>>();
+    let affected = |root: &Path| {
+        paths
+            .iter()
+            .any(|path| path.starts_with(root) || root.starts_with(path))
+    };
+    // Unknown backend/overflow scope flags every subscription. Otherwise bind
+    // the notice to the captured immutable IDs, never a replacement at its path.
+    let unknown = paths.is_empty() || !roots.iter().any(|(root, _)| affected(root));
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)?;
+    for (root, id) in roots {
+        if unknown || affected(root) {
+            owner.mark_root_scan_required(*id).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn rebuild_shared_directory_watch(core: &EmulebbCore) {
     let _gate = core.shared_watcher_gate.lock().await;
-    let mut slot = core.shared_dir_monitor.lock().await;
-    if let Some(monitor) = slot.as_mut() {
-        if let Err(error) = monitor.stop().await {
-            core.shared_monitor_fault.store(true, Ordering::Release);
-            tracing::warn!(%error, "failed to join shared monitor consumer");
-        }
-        slot.take();
-    }
     if core.lifecycle_state_name() != "running"
         || core.shared_monitor_stopped.load(Ordering::Acquire)
     {
@@ -1372,72 +1498,52 @@ async fn rebuild_shared_directory_watch(core: &EmulebbCore) {
             return;
         }
     };
-    if roots.is_empty() {
+    let root_ids = match watched_root_identities(core).await {
+        Ok(roots) => Arc::new(roots),
+        Err(error) => {
+            if core.lifecycle_state_name() == "running"
+                && !core.shared_monitor_stopped.load(Ordering::Acquire)
+            {
+                core.shared_monitor_fault.store(true, Ordering::Release);
+            }
+            tracing::warn!(%error, "failed to bind watcher root identities");
+            return;
+        }
+    };
+    let mut slot = core.shared_dir_monitor.lock().await;
+    // WHY: root notifications can outlive the command/startup that already
+    // installed the same subscriptions. Replacing a healthy identical watcher
+    // drops unsettled events and creates a gap where a one-time write is lost.
+    if slot
+        .as_ref()
+        .is_some_and(|monitor| monitor.matches(&roots, &root_ids))
+    {
         return;
     }
-
+    if let Some(monitor) = slot.as_mut() {
+        if let Err(error) = monitor.stop().await {
+            core.shared_monitor_fault.store(true, Ordering::Release);
+            tracing::warn!(%error, "failed to join shared monitor consumer");
+        }
+        slot.take();
+    }
+    if core.lifecycle_state_name() != "running"
+        || core.shared_monitor_stopped.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let binding_ids = Arc::clone(&root_ids);
     let applier = core.clone();
     let monitor = start_monitor(&roots, move |action| {
         let applier = applier.clone();
-        async move {
-            match action {
-                MonitorAction::Share(path) => auto_share_monitored_path(&applier, &path).await,
-                MonitorAction::Remove(path) => auto_unshare_monitored_path(&applier, &path).await,
-                MonitorAction::Rename { from, to } => {
-                    auto_relocate_monitored_path(&applier, &from, &to).await
-                }
-                MonitorAction::Reconcile => {
-                    // A scan repairs catalog contents, but cannot repair native
-                    // watches lost alongside directory-creation events. Re-arm
-                    // the existing watcher first so the scan bridges that gap.
-                    // Use the tracked I/O owner: registration walks directories
-                    // and must survive caller cancellation without an orphan job.
-                    #[cfg(target_os = "linux")]
-                    match run_root_io(
-                        &applier,
-                        RootIoRequest::RefreshWatchCoverage(Arc::clone(
-                            &applier.shared_dir_monitor,
-                        )),
-                    )
-                    .await
-                    {
-                        Ok(RootIoResult::WatchesRefreshed(roots)) => {
-                            tracing::info!(
-                                roots,
-                                "refreshed shared-directory recursive watch coverage"
-                            );
-                        }
-                        Ok(_) => unreachable!(),
-                        Err(error) => {
-                            tracing::warn!(%error, "failed to refresh shared-directory watch coverage");
-                        }
-                    }
-                    if let Err(error) = applier.reload_shared_directories_detached().await {
-                        tracing::warn!(
-                            error = %error,
-                            "failed to schedule shared-directory watcher reconciliation",
-                        );
-                    } else {
-                        // Keep the serial watcher consumer behind the reload so
-                        // later event batches cannot mutate the catalog while
-                        // reconciliation is rebuilding it. The detached worker
-                        // still retains one hash worker per physical disk.
-                        while applier
-                            .shared_reload_running
-                            .load(std::sync::atomic::Ordering::Acquire)
-                            || applier
-                                .shared_reload_pending
-                                .load(std::sync::atomic::Ordering::Acquire)
-                        {
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-                    }
-                }
-            }
-        }
+        let root_ids = Arc::clone(&root_ids);
+        async move { apply_monitor_action(&applier, &root_ids, action).await }
     });
 
-    *slot = monitor;
+    *slot = monitor.map(|mut monitor| {
+        monitor.binding_ids = binding_ids;
+        monitor
+    });
     if core.lifecycle_state_name() != "running"
         || core.shared_monitor_stopped.load(Ordering::Acquire)
     {
@@ -1448,6 +1554,30 @@ async fn rebuild_shared_directory_watch(core: &EmulebbCore) {
             tracing::warn!(%error, "failed to join stopped shared monitor consumer");
         }
         slot.take();
+    }
+}
+
+async fn apply_monitor_action(core: &EmulebbCore, roots: &[(PathBuf, i64)], action: MonitorAction) {
+    // WHY: replacement membership belongs to the walk's snapshot. Serialize
+    // ordinary watcher edits behind that scan so it cannot prune a newer edit.
+    // Keep loss writes independent: scan/stop lock ordering requires their drain
+    // to finish even while a scan owns this gate. The caller can cancel only the
+    // ordinary lock wait/work; accepted mutations retain their existing owner.
+    let _scan = if matches!(action, MonitorAction::ScanRequired(_)) {
+        None
+    } else {
+        Some(core.shared_reload_gate.lock().await)
+    };
+    match action {
+        MonitorAction::Share(path) => auto_share_monitored_path(core, &path).await,
+        MonitorAction::Remove(path) => auto_unshare_monitored_path(core, &path).await,
+        MonitorAction::Rename { from, to } => auto_relocate_monitored_path(core, &from, &to).await,
+        MonitorAction::ScanRequired(paths) => {
+            if let Err(error) = mark_watcher_loss(core, roots, &paths).await {
+                core.shared_monitor_fault.store(true, Ordering::Release);
+                tracing::warn!(%error, "failed to persist watcher loss; explicit scan required");
+            }
+        }
     }
 }
 
@@ -1930,6 +2060,49 @@ mod tests {
         assert!(monitor.is_none());
     }
 
+    #[tokio::test]
+    async fn redundant_root_refresh_retains_the_native_subscription() {
+        let base =
+            std::env::temp_dir().join(format!("watch-subscription-{}", uuid::Uuid::new_v4()));
+        let root = base.join("shared");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = EmulebbCore::new_in_memory(
+            "watch-subscription",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap()
+        .with_incoming_dir(base.join("incoming"));
+        core.create_library_root(&root.display().to_string(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        core.start_shared_directory_monitor().await;
+        let original = core
+            .shared_dir_monitor
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .stop
+            .clone();
+        rebuild_shared_directory_watch(&core).await;
+        let current = core
+            .shared_dir_monitor
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .stop
+            .clone();
+        assert!(
+            original.same_channel(&current),
+            "identical root refresh must retain the native subscription"
+        );
+        core.drain_persistence().await.unwrap();
+        drop(core);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     /// Model a missed native directory-registration event independently of
     /// kernel queue timing, then prove the existing consumer sees later writes.
     #[cfg(target_os = "linux")]
@@ -1978,7 +2151,10 @@ mod tests {
         *core.shared_dir_monitor.lock().await = Some(monitor);
         let result = run_root_io(
             &core,
-            RootIoRequest::RefreshWatchCoverage(Arc::clone(&core.shared_dir_monitor)),
+            RootIoRequest::RefreshWatchCoverage(
+                Arc::clone(&core.shared_dir_monitor),
+                Arc::clone(&core.shared_watcher_gate).lock_owned().await,
+            ),
         )
         .await
         .unwrap();
@@ -2402,8 +2578,176 @@ mod tests {
             to: PathBuf::from(to),
         }
     }
-    fn reconcile() -> MonitorAction {
-        MonitorAction::Reconcile
+    fn loss_notice(paths: &[&str]) -> MonitorAction {
+        MonitorAction::ScanRequired(paths.iter().map(PathBuf::from).collect())
+    }
+
+    #[tokio::test]
+    async fn scan_gate_delays_native_path_work_without_blocking_loss_state() {
+        let core = EmulebbCore::new_in_memory(
+            "watch-scan-order",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join("watch-scan-order");
+        let root = core
+            .metadata_store
+            .create_library_root(&path, true, true)
+            .unwrap()
+            .unwrap();
+        let roots = watched_root_identities(&core).await.unwrap();
+        let scan = core.shared_reload_gate.lock().await;
+        let mut change = Box::pin(apply_monitor_action(
+            &core,
+            &roots,
+            MonitorAction::Share(path.join("sample.bin")),
+        ));
+        let observed =
+            std::future::poll_fn(|context| Poll::Ready(change.as_mut().poll(context))).await;
+        assert!(matches!(observed, Poll::Pending));
+        apply_monitor_action(&core, &roots, MonitorAction::ScanRequired(vec![path])).await;
+        assert!(
+            core.library_root(root.id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        drop(change);
+        drop(scan);
+        core.drain_persistence().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn loss_scope_uses_subscription_ids_and_never_schedules_a_scan() {
+        let core = EmulebbCore::new_in_memory(
+            "watch-loss",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap();
+        let base = std::env::temp_dir().join("watch-loss-scope");
+        let first_path = base.join("one");
+        let second_path = base.join("two");
+        let first = core
+            .metadata_store
+            .create_library_root(&first_path, true, true)
+            .unwrap()
+            .unwrap();
+        let second = core
+            .metadata_store
+            .create_library_root(&second_path, true, true)
+            .unwrap()
+            .unwrap();
+        let roots = watched_root_identities(&core).await.unwrap();
+        mark_watcher_loss(&core, &roots, &[first_path.join("sample.bin")])
+            .await
+            .unwrap();
+        assert!(
+            core.library_root(first.id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        assert!(
+            !core
+                .library_root(second.id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        assert!(!core.shared_reload_running.load(Ordering::Acquire));
+        assert!(!core.shared_reload_pending.load(Ordering::Acquire));
+        core.metadata_store.delete_library_root(first.id).unwrap();
+        let replacement = core
+            .metadata_store
+            .create_library_root(&first_path, true, true)
+            .unwrap()
+            .unwrap();
+        mark_watcher_loss(&core, &roots, &[first_path])
+            .await
+            .unwrap();
+        assert!(
+            !core
+                .library_root(replacement.id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        // The final notice is drain-owned after ordinary API writes close.
+        core.stop_persistence_admission().unwrap();
+        mark_watcher_loss(&core, &roots, &[]).await.unwrap();
+        assert!(
+            core.metadata_store
+                .library_root(second.id)
+                .unwrap()
+                .unwrap()
+                .scan_required
+        );
+        core.drain_persistence().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_cancels_path_work_but_drains_loss_and_observation_gap() {
+        let (ingress, rx, required) = monitor_action_channel(4);
+        let (stop, stop_rx) = tokio::sync::watch::channel(false);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        ingress.try_send_actions([share("/root/busy.bin"), loss_notice(&["/root/changed.bin"])]);
+        let signal = Arc::clone(&started);
+        let sink = Arc::clone(&applied);
+        let consumer = tokio::spawn(run_consumer(rx, required, stop_rx, move |action| {
+            let signal = Arc::clone(&signal);
+            let sink = Arc::clone(&sink);
+            async move {
+                if matches!(action, MonitorAction::Share(_)) {
+                    signal.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                sink.lock().unwrap().push(action);
+            }
+        }));
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
+        stop.send_replace(true);
+        drop(ingress);
+        tokio::time::timeout(Duration::from_secs(1), consumer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *applied.lock().unwrap(),
+            vec![loss_notice(&["/root/changed.bin"]), loss_notice(&[])]
+        );
+    }
+
+    #[tokio::test]
+    async fn loss_without_path_work_wakes_an_empty_consumer() {
+        let (ingress, rx, required) = monitor_action_channel(4);
+        ingress.require_scan();
+        let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+        drop(ingress);
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&applied);
+        run_consumer(rx, required, stop_rx, move |action| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().unwrap().push(action);
+            }
+        })
+        .await;
+        assert_eq!(*applied.lock().unwrap(), vec![loss_notice(&[])]);
     }
     fn name(mode: RenameMode) -> EventKind {
         EventKind::Modify(ModifyKind::Name(mode))
@@ -2431,11 +2775,14 @@ mod tests {
     }
 
     #[test]
-    fn unpaired_rename_requests_full_reconciliation() {
+    fn unpaired_rename_flags_its_affected_path() {
         let to = debounced(name(RenameMode::To), vec!["/share/new.dat"]);
-        assert_eq!(classify_event(&to), vec![reconcile()]);
+        assert_eq!(classify_event(&to), vec![loss_notice(&["/share/new.dat"])]);
         let from = debounced(name(RenameMode::From), vec!["/share/old.dat"]);
-        assert_eq!(classify_event(&from), vec![reconcile()]);
+        assert_eq!(
+            classify_event(&from),
+            vec![loss_notice(&["/share/old.dat"])]
+        );
     }
 
     #[test]
@@ -2472,13 +2819,13 @@ mod tests {
     }
 
     #[test]
-    fn backend_rescan_notice_requests_reconciliation() {
+    fn backend_rescan_notice_reports_loss() {
         let event = Event::new(EventKind::Other).set_flag(Flag::Rescan);
         let event = DebouncedEvent {
             event,
             time: Instant::now(),
         };
-        assert_eq!(classify_event(&event), vec![reconcile()]);
+        assert_eq!(classify_event(&event), vec![loss_notice(&[])]);
     }
 
     #[test]
@@ -2490,7 +2837,11 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         let expected = vec![share("/s/a.dat"), remove("/s/b.dat")];
         #[cfg(target_os = "windows")]
-        let expected = vec![share("/s/a.dat"), remove("/s/b.dat"), reconcile()];
+        let expected = vec![
+            share("/s/a.dat"),
+            remove("/s/b.dat"),
+            loss_notice(&["/s/a.dat", "/s/b.dat"]),
+        ];
         assert_eq!(actions_for_events(&events), expected);
     }
 
@@ -2530,8 +2881,8 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_rename_burst_requests_follow_up_reconciliation() {
-        let events = (0..WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD)
+    fn windows_rename_burst_reports_possible_loss() {
+        let events = (0..WINDOWS_EVENT_BURST_LOSS_THRESHOLD)
             .map(|index| {
                 let event = Event {
                     kind: name(RenameMode::Both),
@@ -2553,12 +2904,12 @@ mod tests {
                 .iter()
                 .filter(|action| matches!(action, MonitorAction::Rename { .. }))
                 .count(),
-            WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD,
+            WINDOWS_EVENT_BURST_LOSS_THRESHOLD,
         );
         assert_eq!(
             actions
                 .iter()
-                .filter(|action| matches!(action, MonitorAction::Reconcile))
+                .filter(|action| matches!(action, MonitorAction::ScanRequired(_)))
                 .count(),
             1,
         );
@@ -2566,8 +2917,8 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_create_burst_requests_follow_up_reconciliation() {
-        let events = (0..WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD)
+    fn windows_create_burst_reports_possible_loss() {
+        let events = (0..WINDOWS_EVENT_BURST_LOSS_THRESHOLD)
             .map(|index| {
                 let event = Event {
                     kind: EventKind::Create(CreateKind::File),
@@ -2586,27 +2937,27 @@ mod tests {
                 .iter()
                 .filter(|action| matches!(action, MonitorAction::Share(_)))
                 .count(),
-            WINDOWS_EVENT_BURST_RECONCILE_THRESHOLD,
+            WINDOWS_EVENT_BURST_LOSS_THRESHOLD,
         );
         assert_eq!(
             actions
                 .iter()
-                .filter(|action| matches!(action, MonitorAction::Reconcile))
+                .filter(|action| matches!(action, MonitorAction::ScanRequired(_)))
                 .count(),
             1,
         );
     }
 
     #[test]
-    fn coalesce_actions_schedules_only_one_reconciliation_per_burst() {
+    fn coalesce_actions_keeps_known_changes_beside_one_loss_notice() {
         assert_eq!(
             coalesce_actions(vec![
-                reconcile(),
+                loss_notice(&[]),
                 share("/s/a.dat"),
-                reconcile(),
+                loss_notice(&[]),
                 remove("/s/b.dat"),
             ]),
-            vec![reconcile()],
+            vec![share("/s/a.dat"), loss_notice(&[]), remove("/s/b.dat")],
         );
     }
 
@@ -2615,11 +2966,12 @@ mod tests {
     /// cannot be tested deterministically).
     async fn applied_actions(inputs: Vec<MonitorAction>) -> Vec<MonitorAction> {
         let applied: Arc<Mutex<Vec<MonitorAction>>> = Arc::new(Mutex::new(Vec::new()));
-        let (ingress, rx, reconcile_required) = monitor_action_channel(inputs.len().max(1));
+        let (ingress, rx, scan_required) = monitor_action_channel(inputs.len().max(1));
         ingress.try_send_actions(inputs);
         drop(ingress);
         let sink = Arc::clone(&applied);
-        let consumer = tokio::spawn(run_consumer(rx, reconcile_required, move |action| {
+        let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+        let consumer = tokio::spawn(run_consumer(rx, scan_required, stop_rx, move |action| {
             let sink = Arc::clone(&sink);
             async move {
                 sink.lock().unwrap().push(action);
@@ -2630,16 +2982,16 @@ mod tests {
     }
 
     #[test]
-    fn bounded_ingress_caps_large_burst_and_latches_one_reconcile() {
+    fn bounded_ingress_caps_large_burst_and_latches_one_loss() {
         const TEST_CAPACITY: usize = 4;
-        let (ingress, mut rx, reconcile_required) = monitor_action_channel(TEST_CAPACITY);
+        let (ingress, mut rx, scan_required) = monitor_action_channel(TEST_CAPACITY);
         let burst = (0..10_000)
             .map(|index| share(&format!("/s/{index}.dat")))
             .collect::<Vec<_>>();
 
         ingress.try_send_actions(burst);
 
-        assert!(reconcile_required.load(Ordering::Acquire));
+        assert!(scan_required.load(Ordering::Acquire));
         assert_eq!(
             std::iter::from_fn(|| rx.try_recv().ok()).count(),
             TEST_CAPACITY,
@@ -2649,12 +3001,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overflow_reconciles_each_episode_then_preserves_later_final_intent() {
+    async fn overflow_flags_each_episode_then_preserves_later_final_intent() {
         let applied: Arc<Mutex<Vec<MonitorAction>>> = Arc::new(Mutex::new(Vec::new()));
-        let reconcile_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let reconcile_started = Arc::new(tokio::sync::Notify::new());
-        let release_reconcile = Arc::new(tokio::sync::Notify::new());
-        let (ingress, rx, reconcile_required) = monitor_action_channel(2);
+        let loss_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loss_started = Arc::new(tokio::sync::Notify::new());
+        let release_loss = Arc::new(tokio::sync::Notify::new());
+        let (ingress, rx, scan_required) = monitor_action_channel(2);
 
         ingress.try_send_actions([
             share("/s/pre-overflow-a.dat"),
@@ -2663,17 +3015,18 @@ mod tests {
         ]);
 
         let sink = Arc::clone(&applied);
-        let count = Arc::clone(&reconcile_count);
-        let started = Arc::clone(&reconcile_started);
-        let release = Arc::clone(&release_reconcile);
-        let consumer = tokio::spawn(run_consumer(rx, reconcile_required, move |action| {
+        let count = Arc::clone(&loss_count);
+        let started = Arc::clone(&loss_started);
+        let release = Arc::clone(&release_loss);
+        let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+        let consumer = tokio::spawn(run_consumer(rx, scan_required, stop_rx, move |action| {
             let sink = Arc::clone(&sink);
             let count = Arc::clone(&count);
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
             async move {
                 sink.lock().unwrap().push(action.clone());
-                if action == MonitorAction::Reconcile {
+                if matches!(action, MonitorAction::ScanRequired(_)) {
                     count.fetch_add(1, Ordering::AcqRel);
                     started.notify_one();
                     release.notified().await;
@@ -2681,28 +3034,28 @@ mod tests {
             }
         }));
 
-        tokio::time::timeout(Duration::from_secs(1), reconcile_started.notified())
+        tokio::time::timeout(Duration::from_secs(1), loss_started.notified())
             .await
-            .expect("overflow reconciliation did not start");
+            .expect("overflow loss recording did not start");
         ingress.try_send_actions([
             share("/s/during-reconcile-a.dat"),
             remove("/s/during-reconcile-b.dat"),
             share("/s/triggers-follow-up-overflow.dat"),
         ]);
-        release_reconcile.notify_one();
+        release_loss.notify_one();
 
-        tokio::time::timeout(Duration::from_secs(1), reconcile_started.notified())
+        tokio::time::timeout(Duration::from_secs(1), loss_started.notified())
             .await
-            .expect("follow-up overflow reconciliation did not start");
-        assert_eq!(reconcile_count.load(Ordering::Acquire), 2);
+            .expect("follow-up overflow loss recording did not start");
+        assert_eq!(loss_count.load(Ordering::Acquire), 2);
         ingress.try_send_actions([remove("/s/final.dat"), share("/s/final.dat")]);
         drop(ingress);
-        release_reconcile.notify_one();
+        release_loss.notify_one();
         consumer.await.unwrap();
 
         assert_eq!(
             Arc::try_unwrap(applied).unwrap().into_inner().unwrap(),
-            vec![reconcile(), reconcile(), share("/s/final.dat")],
+            vec![loss_notice(&[]), loss_notice(&[]), share("/s/final.dat")],
         );
     }
 

@@ -908,7 +908,8 @@ export function SharingView(props: {
                       const watchEnabled = event.currentTarget.checked;
                       void props.run(() => props.client.patch(`library/roots/${root.id}`, { watchEnabled }), "Watch policy updated");
                     }} /></td>
-                  <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "available"} /></td>
+                  <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "available"} />
+                    {root.scanRequired && <div role="status"><strong>Scan required</strong><small> Use Reload to refresh library files.</small></div>}</td>
                   <td>
                     {!root.managed && <Action title="Remove" icon={<Trash2 size={15} />} onClick={() => {
                       if (window.confirm("Remove this shared folder tree?")) {

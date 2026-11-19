@@ -12,7 +12,7 @@ use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
 const LIBRARY_ROOT_SELECT: &str = "SELECT r.id,p.platform,p.native_path,r.watch_enabled,
     EXISTS(SELECT 1 FROM shared_directory_root_origins o WHERE o.root_id=r.id AND o.origin='implicit'),
-    r.accessible,r.shareable,r.last_scanned_at_ms,length(p.native_path)
+    r.accessible,r.shareable,r.last_scanned_at_ms,length(p.native_path),r.scan_required
     FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx
     JOIN local_paths p ON p.id=r.path_id";
 
@@ -22,6 +22,7 @@ fn library_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::Metadata
         id: row.get(0)?,
         path: crate::native_path::path_from_row(row, 1, 2)?,
         watch_enabled: row.get(3)?,
+        scan_required: row.get(9)?,
         managed: row.get(4)?,
         accessible: row.get(5)?,
         shareable: row.get(6)?,

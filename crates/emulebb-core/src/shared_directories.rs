@@ -1164,6 +1164,8 @@ pub(crate) fn hashing_count_snapshot(core: &EmulebbCore) -> i64 {
 /// Scan the configured shared roots and return the deduped, sorted file list.
 async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     sync_implicit_shared_directory_roots(core).await?;
+    #[cfg(target_os = "linux")]
+    crate::shared_dir_monitor::refresh_shared_watch_for_scan(core).await?;
     let roots = effective_shared_directory_roots(core).await?;
     let policy = load_shared_file_ignore_policy(core)?;
     // The recursive directory walk is synchronous and may be large, so the helper

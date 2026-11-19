@@ -110,6 +110,7 @@ impl std::error::Error for CategoryNameConflict {}
 enum Command {
     Settings(settings::SettingsCommand),
     RootRead(crate::library_roots::Query),
+    RootLoss(i64),
     Add { hash: String, name: String },
     Delete { hash: String },
     Category(category::CategoryCommand),
@@ -131,6 +132,7 @@ enum Command {
 enum Response {
     Settings(settings::Outcome),
     RootRead(crate::LibraryReply<crate::library_roots::Value>),
+    RootLoss,
     ContentObserved(Result<(), PersistenceError>),
     SearchMutated(bool),
     SearchCreated(anyhow::Result<crate::Search>),
@@ -316,6 +318,7 @@ impl Drop for Permit {
 enum DbCommand {
     Settings(settings::SqlCommand),
     RootRead(crate::library_roots::Query),
+    RootLoss(i64),
     SearchRead(search_read::Query),
     SearchCreate(emulebb_metadata::MetadataSearchData),
     SearchUpdate(i64, emulebb_metadata::MetadataSearchData, Vec<String>),
@@ -358,6 +361,7 @@ enum KadMergeOutcome {
 enum DbResponse {
     Settings(settings::SqlOutcome),
     RootRead(crate::library_roots::Value),
+    RootLoss,
     SearchRead(search_read::Value),
     SearchCreated(Result<i64, emulebb_metadata::MissingSearchParent>),
     SearchUpdated(emulebb_metadata::MetadataSearchTransitionReceipt),
@@ -518,6 +522,20 @@ impl PersistenceOwner {
                         let result = match outcome {
                             Ok(value) => value.map(DbResponse::Settings),
                             Err(_) => Err(if writing { PersistenceError::CommitUnknown } else { PersistenceError::Worker }),
+                        };
+                        drop(request.command);
+                        let _ = request.response.send(result);
+                        continue;
+                    }
+                    if let DbCommand::RootLoss(id) = &request.command {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.mark_library_root_scan_required(*id)));
+                        let result = match outcome {
+                            Ok(Ok(_)) => Ok(DbResponse::RootLoss),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "failed to persist watcher loss");
+                                Err(PersistenceError::Storage("database operation failed".into()))
+                            }
+                            Err(_) => Err(PersistenceError::CommitUnknown),
                         };
                         drop(request.command);
                         let _ = request.response.send(result);
@@ -754,7 +772,7 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
+                            DbCommand::RootLoss(_) | DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
@@ -805,7 +823,7 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
+                                DbCommand::RootLoss(_) | DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
@@ -837,7 +855,7 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
+                            DbCommand::RootLoss(_) | DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
@@ -1090,6 +1108,7 @@ impl PersistenceOwner {
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
             Command::Settings(_)
+            | Command::RootLoss(_)
             | Command::RootRead(_)
             | Command::SearchRead(_)
             | Command::SearchTransition(_)
@@ -1129,7 +1148,7 @@ impl PersistenceOwner {
     async fn submit_reserved_inner(
         &self,
         charge: usize,
-        final_snapshot: bool,
+        drain_owned: bool,
         make_command: impl FnOnce() -> Result<Command, PersistenceError>,
     ) -> Result<Response, PersistenceError> {
         let (response, receive) = oneshot::channel();
@@ -1151,7 +1170,7 @@ impl PersistenceOwner {
                     PersistenceError::Closing
                 });
             }
-            if admission.stopping && !final_snapshot {
+            if admission.stopping && !drain_owned {
                 return Err(PersistenceError::Closing);
             }
             if charge > MAX_BYTES {
@@ -1239,6 +1258,9 @@ async fn process(
             publication_gate,
         )
         .await;
+    }
+    if matches!(&request.command, Command::RootLoss(_)) {
+        return library_roots::process_loss(db, request).await;
     }
     if matches!(&request.command, Command::RootRead(_)) {
         return library_roots::process(db, request).await;
@@ -1355,6 +1377,7 @@ async fn process(
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
             DbResponse::Settings(_)
+            | DbResponse::RootLoss
             | DbResponse::RootRead(_)
             | DbResponse::SearchRead(_)
             | DbResponse::SearchUpdated(_)
@@ -1390,6 +1413,7 @@ async fn process(
                 DbCommand::Delete(existing.clone())
             }
             Command::Settings(_)
+            | Command::RootLoss(_)
             | Command::RootRead(_)
             | Command::SearchRead(_)
             | Command::SearchTransition(_)
