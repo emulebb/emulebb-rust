@@ -178,7 +178,7 @@ impl LocalMutationRegistry {
         let metadata = runtime.metadata.clone();
         let epoch = Arc::clone(&runtime.category_root_epoch);
         let (send, receive) = oneshot::channel();
-        Self::spawn_unit(&mut state, lease, move |lease| {
+        Self::spawn_unit_reply(&mut state, lease, send, move |lease| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let root_cut = epoch.load(std::sync::atomic::Ordering::Acquire);
                 ensure!(root_cut.is_multiple_of(2), LocalMutationError::Busy);
@@ -220,8 +220,7 @@ impl LocalMutationRegistry {
                 Ok(result) => (result.map_err(changed_to_busy), 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
-            let _ = send.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receive)
     }

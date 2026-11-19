@@ -46,7 +46,7 @@ impl LocalMutationRegistry {
         )?;
         let input = input.to_vec();
         let (sender, receipt) = oneshot::channel();
-        LocalMutationRegistry::spawn_unit(&mut state, lease, move |lease| {
+        LocalMutationRegistry::spawn_unit_reply(&mut state, lease, sender, move |lease| {
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<bool> {
                     lease.enter_filesystem(bytes, WORKSPACE)?;
@@ -59,8 +59,7 @@ impl LocalMutationRegistry {
                 Ok(result) => (result, 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }

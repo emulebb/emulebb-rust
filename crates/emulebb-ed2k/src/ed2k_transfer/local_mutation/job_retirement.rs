@@ -40,7 +40,7 @@ impl LocalMutationRegistry {
         let (sender, receipt) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
-        Self::spawn_unit(&mut state, capacity_lease, move |_capacity| {
+        Self::spawn_unit_reply(&mut state, capacity_lease, sender, move |_capacity| {
             let _lease = lease;
             let _lifecycle = lifecycle;
             let _job = job_guard;
@@ -119,8 +119,7 @@ impl LocalMutationRegistry {
                 Ok(Err(error)) => (Err(error), 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }

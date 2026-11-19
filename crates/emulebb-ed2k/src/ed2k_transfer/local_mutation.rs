@@ -162,6 +162,7 @@ impl LocalMutationRegistry {
     /// actual blocking task is reaped, including cancelled receipt/drain waiters.
     /// `work` owns all command captures. Its FnOnce environment drops before
     /// the outer lease, including on unwind; no captured buffers outlive charge.
+    #[cfg(test)]
     fn spawn_unit(
         state: &mut State,
         lease: CapacityLease,
@@ -396,7 +397,7 @@ impl LocalMutationRegistry {
         let (response, receive) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
-        Self::spawn_unit(&mut state, lease, move |lease| {
+        Self::spawn_unit_reply(&mut state, lease, response, move |lease| {
             let mut _manifest_guard = Some(manifest_guard);
             let mut _stripe_guard = Some(stripe_guard);
             let mut committed = false;
@@ -495,14 +496,12 @@ impl LocalMutationRegistry {
                         demand_revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                         demand_notify.notify_waiters();
                     }
-                    let _ = response.send(result);
-                    failed
+                    (result, failed)
                 }
                 Err(_) => {
                     root_dirty.store(true, std::sync::atomic::Ordering::Release);
                     publication_failed.store(true, std::sync::atomic::Ordering::Release);
-                    let _ = response.send(Err(LocalMutationError::Unknown.into()));
-                    2
+                    (Err(LocalMutationError::Unknown.into()), 2)
                 }
             }
         });

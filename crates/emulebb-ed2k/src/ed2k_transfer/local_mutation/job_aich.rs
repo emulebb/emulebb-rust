@@ -70,7 +70,7 @@ impl LocalMutationRegistry {
         let barrier = runtime.aich_persist_barrier.lock().unwrap().take();
         #[cfg(test)]
         let executor = tokio::runtime::Handle::current();
-        Self::spawn_unit(&mut state, lease, move |lease| {
+        Self::spawn_unit_reply(&mut state, lease, sender, move |lease| {
             let mut committed = false;
             let mut published = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -179,8 +179,7 @@ impl LocalMutationRegistry {
                 failed.store(true, Ordering::Release);
                 dirty.store(true, Ordering::Release);
             }
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }
