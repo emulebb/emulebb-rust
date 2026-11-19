@@ -70,10 +70,10 @@ impl MetadataStore {
         );
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        let total = tx.query_row("SELECT count(*) FROM shared_directory_roots INDEXED BY shared_directory_roots_active_id_idx WHERE enabled=1 AND deleted_at_ms IS NULL", [], |row| row.get(0))?;
+        let total: i64 = tx.query_row("SELECT count(*) FROM shared_directory_roots INDEXED BY shared_directory_roots_active_id_idx WHERE enabled=1 AND deleted_at_ms IS NULL", [], |row| row.get(0))?;
         let mut items = {
             let mut stmt = tx.prepare_cached(&format!("{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id>?1 ORDER BY r.id LIMIT ?2"))?;
-            stmt.query_map(params![after, limit + 1], library_root_row)?
+            stmt.query_map(params![after, i64::try_from(limit + 1)?], library_root_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let more = items.len() > limit;
@@ -82,7 +82,7 @@ impl MetadataStore {
         tx.commit()?;
         Ok(crate::MetadataLibraryRootPage {
             items,
-            total,
+            total: u64::try_from(total)?,
             next_id,
         })
     }
