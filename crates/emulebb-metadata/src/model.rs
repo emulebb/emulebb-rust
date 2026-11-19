@@ -40,3 +40,31 @@ pub struct MetadataSharedDirectoryRoot {
     pub shareable: bool,
     pub accessible: bool,
 }
+
+/// One active root resource, addressed independently of its native path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataLibraryRoot {
+    pub id: i64,
+    pub path: std::path::PathBuf,
+    pub watch_enabled: bool,
+    pub managed: bool,
+    pub accessible: bool,
+    pub shareable: bool,
+    pub last_scanned_at_ms: Option<i64>,
+}
+
+/// A bounded live page of active roots in immutable ID order.
+#[derive(Debug)]
+pub struct MetadataLibraryRootPage {
+    pub items: Vec<MetadataLibraryRoot>,
+    pub total: u64,
+    pub next_id: Option<i64>,
+}
+
+/// Removal never withdraws a destination still required by application settings.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MetadataLibraryRootDelete {
+    Deleted(MetadataLibraryRoot),
+    Managed,
+    Missing,
+}

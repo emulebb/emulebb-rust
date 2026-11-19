@@ -311,7 +311,7 @@ CREATE INDEX local_file_instances_secondary_identity_idx
     ON local_file_instances(secondary_identity, size_bytes) WHERE secondary_identity IS NOT NULL;
 
 CREATE TABLE shared_directory_roots (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
     monitor_owned INTEGER NOT NULL DEFAULT 0 CHECK(monitor_owned IN (0, 1)),
     watch_enabled INTEGER NOT NULL DEFAULT 0 CHECK(watch_enabled IN (0, 1)),
@@ -320,9 +320,13 @@ CREATE TABLE shared_directory_roots (
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     last_scanned_at_ms INTEGER CHECK(last_scanned_at_ms IS NULL OR last_scanned_at_ms >= 0),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0),
-    UNIQUE(path_id)
+    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
 ) STRICT;
+
+CREATE UNIQUE INDEX shared_directory_roots_active_path_idx
+    ON shared_directory_roots(path_id) WHERE deleted_at_ms IS NULL;
+CREATE INDEX shared_directory_roots_active_id_idx
+    ON shared_directory_roots(id) WHERE enabled = 1 AND deleted_at_ms IS NULL;
 
 -- A physical directory can be both user-selected and a mandatory Incoming or
 -- category root. Replacing explicit roots must not withdraw implicit membership.

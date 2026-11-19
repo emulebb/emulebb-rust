@@ -10,6 +10,36 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
+const LIBRARY_ROOT_SELECT: &str = "SELECT r.id,p.platform,p.native_path,r.watch_enabled,
+    EXISTS(SELECT 1 FROM shared_directory_root_origins o WHERE o.root_id=r.id AND o.origin='implicit'),
+    r.accessible,r.shareable,r.last_scanned_at_ms
+    FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx
+    JOIN local_paths p ON p.id=r.path_id";
+
+fn library_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::MetadataLibraryRoot> {
+    Ok(crate::MetadataLibraryRoot {
+        id: row.get(0)?,
+        path: crate::native_path::path_from_row(row, 1, 2)?,
+        watch_enabled: row.get(3)?,
+        managed: row.get(4)?,
+        accessible: row.get(5)?,
+        shareable: row.get(6)?,
+        last_scanned_at_ms: row.get(7)?,
+    })
+}
+
+fn library_root_on_connection(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> Result<Option<crate::MetadataLibraryRoot>> {
+    conn.prepare_cached(&format!(
+        "{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id=?1"
+    ))?
+    .query_row([id], library_root_row)
+    .optional()
+    .map_err(Into::into)
+}
+
 #[derive(Debug)]
 pub struct ObservedRootChanged;
 impl std::fmt::Display for ObservedRootChanged {
@@ -20,6 +50,83 @@ impl std::fmt::Display for ObservedRootChanged {
 impl std::error::Error for ObservedRootChanged {}
 
 impl MetadataStore {
+    /// Read one current resource without resolving or probing its filesystem path.
+    pub fn library_root(&self, id: i64) -> Result<Option<crate::MetadataLibraryRoot>> {
+        ensure!(id > 0, "root id must be positive");
+        let conn = self.connection()?;
+        library_root_on_connection(&conn, id)
+    }
+
+    /// Page the active-ID index; retired roots do not inflate page traversal.
+    pub fn library_root_page(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<crate::MetadataLibraryRootPage> {
+        ensure!(after >= 0, "root continuation must be nonnegative");
+        ensure!(
+            (1..=100).contains(&limit),
+            "root page limit must be between 1 and 100"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let total = tx.query_row("SELECT count(*) FROM shared_directory_roots INDEXED BY shared_directory_roots_active_id_idx WHERE enabled=1 AND deleted_at_ms IS NULL", [], |row| row.get(0))?;
+        let mut items = {
+            let mut stmt = tx.prepare_cached(&format!("{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id>?1 ORDER BY r.id LIMIT ?2"))?;
+            stmt.query_map(params![after, limit + 1], library_root_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let more = items.len() > limit;
+        items.truncate(limit);
+        let next_id = more.then(|| items.last().expect("nonempty root page").id);
+        tx.commit()?;
+        Ok(crate::MetadataLibraryRootPage {
+            items,
+            total,
+            next_id,
+        })
+    }
+
+    /// Commit only the addressed watch policy, retaining the receipt in the same transaction.
+    /// The serialized root owner publishes this result before completing its request.
+    pub fn patch_library_root_watch(
+        &self,
+        id: i64,
+        watch_enabled: bool,
+    ) -> Result<Option<crate::MetadataLibraryRoot>> {
+        ensure!(id > 0, "root id must be positive");
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE shared_directory_roots SET watch_enabled=?2 WHERE id=?1 AND enabled=1 AND deleted_at_ms IS NULL AND watch_enabled!=?2", params![id, watch_enabled])?;
+        let result = library_root_on_connection(&tx, id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Retire one explicit root by ID, preserving memberships and native identity history.
+    pub fn delete_library_root(&self, id: i64) -> Result<crate::MetadataLibraryRootDelete> {
+        ensure!(id > 0, "root id must be positive");
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let Some(root) = library_root_on_connection(&tx, id)? else {
+            return Ok(crate::MetadataLibraryRootDelete::Missing);
+        };
+        if root.managed {
+            return Ok(crate::MetadataLibraryRootDelete::Managed);
+        }
+        let removed = tx.execute(
+            "DELETE FROM shared_directory_root_origins WHERE root_id=?1 AND origin='explicit'",
+            [id],
+        )?;
+        ensure!(
+            removed == 1,
+            "active unmanaged root lacks explicit ownership"
+        );
+        crate::store::refresh_shared_root_eligibility(&tx, unix_ms())?;
+        tx.commit()?;
+        Ok(crate::MetadataLibraryRootDelete::Deleted(root))
+    }
+
     pub fn shared_root_last_scan_ms(&self, root: &Path) -> Result<Option<i64>> {
         let native = NativePath::from(root);
         self.connection()?
@@ -27,7 +134,8 @@ impl MetadataStore {
                 "SELECT shared_directory_roots.last_scanned_at_ms
                  FROM shared_directory_roots
                  JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
-                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2",
+                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+                   AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_ms IS NULL",
                 params![NativePath::platform(), native.storage_bytes()],
                 |row| row.get(0),
             )
@@ -476,6 +584,7 @@ impl MetadataStore {
                      SELECT shared_directory_roots.id FROM shared_directory_roots
                      JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
                      WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+                       AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_ms IS NULL
                  ) AND removed_at_ms IS NULL",
                 params![NativePath::platform(), native.storage_bytes(), unix_ms()],
             )?
