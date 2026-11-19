@@ -153,6 +153,8 @@ impl PersistenceOwner {
             .checked_add(publication_bytes)
             .ok_or(PersistenceError::TooLarge)?
             .checked_mul(4)
+            // WHY: the boxed command has separate backing from the fixed request.
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ObservationCommand>()))
             .and_then(|bytes| bytes.checked_add(FIXED_CHARGE))
             .ok_or(PersistenceError::TooLarge)?;
         let available = {
