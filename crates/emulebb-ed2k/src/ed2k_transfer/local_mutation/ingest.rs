@@ -152,198 +152,195 @@ impl LocalMutationRegistry {
         let (response, receive) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
-        Self::spawn_unit_with(
-            &mut state,
-            capacity_lease,
-            lease,
-            move |_capacity, _lease| {
-                let mut committed = false;
-                let operation = || {
-                    let path = crate::long_path::long_path(&path);
-                    let expected = metadata.local_file_instance(&path)?;
-                    let prepared = transfer::ingest::prepare_local_ingest(&path, &name, observer)?;
-                    let mut hashes = Vec::with_capacity(2);
-                    if let Some(old) = &expected {
-                        hashes.push(old.file_hash.clone());
-                    }
-                    hashes.push(prepared.content.file_hash.clone());
-                    hashes.sort_unstable();
-                    hashes.dedup();
-                    let raw_hashes = hashes
+        Self::spawn_unit_reply(&mut state, capacity_lease, response, move |_capacity| {
+            // WHY: completion must release hashing admission before the
+            // caller can submit the next file, including after cancellation.
+            let preparation = lease;
+            let mut committed = false;
+            let operation = || {
+                let path = crate::long_path::long_path(&path);
+                let expected = metadata.local_file_instance(&path)?;
+                let prepared = transfer::ingest::prepare_local_ingest(&path, &name, observer)?;
+                let mut hashes = Vec::with_capacity(2);
+                if let Some(old) = &expected {
+                    hashes.push(old.file_hash.clone());
+                }
+                hashes.push(prepared.content.file_hash.clone());
+                hashes.sort_unstable();
+                hashes.dedup();
+                let raw_hashes = hashes
+                    .iter()
+                    .map(|hash| {
+                        hash.parse::<emulebb_kad_proto::Ed2kHash>()
+                            .map(|hash| hash.0)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut committed_result = None;
+                for _ in 0..100 {
+                    // Capture only after the long hash. Job guards precede
+                    // short content publication guards; no SQL/catalog/root
+                    // lock is retained while either set is acquired.
+                    let jobs = metadata.capture_local_ingest_jobs(&hashes)?;
+                    let mut tokens: Vec<_> = jobs.iter().filter_map(|job| job.token).collect();
+                    tokens.sort_unstable_by_key(|token| token.job_id);
+                    let job_guards: Vec<_> = tokens
+                        .iter()
+                        .map(|token| {
+                            transfer::store::scoped_lock(&job_locks, token.job_id)
+                                .blocking_lock_owned()
+                        })
+                        .collect();
+                    let content_guards: Vec<_> = hashes
                         .iter()
                         .map(|hash| {
-                            hash.parse::<emulebb_kad_proto::Ed2kHash>()
-                                .map(|hash| hash.0)
+                            transfer::store::scoped_lock(&content_locks, hash.clone())
+                                .blocking_lock_owned()
                         })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let mut committed_result = None;
-                    for _ in 0..100 {
-                        // Capture only after the long hash. Job guards precede
-                        // short content publication guards; no SQL/catalog/root
-                        // lock is retained while either set is acquired.
-                        let jobs = metadata.capture_local_ingest_jobs(&hashes)?;
-                        let mut tokens: Vec<_> = jobs.iter().filter_map(|job| job.token).collect();
-                        tokens.sort_unstable_by_key(|token| token.job_id);
-                        let job_guards: Vec<_> = tokens
-                            .iter()
-                            .map(|token| {
-                                transfer::store::scoped_lock(&job_locks, token.job_id)
-                                    .blocking_lock_owned()
-                            })
-                            .collect();
-                        let content_guards: Vec<_> = hashes
-                            .iter()
-                            .map(|hash| {
-                                transfer::store::scoped_lock(&content_locks, hash.clone())
-                                    .blocking_lock_owned()
-                            })
-                            .collect();
-                        let stripe = eligibility.begin_mutation(&raw_hashes)?;
-                        let cut = epoch.load(Ordering::Acquire);
-                        if !cut.is_multiple_of(2) {
+                        .collect();
+                    let stripe = eligibility.begin_mutation(&raw_hashes)?;
+                    let cut = epoch.load(Ordering::Acquire);
+                    if !cut.is_multiple_of(2) {
+                        drop(stripe);
+                        drop(content_guards);
+                        drop(job_guards);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    ensure!(
+                        transfer::ingest::native_file_fingerprint(&path).as_ref()
+                            == Some(&prepared.content.fingerprint),
+                        "local ingest source changed before binding"
+                    );
+                    for root in &roots {
+                        ensure!(
+                            crate::long_path::long_path(&root.root).is_dir(),
+                            "required ingest root is no longer accessible"
+                        );
+                    }
+                    // Same job/content guards fence cache admission. Reserve
+                    // every affected execution before the durable bind.
+                    let resident_writes = tokens
+                        .iter()
+                        .map(|token| {
+                            residents
+                                .reserve(token.job_id)
+                                .map(|permit| (*token, permit))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    match metadata.commit_local_ingest(
+                        emulebb_metadata::MetadataLocalIngestContent {
+                            content: &prepared.content,
+                            recovery: &prepared.recovery,
+                            media: &prepared.media,
+                        },
+                        expected.as_ref(),
+                        &jobs,
+                        &roots,
+                        index_type.as_deref(),
+                        (&epoch, cut),
+                    ) {
+                        Err(error)
+                            if error.is::<emulebb_metadata::ObservedRootChanged>()
+                                || error.is::<emulebb_metadata::MetadataIngestJobChanged>() =>
+                        {
                             drop(stripe);
                             drop(content_guards);
                             drop(job_guards);
-                            std::thread::sleep(std::time::Duration::from_millis(5));
                             continue;
                         }
-                        ensure!(
-                            transfer::ingest::native_file_fingerprint(&path).as_ref()
-                                == Some(&prepared.content.fingerprint),
-                            "local ingest source changed before binding"
-                        );
-                        for root in &roots {
-                            ensure!(
-                                crate::long_path::long_path(&root.root).is_dir(),
-                                "required ingest root is no longer accessible"
-                            );
-                        }
-                        // Same job/content guards fence cache admission. Reserve
-                        // every affected execution before the durable bind.
-                        let resident_writes = tokens
-                            .iter()
-                            .map(|token| {
-                                residents
-                                    .reserve(token.job_id)
-                                    .map(|permit| (*token, permit))
-                            })
-                            .collect::<Result<Vec<_>>>()?;
-                        match metadata.commit_local_ingest(
-                            emulebb_metadata::MetadataLocalIngestContent {
-                                content: &prepared.content,
-                                recovery: &prepared.recovery,
-                                media: &prepared.media,
-                            },
-                            expected.as_ref(),
-                            &jobs,
-                            &roots,
-                            index_type.as_deref(),
-                            (&epoch, cut),
-                        ) {
-                            Err(error)
-                                if error.is::<emulebb_metadata::ObservedRootChanged>()
-                                    || error.is::<emulebb_metadata::MetadataIngestJobChanged>() =>
-                            {
-                                drop(stripe);
-                                drop(content_guards);
-                                drop(job_guards);
-                                continue;
-                            }
-                            result => {
-                                committed_result = Some((
-                                    result?,
-                                    job_guards,
-                                    content_guards,
-                                    stripe,
-                                    resident_writes,
-                                ));
-                                break;
-                            }
+                        result => {
+                            committed_result = Some((
+                                result?,
+                                job_guards,
+                                content_guards,
+                                stripe,
+                                resident_writes,
+                            ));
+                            break;
                         }
                     }
-                    let (result, _job_guards, _content_guards, stripe, mut resident_writes) =
-                        committed_result
-                            .ok_or_else(|| anyhow!("ingest binding could not stabilize"))?;
-                    committed = true;
-                    if let Some(error) = result.recovery_error {
-                        tracing::warn!(%error, "Verified MD4 content retained without AICH recovery cache");
-                    }
-                    #[cfg(test)]
-                    if let Some((reached, release)) = publication_gate {
-                        let _ = reached.send(());
-                        let _ = release.recv();
-                    }
-                    {
-                        let mut cache = manifests.blocking_lock();
-                        for projection in result.projections {
-                            let current = projection.job_token.and_then(|token| {
-                                cache
-                                    .get_mut(&token.job_id)
-                                    .filter(|manifest| manifest.token == token)
-                            });
-                            if let (Some(manifest), Some(aich)) = (current, projection.aich)
-                                && manifest.aich_trust_generation < aich.generation
-                            {
-                                let index = resident_writes
-                                    .iter()
-                                    .position(|(token, _)| *token == manifest.token)
-                                    .ok_or_else(|| {
-                                        anyhow!("ingest cache lacks preadmitted write credit")
-                                    })?;
-                                let (_, permit) = resident_writes.swap_remove(index);
-                                manifest.write_with(permit, |manifest| {
-                                    manifest.aich_root = aich.root;
-                                    manifest.aich_root_origin = aich
-                                        .origin
-                                        .as_deref()
-                                        .map(transfer::Ed2kAichRootOrigin::parse)
-                                        .transpose()?;
-                                    manifest.aich_trust_generation = aich.generation;
-                                    manifest.aich_hashset.clear();
-                                    manifest.aich_hashset_acquired = false;
-                                    Ok(())
-                                })?;
-                            }
-                        }
-                    }
-                    dirty.store(true, Ordering::Release);
-                    drop(stripe);
-                    drop(_content_guards);
-                    drop(_job_guards);
-                    // The real prepared lease remains alive; no hashing or binding
-                    // is replayed when fresh catalog evidence has to be retried.
-                    publication.publish_prepared_pair(&hashes, _lease)?;
-                    Ok(prepared.summary)
-                };
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
-                let (result, status) = match outcome {
-                    Ok(Ok(summary)) => (Ok(summary), 0),
-                    Ok(Err(error)) => {
-                        let unknown = error.is::<emulebb_metadata::MetadataIngestCommitUncertain>()
-                            || error.is::<LocalMutationError>()
-                                && matches!(
-                                    error.downcast_ref::<LocalMutationError>(),
-                                    Some(LocalMutationError::Unknown)
-                                );
-                        if unknown {
-                            (Err(LocalMutationError::Unknown.into()), 2)
-                        } else if committed {
-                            tracing::error!(%error, "ingest committed but publication failed");
-                            (Err(LocalMutationError::Committed.into()), 1)
-                        } else {
-                            (Err(error), 0)
-                        }
-                    }
-                    Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
-                };
-                if status != 0 {
-                    dirty.store(true, Ordering::Release);
-                    failed.store(true, Ordering::Release);
                 }
-                let _ = response.send(result);
-                status
-            },
-        );
+                let (result, _job_guards, _content_guards, stripe, mut resident_writes) =
+                    committed_result
+                        .ok_or_else(|| anyhow!("ingest binding could not stabilize"))?;
+                committed = true;
+                if let Some(error) = result.recovery_error {
+                    tracing::warn!(%error, "Verified MD4 content retained without AICH recovery cache");
+                }
+                #[cfg(test)]
+                if let Some((reached, release)) = publication_gate {
+                    let _ = reached.send(());
+                    let _ = release.recv();
+                }
+                {
+                    let mut cache = manifests.blocking_lock();
+                    for projection in result.projections {
+                        let current = projection.job_token.and_then(|token| {
+                            cache
+                                .get_mut(&token.job_id)
+                                .filter(|manifest| manifest.token == token)
+                        });
+                        if let (Some(manifest), Some(aich)) = (current, projection.aich)
+                            && manifest.aich_trust_generation < aich.generation
+                        {
+                            let index = resident_writes
+                                .iter()
+                                .position(|(token, _)| *token == manifest.token)
+                                .ok_or_else(|| {
+                                    anyhow!("ingest cache lacks preadmitted write credit")
+                                })?;
+                            let (_, permit) = resident_writes.swap_remove(index);
+                            manifest.write_with(permit, |manifest| {
+                                manifest.aich_root = aich.root;
+                                manifest.aich_root_origin = aich
+                                    .origin
+                                    .as_deref()
+                                    .map(transfer::Ed2kAichRootOrigin::parse)
+                                    .transpose()?;
+                                manifest.aich_trust_generation = aich.generation;
+                                manifest.aich_hashset.clear();
+                                manifest.aich_hashset_acquired = false;
+                                Ok(())
+                            })?;
+                        }
+                    }
+                }
+                dirty.store(true, Ordering::Release);
+                drop(stripe);
+                drop(_content_guards);
+                drop(_job_guards);
+                // The real prepared lease remains alive; no hashing or binding
+                // is replayed when fresh catalog evidence has to be retried.
+                publication.publish_prepared_pair(&hashes, &preparation)?;
+                Ok(prepared.summary)
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+            let (result, status) = match outcome {
+                Ok(Ok(summary)) => (Ok(summary), 0),
+                Ok(Err(error)) => {
+                    let unknown = error.is::<emulebb_metadata::MetadataIngestCommitUncertain>()
+                        || error.is::<LocalMutationError>()
+                            && matches!(
+                                error.downcast_ref::<LocalMutationError>(),
+                                Some(LocalMutationError::Unknown)
+                            );
+                    if unknown {
+                        (Err(LocalMutationError::Unknown.into()), 2)
+                    } else if committed {
+                        tracing::error!(%error, "ingest committed but publication failed");
+                        (Err(LocalMutationError::Committed.into()), 1)
+                    } else {
+                        (Err(error), 0)
+                    }
+                }
+                Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
+            };
+            if status != 0 {
+                dirty.store(true, Ordering::Release);
+                failed.store(true, Ordering::Release);
+            }
+            (result, status)
+        });
         Ok(receive)
     }
 }

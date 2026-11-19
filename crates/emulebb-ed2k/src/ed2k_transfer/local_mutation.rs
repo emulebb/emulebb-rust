@@ -188,6 +188,7 @@ impl LocalMutationRegistry {
     }
     /// An additional pure control lease (prepared hashing) also outlives every
     /// captured input. Neither control contains the runtime or this task set.
+    #[cfg(test)]
     fn spawn_unit_with<C: Send + 'static>(
         state: &mut State,
         mut lease: CapacityLease,
