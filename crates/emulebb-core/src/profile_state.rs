@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{Category, CoreState, Friend, ServerInfo, SharedDirectoryRoot};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
-use emulebb_ed2k::long_path::normal_path_display;
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
 
 pub(crate) fn load_core_state(

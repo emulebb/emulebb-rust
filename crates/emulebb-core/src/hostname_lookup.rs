@@ -422,7 +422,7 @@ fn read_dns_name(bytes: &[u8], offset: &mut usize) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::Ipv4Addr;
 
     use super::{build_ptr_query, candidate_ips_from_servers, parse_ptr_response};
     use crate::ServerInfo;

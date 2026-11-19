@@ -34,7 +34,8 @@ async fn invalid_whole_candidate_changes_neither_saved_document_nor_runtime() {
             json!({"network":{"nat":{"enabled":false}},"transfers":{"upload":{"baseSlots":0}}}),
         ))
         .await
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(matches!(
         error.downcast_ref::<SettingsMutationError>(),
         Some(SettingsMutationError::Invalid(_))
@@ -104,7 +105,7 @@ async fn caller_disconnect_after_commit_cannot_abandon_runtime_publication() {
         1048576
     );
     writer.abort();
-    assert!(writer.await.unwrap_err().is_cancelled());
+    assert!(writer.await.err().unwrap().is_cancelled());
     *owner.publication_gate.lock().unwrap() = None;
     gate.release.notify_one();
     let read = tokio::time::timeout(Duration::from_secs(5), core.settings())
@@ -246,7 +247,7 @@ async fn uncertain_sql_commit_stops_coherent_reads_and_further_mutation() {
         "1",
         json!({"transfers":{"downloadLimitBytesPerSecond":2097152}}),
     );
-    let error = core.update_settings(&change).await.unwrap_err();
+    let error = core.update_settings(&change).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<PersistenceError>(),
         Some(PersistenceError::CommitUnknown)
@@ -276,7 +277,8 @@ async fn revision_exhaustion_changes_neither_saved_values_nor_admitted_effective
             json!({"transfers":{"downloadLimitBytesPerSecond":2097152}}),
         ))
         .await
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(matches!(
         error.downcast_ref::<SettingsMutationError>(),
         Some(SettingsMutationError::RevisionExhausted)
