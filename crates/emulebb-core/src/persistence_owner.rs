@@ -109,7 +109,7 @@ enum Command {
     Add { hash: String, name: String },
     Delete { hash: String },
     Category(category::CategoryCommand),
-    ContentObservations(content_observations::ObservationCommand),
+    ContentObservations(Box<content_observations::ObservationCommand>),
     SearchSessions(search_sessions::SearchCommand),
     SearchCreate(search_create::CreateCommand),
     SearchTransition(search_transition::Transition),
@@ -453,7 +453,7 @@ pub(crate) struct PersistenceOwner {
     #[cfg(test)]
     worker_started: Arc<tokio::sync::Notify>,
     #[cfg(test)]
-    category_page_gate: Arc<StdMutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>>,
+    category_page_gate: crate::TestWorkerGate,
     #[cfg(test)]
     final_quota_wait: Arc<tokio::sync::Notify>,
 }

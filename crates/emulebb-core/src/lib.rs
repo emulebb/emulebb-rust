@@ -419,6 +419,22 @@ enum Ed2kServerCallbackDispatch {
     DeliveryUnknown(anyhow::Error),
 }
 
+#[cfg(test)]
+type TestWorkerGate = Arc<
+    std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
+>;
+
+type CategoryProbeTask = JoinHandle<(
+    emulebb_metadata::MetadataSharedCopyCandidate,
+    bool,
+    persistence_owner::ByteLease,
+)>;
+
 #[derive(Clone)]
 pub struct EmulebbCore {
     started_at: Instant,
@@ -500,41 +516,13 @@ pub struct EmulebbCore {
     shared_root_unpublished: Arc<AtomicBool>,
     shared_root_fault: Arc<AtomicBool>,
     #[cfg(test)]
-    shared_root_sql_gate: Arc<
-        std::sync::Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                std::sync::mpsc::Receiver<()>,
-            )>,
-        >,
-    >,
+    shared_root_sql_gate: TestWorkerGate,
     #[cfg(test)]
-    shared_root_io_gate: Arc<
-        std::sync::Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                std::sync::mpsc::Receiver<()>,
-            )>,
-        >,
-    >,
+    shared_root_io_gate: TestWorkerGate,
     #[cfg(test)]
-    shared_implicit_sql_gate: Arc<
-        std::sync::Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                std::sync::mpsc::Receiver<()>,
-            )>,
-        >,
-    >,
+    shared_implicit_sql_gate: TestWorkerGate,
     #[cfg(test)]
-    category_probe_gate: Arc<
-        std::sync::Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                std::sync::mpsc::Receiver<()>,
-            )>,
-        >,
-    >,
+    category_probe_gate: TestWorkerGate,
     #[cfg(test)]
     category_probe_waiting: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     shared_root_change: Arc<tokio::sync::Notify>,
@@ -543,17 +531,7 @@ pub struct EmulebbCore {
             Option<tokio::sync::mpsc::Sender<persistence_owner::category::CategoryProbeJob>>,
         >,
     >,
-    category_probe_slot: Arc<
-        tokio::sync::Mutex<
-            Option<
-                JoinHandle<(
-                    emulebb_metadata::MetadataSharedCopyCandidate,
-                    bool,
-                    persistence_owner::ByteLease,
-                )>,
-            >,
-        >,
-    >,
+    category_probe_slot: Arc<Mutex<Option<CategoryProbeTask>>>,
     /// Files still pending the initial hash in the detached background reload
     /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
     /// atomic shared by the sync primitive and the worker (see `shared_directories`).
