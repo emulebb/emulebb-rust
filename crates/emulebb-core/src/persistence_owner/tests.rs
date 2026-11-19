@@ -100,7 +100,7 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
         sharing: category::CategorySharingContext {
             runtime: Arc::clone(&runtime),
             incoming: Arc::new(root.join("incoming")),
-            root_change: Arc::new(tokio::sync::Notify::new()),
+            root_change: Arc::default(),
             probe_sender: std::sync::Weak::new(),
         },
         reload: None,
@@ -163,7 +163,7 @@ async fn cancelled_explicit_root_writer_is_published_before_drain() {
                         sharing: category::CategorySharingContext {
                             runtime,
                             incoming: Arc::new(root.join("incoming")),
-                            root_change: Arc::new(tokio::sync::Notify::new()),
+                            root_change: Arc::default(),
                             probe_sender: std::sync::Weak::new(),
                         },
                         reload: None,
@@ -405,7 +405,7 @@ async fn explicit_root_continuation_reconciles_each_removed_root() {
             sharing: category::CategorySharingContext {
                 runtime: Arc::clone(&runtime),
                 incoming: Arc::new(base.join("incoming")),
-                root_change: Arc::new(tokio::sync::Notify::new()),
+                root_change: Arc::default(),
                 probe_sender: std::sync::Weak::new(),
             },
             reload: None,
