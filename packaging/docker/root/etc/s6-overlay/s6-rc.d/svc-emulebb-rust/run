@@ -1,13 +1,11 @@
 #!/usr/bin/with-contenv bash
 set -euo pipefail
 
-mkdir -p /config /data/ed2k
-args=(--profile /config/emulebb-rust --incoming-dir /data/ed2k)
-if [[ -n ${EMULEBB_RUST_P2P_INTERFACE:-} ]]; then
-    args+=(--p2p-bind-interface "$EMULEBB_RUST_P2P_INTERFACE")
-fi
+mkdir -p /config /data/incoming /data/temp
 if [[ -z ${LSIO_NON_ROOT_USER:-} ]]; then
-    chown abc:abc /config /data/ed2k
-    exec s6-setuidgid abc /usr/lib/emulebb-rust/emulebb-rust "${args[@]}"
+    chown abc:abc /config /data/incoming /data/temp
+    s6-setuidgid abc /usr/lib/emulebb-rust/emulebb-profile-init
+    exec s6-setuidgid abc /usr/lib/emulebb-rust/emulebb-rust --profile /config/emulebb-rust
 fi
-exec /usr/lib/emulebb-rust/emulebb-rust "${args[@]}"
+/usr/lib/emulebb-rust/emulebb-profile-init
+exec /usr/lib/emulebb-rust/emulebb-rust --profile /config/emulebb-rust

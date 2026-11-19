@@ -23,6 +23,9 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 mod bind_config;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod container_profile;
 mod offline_settings;
 mod runtime_settings;
 pub use bind_config::NetworkStartupError;

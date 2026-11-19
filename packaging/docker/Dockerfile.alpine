@@ -25,6 +25,7 @@ RUN apk upgrade --no-cache && apk add --no-cache ca-certificates jq
 COPY --from=unpack /payload/ /usr/lib/emulebb-rust/
 COPY root/ /
 RUN chmod 755 /usr/lib/emulebb-rust/emulebb-rust \
+    /usr/lib/emulebb-rust/emulebb-profile-init \
     /etc/s6-overlay/s6-rc.d/svc-emulebb-rust/run \
     /usr/local/bin/emulebb-rust-healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["/usr/local/bin/emulebb-rust-healthcheck"]

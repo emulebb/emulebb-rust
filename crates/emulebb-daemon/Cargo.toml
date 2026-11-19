@@ -14,6 +14,10 @@ workspace = true
 name = "emulebb-rust"
 path = "src/bin/emulebb-rust.rs"
 
+[[bin]]
+name = "emulebb-profile-init"
+path = "src/bin/emulebb-profile-init.rs"
+
 # Diagnostics flavor: the SAME binary built under a distinct name so it is never
 # confused with the plain release exe (mirrors the MFC emulebb.exe vs
 # emulebb-diagnostics.exe split). The target points at a thin shim that
@@ -63,6 +67,9 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
 
 [build-dependencies]
 embed-manifest.workspace = true

@@ -25,6 +25,7 @@ COPY dist/emulebb-rust-v${VERSION}-linux-${TARGETARCH}.deb /tmp/emulebb-rust.deb
 RUN dpkg-deb -x /tmp/emulebb-rust.deb / && rm /tmp/emulebb-rust.deb
 COPY root/ /
 RUN chmod 755 /etc/s6-overlay/s6-rc.d/svc-emulebb-rust/run \
+    /usr/lib/emulebb-rust/emulebb-profile-init \
     /usr/local/bin/emulebb-rust-healthcheck
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["/usr/local/bin/emulebb-rust-healthcheck"]

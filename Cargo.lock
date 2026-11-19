@@ -645,6 +645,7 @@ dependencies = [
  "hex",
  "reqwest",
  "rusqlite",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
