@@ -5,8 +5,8 @@
 //! captured root IDs. They never schedule a full scan. Explicit/startup scans
 //! acknowledge only losses covered by their captured scan watermark.
 //!
-//! The native debouncer still owns upstream event/cache state; the admission and
-//! coalescing limits here bound the downstream path work, not that upstream cache.
+//! Raw native events enter a bounded queue directly. Settling and coalescing
+//! retain at most one bounded batch, without a per-file native identity cache.
 use anyhow::Context;
 use emulebb_metadata::NativeFileFingerprint;
 use std::collections::{HashMap, HashSet};
@@ -15,21 +15,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use notify_debouncer_full::notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
-use notify_debouncer_full::notify::{EventKind, RecursiveMode};
-use notify_debouncer_full::{
-    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
-};
+use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::shared_directories::{SharedDirectoryRoot, load_shared_file_ignore_policy};
 
-/// Settle window before a burst of raw FS events for one logical change is
-/// emitted as a settled event. Long enough that a file copied in is fully
-/// written before we hash it, short enough that auto-pickup still feels live.
-/// (eMule re-scans shared dirs on a coarse timer; a 2s settle is well within
-/// that responsiveness while avoiding mid-write hashing.)
+/// Coalescing window for a bounded raw-event batch. Verified source ingestion
+/// remains responsible for detecting writes that continue during hashing.
 const SETTLE_WINDOW: Duration = Duration::from_secs(2);
 
 /// Maximum settled path actions retained while the serial async applier is
@@ -97,7 +91,7 @@ pub(crate) enum MonitorAction {
     ScanRequired(Vec<PathBuf>),
 }
 
-/// Classify a single settled debounced event into zero or more actions.
+/// Classify a single native event into zero or more actions.
 ///
 /// `notify`'s settled event kinds map cleanly onto our three intents:
 /// * `Create` / `Modify(Data|Any|Metadata)` -> the path now holds content we
@@ -112,7 +106,7 @@ pub(crate) enum MonitorAction {
 /// We intentionally do not try to stat the path here (it may already be gone for
 /// a remove, or still settling); the consumer decides share-vs-skip when it
 /// actually touches the filesystem.
-pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
+pub(crate) fn classify_event(event: &Event) -> Vec<MonitorAction> {
     if event.need_rescan() {
         return vec![MonitorAction::ScanRequired(event.paths.clone())];
     }
@@ -143,7 +137,15 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
             // An unpaired rename is also the only portable signal left after
             // a native watcher buffer overflow. A full incremental scan is
             // required to discover every path the kernel could not report.
-            RenameMode::To | RenameMode::From => {
+            RenameMode::To => {
+                // WHY: Windows reports separate rename halves without a cookie.
+                // The share owner can relocate a vanished path by its verified
+                // native fingerprint; guessing pairs here could move wrong data.
+                let mut actions = map_paths(MonitorAction::Share);
+                actions.push(MonitorAction::ScanRequired(event.paths.clone()));
+                actions
+            }
+            RenameMode::From => {
                 vec![MonitorAction::ScanRequired(event.paths.clone())]
             }
             // Some backends label a paired [from, to] event as Any/Other. Keep
@@ -170,9 +172,13 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
     }
 }
 
-/// Flatten a settled batch of debounced events into the ordered action list.
-pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction> {
+/// Flatten a bounded batch of native events into the ordered action list.
+pub(crate) fn actions_for_events(events: &[Event]) -> Vec<MonitorAction> {
     let actions = events.iter().flat_map(classify_event).collect::<Vec<_>>();
+    with_burst_loss(actions)
+}
+
+fn with_burst_loss(actions: Vec<MonitorAction>) -> Vec<MonitorAction> {
     #[cfg(target_os = "windows")]
     {
         let mut actions = actions;
@@ -182,9 +188,15 @@ pub(crate) fn actions_for_events(events: &[DebouncedEvent]) -> Vec<MonitorAction
             .count();
         if catalog_action_count >= WINDOWS_EVENT_BURST_LOSS_THRESHOLD {
             actions.push(MonitorAction::ScanRequired(
-                events
+                actions
                     .iter()
-                    .flat_map(|event| event.paths.iter().cloned())
+                    .flat_map(|action| match action {
+                        MonitorAction::Share(path) | MonitorAction::Remove(path) => {
+                            vec![path.clone()]
+                        }
+                        MonitorAction::Rename { from, to } => vec![from.clone(), to.clone()],
+                        MonitorAction::ScanRequired(paths) => paths.clone(),
+                    })
                     .collect(),
             ));
         }
@@ -279,6 +291,36 @@ impl MonitorIngress {
             .try_send(MonitorAction::ScanRequired(Vec::new()));
     }
 
+    fn handle_event(&self, result: notify::Result<Event>) {
+        match result {
+            Ok(event) => {
+                if event.need_rescan() {
+                    self.native_faulted.store(true, Ordering::Release);
+                }
+                if self.scan_required.load(Ordering::Acquire) {
+                    return;
+                }
+                // WHY: bound allocation before classifying a native event.
+                // An oversized event has unknown loss scope, so flag every
+                // subscribed root instead of allocating work proportional to it.
+                if event.paths.len() > ACTION_CHANNEL_CAPACITY {
+                    self.require_scan();
+                    return;
+                }
+                self.try_send_actions(actions_for_events(std::slice::from_ref(&event)));
+            }
+            Err(error) => {
+                self.native_faulted.store(true, Ordering::Release);
+                if error.paths.len() > ACTION_CHANNEL_CAPACITY {
+                    self.require_scan();
+                    return;
+                }
+                tracing::warn!(error = %error, "shared-directory watcher reported an error");
+                self.try_send_actions([MonitorAction::ScanRequired(error.paths)]);
+            }
+        }
+    }
+
     fn try_send_actions(&self, actions: impl IntoIterator<Item = MonitorAction>) {
         if self.scan_required.load(Ordering::Acquire) {
             return;
@@ -324,15 +366,14 @@ fn monitor_action_channel(
 
 /// Handle to a running shared-directory monitor.
 ///
-/// Owns the `notify` debouncer (its `Drop` stops the watcher thread) and the
+/// Owns the native watcher (its `Drop` stops the watcher thread) and the
 /// `JoinHandle` of the tokio consumer task. Dropping or [`stop`](Self::stop)ing
 /// it tears both down so neither the watcher thread nor the consumer task leaks
 /// across a disconnect / reconfigure.
 pub(crate) struct SharedDirMonitor {
     /// Re-register roots in place after event loss; dropping this joins the
     /// native watcher without leaving an unowned thread.
-    debouncer:
-        Option<Debouncer<notify_debouncer_full::notify::RecommendedWatcher, RecommendedCache>>,
+    watcher: Option<RecommendedWatcher>,
     watched_roots: Vec<PathBuf>,
     binding_ids: Arc<Vec<(PathBuf, i64)>>,
     native_faulted: Arc<AtomicBool>,
@@ -342,7 +383,7 @@ pub(crate) struct SharedDirMonitor {
 
 impl SharedDirMonitor {
     fn matches(&self, roots: &[SharedDirectoryRoot], ids: &[(PathBuf, i64)]) -> bool {
-        if self.debouncer.is_none()
+        if self.watcher.is_none()
             || self.native_faulted.load(Ordering::Acquire)
             || self.binding_ids.as_slice() != ids
         {
@@ -367,12 +408,12 @@ impl SharedDirMonitor {
     /// Existing registrations stay installed while new directories are added.
     #[cfg(target_os = "linux")]
     fn refresh_watch_coverage(&mut self) -> usize {
-        let Some(debouncer) = self.debouncer.as_mut() else {
+        let Some(watcher) = self.watcher.as_mut() else {
             return 0;
         };
         let mut refreshed = 0;
         for root in &self.watched_roots {
-            match debouncer.watch(root, RecursiveMode::Recursive) {
+            match watcher.watch(root, RecursiveMode::Recursive) {
                 Ok(()) => refreshed += 1,
                 Err(error) => tracing::warn!(
                     root = %root.display(), %error,
@@ -386,7 +427,7 @@ impl SharedDirMonitor {
     /// Stop native callbacks, cancel ordinary path work and join final loss writes.
     pub(crate) async fn stop(&mut self) -> anyhow::Result<()> {
         self.stop.send_replace(true);
-        self.debouncer.take();
+        self.watcher.take();
         match (&mut self.consumer).await {
             Ok(()) => Ok(()),
             Err(error) if error.is_cancelled() => Ok(()),
@@ -399,7 +440,7 @@ impl Drop for SharedDirMonitor {
     fn drop(&mut self) {
         // If the monitor is dropped without an explicit stop (e.g. the holding
         // Option is replaced), still abort the consumer task so it does not leak.
-        // The debouncer's own Drop stops the watcher thread.
+        // The native watcher's own Drop stops its thread.
         self.consumer.abort();
     }
 }
@@ -425,7 +466,7 @@ where
         return None;
     }
 
-    // notify watcher thread -> tokio consumer bridge. The debouncer's event
+    // notify watcher thread -> tokio consumer bridge. The native event
     // handler runs on the watcher thread; it must not block. A full bounded
     // queue therefore latches one loss notice instead of waiting or retaining
     // work proportional to the mutation volume.
@@ -434,42 +475,10 @@ where
     let native_faulted = Arc::clone(&ingress.native_faulted);
 
     let error_ingress = ingress.clone();
-    let handler = move |result: DebounceEventResult| match result {
-        Ok(events) => {
-            if events.iter().any(|event| event.need_rescan()) {
-                ingress.native_faulted.store(true, Ordering::Release);
-            }
-            // WHY: bound allocation before flattening/coalescing a settled
-            // batch. An oversized batch has unknown loss scope, so flag every
-            // subscribed root instead of allocating work proportional to it.
-            if events.len() > ACTION_CHANNEL_CAPACITY
-                || events.iter().map(|event| event.paths.len()).sum::<usize>()
-                    > ACTION_CHANNEL_CAPACITY
-            {
-                ingress.require_scan();
-                return;
-            }
-            ingress.try_send_actions(coalesce_actions(actions_for_events(&events)));
-        }
-        Err(errors) => {
-            ingress.native_faulted.store(true, Ordering::Release);
-            if errors.len() > ACTION_CHANNEL_CAPACITY {
-                ingress.require_scan();
-                return;
-            }
-            for error in errors {
-                tracing::warn!(error = %error, "shared-directory watcher reported an error");
-                if error.paths.len() > ACTION_CHANNEL_CAPACITY {
-                    ingress.require_scan();
-                    return;
-                }
-                ingress.try_send_actions([MonitorAction::ScanRequired(error.paths)]);
-            }
-        }
-    };
+    let handler = move |result| ingress.handle_event(result);
 
-    let mut debouncer = match new_debouncer(SETTLE_WINDOW, None, handler) {
-        Ok(debouncer) => debouncer,
+    let mut watcher = match notify::recommended_watcher(handler) {
+        Ok(watcher) => watcher,
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -477,7 +486,7 @@ where
             );
             error_ingress.try_send_actions([MonitorAction::ScanRequired(Vec::new())]);
             return Some(SharedDirMonitor {
-                debouncer: None,
+                watcher: None,
                 watched_roots: Vec::new(),
                 binding_ids: Arc::new(Vec::new()),
                 native_faulted,
@@ -493,10 +502,8 @@ where
             continue;
         }
         let path = Path::new(&root.path);
-        match debouncer.watch(path, RecursiveMode::Recursive) {
+        match watcher.watch(path, RecursiveMode::Recursive) {
             Ok(()) => {
-                // notify-debouncer-full 0.7 manages the file-id cache roots
-                // together with the watcher registration.
                 watched_roots.push(path.to_path_buf());
                 tracing::info!(
                     root = %root.path,
@@ -524,7 +531,7 @@ where
     error_ingress.try_send_actions([MonitorAction::ScanRequired(watched_roots.clone())]);
     let consumer = tokio::spawn(run_consumer(action_rx, scan_required, stop_rx, apply));
     Some(SharedDirMonitor {
-        debouncer: Some(debouncer),
+        watcher: Some(watcher),
         watched_roots,
         binding_ids: Arc::new(Vec::new()),
         native_faulted,
@@ -562,6 +569,18 @@ async fn run_consumer<F, Fut>(
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     while let Some(first) = action_rx.recv().await {
+        if !matches!(first, MonitorAction::ScanRequired(_))
+            && !scan_required.load(Ordering::Acquire)
+            && !*stop.borrow()
+        {
+            // Keep callbacks nonblocking and memory bounded while a write burst
+            // settles. Overflow records uncertainty instead of growing a cache.
+            tokio::select! {
+                biased;
+                _ = stop.changed() => {},
+                _ = tokio::time::sleep(SETTLE_WINDOW) => {},
+            }
+        }
         let mut pending = vec![first];
         for _ in 1..ACTION_CHANNEL_CAPACITY {
             match action_rx.try_recv() {
@@ -580,7 +599,7 @@ async fn run_consumer<F, Fut>(
             continue;
         }
 
-        for action in coalesce_actions(pending) {
+        for action in coalesce_actions(with_burst_loss(coalesce_actions(pending))) {
             if matches!(action, MonitorAction::ScanRequired(_)) {
                 apply(action).await;
             } else if !*stop.borrow() {
@@ -593,7 +612,7 @@ async fn run_consumer<F, Fut>(
         }
     }
     if *stop.borrow() {
-        // WHY: stopping drops unsettled debouncer state and opens an observation
+        // WHY: stopping drops unsettled event state and opens an observation
         // gap. Persist that uncertainty before joining the consumer; ordinary
         // path work is cancelled, while admitted SQL remains owned and drained.
         apply(MonitorAction::ScanRequired(Vec::new())).await;
@@ -2069,12 +2088,11 @@ mod tests {
 
     use super::*;
     use emulebb_metadata::MetadataSharedDirectoryRoot;
-    use notify_debouncer_full::notify::Event;
-    use notify_debouncer_full::notify::event::{CreateKind, Flag, RemoveKind};
+    use notify::Event;
+    use notify::event::{CreateKind, Flag, RemoveKind};
     use std::future::{Future, poll_fn};
     use std::sync::Mutex;
     use std::task::Poll;
-    use std::time::Instant;
 
     #[test]
     fn unwatched_roots_do_not_create_a_native_monitor() {
@@ -2173,12 +2191,7 @@ mod tests {
         .unwrap();
         // Root registration initially includes the child. Remove only that
         // native subscription, leaving the directory and consumer in place.
-        monitor
-            .debouncer
-            .as_mut()
-            .unwrap()
-            .unwatch(&nested)
-            .unwrap();
+        monitor.watcher.as_mut().unwrap().unwatch(&nested).unwrap();
         *core.shared_dir_monitor.lock().await = Some(monitor);
         let result = run_root_io(
             &core,
@@ -2585,15 +2598,11 @@ mod tests {
             .unwrap();
     }
 
-    fn debounced(kind: EventKind, paths: Vec<&str>) -> DebouncedEvent {
-        let event = Event {
+    fn native_event(kind: EventKind, paths: Vec<&str>) -> Event {
+        Event {
             kind,
             paths: paths.into_iter().map(PathBuf::from).collect(),
             attrs: Default::default(),
-        };
-        DebouncedEvent {
-            event,
-            time: Instant::now(),
         }
     }
 
@@ -2728,7 +2737,7 @@ mod tests {
         core.drain_persistence().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stopping_cancels_path_work_but_drains_loss_and_observation_gap() {
         let (ingress, rx, required) = monitor_action_channel(4);
         let (stop, stop_rx) = tokio::sync::watch::channel(false);
@@ -2748,7 +2757,7 @@ mod tests {
                 sink.lock().unwrap().push(action);
             }
         }));
-        tokio::time::timeout(Duration::from_secs(1), started.notified())
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
             .await
             .unwrap();
         stop.send_replace(true);
@@ -2786,7 +2795,7 @@ mod tests {
 
     #[test]
     fn create_event_classifies_as_share() {
-        let event = debounced(EventKind::Create(CreateKind::File), vec!["/share/a.dat"]);
+        let event = native_event(EventKind::Create(CreateKind::File), vec!["/share/a.dat"]);
         assert_eq!(classify_event(&event), vec![share("/share/a.dat")]);
     }
 
@@ -2798,7 +2807,7 @@ mod tests {
             EventKind::Any,
             EventKind::Other,
         ] {
-            let event = debounced(kind, vec!["/share/subtree"]);
+            let event = native_event(kind, vec!["/share/subtree"]);
             assert_eq!(
                 classify_event(&event),
                 vec![loss_notice(&["/share/subtree"])]
@@ -2809,7 +2818,7 @@ mod tests {
     #[test]
     fn untyped_removal_keeps_file_work_and_reports_possible_subtree_loss() {
         for kind in [RemoveKind::Any, RemoveKind::Other] {
-            let event = debounced(EventKind::Remove(kind), vec!["/share/subtree"]);
+            let event = native_event(EventKind::Remove(kind), vec!["/share/subtree"]);
             assert_eq!(
                 classify_event(&event),
                 vec![remove("/share/subtree"), loss_notice(&["/share/subtree"])]
@@ -2907,7 +2916,7 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&moved).unwrap();
-        let notice = debounced(
+        let notice = native_event(
             EventKind::Remove(RemoveKind::Folder),
             vec![moved.to_str().unwrap()],
         );
@@ -2943,24 +2952,25 @@ mod tests {
 
     #[test]
     fn data_modify_event_classifies_as_share() {
-        let kind = EventKind::Modify(ModifyKind::Data(
-            notify_debouncer_full::notify::event::DataChange::Content,
-        ));
-        let event = debounced(kind, vec!["/share/b.dat"]);
+        let kind = EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content));
+        let event = native_event(kind, vec!["/share/b.dat"]);
         assert_eq!(classify_event(&event), vec![share("/share/b.dat")]);
     }
 
     #[test]
     fn remove_event_classifies_as_remove() {
-        let event = debounced(EventKind::Remove(RemoveKind::File), vec!["/share/c.dat"]);
+        let event = native_event(EventKind::Remove(RemoveKind::File), vec!["/share/c.dat"]);
         assert_eq!(classify_event(&event), vec![remove("/share/c.dat")]);
     }
 
     #[test]
     fn unpaired_rename_flags_its_affected_path() {
-        let to = debounced(name(RenameMode::To), vec!["/share/new.dat"]);
-        assert_eq!(classify_event(&to), vec![loss_notice(&["/share/new.dat"])]);
-        let from = debounced(name(RenameMode::From), vec!["/share/old.dat"]);
+        let to = native_event(name(RenameMode::To), vec!["/share/new.dat"]);
+        assert_eq!(
+            classify_event(&to),
+            vec![share("/share/new.dat"), loss_notice(&["/share/new.dat"])]
+        );
+        let from = native_event(name(RenameMode::From), vec!["/share/old.dat"]);
         assert_eq!(
             classify_event(&from),
             vec![loss_notice(&["/share/old.dat"])]
@@ -2969,7 +2979,7 @@ mod tests {
 
     #[test]
     fn both_rename_preserves_the_path_pair() {
-        let event = debounced(
+        let event = native_event(
             name(RenameMode::Both),
             vec!["/share/old.dat", "/share/new.dat"],
         );
@@ -2981,7 +2991,7 @@ mod tests {
 
     #[test]
     fn ambiguous_two_path_rename_preserves_the_path_pair() {
-        let event = debounced(
+        let event = native_event(
             name(RenameMode::Any),
             vec!["/share/old.dat", "/share/new.dat"],
         );
@@ -2993,8 +3003,8 @@ mod tests {
 
     #[test]
     fn access_event_yields_no_action() {
-        let event = debounced(
-            EventKind::Access(notify_debouncer_full::notify::event::AccessKind::Read),
+        let event = native_event(
+            EventKind::Access(notify::event::AccessKind::Read),
             vec!["/share/x.dat"],
         );
         assert!(classify_event(&event).is_empty());
@@ -3003,18 +3013,14 @@ mod tests {
     #[test]
     fn backend_rescan_notice_reports_loss() {
         let event = Event::new(EventKind::Other).set_flag(Flag::Rescan);
-        let event = DebouncedEvent {
-            event,
-            time: Instant::now(),
-        };
         assert_eq!(classify_event(&event), vec![loss_notice(&[])]);
     }
 
     #[test]
     fn actions_for_events_flattens_a_batch_in_order() {
         let events = vec![
-            debounced(EventKind::Create(CreateKind::File), vec!["/s/a.dat"]),
-            debounced(EventKind::Remove(RemoveKind::File), vec!["/s/b.dat"]),
+            native_event(EventKind::Create(CreateKind::File), vec!["/s/a.dat"]),
+            native_event(EventKind::Remove(RemoveKind::File), vec!["/s/b.dat"]),
         ];
         #[cfg(not(target_os = "windows"))]
         let expected = vec![share("/s/a.dat"), remove("/s/b.dat")];
@@ -3065,19 +3071,13 @@ mod tests {
     #[test]
     fn windows_rename_burst_reports_possible_loss() {
         let events = (0..WINDOWS_EVENT_BURST_LOSS_THRESHOLD)
-            .map(|index| {
-                let event = Event {
-                    kind: name(RenameMode::Both),
-                    paths: vec![
-                        PathBuf::from(format!("C:/share/old-{index}.bin")),
-                        PathBuf::from(format!("C:/share/new-{index}.bin")),
-                    ],
-                    attrs: Default::default(),
-                };
-                DebouncedEvent {
-                    event,
-                    time: Instant::now(),
-                }
+            .map(|index| Event {
+                kind: name(RenameMode::Both),
+                paths: vec![
+                    PathBuf::from(format!("C:/share/old-{index}.bin")),
+                    PathBuf::from(format!("C:/share/new-{index}.bin")),
+                ],
+                attrs: Default::default(),
             })
             .collect::<Vec<_>>();
         let actions = actions_for_events(&events);
@@ -3101,16 +3101,10 @@ mod tests {
     #[test]
     fn windows_create_burst_reports_possible_loss() {
         let events = (0..WINDOWS_EVENT_BURST_LOSS_THRESHOLD)
-            .map(|index| {
-                let event = Event {
-                    kind: EventKind::Create(CreateKind::File),
-                    paths: vec![PathBuf::from(format!("C:/share/new-{index}.bin"))],
-                    attrs: Default::default(),
-                };
-                DebouncedEvent {
-                    event,
-                    time: Instant::now(),
-                }
+            .map(|index| Event {
+                kind: EventKind::Create(CreateKind::File),
+                paths: vec![PathBuf::from(format!("C:/share/new-{index}.bin"))],
+                attrs: Default::default(),
             })
             .collect::<Vec<_>>();
         let actions = actions_for_events(&events);
@@ -3161,6 +3155,33 @@ mod tests {
         }));
         consumer.await.unwrap();
         Arc::try_unwrap(applied).unwrap().into_inner().unwrap()
+    }
+
+    #[test]
+    fn native_event_flood_is_bounded_before_settling_or_identity_caching() {
+        let (ingress, mut rx, required) = monitor_action_channel(4);
+        for index in 0..10_000 {
+            ingress.handle_event(Ok(Event::new(EventKind::Create(CreateKind::File))
+                .add_path(PathBuf::from(format!("/root/{index}.bin")))));
+        }
+        assert!(required.load(Ordering::Acquire));
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 4);
+        ingress.handle_event(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)));
+        assert!(ingress.native_faulted.load(Ordering::Acquire));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn oversized_native_event_records_loss_without_expanding_paths() {
+        let (ingress, mut rx, required) = monitor_action_channel(4);
+        let mut event = Event::new(EventKind::Create(CreateKind::File));
+        event.paths = (0..=ACTION_CHANNEL_CAPACITY)
+            .map(|index| PathBuf::from(format!("/root/{index}.bin")))
+            .collect();
+        ingress.handle_event(Ok(event));
+        assert!(required.load(Ordering::Acquire));
+        assert_eq!(rx.try_recv().unwrap(), loss_notice(&[]));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -3252,7 +3273,58 @@ mod tests {
             remove("/s/b.dat"),
         ])
         .await;
-        assert_eq!(applied, vec![remove("/s/a.dat"), remove("/s/b.dat")]);
+        let mut expected = vec![remove("/s/a.dat"), remove("/s/b.dat")];
+        if cfg!(target_os = "windows") {
+            expected.push(loss_notice(&["/s/a.dat", "/s/b.dat"]));
+        }
+        assert_eq!(applied, expected);
+    }
+
+    /// The fixed settle window retains only bounded final path work.
+    #[tokio::test(start_paused = true)]
+    async fn bounded_batch_settles_before_applying_its_final_path_intent() {
+        let (ingress, rx, required) = monitor_action_channel(4);
+        let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+        let (applied, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        ingress.try_send_actions([share("/root/sample.bin")]);
+        let consumer = tokio::spawn(run_consumer(rx, required, stop_rx, move |action| {
+            let applied = applied.clone();
+            async move {
+                applied.send(action).unwrap();
+            }
+        }));
+        tokio::task::yield_now().await;
+        assert!(observed.try_recv().is_err());
+        tokio::time::advance(SETTLE_WINDOW / 2).await;
+        ingress.try_send_actions([remove("/root/sample.bin")]);
+        tokio::task::yield_now().await;
+        assert!(observed.try_recv().is_err());
+        tokio::time::advance(SETTLE_WINDOW / 2).await;
+        assert_eq!(observed.recv().await, Some(remove("/root/sample.bin")));
+        drop(ingress);
+        consumer.await.unwrap();
+        assert!(observed.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_interrupts_settling_and_records_the_gap_without_applying_content() {
+        let (ingress, rx, required) = monitor_action_channel(4);
+        let (stop, stop_rx) = tokio::sync::watch::channel(false);
+        let (applied, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        ingress.try_send_actions([share("/root/sample.bin")]);
+        let consumer = tokio::spawn(run_consumer(rx, required, stop_rx, move |action| {
+            let applied = applied.clone();
+            async move {
+                applied.send(action).unwrap();
+            }
+        }));
+        tokio::task::yield_now().await;
+        assert!(observed.try_recv().is_err());
+        stop.send_replace(true);
+        drop(ingress);
+        consumer.await.unwrap();
+        assert_eq!(observed.recv().await, Some(loss_notice(&[])));
+        assert!(observed.try_recv().is_err());
     }
 
     /// Remove-then-readd: a Share after a Remove is forwarded and re-shares.
