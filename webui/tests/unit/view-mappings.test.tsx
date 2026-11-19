@@ -26,10 +26,10 @@ describe("canonical view mappings", () => {
     const client = new RestClient();
     let resolve!: (value: Upload) => void;
     const get = vi.spyOn(client, "get").mockReturnValue(new Promise<Upload>((done) => { resolve = done; }));
-    const { rerender } = render(<UploadsView uploads={[{ clientId: "sample-peer", userName: "Original Peer" }]} uploadQueue={[]} client={client} run={run} />);
+    const { rerender } = render(<UploadsView uploads={[{ id: "sample-peer", userName: "Original Peer" }]} uploadQueue={[]} client={client} run={run} />);
     await waitFor(() => expect(get).toHaveBeenCalledWith("uploads/sample-peer"));
-    rerender(<UploadsView uploads={[{ clientId: "sample-peer", userName: "Refreshed Peer" }]} uploadQueue={[]} client={client} run={run} />);
-    resolve({ clientId: "sample-peer", userName: "Older Detail Name", scoreBreakdown: { baseScore: 123 } });
+    rerender(<UploadsView uploads={[{ id: "sample-peer", userName: "Refreshed Peer" }]} uploadQueue={[]} client={client} run={run} />);
+    resolve({ id: "sample-peer", userName: "Older Detail Name", scoreBreakdown: { baseScore: 123 } });
     await waitFor(() => expect(screen.getByText("baseScore").parentElement).toHaveTextContent("123"));
     expect(get).toHaveBeenCalledOnce();
     expect(screen.getByRole("heading", { name: "Peer Slot Inspector" }).parentElement).toHaveTextContent("Refreshed Peer");
@@ -44,11 +44,11 @@ describe("canonical view mappings", () => {
     let second!: (value: Upload) => void;
     vi.spyOn(client, "get").mockReturnValueOnce(new Promise<Upload>((done) => { first = done; }))
       .mockReturnValueOnce(new Promise<Upload>((done) => { second = done; }));
-    render(<UploadsView uploads={[{ clientId: "first", userName: "First Peer" }, { clientId: "second", userName: "Second Peer" }]}
+    render(<UploadsView uploads={[{ id: "first", userName: "First Peer" }, { id: "second", userName: "Second Peer" }]}
       uploadQueue={[]} client={client} run={run} />);
     fireEvent.click(screen.getByRole("button", { name: "Second Peer" }));
-    second({ clientId: "second", scoreBreakdown: { baseScore: 200 } });
-    first({ clientId: "first", scoreBreakdown: { baseScore: 999 } });
+    second({ id: "second", scoreBreakdown: { baseScore: 200 } });
+    first({ id: "first", scoreBreakdown: { baseScore: 999 } });
     await waitFor(() => expect(screen.getByText("baseScore").parentElement).toHaveTextContent("200"));
     expect(screen.queryByText("999")).not.toBeInTheDocument();
   });

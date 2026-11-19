@@ -1,6 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { SearchObservations } from "./searchObservations";
+import { FileTags, LibraryTags } from "./libraryTags";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
@@ -65,10 +66,11 @@ import {
   RestError,
   encodeSegment
 } from "./api";
-import { Action, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll } from "./components";
+import { Action, CursorControls, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll } from "./components";
 import {
   boolField,
   errorMessage,
+  identityNameError,
   firewallLabel,
   formatBytes,
   formatDurationMs,
@@ -225,13 +227,6 @@ function ProgressLine(props: { label: string; completed?: number; total?: number
       </div>
     </div>
   );
-}
-
-function CursorControls(props: { cursor: string | null; nextCursor: string | null; loading: boolean; change: (cursor: string | null) => void }) {
-  return <div class="row-actions">
-    <button class="btn" type="button" disabled={props.loading || props.cursor === null} onClick={() => props.change(null)}>First page</button>
-    <button class="btn" type="button" disabled={props.loading || !props.nextCursor} onClick={() => props.change(props.nextCursor)}>Next page</button>
-  </div>;
 }
 
 /** One independently paged evidence resource; refresh replaces its current page. */
@@ -961,6 +956,8 @@ export function SharingView(props: {
         </TableScroll>
       </section>
 
+      <LibraryTags client={props.client} />
+
       <section class="panel card wide progress-panel">
         <div class="section-title">
           <h2>Reload Progress</h2>
@@ -1390,6 +1387,7 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
             <button class="btn" type="submit" disabled={Boolean(ratingError)}><Save size={15} />Save</button>
           </form>
         )}
+        {selected && <FileTags client={props.client} hash={selected.hash} />}
         <h3>Comments</h3>
         <JsonPanel value={comments} />
       </section>
@@ -1454,7 +1452,7 @@ export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; c
   useEffect(() => {
     let current = true;
     setDetailError("");
-    const clientId = selected?.item.clientId;
+    const clientId = selected?.item.id;
     if (!selected || !clientId) return;
     const key = selected.key;
     const path = selected.lane === "active" ? "uploads" : "upload-queue";
@@ -1538,7 +1536,7 @@ function UploadTable(props: {
           <tbody>
             {props.rows.map((row) => {
               const upload = row.item;
-              const clientId = upload.clientId ?? "";
+              const clientId = upload.id ?? "";
               const encoded = encodeSegment(clientId);
               return (
                 <tr key={row.key} class={props.selectedKey === row.key ? "selected-row" : ""} onClick={() => props.onSelect(row.key)}>
@@ -1584,7 +1582,7 @@ function UploadPeerInspector(props: { row?: UploadRow }) {
     <section class="panel card">
       <div class="section-title">
         <h2>Peer Slot Inspector</h2>
-        <span>{upload.userName ?? upload.clientId ?? "Selected peer"}</span>
+        <span>{upload.userName ?? upload.id ?? "Selected peer"}</span>
       </div>
       <div class="upload-inspector">
         <div class="kv compact">
@@ -1638,7 +1636,7 @@ function ScoreBreakdown(props: { value?: Record<string, unknown> | null }) {
 }
 
 function uploadRowKey(lane: UploadLane, upload: Upload): string {
-  return `${lane}:${upload.clientId ?? upload.userHash ?? upload.address ?? upload.userName ?? ""}`;
+  return `${lane}:${upload.id}`;
 }
 
 function uploadState(upload: Upload): string {
@@ -1651,7 +1649,7 @@ function uploadSearchText(row: UploadRow): string {
     row.lane,
     upload.userName,
     upload.userHash,
-    upload.clientId,
+    upload.id,
     upload.clientSoftware,
     upload.clientMod,
     upload.address,
@@ -2348,10 +2346,10 @@ function networkEndpointRows(
     rows.push(peerEndpointRow("Transfer Source", `source:${source.transferHash ?? ""}:${source.clientId ?? source.address ?? ""}`, source, bindPolicy, source.transferName ?? source.requestedFileName ?? ""));
   }
   for (const upload of uploads) {
-    rows.push(peerEndpointRow("Upload", `upload:${upload.clientId ?? upload.address ?? ""}`, upload, bindPolicy, upload.requestedFileName ?? ""));
+    rows.push(peerEndpointRow("Upload", `upload:${upload.id}`, upload, bindPolicy, upload.requestedFileName ?? ""));
   }
   for (const peer of uploadQueue) {
-    rows.push(peerEndpointRow("Upload Queue", `queue:${peer.clientId ?? peer.address ?? ""}`, peer, bindPolicy, peer.requestedFileName ?? ""));
+    rows.push(peerEndpointRow("Upload Queue", `queue:${peer.id}`, peer, bindPolicy, peer.requestedFileName ?? ""));
   }
   return rows;
 }
@@ -2430,7 +2428,7 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
   const [tempDir, setTempDir] = useState("");
   const [destinationDir, setDestinationDir] = useState("");
   const [comment, setComment] = useState("");
-  const nameError = categoryNameError(name);
+  const nameError = identityNameError(name);
   const create = async () => {
     await props.client.post("categories", { name, tempDir: optionalString(tempDir), destinationDir: optionalString(destinationDir), comment });
     setName(""); setTempDir(""); setDestinationDir(""); setComment("");
@@ -3786,10 +3784,7 @@ function friendNameError(value: string): string | undefined {
   return value.length <= 128 ? undefined : "Friend name must be at most 128 characters.";
 }
 
-function categoryNameError(value: string): string | undefined {
-  // WHY: JavaScript's $ also matches before a final newline, but category names must match in full.
-  return value && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}(?![\s\S])/.test(value) ? "Use 1–64 ASCII letters, digits or hyphens, starting with a letter or digit." : undefined;
-}
+
 
 
 

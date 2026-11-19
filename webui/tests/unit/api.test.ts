@@ -3,6 +3,32 @@ import { describe, expect, it, vi } from "vitest";
 import { RestClient, RestError } from "../../src/api";
 
 describe("RestClient", () => {
+  it("preserves ordered hash outcomes and sends tag changes through the bulk endpoint", async () => {
+    const hashes = ["a".repeat(32), "b".repeat(32)];
+    const data = [{ hash: hashes[0], status: "accepted", httpStatus: 200 },
+      { hash: hashes[1], status: "unchanged", httpStatus: 200 }];
+    const fetchMock = vi.fn(async () => jsonResponse({ data }, { status: 207 })) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+    await expect(client.controlLibraryTags("add", "Alpha", hashes)).resolves.toEqual(data);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith("/api/v1/library/files/tags/add", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag: "Alpha", hashes })
+    });
+  });
+
+  it("surfaces failed hash outcomes from HTTP 207 without retrying accepted tag changes", async () => {
+    const hashes = ["a".repeat(32), "b".repeat(32)];
+    const data = [{ hash: hashes[0], status: "accepted", httpStatus: 200 },
+      { hash: hashes[1], status: "failed", httpStatus: 404,
+        error: { code: "NOT_FOUND", message: "Library file not found", details: {} } }];
+    const fetchMock = vi.fn(async () => jsonResponse({ data }, { status: 207 })) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+    await expect(client.controlLibraryTags("remove", "Alpha", hashes)).rejects.toMatchObject({
+      status: 404, code: "NOT_FOUND", details: data
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("captures the exact raw diagnostic bundle with its required bounded request", async () => {
     const bundle = { schema: "emulebb.diagnostic-bundle.v7", capturedAt: "2026-11-14T12:00:00Z",
       settingsProvenance: { apiKeyIncluded: true, sensitiveValues: "exact", apiKey: "synthetic-private-key" } };

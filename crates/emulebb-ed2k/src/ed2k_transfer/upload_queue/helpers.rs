@@ -3,10 +3,10 @@
 use std::time::Instant;
 
 use super::{
-    DEFAULT_CREDIT_SCORE_PERMILLE, DEFAULT_FILE_PRIORITY_SCORE, Ed2kUploadPeerIdentity,
-    Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionEntry, Ed2kUploadSessionPhase,
-    Ed2kUploadSessionPhaseSnapshot, HIGH_FILE_PRIORITY_SCORE, LOW_FILE_PRIORITY_SCORE,
-    RELEASE_FILE_PRIORITY_SCORE, VERY_LOW_FILE_PRIORITY_SCORE,
+    DEFAULT_CREDIT_SCORE_PERMILLE, DEFAULT_FILE_PRIORITY_SCORE, Ed2kUploadQueueSnapshotEntry,
+    Ed2kUploadSessionEntry, Ed2kUploadSessionPhase, Ed2kUploadSessionPhaseSnapshot,
+    HIGH_FILE_PRIORITY_SCORE, LOW_FILE_PRIORITY_SCORE, RELEASE_FILE_PRIORITY_SCORE,
+    VERY_LOW_FILE_PRIORITY_SCORE,
 };
 
 /// The upload-queue waiting-score priority multiplier
@@ -99,10 +99,4 @@ pub(super) fn upload_snapshot_sort_key(entry: &Ed2kUploadQueueSnapshotEntry) -> 
 /// decayed recent rate here, not its lifetime average.
 pub(super) fn upload_speed_bytes_per_sec(session: &Ed2kUploadSessionEntry, now: Instant) -> u64 {
     session.rate_meter.rate_bytes_per_sec(now)
-}
-
-pub(super) fn upload_client_id_matches(peer: &Ed2kUploadPeerIdentity, client_id: &str) -> bool {
-    peer.user_hash
-        .is_some_and(|user_hash| hex::encode(user_hash) == client_id)
-        || format!("{}:{}", peer.ip, peer.tcp_port) == client_id
 }

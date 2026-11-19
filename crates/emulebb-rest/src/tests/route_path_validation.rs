@@ -133,13 +133,13 @@ async fn endpoint_path_parameters_use_canonical_address_port_validation() {
         ),
         (
             "GET",
-            "/api/v1/uploads/client",
-            "clientId must be a 32-character lowercase hex string or address:port",
+            "/api/v1/uploads/not-a-uuid",
+            "id must be a lowercase hyphenated UUID",
         ),
         (
             "GET",
-            "/api/v1/upload-queue/192.0.2.1:0",
-            "clientId must be a 32-character lowercase hex string or address:port",
+            "/api/v1/upload-queue/not-a-uuid",
+            "id must be a lowercase hyphenated UUID",
         ),
     ];
     for (method, uri, expected_message) in cases {
@@ -161,8 +161,14 @@ async fn valid_path_parameters_still_reach_handlers() {
             "POST",
             "/api/v1/servers/192.0.2.1%3A4661/operations/connect",
         ),
-        ("GET", "/api/v1/uploads/192.0.2.1:4662"),
-        ("GET", "/api/v1/uploads/192.0.2.1%3A4662"),
+        (
+            "GET",
+            "/api/v1/uploads/12345678-1234-4234-8234-123456789abc",
+        ),
+        (
+            "GET",
+            "/api/v1/upload-queue/12345678-1234-4234-8234-123456789abc",
+        ),
         ("GET", "/api/v1/downloads/1"),
     ];
     for (method, uri) in accepted_routes {

@@ -376,8 +376,18 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         | ("POST", ["uploads", client_id, "operations", _])
         | ("GET", ["upload-queue", client_id])
         | ("POST", ["upload-queue", client_id, "operations", _]) => {
-            let client_id = decode_path_parameter(client_id, "clientId")?;
-            validate_client_id_path_token(&client_id)?
+            let id = decode_path_parameter(client_id, "id")?;
+            if !uuid::Uuid::try_parse(&id).is_ok_and(|parsed| parsed.hyphenated().to_string() == id)
+            {
+                return Err(Box::new(
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_ARGUMENT",
+                        "id must be a lowercase hyphenated UUID",
+                    )
+                    .into_response(),
+                ));
+            }
         }
         ("GET", ["searches", search_id, "results", result_id, "observations"])
         | ("POST", ["searches", search_id, "results", result_id, "download"]) => {
