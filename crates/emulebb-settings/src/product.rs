@@ -23,7 +23,8 @@ pub use patch::{SettingsPatch, json_size};
 pub use revision::{SettingsRevision, SettingsRevisionError};
 pub use schema::settings_schemas;
 pub use snapshot::{
-    MAX_APPLY_MESSAGE_BYTES, SettingApplyFailure, SettingsApplicationStatus, SettingsReadData,
+    MAX_APPLY_MESSAGE_BYTES, SettingApplyFailure, SettingsApplicationPlan,
+    SettingsApplicationStatus, SettingsReadData,
 };
 
 pub const MAX_SAVED_BYTES: usize = 131_072;

@@ -146,3 +146,69 @@ fn invalid_saved_or_effective_values_are_not_published() {
         Err(SettingsError::Validation(_))
     ));
 }
+
+#[test]
+fn application_plan_applies_compatible_live_values_and_keeps_restart_values() {
+    let effective = SettingsValues::default();
+    let mut desired = effective.clone();
+    desired.network.nickname = "Next Session".into();
+    desired.transfers.download_limit_bytes_per_second = 1;
+    desired.network.hostname_lookup.enabled = true;
+    desired.network.hostname_lookup.dns_servers = vec!["192.0.2.53:53".parse().unwrap()];
+    let plan = SettingsApplicationPlan::new(&effective, &desired).unwrap();
+    assert_eq!(
+        plan.candidate().network.nickname,
+        effective.network.nickname
+    );
+    assert_eq!(
+        plan.candidate().transfers.download_limit_bytes_per_second,
+        1
+    );
+    assert_eq!(
+        plan.candidate().network.hostname_lookup,
+        desired.network.hostname_lookup
+    );
+    assert_eq!(plan.pending_restart(), &[key("network.nickname")]);
+    assert!(plan.candidate().validate().is_empty());
+    desired.network.nickname = effective.network.nickname.clone();
+    assert!(
+        SettingsApplicationPlan::new(&effective, &desired)
+            .unwrap()
+            .pending_restart()
+            .is_empty()
+    );
+}
+
+#[test]
+fn incompatible_live_subset_defers_every_desired_difference_without_mutation() {
+    let mut effective = SettingsValues::default();
+    effective.network.connections.max_half_open_connections = 100;
+    let mut desired = effective.clone();
+    desired.network.connections.max_connections = 40;
+    desired.network.connections.max_half_open_connections = 20;
+    desired.transfers.download_limit_bytes_per_second = 1234;
+    desired.storage.temp_directory = "next-temp".into();
+    assert!(desired.validate().is_empty());
+    let before_effective = effective.clone();
+    let before_desired = desired.clone();
+    let plan = SettingsApplicationPlan::new(&effective, &desired).unwrap();
+    assert_eq!(plan.candidate(), &before_effective);
+    assert_eq!(plan.pending_restart(), desired.differing_keys(&effective));
+    assert!(
+        plan.pending_restart()
+            .contains(&key("transfers.downloadLimitBytesPerSecond"))
+    );
+    assert_eq!(effective, before_effective);
+    assert_eq!(desired, before_desired);
+}
+
+#[test]
+fn application_plan_does_not_repair_invalid_inputs() {
+    let valid = SettingsValues::default();
+    let mut invalid = valid.clone();
+    invalid.network.connections.max_connections = 0;
+    for (effective, desired) in [(&valid, &invalid), (&invalid, &valid)] {
+        let result = SettingsApplicationPlan::new(effective, desired);
+        assert!(matches!(result, Err(SettingsError::Validation(_))));
+    }
+}
