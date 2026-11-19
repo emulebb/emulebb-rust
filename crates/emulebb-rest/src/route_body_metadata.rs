@@ -147,7 +147,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SEARCH_RESULT_DOWNLOAD: &[&str] = &["category", "intent", "redownload"];
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
-    const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
+    const SHARED_DIRECTORY_ROOT: &[&str] = &["path", "watchEnabled"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
     const SHARED_FILE_IGNORE_RULE: &[&str] = &["enabled"];
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
