@@ -12,11 +12,12 @@ use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
 const LIBRARY_ROOT_SELECT: &str = "SELECT r.id,p.platform,p.native_path,r.watch_enabled,
     EXISTS(SELECT 1 FROM shared_directory_root_origins o WHERE o.root_id=r.id AND o.origin='implicit'),
-    r.accessible,r.shareable,r.last_scanned_at_ms
+    r.accessible,r.shareable,r.last_scanned_at_ms,length(p.native_path)
     FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx
     JOIN local_paths p ON p.id=r.path_id";
 
 fn library_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::MetadataLibraryRoot> {
+    root_path_bytes(row)?;
     Ok(crate::MetadataLibraryRoot {
         id: row.get(0)?,
         path: crate::native_path::path_from_row(row, 1, 2)?,
@@ -26,6 +27,24 @@ fn library_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::Metadata
         shareable: row.get(6)?,
         last_scanned_at_ms: row.get(7)?,
     })
+}
+
+// A native Windows extended path fits in 64 KiB. Inspect SQLite's byte count
+// before decoding; corrupt or oversized rows cannot defeat response admission.
+fn root_path_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
+    let bytes: i64 = row.get(8)?;
+    if !(1..=65_536).contains(&bytes) {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            8,
+            rusqlite::types::Type::Integer,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "root path exceeds read budget",
+            )
+            .into(),
+        ));
+    }
+    usize::try_from(bytes).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(8, bytes))
 }
 
 fn library_root_on_connection(
@@ -156,13 +175,29 @@ impl MetadataStore {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let total: i64 = tx.query_row("SELECT count(*) FROM shared_directory_roots INDEXED BY shared_directory_roots_active_id_idx WHERE enabled=1 AND deleted_at_ms IS NULL", [], |row| row.get(0))?;
-        let mut items = {
+        let (items, more) = {
             let mut stmt = tx.prepare_cached(&format!("{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id>?1 ORDER BY r.id LIMIT ?2"))?;
-            stmt.query_map(params![after, i64::try_from(limit + 1)?], library_root_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let mut rows = stmt.query(params![after, i64::try_from(limit + 1)?])?;
+            let mut items = Vec::with_capacity(limit);
+            let mut bytes = 0;
+            let mut more = false;
+            while let Some(row) = rows.next()? {
+                if items.len() == limit {
+                    more = true;
+                    break;
+                }
+                let path_bytes = root_path_bytes(row)?;
+                // WHY: a count limit alone can retain megabytes of native paths.
+                // Allow one long path, then continue by ID before decoding another.
+                if !items.is_empty() && bytes + path_bytes > 32 * 1024 {
+                    more = true;
+                    break;
+                }
+                bytes += path_bytes;
+                items.push(library_root_row(row)?);
+            }
+            (items, more)
         };
-        let more = items.len() > limit;
-        items.truncate(limit);
         let next_id = more.then(|| items.last().expect("nonempty root page").id);
         tx.commit()?;
         Ok(crate::MetadataLibraryRootPage {

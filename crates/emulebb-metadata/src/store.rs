@@ -1243,6 +1243,44 @@ mod tests {
     }
 
     #[test]
+    fn root_pages_stop_before_decoding_paths_beyond_the_byte_budget() {
+        let store = MetadataStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join("root-page-byte-budget");
+        let mut ids = Vec::new();
+        for name in ["a", "b", "c"] {
+            let path = base.join(name.repeat(20 * 1024));
+            ids.push(
+                store
+                    .create_library_root(&path, false, false)
+                    .unwrap()
+                    .unwrap()
+                    .id,
+            );
+        }
+        let mut after = 0;
+        for (index, id) in ids.iter().enumerate() {
+            let page = store.library_root_page(after, 100).unwrap();
+            assert_eq!(page.total, 3);
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].id, *id);
+            assert_eq!(page.next_id, (index < 2).then_some(*id));
+            after = *id;
+        }
+        assert!(
+            store
+                .library_root_page(after, 100)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let conn = store.connection().unwrap();
+        conn.execute("UPDATE local_paths SET native_path=zeroblob(65538) WHERE id=(SELECT path_id FROM shared_directory_roots WHERE id=?1)", [ids[0]]).unwrap();
+        drop(conn);
+        assert!(store.library_root(ids[0]).is_err());
+        assert!(store.library_root_page(0, 100).is_err());
+    }
+
+    #[test]
     fn root_creation_rejects_overlaps_but_allows_siblings_and_retired_paths() {
         let store = MetadataStore::in_memory().unwrap();
         let parent = std::env::temp_dir().join("emulebb-root-overlap");
