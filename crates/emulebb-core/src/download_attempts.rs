@@ -27,6 +27,7 @@ pub(crate) struct DownloadAttemptControl {
 }
 #[derive(Default)]
 struct State {
+    ordinary_limit: Option<u32>,
     nonce: u64,
     entries: HashMap<JobId, Entry>,
     verifications: HashMap<JobId, VerificationEntry>,
@@ -35,6 +36,13 @@ struct VerificationEntry {
     token: JobToken,
     hash: Ed2kHash,
     nonce: u64,
+}
+
+impl State {
+    fn active_limit(&self) -> usize {
+        self.ordinary_limit
+            .map_or(MAX_ACTIVE, |limit| (limit as usize).min(MAX_ACTIVE))
+    }
 }
 
 /// At most two operator rechecks exclude scheduler selection, including while
@@ -64,6 +72,20 @@ pub(crate) struct DownloadAttemptGuard {
     wake: Arc<tokio::sync::Notify>,
 }
 impl DownloadAttemptControl {
+    pub(crate) fn with_limit(limit: Option<u32>) -> Self {
+        let control = Self::default();
+        control.apply_concurrency_limit(limit);
+        control
+    }
+    /// A lower ceiling drains admissions; existing attempt guards stay owned.
+    pub(crate) fn apply_concurrency_limit(&self, limit: Option<u32>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ordinary_limit = limit;
+        self.changed.notify_waiters();
+    }
+
     pub(crate) fn try_enter(
         self: &Arc<Self>,
         token: JobToken,
@@ -86,8 +108,8 @@ impl DownloadAttemptControl {
             .filter(|entry| entry.kind == Kind::Active)
             .count();
         (
-            MAX_ACTIVE - active,
-            MAX_PREPARING - (state.entries.len() - active),
+            state.active_limit().saturating_sub(active),
+            MAX_PREPARING.saturating_sub(state.entries.len() - active),
         )
     }
     fn enter(
@@ -110,7 +132,7 @@ impl DownloadAttemptControl {
         // WHY: a removed job may still own protocol source leases for this
         // content. Its actual task must retire before a new job reuses them.
         let limit = if kind == Kind::Active {
-            MAX_ACTIVE
+            state.active_limit()
         } else {
             MAX_PREPARING
         };

@@ -29,6 +29,7 @@ pub(crate) mod search_create;
 mod search_read;
 mod search_sessions;
 pub(crate) mod search_transition;
+mod settings;
 
 #[cfg(test)]
 mod download_tests;
@@ -107,6 +108,7 @@ impl std::fmt::Display for CategoryNameConflict {
 impl std::error::Error for CategoryNameConflict {}
 
 enum Command {
+    Settings(settings::SettingsCommand),
     RootRead(crate::library_roots::Query),
     Add { hash: String, name: String },
     Delete { hash: String },
@@ -127,6 +129,7 @@ enum Command {
 }
 
 enum Response {
+    Settings(settings::Outcome),
     RootRead(crate::LibraryReply<crate::library_roots::Value>),
     ContentObserved(Result<(), PersistenceError>),
     SearchMutated(bool),
@@ -311,6 +314,7 @@ impl Drop for Permit {
 }
 
 enum DbCommand {
+    Settings(settings::SqlCommand),
     RootRead(crate::library_roots::Query),
     SearchRead(search_read::Query),
     SearchCreate(emulebb_metadata::MetadataSearchData),
@@ -352,6 +356,7 @@ enum KadMergeOutcome {
 }
 
 enum DbResponse {
+    Settings(settings::SqlOutcome),
     RootRead(crate::library_roots::Value),
     SearchRead(search_read::Value),
     SearchCreated(Result<i64, emulebb_metadata::MissingSearchParent>),
@@ -507,6 +512,17 @@ impl PersistenceOwner {
             .name("emulebb-persistence".into())
             .spawn(move || {
                 while let Ok(request) = db_rx.recv() {
+                    if let DbCommand::Settings(command) = &request.command {
+                        let writing = command.writes();
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| settings::execute(&store, command)));
+                        let result = match outcome {
+                            Ok(value) => value.map(DbResponse::Settings),
+                            Err(_) => Err(if writing { PersistenceError::CommitUnknown } else { PersistenceError::Worker }),
+                        };
+                        drop(request.command);
+                        let _ = request.response.send(result);
+                        continue;
+                    }
                     if let DbCommand::RootRead(query) = &request.command {
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| library_roots::load(&store, query)));
                         let result = match outcome {
@@ -738,7 +754,7 @@ impl PersistenceOwner {
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
-                            DbCommand::RootRead(_) | DbCommand::SearchRead(_)
+                            DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
@@ -789,7 +805,7 @@ impl PersistenceOwner {
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
-                                DbCommand::RootRead(_) | DbCommand::SearchRead(_)
+                                DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
@@ -821,7 +837,7 @@ impl PersistenceOwner {
                     .map(|recovered| {
                         let friend = match request.command {
                             DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
-                            DbCommand::RootRead(_) | DbCommand::SearchRead(_)
+                            DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
                             | DbCommand::SearchRemove(_)
@@ -1073,7 +1089,8 @@ impl PersistenceOwner {
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
             Command::Delete { hash } => hash.capacity(),
-            Command::RootRead(_)
+            Command::Settings(_)
+            | Command::RootRead(_)
             | Command::SearchRead(_)
             | Command::SearchTransition(_)
             | Command::SearchCreate(_)
@@ -1213,6 +1230,16 @@ async fn process(
     category_continuation: &mut Option<category::CategoryContinuation>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    if matches!(&request.command, Command::Settings(_)) {
+        return settings::process(
+            state,
+            db,
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::RootRead(_)) {
         return library_roots::process(db, request).await;
     }
@@ -1327,7 +1354,8 @@ async fn process(
             DbResponse::KadIdentity(id) => Ok(Response::KadIdentity(id)),
             DbResponse::KadReplaced(_) => Err(PersistenceError::Worker),
             DbResponse::KadMerged(_) => Err(PersistenceError::Worker),
-            DbResponse::RootRead(_)
+            DbResponse::Settings(_)
+            | DbResponse::RootRead(_)
             | DbResponse::SearchRead(_)
             | DbResponse::SearchUpdated(_)
             | DbResponse::SearchCreated(_)
@@ -1361,7 +1389,8 @@ async fn process(
                 request.permit.extend(friend_charge(existing)?)?;
                 DbCommand::Delete(existing.clone())
             }
-            Command::RootRead(_)
+            Command::Settings(_)
+            | Command::RootRead(_)
             | Command::SearchRead(_)
             | Command::SearchTransition(_)
             | Command::SearchCreate(_)

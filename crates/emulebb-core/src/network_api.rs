@@ -325,14 +325,14 @@ impl EmulebbCore {
             endpoint = endpoint.unwrap_or("auto"),
             "ED2K connect requested"
         );
-        let core_settings = self.state.lock().await.core_settings.clone();
+        let settings = self.effective_settings().await?;
         // The eD2k network must be enabled (eMule thePrefs.GetNetworkED2K()); when
         // off, the server connect is refused and no eD2k auto-ops run.
         ensure!(
-            core_settings.network_ed2k,
-            "eD2k network is disabled in settings.core (networkEd2k=false)"
+            settings.network.ed2k_enabled,
+            "eD2k network is disabled in effective settings"
         );
-        let kad_network_enabled = core_settings.network_kademlia;
+        let kad_network_enabled = settings.network.kad_enabled;
         let guard = self.vpn_guard_status();
         if guard.startup_blocked {
             tracing::warn!(

@@ -31,7 +31,7 @@ impl EmulebbCore {
                     "eD2k search network is not configured"
                 );
                 ensure!(
-                    state.core_settings.network_ed2k,
+                    state.settings.values().network.ed2k_enabled,
                     "eD2k search network is disabled in settings.core (networkEd2k=false)"
                 );
             }
@@ -41,7 +41,7 @@ impl EmulebbCore {
                     "Kad search network is not configured"
                 );
                 ensure!(
-                    state.core_settings.network_kademlia,
+                    state.settings.values().network.kad_enabled,
                     "Kad search network is disabled in settings.core (networkKademlia=false)"
                 );
             }
@@ -53,8 +53,8 @@ impl EmulebbCore {
         let queue_lane = automatic_search_queue_lane(
             &request,
             self.ed2k_network.is_some(),
-            state.core_settings.network_ed2k,
-            state.core_settings.network_kademlia,
+            state.settings.values().network.ed2k_enabled,
+            state.settings.values().network.kad_enabled,
         )?;
         let _ = emulebb_ed2k::ed2k_server::encode_kad_search_expression(
             &request.query,

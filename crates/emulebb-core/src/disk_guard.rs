@@ -69,7 +69,7 @@ impl EmulebbCore {
     /// Reserve only selected jobs, including their delivery copies. A storage
     /// failure is durable and can be cleared only by an explicit start.
     pub(crate) async fn check_download_storage_space(&self, token: JobToken) -> Result<bool> {
-        let settings = self.app_settings().await?.ed2k;
+        let settings = self.effective_settings().await?.storage;
         let mut tokens: Vec<_> = self
             .download_attempts
             .snapshot()
@@ -83,7 +83,7 @@ impl EmulebbCore {
         input.push(StorageSpaceReservation {
             path: self.profile_dir.clone(),
             bytes: 0,
-            floor: settings.min_free_config_space_bytes,
+            floor: settings.min_free_profile_bytes,
             required: true,
         });
         let mut current = false;
@@ -122,13 +122,13 @@ impl EmulebbCore {
                     .expected_size_bytes
                     .unwrap_or(0)
                     .saturating_sub(job.checkpointed_bytes),
-                floor: settings.min_free_transfer_space_bytes,
+                floor: settings.min_free_temp_bytes,
                 required,
             });
             input.push(StorageSpaceReservation {
                 path: incoming,
                 bytes: job.expected_size_bytes.unwrap_or(0),
-                floor: settings.min_free_incoming_space_bytes,
+                floor: settings.min_free_incoming_bytes,
                 required,
             });
         }

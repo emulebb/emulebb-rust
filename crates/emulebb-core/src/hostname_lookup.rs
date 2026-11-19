@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use emulebb_settings::HostnameLookupSettings;
+use emulebb_settings::product::NetworkHostnameLookupValues;
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use tokio::net::UdpSocket;
 
@@ -142,33 +142,19 @@ impl HostNameLookupCache {
 }
 
 pub(crate) async fn run_hostname_lookup_loop(core: EmulebbCore, shutdown: Arc<AtomicBool>) {
-    let mut interval_secs = 30;
+    let interval_secs = 30;
     let mut tick = hostname_lookup_interval(interval_secs);
     loop {
         tick.tick().await;
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let Ok(settings) = core
-            .app_settings()
-            .await
-            .map(|settings| settings.daemon.hostname_lookup)
-        else {
+        let Ok(values) = core.effective_settings().await else {
             continue;
         };
+        let settings = values.network.hostname_lookup;
         if !settings.enabled {
-            if interval_secs != 30 {
-                interval_secs = 30;
-                tick = hostname_lookup_interval(interval_secs);
-                tick.tick().await;
-            }
             continue;
-        }
-        let desired_interval_secs = settings.tick_interval_secs.max(5);
-        if interval_secs != desired_interval_secs {
-            interval_secs = desired_interval_secs;
-            tick = hostname_lookup_interval(interval_secs);
-            tick.tick().await;
         }
         run_hostname_lookup_tick(&core, &settings).await;
     }
@@ -180,11 +166,9 @@ fn hostname_lookup_interval(interval_secs: u64) -> tokio::time::Interval {
     tick
 }
 
-async fn run_hostname_lookup_tick(core: &EmulebbCore, settings: &HostnameLookupSettings) {
+async fn run_hostname_lookup_tick(core: &EmulebbCore, settings: &NetworkHostnameLookupValues) {
     let ips = core.hostname_lookup_candidate_ips().await;
-    let queued = core
-        .hostname_lookup_cache
-        .queue_candidates(ips, settings.max_lookups_per_tick.max(1));
+    let queued = core.hostname_lookup_cache.queue_candidates(ips, 32);
     if queued.is_empty() {
         return;
     }
@@ -193,10 +177,12 @@ async fn run_hostname_lookup_tick(core: &EmulebbCore, settings: &HostnameLookupS
             .set_blocked(queued, "P2P network binding is not configured".to_string());
         return;
     };
-    let dns_servers = parse_dns_servers(&settings.dns_servers);
+    let dns_servers = &settings.dns_servers;
     if dns_servers.is_empty() {
-        core.hostname_lookup_cache
-            .set_blocked(queued, "hostnameLookup.dnsServers is empty".to_string());
+        core.hostname_lookup_cache.set_blocked(
+            queued,
+            "network.hostnameLookup.dnsServers is empty".to_string(),
+        );
         return;
     }
     let bind_ip = network.bind_ip;
@@ -212,9 +198,8 @@ async fn run_hostname_lookup_tick(core: &EmulebbCore, settings: &HostnameLookupS
         }
     };
     for ip in queued {
-        let result = reverse_lookup(ip, bind_ip, bind_if_index, &dns_servers).await;
-        core.hostname_lookup_cache
-            .set_result(ip, result, settings.cache_ttl_secs);
+        let result = reverse_lookup(ip, bind_ip, bind_if_index, dns_servers).await;
+        core.hostname_lookup_cache.set_result(ip, result, 86_400);
     }
 }
 
@@ -284,20 +269,6 @@ fn push_ip(ips: &mut Vec<Ipv4Addr>, value: &str) {
     if let Ok(ip) = value.parse::<Ipv4Addr>() {
         ips.push(ip);
     }
-}
-
-fn parse_dns_servers(values: &[String]) -> Vec<SocketAddrV4> {
-    values
-        .iter()
-        .filter_map(|value| {
-            value.parse::<SocketAddrV4>().ok().or_else(|| {
-                value
-                    .parse::<Ipv4Addr>()
-                    .ok()
-                    .map(|ip| SocketAddrV4::new(ip, 53))
-            })
-        })
-        .collect()
 }
 
 async fn reverse_lookup(
@@ -453,9 +424,7 @@ fn read_dns_name(bytes: &[u8], offset: &mut usize) -> Result<String> {
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
 
-    use super::{
-        build_ptr_query, candidate_ips_from_servers, parse_dns_servers, parse_ptr_response,
-    };
+    use super::{build_ptr_query, candidate_ips_from_servers, parse_ptr_response};
     use crate::ServerInfo;
 
     fn server(address: &str, ip: &str, dyn_ip: &str) -> ServerInfo {
@@ -499,21 +468,6 @@ mod tests {
             host_name_resolved_at: None,
             host_name_error: None,
         }
-    }
-
-    #[test]
-    fn dns_servers_accept_ipv4_with_default_or_explicit_port() {
-        assert_eq!(
-            parse_dns_servers(&[
-                "9.9.9.9".to_string(),
-                "1.1.1.1:5353".to_string(),
-                "dns.example.invalid".to_string()
-            ]),
-            vec![
-                SocketAddrV4::new(Ipv4Addr::new(9, 9, 9, 9), 53),
-                SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 5353)
-            ]
-        );
     }
 
     #[test]

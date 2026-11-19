@@ -385,17 +385,13 @@ async fn explicit_network_search_respects_disabled_network_settings() {
     );
     let core = EmulebbCore::new_with_network(
         "test",
-        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        test_index_with_settings(
+            FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+            serde_json::json!({"network": {"ed2kEnabled": false, "kadEnabled": false}}),
+        ),
         transfer_root.join("transfers"),
         Some(network),
     )
-    .unwrap();
-    core.update_core_settings(CoreSettingsUpdate {
-        network_ed2k: Some(false),
-        network_kademlia: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
     .unwrap();
 
     for method in ["server", "global", "kad"] {
@@ -431,17 +427,13 @@ async fn automatic_search_is_rejected_when_all_networks_are_disabled() {
     );
     let core = EmulebbCore::new_with_network(
         "test",
-        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        test_index_with_settings(
+            FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+            serde_json::json!({"network": {"ed2kEnabled": false, "kadEnabled": false}}),
+        ),
         transfer_root.join("transfers"),
         Some(network),
     )
-    .unwrap();
-    core.update_core_settings(CoreSettingsUpdate {
-        network_ed2k: Some(false),
-        network_kademlia: Some(false),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
     .unwrap();
 
     let error = core
@@ -509,17 +501,13 @@ async fn kad_only_automatic_search_rejects_an_invalid_kad_keyword() {
     );
     let core = EmulebbCore::new_with_network(
         "test",
-        FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+        test_index_with_settings(
+            FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+            serde_json::json!({"network": {"ed2kEnabled": false, "kadEnabled": true}}),
+        ),
         transfer_root.join("transfers"),
         Some(network),
     )
-    .unwrap();
-    core.update_core_settings(CoreSettingsUpdate {
-        network_ed2k: Some(false),
-        network_kademlia: Some(true),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
     .unwrap();
 
     let error = core
@@ -1358,12 +1346,11 @@ async fn core_settings_do_not_republish_or_overwrite_ed2k_server_policy() {
     )
     .await;
 
-    core.update_core_settings(CoreSettingsUpdate {
-        max_connections: Some(321),
-        ..CoreSettingsUpdate::default()
-    })
-    .await
-    .unwrap();
+    update_test_settings(
+        &core,
+        serde_json::json!({"network":{"connections":{"maxConnections":321}}}),
+    )
+    .await;
 
     assert!(
         tokio::time::timeout(Duration::from_millis(50), plan_rx.changed())
