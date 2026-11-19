@@ -546,10 +546,10 @@ async fn assert_concurrent_reload_drains(cancel_latest: bool) {
             let mut pending = Some(pending);
             poll_fn(|cx| {
                 let result = drain.as_mut().poll(cx);
-                if result.is_pending() {
-                    if let Some(pending) = pending.take() {
-                        let _ = pending.send(());
-                    }
+                if result.is_pending()
+                    && let Some(pending) = pending.take()
+                {
+                    let _ = pending.send(());
                 }
                 result
             })

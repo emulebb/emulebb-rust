@@ -282,11 +282,11 @@ impl DhtNode {
             return Err(DhtError::RoutingSnapshotTooLarge);
         }
         for (record, (_, learned)) in snapshot.iter_mut().zip(lookups) {
-            if let Some(binding) = public_ip {
-                if let Some(key) = learned.filter(|key| *key != 0) {
-                    record.udp_key = KadUdpKey::new(key);
-                    record.udp_key_ip = Some(binding);
-                }
+            if let Some(binding) = public_ip
+                && let Some(key) = learned.filter(|key| *key != 0)
+            {
+                record.udp_key = KadUdpKey::new(key);
+                record.udp_key_ip = Some(binding);
             }
             projection.push(RoutingKeyProjection {
                 node_id: record.node_id,

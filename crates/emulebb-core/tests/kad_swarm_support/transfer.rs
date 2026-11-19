@@ -64,10 +64,9 @@ pub async fn wait_for_completed_download(
         if page
             .as_ref()
             .is_ok_and(|page| page.downloads.iter().any(|download| download.hash == hash))
+            && let Some(share) = share
         {
-            if let Some(share) = share {
-                return share;
-            }
+            return share;
         }
         assert!(
             Instant::now() < deadline,

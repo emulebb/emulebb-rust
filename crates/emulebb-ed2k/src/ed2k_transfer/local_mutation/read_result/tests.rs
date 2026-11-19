@@ -74,7 +74,9 @@ fn worst_case_escaped_text_admits_simultaneous_exact_backing_before_encoding() {
     assert_eq!(encoded[0], b'"');
     assert!(
         encoded[1..encoded.len() - 1]
-            .chunks_exact(6)
+            .as_chunks::<6>()
+            .0
+            .iter()
             .all(|chunk| chunk == br"\u0000")
     );
     assert_eq!(encoded[encoded.len() - 1], b'"');

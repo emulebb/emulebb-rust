@@ -39,7 +39,7 @@ impl LocalMutationRegistry {
         let (sender, receipt) = oneshot::channel();
         #[cfg(test)]
         let gate = state.publication_gate.take();
-        Self::spawn_unit(&mut state, lease, move |lease| {
+        Self::spawn_unit_reply(&mut state, lease, sender, move |lease| {
             let mut committed = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let hash_text = hash.to_string();
@@ -58,7 +58,8 @@ impl LocalMutationRegistry {
                 }
                 committed = sharing_change == Some(true);
                 let mutation = priority.is_some() || comment.is_some();
-                let observed = metadata.capture_local_ingest_jobs(&[hash_text.clone()])?[0].token;
+                let observed =
+                    metadata.capture_local_ingest_jobs(std::slice::from_ref(&hash_text))?[0].token;
                 let mut resident_write = if let Some(token) = observed.filter(|_| mutation) {
                     if cache
                         .blocking_lock()
@@ -89,27 +90,26 @@ impl LocalMutationRegistry {
                     let _ = reached.send(());
                     let _ = release.recv();
                 }
-                if let Some(token) = token.filter(|_| mutation) {
-                    if let Some(current) = cache
+                if let Some(token) = token.filter(|_| mutation)
+                    && let Some(current) = cache
                         .blocking_lock()
                         .get_mut(&token.job_id)
                         .filter(|m| m.token == token)
-                    {
-                        let permit = resident_write.take().ok_or_else(|| {
-                            anyhow!("content cache lacks preadmitted write credit")
-                        })?;
-                        current.write_with(permit, |current| {
-                            if let Some((value, auto)) = &priority {
-                                current.upload_priority = value.clone();
-                                current.auto_upload_priority = *auto;
-                            }
-                            if let Some((value, rating)) = &comment {
-                                current.comment = value.clone();
-                                current.rating = *rating;
-                            }
-                            Ok(())
-                        })?;
-                    }
+                {
+                    let permit = resident_write
+                        .take()
+                        .ok_or_else(|| anyhow!("content cache lacks preadmitted write credit"))?;
+                    current.write_with(permit, |current| {
+                        if let Some((value, auto)) = &priority {
+                            current.upload_priority = value.clone();
+                            current.auto_upload_priority = *auto;
+                        }
+                        if let Some((value, rating)) = &comment {
+                            current.comment = value.clone();
+                            current.rating = *rating;
+                        }
+                        Ok(())
+                    })?;
                 }
                 if let Some((value, auto)) = &priority {
                     let mut queue = queue.blocking_lock();
@@ -148,8 +148,7 @@ impl LocalMutationRegistry {
                 dirty.store(true, Ordering::Release);
                 failed.store(true, Ordering::Release);
             }
-            let _ = sender.send(result);
-            outcome
+            (result, outcome)
         });
         Ok(receipt)
     }

@@ -273,7 +273,7 @@ impl ReaskService {
                 }
                 release(lease);
             });
-            set.len() != 0
+            !set.is_empty()
         });
     }
 

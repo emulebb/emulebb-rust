@@ -41,7 +41,7 @@ async fn retained_category_entry_wakes_the_real_server_publish_pump() {
     let core = EmulebbCore::new_with_network(
         "test",
         FileIndex::in_memory().unwrap(),
-        &root.join("transfers"),
+        root.join("transfers"),
         Some(network),
     )
     .unwrap();

@@ -70,14 +70,16 @@ impl Ed2kTransferRuntime {
             let result = async {
                 let manifest_guard = self.lock_content(file_hash).await;
                 let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
-                let receive = self.local_mutations.submit_admission(
+                let receive = self.local_mutations.submit_path_mutation(
                     self,
                     file_hash,
-                    root,
-                    path,
-                    relative,
-                    fingerprint,
-                    observed_root,
+                    super::local_mutation::PathMutation::Admit {
+                        root,
+                        path,
+                        relative,
+                        fingerprint,
+                        observed_root,
+                    },
                     manifest_guard,
                     stripe_guard,
                 )?;
@@ -123,12 +125,14 @@ impl Ed2kTransferRuntime {
             let result = async {
                 let manifest_guard = self.lock_content(file_hash).await;
                 let stripe_guard = self.begin_shared_file_mutation(&[hash.0])?;
-                let receive = self.local_mutations.submit_withdrawal(
+                let receive = self.local_mutations.submit_path_mutation(
                     self,
                     file_hash,
-                    path,
-                    None,
-                    false,
+                    super::local_mutation::PathMutation::Withdraw {
+                        path,
+                        expected: None,
+                        queue_rehash: false,
+                    },
                     manifest_guard,
                     stripe_guard,
                 )?;
@@ -200,7 +204,7 @@ impl Ed2kTransferRuntime {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let epoch = self.category_root_epoch.load(Ordering::Acquire);
-            if epoch % 2 == 0 {
+            if epoch.is_multiple_of(2) {
                 return epoch;
             }
             notified.await;

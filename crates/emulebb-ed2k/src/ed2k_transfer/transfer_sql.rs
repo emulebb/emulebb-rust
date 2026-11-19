@@ -194,6 +194,7 @@ pub(super) fn stream_execution_from_metadata(
     let found = metadata.stream_download_execution(token, |row| {
         match row {
             Row::Header(header, counts) => {
+                let header = *header;
                 result = Some(Ed2kResumeManifest {
                     token: header.token,
                     file_hash: header.file_hash,

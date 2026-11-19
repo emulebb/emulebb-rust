@@ -153,6 +153,8 @@ impl PersistenceOwner {
             .checked_add(publication_bytes)
             .ok_or(PersistenceError::TooLarge)?
             .checked_mul(4)
+            // WHY: the boxed command has separate backing from the fixed request.
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ObservationCommand>()))
             .and_then(|bytes| bytes.checked_add(FIXED_CHARGE))
             .ok_or(PersistenceError::TooLarge)?;
         let available = {
@@ -172,10 +174,10 @@ impl PersistenceOwner {
             notified.as_mut().enable();
             match self
                 .submit_reserved(charge, || {
-                    Ok(Command::ContentObservations(ObservationCommand {
+                    Ok(Command::ContentObservations(Box::new(ObservationCommand {
                         events: events.to_vec(),
                         publication: publication.cloned(),
-                    }))
+                    })))
                 })
                 .await
             {
@@ -217,13 +219,15 @@ pub(super) async fn process(
     request: &mut Request,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
-    let Command::ContentObservations(ObservationCommand {
-        events,
-        publication,
-    }) = std::mem::replace(&mut request.command, Command::KadLoad)
+    let Command::ContentObservations(command) =
+        std::mem::replace(&mut request.command, Command::KadLoad)
     else {
         unreachable!()
     };
+    let ObservationCommand {
+        events,
+        publication,
+    } = *command;
     let mut candidate = match publication.as_ref() {
         Some(publication) => match prepare_projection(publication, &mut request.permit).await {
             // This command was admitted but has not reached SQL. Report its

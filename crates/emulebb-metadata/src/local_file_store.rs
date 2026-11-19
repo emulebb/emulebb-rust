@@ -1005,7 +1005,7 @@ mod tests {
                 &path,
                 hash,
                 &first,
-                crate::NativeFileIdentityEvidence::new((&first).identity, None).unwrap(),
+                crate::NativeFileIdentityEvidence::new(first.identity, None).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -1033,7 +1033,7 @@ mod tests {
                 &path,
                 hash,
                 &changed,
-                crate::NativeFileIdentityEvidence::new((&changed).identity, None).unwrap(),
+                crate::NativeFileIdentityEvidence::new(changed.identity, None).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -1054,11 +1054,11 @@ mod tests {
                         ..changed
                     },
                     crate::NativeFileIdentityEvidence::new(
-                        (&NativeFileFingerprint {
+                        NativeFileFingerprint {
                             size_bytes: 31,
                             ..changed
-                        })
-                            .identity,
+                        }
+                        .identity,
                         None
                     )
                     .unwrap()

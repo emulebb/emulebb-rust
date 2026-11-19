@@ -152,7 +152,7 @@ fn corpus_survives_search_clear_reopen_and_saturates_counts_without_real_overflo
     let store = MetadataStore::open(&path).unwrap();
     let original = event(Some(256));
     let receipt = store
-        .ingest_content_observations(&[original.clone()])
+        .ingest_content_observations(std::slice::from_ref(&original))
         .unwrap()[0];
     store.connection().unwrap().execute_batch(
         "INSERT INTO search_sessions(query,normalized_query,requested_method,status,created_at_s,updated_at_s)

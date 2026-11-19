@@ -2431,7 +2431,10 @@ async fn destructive_delete_preserves_replaced_transfer_directory_tombstone() {
         .target_path
         .unwrap();
     fs::rename(&transfer_dir, &transfer_tombstone).unwrap();
-    fs::remove_dir_all(&transfer_tombstone).unwrap();
+    // WHY: keep the old directory alive so inode reuse cannot make the
+    // replacement appear to have the original native identity on Unix.
+    let displaced_tombstone = transfer_tombstone.with_extension("displaced");
+    fs::rename(&transfer_tombstone, &displaced_tombstone).unwrap();
     fs::create_dir(&transfer_tombstone).unwrap();
     let sentinel = transfer_tombstone.join("unrelated.txt");
     fs::write(&sentinel, b"preserve me").unwrap();

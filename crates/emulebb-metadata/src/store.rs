@@ -574,7 +574,7 @@ impl MetadataStore {
             params![origin],
         )?;
         for root in roots {
-            let path_id = upsert_local_path(&tx, Path::new(&root.path))?;
+            let path_id = upsert_local_path(tx, Path::new(&root.path))?;
             tx.execute(
                 r#"
                 INSERT INTO shared_directory_roots(
@@ -611,7 +611,7 @@ impl MetadataStore {
                 ],
             )?;
         }
-        refresh_shared_root_eligibility(&tx, now)?;
+        refresh_shared_root_eligibility(tx, now)?;
         Ok(())
     }
 

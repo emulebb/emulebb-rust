@@ -146,7 +146,7 @@ impl LocalMutationRegistry {
                 let availability =
                     if let OwnedControl::Admit(request, redownload, _, initial_peers) = &change {
                         let root_cut = epoch.load(Ordering::Acquire);
-                        ensure!(root_cut % 2 == 0, LocalMutationError::Busy);
+                        ensure!(root_cut.is_multiple_of(2), LocalMutationError::Busy);
                         let cut = metadata.capture_download_availability()?;
                         let active = metadata.active_download_job(&hash.to_string())?.is_some();
                         let state = if active || *redownload {
