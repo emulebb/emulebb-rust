@@ -1,15 +1,9 @@
 use super::*;
 
 #[tokio::test]
-async fn dashboard_counts_wait_for_sql_without_blocking_network_status_or_using_the_live_cohort() {
-    let root = unique_runtime_dir("dashboard-sql-contention");
-    let database = root.join("metadata.sqlite");
-    let core = EmulebbCore::new(
-        "test",
-        FileIndex::open(&database).unwrap(),
-        root.join("temp"),
-    )
-    .unwrap();
+async fn dashboard_counts_wait_for_profile_owner_without_blocking_network_status_or_using_the_live_cohort()
+ {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     for (hash, intent) in [
         ("61", emulebb_metadata::DownloadIntent::Started),
         ("62", emulebb_metadata::DownloadIntent::Stopped),
@@ -26,9 +20,24 @@ async fn dashboard_counts_wait_for_sql_without_blocking_network_status_or_using_
             .unwrap();
     }
     assert!(core.state.lock().await.transfers.is_empty());
-    let blocking = rusqlite::Connection::open(&database).unwrap();
-    blocking
-        .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(persistence_owner::PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let writer = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            update_test_settings(
+                &core,
+                serde_json::json!({"transfers":{"uploadLimitBytesPerSecond":1048576}}),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
         .unwrap();
     let reader = core.clone();
     let mut reading = tokio::spawn(async move { reader.transfer_stats().await });
@@ -40,7 +49,9 @@ async fn dashboard_counts_wait_for_sql_without_blocking_network_status_or_using_
     tokio::time::timeout(std::time::Duration::from_secs(1), core.status())
         .await
         .unwrap();
-    blocking.execute_batch("COMMIT;").unwrap();
+    *owner.publication_gate.lock().unwrap() = None;
+    gate.release.notify_one();
+    drop(writer.await.unwrap());
     let counts = reading.await.unwrap().unwrap();
     assert_eq!((counts.total, counts.active, counts.completed), (2, 1, 0));
 }

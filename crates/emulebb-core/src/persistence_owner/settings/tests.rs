@@ -141,7 +141,7 @@ async fn incompatible_mixed_update_defers_every_change_until_explicit_update_or_
     let core = core();
     let before = core.effective_settings().await.unwrap();
     let updated=core.update_settings(&patch("1",json!({
-        "network":{"connections":{"maxConnections":10,"maxNewConnectionsPerFiveSeconds":10,"maxHalfOpenConnections":5}},
+        "network":{"connections":{"maxConnections":20,"maxNewConnectionsPerFiveSeconds":20,"maxHalfOpenConnections":5}},
         "transfers":{"uploadLimitBytesPerSecond":1048576}
     }))).await.unwrap();
     assert_eq!(updated.value().data().effective(), &before);
