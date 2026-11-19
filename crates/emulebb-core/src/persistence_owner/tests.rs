@@ -199,6 +199,108 @@ async fn cancelled_explicit_root_writer_is_published_before_drain() {
 }
 
 #[tokio::test]
+async fn cancelled_root_deletion_reconciles_memberships_and_preserves_payload() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let root = crate::unique_runtime_dir("root-delete-owner");
+    let path = root.join("sample.bin");
+    std::fs::write(&path, b"root deletion preserves payload").unwrap();
+    let resource = core
+        .metadata_store
+        .create_library_root(&root, false, true)
+        .unwrap()
+        .unwrap();
+    let descriptor = crate::SharedDirectoryRoot {
+        path: emulebb_metadata::NativePath::from(root.as_path()).display_path(),
+        watch_enabled: false,
+        monitor_owned: false,
+        accessible: true,
+        shareable: true,
+    };
+    core.state.lock().await.shared_directories = vec![descriptor.clone()];
+    let shared = core
+        .ed2k_transfers
+        .ingest_local_file(&path, "sample.bin")
+        .await
+        .unwrap();
+    let native = emulebb_ed2k::long_path::long_path(&path);
+    let fingerprint = core
+        .metadata_store
+        .local_file_instance(&native)
+        .unwrap()
+        .unwrap()
+        .verified_fingerprint;
+    assert!(
+        core.ed2k_transfers
+            .admit_monitored_shared_path(
+                &shared.file_hash,
+                &root,
+                &native,
+                std::path::Path::new("sample.bin"),
+                &fingerprint,
+                None
+            )
+            .await
+            .unwrap()
+    );
+    let hash: emulebb_kad_proto::Ed2kHash = shared.file_hash.parse().unwrap();
+    assert_eq!(
+        core.ed2k_transfers
+            .admit_shared_hashes(&[hash.0], true)
+            .await
+            .unwrap(),
+        Some(vec![true])
+    );
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let writer = {
+        let core = core.clone();
+        tokio::spawn(async move { core.delete_library_root(resource.id).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .unwrap();
+    assert!(
+        core.metadata_store
+            .library_root(resource.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(core.state.lock().await.shared_directories, vec![descriptor]);
+    writer.abort();
+    let _ = writer.await;
+    gate.release.notify_one();
+    // Caller cancellation leaves the admitted reconciliation running. Wait for
+    // that owned request before issuing a separate daemon shutdown cancellation.
+    wait_for_slots(&owner, 0).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), owner.close_and_drain())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(core.state.lock().await.shared_directories.is_empty());
+    assert_eq!(
+        core.ed2k_transfers
+            .admit_shared_hashes(&[hash.0], true)
+            .await
+            .unwrap(),
+        Some(vec![false])
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"root deletion preserves payload"
+    );
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
 async fn cancelled_watch_edit_publishes_only_addressed_root_without_scan() {
     let core =
         crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
@@ -292,6 +394,15 @@ async fn managed_root_watch_edit_preserves_ownership_and_missing_id_is_absent() 
         .unwrap()
         .unwrap();
     assert!(result.managed && result.watch_enabled);
+    assert_eq!(
+        core.delete_library_root(id).await.unwrap(),
+        emulebb_metadata::MetadataLibraryRootDelete::Managed
+    );
+    assert_eq!(
+        core.delete_library_root(i64::MAX).await.unwrap(),
+        emulebb_metadata::MetadataLibraryRootDelete::Missing
+    );
+    assert_eq!(core.metadata_store.library_root(id).unwrap(), Some(result));
     assert!(
         core.patch_library_root_watch(i64::MAX, true)
             .await

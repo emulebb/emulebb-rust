@@ -50,6 +50,61 @@ impl std::fmt::Display for ObservedRootChanged {
 impl std::error::Error for ObservedRootChanged {}
 
 impl MetadataStore {
+    /// Create one explicit root and return its committed identity. An active path
+    /// conflict leaves its policy, origins and observed health unchanged.
+    pub fn create_library_root(
+        &self,
+        path: &Path,
+        watch_enabled: bool,
+        accessible: bool,
+    ) -> Result<Option<crate::MetadataLibraryRoot>> {
+        ensure!(path.is_absolute(), "root path must be absolute");
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let path_id = crate::store::upsert_local_path(&tx, path)?;
+        let inserted = tx.execute(
+            "INSERT INTO shared_directory_roots(path_id,watch_enabled,accessible,created_at_ms)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING",
+            params![path_id, watch_enabled, accessible, unix_ms()],
+        )?;
+        if inserted == 0 {
+            return Ok(None);
+        }
+        let id = tx.last_insert_rowid();
+        tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) VALUES(?1,'explicit',0,1,?2)", params![id, accessible])?;
+        let root = library_root_on_connection(&tx, id)?;
+        ensure!(root.is_some(), "created root is not active");
+        tx.commit()?;
+        Ok(root)
+    }
+
+    /// Page one exact root's content for bounded internal reconciliation.
+    /// Retired IDs remain valid and cannot be redirected by re-adding their path.
+    pub fn library_root_hash_page(
+        &self,
+        id: i64,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, [u8; 16])>> {
+        ensure!(
+            id > 0 && after >= 0 && (1..=128).contains(&limit),
+            "invalid root membership page"
+        );
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare_cached("SELECT m.known_file_id,k.ed2k_hash FROM shared_file_memberships m INDEXED BY shared_file_memberships_root_content_idx JOIN known_files k ON k.id=m.known_file_id WHERE m.root_id=?1 AND m.known_file_id>?2 GROUP BY m.known_file_id ORDER BY m.known_file_id LIMIT ?3")?;
+        let mut rows = stmt.query(params![id, after, i64::try_from(limit)?])?;
+        let mut page = Vec::with_capacity(limit);
+        while let Some(row) = rows.next()? {
+            let hash: Vec<u8> = row.get(1)?;
+            let hash = hash
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid content hash"))?;
+            page.push((row.get(0)?, hash));
+        }
+        Ok(page)
+    }
+
     /// Read one current resource without resolving or probing its filesystem path.
     pub fn library_root(&self, id: i64) -> Result<Option<crate::MetadataLibraryRoot>> {
         ensure!(id > 0, "root id must be positive");

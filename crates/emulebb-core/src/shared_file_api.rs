@@ -580,6 +580,21 @@ impl EmulebbCore {
             .await
     }
 
+    /// Retire one explicit root and reconcile affected hashes in bounded pages.
+    /// Managed destinations remain owned by their settings or category.
+    pub async fn delete_library_root(
+        &self,
+        id: i64,
+    ) -> Result<emulebb_metadata::MetadataLibraryRootDelete> {
+        ensure!(id > 0, "root id must be positive");
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .delete_root(id, self.category_sharing_context())
+            .await?)
+    }
+
     /// Change one root's watch policy by immutable identity, including managed roots.
     /// The admitted persistence owner completes publication even if the caller disconnects.
     pub async fn patch_library_root_watch(

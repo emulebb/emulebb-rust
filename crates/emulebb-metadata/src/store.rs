@@ -1243,6 +1243,101 @@ mod tests {
     }
 
     #[test]
+    fn creating_a_root_preserves_active_path_conflicts_and_allocates_a_fresh_id() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let path = std::env::temp_dir().join("emulebb-root-create");
+        let first = store
+            .create_library_root(&path, true, false)
+            .unwrap()
+            .unwrap();
+        assert!(!first.managed && first.watch_enabled && !first.accessible);
+        assert!(
+            store
+                .create_library_root(&path, false, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.library_root(first.id).unwrap(), Some(first.clone()));
+        store.delete_library_root(first.id).unwrap();
+        let next = store
+            .create_library_root(&path, false, true)
+            .unwrap()
+            .unwrap();
+        assert!(next.id > first.id);
+        store
+            .replace_implicit_shared_directory_roots(&[library_root_config(&path, false)])
+            .unwrap();
+        let managed = store.library_root(next.id).unwrap().unwrap();
+        assert!(managed.managed);
+        assert!(
+            store
+                .create_library_root(&path, true, false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.library_root(next.id).unwrap(), Some(managed));
+        assert!(
+            store
+                .create_library_root(Path::new("relative"), false, true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn root_membership_pages_keep_retired_and_replacement_resources_separate() {
+        let store = MetadataStore::in_memory().unwrap();
+        let path = std::env::temp_dir().join("emulebb-root-membership-identities");
+        let first = store
+            .create_library_root(&path, false, true)
+            .unwrap()
+            .unwrap();
+        store.delete_library_root(first.id).unwrap();
+        let next = store
+            .create_library_root(&path, false, true)
+            .unwrap()
+            .unwrap();
+        {
+            let mut conn = store.connection().unwrap();
+            let tx = conn.transaction().unwrap();
+            for (n, root) in [(1u8, first.id), (2u8, next.id)] {
+                let file = upsert_local_path(&tx, &path.join(format!("sample-{n}.bin"))).unwrap();
+                let fingerprint = crate::NativeFileFingerprint {
+                    identity: crate::NativeFileIdentity::Unix {
+                        device_id: 1,
+                        inode_number: u64::from(n),
+                    },
+                    size_bytes: 1,
+                    modified: crate::NativeFileTimestamp::new(1, 0).unwrap(),
+                    changed: None,
+                };
+                tx.execute("INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES(?1,?2,1,'sample.bin',0,0,0)", params![n, vec![n;16]]).unwrap();
+                tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) VALUES(?1,?2,1,?3,?4,0)", params![file,n,fingerprint.identity.storage_bytes(),fingerprint.storage_bytes()]).unwrap();
+                tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_ms,last_seen_at_ms,removed_at_ms) VALUES(?1,?2,?3,'sample.bin',0,0,0)", params![root,file,n]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            store.library_root_hash_page(first.id, 0, 1).unwrap(),
+            vec![(1, [1; 16])]
+        );
+        assert_eq!(
+            store.library_root_hash_page(next.id, 0, 1).unwrap(),
+            vec![(2, [2; 16])]
+        );
+        assert!(
+            store
+                .library_root_hash_page(first.id, 1, 128)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.category_root_hash_page(&path, 0, 128).unwrap(),
+            vec![(2, [2; 16])]
+        );
+        assert!(store.library_root_hash_page(first.id, 0, 129).is_err());
+    }
+
+    #[test]
     fn deleting_one_root_preserves_another_roots_observed_health() {
         let mut store = MetadataStore::in_memory().unwrap();
         let base = std::env::temp_dir().join("emulebb-root-resource-health");

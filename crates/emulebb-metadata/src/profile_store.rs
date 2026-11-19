@@ -12,7 +12,9 @@ use crate::{
 
 // A root path and its root row are each unique. Scalar lookups keep the
 // membership scan constrained to one root and ordered by the covering index.
-pub(crate) const CATEGORY_ROOT_HASH_PAGE_SQL: &str = "SELECT m.known_file_id,(SELECT k.ed2k_hash FROM known_files k WHERE k.id=m.known_file_id) FROM shared_file_memberships m INDEXED BY shared_file_memberships_root_content_idx WHERE m.root_id=(SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2) AND m.known_file_id>?3 GROUP BY m.known_file_id ORDER BY m.known_file_id LIMIT ?4";
+// WHY: category paths refer to their latest root instance, not the first retired
+// identity at that path. Explicit resource deletion uses an exact ID instead.
+pub(crate) const CATEGORY_ROOT_HASH_PAGE_SQL: &str = "SELECT m.known_file_id,(SELECT k.ed2k_hash FROM known_files k WHERE k.id=m.known_file_id) FROM shared_file_memberships m INDEXED BY shared_file_memberships_root_content_idx WHERE m.root_id=(SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2 ORDER BY r.id DESC LIMIT 1) AND m.known_file_id>?3 GROUP BY m.known_file_id ORDER BY m.known_file_id LIMIT ?4";
 
 /// Time spent acquiring the shared connection and executing a friend write.
 #[derive(Debug, Clone, Copy)]

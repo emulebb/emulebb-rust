@@ -19,9 +19,15 @@ pub(crate) struct CategoryProbeJob {
 
 pub(super) struct CategoryContinuation {
     sharing: CategorySharingContext,
-    roots: Vec<std::path::PathBuf>,
+    roots: Vec<RootMembershipScope>,
     lease: ByteLease,
     clean_epoch: Option<u64>,
+}
+
+#[derive(Clone)]
+pub(super) enum RootMembershipScope {
+    Path(std::path::PathBuf),
+    Id(i64),
 }
 
 impl CategoryContinuation {
@@ -54,6 +60,10 @@ pub(crate) struct CategorySharingContext {
 }
 
 pub(crate) enum CategoryCommand {
+    DeleteRoot {
+        id: i64,
+        sharing: CategorySharingContext,
+    },
     CreateDownload(super::download_create::DownloadCreateCommand),
     PatchDownload(super::download_patch::DownloadPatchCommand),
     Create {
@@ -86,6 +96,7 @@ pub(crate) enum CategoryCommand {
 }
 
 pub(super) enum CategoryDbCommand {
+    DeleteRoot(i64),
     PatchRootWatch(i64, bool),
     PatchDownload {
         patch: emulebb_metadata::MetadataDownloadPatch,
@@ -100,7 +111,7 @@ pub(super) enum CategoryDbCommand {
         Vec<emulebb_metadata::MetadataSharedDirectoryRoot>,
     ),
     RootPage {
-        root: std::path::PathBuf,
+        root: RootMembershipScope,
         after: i64,
     },
     NextCopy {
@@ -112,6 +123,7 @@ pub(super) enum CategoryDbCommand {
 }
 
 pub(super) enum CategoryWrite {
+    RootDeleted(emulebb_metadata::MetadataLibraryRootDelete),
     RootWatch(Option<emulebb_metadata::MetadataLibraryRoot>),
     DownloadPatched(
         Result<
@@ -142,6 +154,9 @@ pub(super) fn execute(
     command: CategoryDbCommand,
 ) -> anyhow::Result<CategoryWrite> {
     match command {
+        CategoryDbCommand::DeleteRoot(id) => store
+            .delete_library_root(id)
+            .map(CategoryWrite::RootDeleted),
         CategoryDbCommand::PatchRootWatch(id, enabled) => store
             .patch_library_root_watch(id, enabled)
             .map(CategoryWrite::RootWatch),
@@ -193,9 +208,11 @@ pub(super) fn execute(
         CategoryDbCommand::ReplaceRoots(implicit, roots) => store
             .replace_explicit_roots_if_implicit_matches(&implicit, &roots)
             .map(CategoryWrite::Roots),
-        CategoryDbCommand::RootPage { root, after } => store
-            .category_root_hash_page(&root, after, 128)
-            .map(CategoryWrite::RootPage),
+        CategoryDbCommand::RootPage { root, after } => match root {
+            RootMembershipScope::Path(path) => store.category_root_hash_page(&path, after, 128),
+            RootMembershipScope::Id(id) => store.library_root_hash_page(id, after, 128),
+        }
+        .map(CategoryWrite::RootPage),
         CategoryDbCommand::NextCopy { hash, after } => store
             .next_shared_copy(&hex::encode(hash), after, 65_536)
             .map(CategoryWrite::Copy),
@@ -249,7 +266,7 @@ impl CategoryCommand {
                 .saturating_add(comment.as_ref().map_or(0, String::capacity))
                 .saturating_add(sharing.incoming.as_os_str().len()),
             Self::Delete { sharing, .. } => sharing.incoming.as_os_str().len(),
-            Self::PatchRootWatch { .. } => 0,
+            Self::PatchRootWatch { .. } | Self::DeleteRoot { .. } => 0,
             Self::ReplaceRoots {
                 expected,
                 implicit,
@@ -279,6 +296,26 @@ impl CategoryCommand {
 }
 
 impl PersistenceOwner {
+    pub(crate) async fn delete_root(
+        &self,
+        id: i64,
+        sharing: CategorySharingContext,
+    ) -> Result<emulebb_metadata::MetadataLibraryRootDelete, PersistenceError> {
+        const PUBLICATION_WORKSPACE: usize = 4 * 1024 * 1024;
+        match self
+            .submit_reserved(FIXED_CHARGE + PUBLICATION_WORKSPACE, || {
+                Ok(Command::Category(CategoryCommand::DeleteRoot {
+                    id,
+                    sharing,
+                }))
+            })
+            .await?
+        {
+            Response::RootDeleted(result) => Ok(result),
+            _ => Err(PersistenceError::Worker),
+        }
+    }
+
     pub(crate) async fn patch_root_watch(
         &self,
         id: i64,
@@ -499,7 +536,7 @@ async fn process_explicit_roots(
             .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
         *continuation = Some(CategoryContinuation {
             sharing,
-            roots: removed,
+            roots: removed.into_iter().map(RootMembershipScope::Path).collect(),
             lease,
             clean_epoch,
         });
@@ -519,6 +556,57 @@ pub(super) async fn process(
         unreachable!()
     };
     let command = match command {
+        CategoryCommand::DeleteRoot { id, sharing } => {
+            let mutation = sharing
+                .runtime
+                .begin_category_root_mutation()
+                .await
+                .map_err(|_| PersistenceError::Worker)?;
+            let (response, receive) = oneshot::channel();
+            db.send(DbRequest {
+                command: DbCommand::Category(CategoryDbCommand::DeleteRoot(id)),
+                response,
+            })
+            .map_err(|_| PersistenceError::Worker)?;
+            let DbResponse::Category(CategoryWrite::RootDeleted(result)) = receive
+                .await
+                .map_err(|_| PersistenceError::CommitUnknown)??
+            else {
+                return Err(PersistenceError::Worker);
+            };
+            #[cfg(test)]
+            {
+                let gate = publication_gate.lock().unwrap().clone();
+                if let Some(gate) = gate {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+            }
+            if let emulebb_metadata::MetadataLibraryRootDelete::Deleted(root) = &result {
+                let display =
+                    emulebb_metadata::NativePath::from(root.path.as_path()).display_path();
+                state
+                    .lock()
+                    .await
+                    .shared_directories
+                    .retain(|cached| cached.path != display);
+                let clean_epoch = mutation.finish();
+                sharing.root_change.watch_changed();
+                let lease = request
+                    .permit
+                    .transfer_bytes(CATEGORY_PROBE_BYTES)
+                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+                *continuation = Some(CategoryContinuation {
+                    sharing,
+                    roots: vec![RootMembershipScope::Id(root.id)],
+                    lease,
+                    clean_epoch,
+                });
+            } else if let Some(epoch) = mutation.finish() {
+                sharing.runtime.finish_scoped_root_publication(epoch).await;
+            }
+            return Ok(Response::RootDeleted(result));
+        }
         CategoryCommand::PatchRootWatch {
             id,
             enabled,
@@ -617,7 +705,9 @@ pub(super) async fn process(
         CategoryCommand::Create { sharing, .. }
         | CategoryCommand::Update { sharing, .. }
         | CategoryCommand::Delete { sharing, .. } => Some(sharing.clone()),
-        CategoryCommand::ReplaceRoots { .. } | CategoryCommand::PatchRootWatch { .. } => {
+        CategoryCommand::ReplaceRoots { .. }
+        | CategoryCommand::PatchRootWatch { .. }
+        | CategoryCommand::DeleteRoot { .. } => {
             unreachable!()
         }
         CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => None,
@@ -672,7 +762,9 @@ pub(super) async fn process(
             CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => {
                 unreachable!()
             }
-            CategoryCommand::ReplaceRoots { .. } | CategoryCommand::PatchRootWatch { .. } => {
+            CategoryCommand::ReplaceRoots { .. }
+            | CategoryCommand::PatchRootWatch { .. }
+            | CategoryCommand::DeleteRoot { .. } => {
                 unreachable!()
             }
             CategoryCommand::Delete { id, .. } => {
@@ -807,7 +899,9 @@ pub(super) async fn process(
                 .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
             *continuation = Some(CategoryContinuation {
                 sharing,
-                roots: vec![std::path::PathBuf::from(old_root)],
+                roots: vec![RootMembershipScope::Path(std::path::PathBuf::from(
+                    old_root,
+                ))],
                 lease,
                 clean_epoch,
             });
@@ -821,7 +915,7 @@ pub(super) async fn process(
 async fn reconcile_removed_root(
     db: &mpsc::SyncSender<DbRequest>,
     sharing: &CategorySharingContext,
-    root: std::path::PathBuf,
+    root: RootMembershipScope,
     mut lease: ByteLease,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<ByteLease, PersistenceError> {
