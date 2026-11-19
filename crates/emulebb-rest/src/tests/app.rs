@@ -196,7 +196,7 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
     let response = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/app/settings/surface")
+                .uri("/api/v1/settings/surface")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -206,100 +206,51 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    let settings = value["data"]["settings"].as_array().unwrap();
-    assert!(settings.iter().any(|entry| {
-        entry["path"] == "core.uploadLimitKiBps"
-            && entry["class"] == "normalControl"
-            && entry["route"] == "/api/v1/app/settings"
-    }));
-    assert!(settings.iter().any(|entry| {
-        entry["path"] == "daemon.ed2kUserHash" && entry["class"] == "notUserFacing"
-    }));
-    assert!(settings.iter().any(|entry| {
-        entry["path"] == "ed2k.minFreeConfigSpaceBytes"
-            && entry["class"] == "normalControl"
-            && entry["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("1 GiB minimum"))
-    }));
-    assert!(settings.iter().any(|entry| {
-        entry["path"] == "ed2k.safeServerConnect" && entry["class"] == "normalControl"
-    }));
-    assert!(settings.iter().any(|entry| {
-        entry["path"] == "ed2k.addServersFromServer" && entry["class"] == "normalControl"
-    }));
-    assert!(settings.iter().any(|entry| {
-        entry["path"] == "ed2k.serverKeepaliveMinutes" && entry["class"] == "advancedControl"
-    }));
+    let fields = value["data"]["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 59);
+    assert_eq!(
+        value["data"]["schemas"],
+        emulebb_settings::product::settings_schemas()
+    );
+    let keys = fields
+        .iter()
+        .map(|field| field["key"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(keys.len(), 59);
+    assert!(fields.iter().any(
+        |field| field["key"] == "transfers.uploadLimitBytesPerSecond"
+            && field["application"] == "live"
+            && field["unit"] == "bytes per second"
+    ));
     assert!(
-        !settings
+        fields
             .iter()
-            .any(|entry| entry["path"] == "core.reconnect")
+            .any(|field| field["key"] == "network.p2p.bindIp"
+                && field["nullable"] == true
+                && field["defaultValue"].is_null())
+    );
+    let bootstrap = value["data"]["bootstrap"].as_array().unwrap();
+    assert_eq!(bootstrap.len(), 3);
+    assert!(
+        bootstrap
+            .iter()
+            .all(|entry| entry["class"] == "bootstrapOnly"
+                && entry["restartRequired"] == true
+                && entry.get("value").is_none())
     );
     assert!(
-        !settings
+        bootstrap
             .iter()
-            .any(|entry| entry["path"] == "core.safeServerConnect")
+            .any(|entry| entry["path"] == "rest.api_key")
     );
     assert!(
-        !settings
+        value["data"]["resources"]
+            .as_array()
+            .unwrap()
             .iter()
-            .any(|entry| entry["path"] == "core.addServersFromServer")
+            .any(|entry| entry["name"] == "libraryRoots"
+                && entry["route"] == "/api/v1/library/roots")
     );
-    assert!(
-        !settings
-            .iter()
-            .any(|entry| entry["path"] == "ed2k.keepaliveSecs")
-    );
-    assert!(!settings.iter().any(|entry| entry["path"] == "rest.api_key"));
-
-    let bootstrap_settings = value["data"]["bootstrapSettings"].as_array().unwrap();
-    assert!(bootstrap_settings.iter().any(|entry| {
-        entry["path"] == "rest.bind_addr"
-            && entry["class"] == "bootstrapOnly"
-            && entry["restartRequired"] == true
-            && entry["route"] == "emulebb-rust-settings.toml"
-    }));
-    assert!(bootstrap_settings.iter().any(|entry| {
-        entry["path"] == "rest.api_key"
-            && entry["class"] == "bootstrapOnly"
-            && entry["description"]
-                .as_str()
-                .unwrap()
-                .contains("not exposed through REST")
-    }));
-
-    let section_resources = value["data"]["sectionResources"].as_array().unwrap();
-    assert!(section_resources.iter().any(|entry| {
-        entry["name"] == "diagnostics"
-            && entry["class"] == "existingSectionResource"
-            && entry["route"] == "/api/v1/diagnostics"
-    }));
-    assert!(section_resources.iter().any(|entry| {
-        entry["name"] == "logs"
-            && entry["class"] == "existingSectionResource"
-            && entry["route"] == "/api/v1/logs"
-    }));
-    assert!(section_resources.iter().any(|entry| {
-        entry["name"] == "ipFilter"
-            && entry["class"] == "existingSectionResource"
-            && entry["route"] == "/api/v1/ip-filter"
-    }));
-    assert!(section_resources.iter().any(|entry| {
-        entry["name"] == "vpnGuard"
-            && entry["class"] == "existingSectionResource"
-            && entry["route"] == "/api/v1/vpn-guard"
-    }));
-    assert!(section_resources.iter().any(|entry| {
-        entry["name"] == "network"
-            && entry["class"] == "existingSectionResource"
-            && entry["route"] == "/api/v1/network"
-    }));
-    assert!(section_resources.iter().any(|entry| {
-        entry["name"] == "nat"
-            && entry["class"] == "existingSectionResource"
-            && entry["route"] == "/api/v1/nat"
-    }));
 }
 
 #[tokio::test]
@@ -310,7 +261,7 @@ async fn settings_surface_section_resources_resolve_to_live_get_routes() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/app/settings/surface")
+                .uri("/api/v1/settings/surface")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -320,7 +271,7 @@ async fn settings_surface_section_resources_resolve_to_live_get_routes() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    let section_resources = value["data"]["sectionResources"].as_array().unwrap();
+    let section_resources = value["data"]["resources"].as_array().unwrap();
 
     for resource in section_resources {
         let route = resource["route"].as_str().unwrap();

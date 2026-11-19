@@ -11,6 +11,23 @@ pub struct SettingsPatch {
     pub reset: Vec<SettingKey>,
 }
 impl SettingsPatch {
+    /// Decode a bounded native request, collecting independent supplied-leaf issues.
+    /// The final typed decode also checks exact structure and duplicate JSON fields.
+    pub fn from_json(body: &[u8]) -> Result<Self, SettingsError> {
+        if body.len() > MAX_PATCH_BYTES {
+            return Err(SettingsError::DocumentTooLarge);
+        }
+        let raw: Value =
+            serde_json::from_slice(body).map_err(|_| SettingsError::InvalidDocument)?;
+        let mut issues = Vec::new();
+        if let Some(set) = raw.get("set") {
+            SettingsPartial::validate_json_fields(set, &mut issues);
+        }
+        if !issues.is_empty() {
+            return Err(SettingsError::Validation(issues));
+        }
+        serde_json::from_slice(body).map_err(|_| SettingsError::InvalidDocument)
+    }
     pub fn into_parts(self) -> (SettingsRevision, SettingsEdit) {
         (
             self.expected_revision,
@@ -113,6 +130,55 @@ impl Write for Count {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_json_collects_type_and_rule_issues_without_echoing_input() {
+        let body = serde_json::json!({"expectedRevision":"1","set":{
+            "network":{"nickname":"", "nat":{"enabled":"private-input"}},
+            "transfers":{"upload":{"baseSlots":0}},
+            "security":{"vpnGuard":{"mode":"private-input"}}
+        }})
+        .to_string();
+        let error = SettingsPatch::from_json(body.as_bytes()).unwrap_err();
+        let SettingsError::Validation(issues) = &error else {
+            panic!("expected field issues");
+        };
+        assert_eq!(
+            issues.iter().map(|i| (i.key, i.code)).collect::<Vec<_>>(),
+            vec![
+                ("network.nickname", "invalid-value"),
+                ("network.nat.enabled", "invalid-type"),
+                ("transfers.upload.baseSlots", "invalid-value"),
+                ("security.vpnGuard.mode", "invalid-type"),
+            ]
+        );
+        assert!(!error.to_string().contains("private-input"));
+    }
+
+    #[test]
+    fn native_json_retains_exact_typed_structure_and_duplicate_checks() {
+        for body in [
+            r#"{"expectedRevision":"1","set":{"network":{"nickname":"First","nickname":"Second"}}}"#,
+            r#"{"expectedRevision":"1","expectedRevision":"2","set":{"network":{"nickname":"First"}}}"#,
+            r#"{"expectedRevision":"1","set":{"network":false}}"#,
+            r#"{"expectedRevision":1,"set":{"network":{"nickname":"First"}}}"#,
+            r#"{"expectedRevision":"1","extension":true}"#,
+        ] {
+            assert_eq!(
+                SettingsPatch::from_json(body.as_bytes()).unwrap_err(),
+                SettingsError::InvalidDocument
+            );
+        }
+        let body = br#"{"expectedRevision":"1","set":{"network":{"nat":{"pcpServerIp":null}}}}"#;
+        assert_eq!(
+            SettingsPatch::from_json(body).unwrap(),
+            serde_json::from_slice::<SettingsPatch>(body).unwrap()
+        );
+        assert_eq!(
+            SettingsPatch::from_json(&vec![b' '; MAX_PATCH_BYTES + 1]).unwrap_err(),
+            SettingsError::DocumentTooLarge
+        );
+    }
 
     #[test]
     fn one_key_text_input_uses_the_catalog_types_and_shared_candidate_validation() {

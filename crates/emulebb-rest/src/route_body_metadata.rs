@@ -11,14 +11,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use validators::{
-    validate_app_settings_patch_body_fields, validate_category_create_body_fields,
-    validate_category_patch_body_fields, validate_destructive_confirmation_body_field,
-    validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
-    validate_library_root_create_body_fields, validate_library_root_patch_body_fields,
-    validate_search_create_body_fields, validate_server_create_body_fields,
-    validate_server_patch_body_fields, validate_shared_file_ignore_pattern_body_fields,
-    validate_shared_file_ignore_rule_body_fields, validate_shared_file_patch_body_fields,
-    validate_url_import_body_fields,
+    validate_category_create_body_fields, validate_category_patch_body_fields,
+    validate_destructive_confirmation_body_field, validate_friend_create_body_fields,
+    validate_kad_bootstrap_body_fields, validate_library_root_create_body_fields,
+    validate_library_root_patch_body_fields, validate_search_create_body_fields,
+    validate_server_create_body_fields, validate_server_patch_body_fields,
+    validate_shared_file_ignore_pattern_body_fields, validate_shared_file_ignore_rule_body_fields,
+    validate_shared_file_patch_body_fields, validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -107,10 +106,6 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path_matches_shared_file_ignore_rule(path) {
         return validate_shared_file_ignore_rule_body_fields(object);
     }
-    if method == "PATCH" && path == "/api/v1/app/settings" {
-        validate_app_settings_patch_body_fields(object)?;
-        return validate_destructive_confirmation_body(method, path, object);
-    }
     if method == "POST" && path == "/api/v1/servers" {
         return validate_server_create_body_fields(object);
     }
@@ -155,9 +150,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
     const DIAGNOSTIC_BUNDLE: &[&str] = &["confirmCapture", "maxBytes"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
-    const APP_SETTINGS: &[&str] = &[
-        "core", "daemon", "ed2k", "kad", "nat", "vpnGuard", "ipFilter",
-    ];
+    const SETTINGS_PATCH: &[&str] = &["expectedRevision", "set", "reset"];
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static", "enabled"];
@@ -272,8 +265,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "POST" && path == "/api/v1/diagnostics/crash-tests" {
         return Some(CONFIRM_CRASH);
     }
-    if method == "PATCH" && path == "/api/v1/app/settings" {
-        return Some(APP_SETTINGS);
+    if method == "PATCH" && path == "/api/v1/settings" {
+        return Some(SETTINGS_PATCH);
     }
     if method == "POST" && path == "/api/v1/logs/operations/clear" {
         return Some(CONFIRM_CLEAR_LOGS);
