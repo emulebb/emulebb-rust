@@ -486,6 +486,7 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
     metadata
         .replace_root_memberships(
             &shared_root,
+            &metadata.shared_root_scan_watermark(&shared_root).unwrap(),
             &[(native_path.clone(), "Sample.bin".into(), fingerprint)],
         )
         .unwrap();
@@ -519,6 +520,7 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
     metadata
         .replace_root_memberships(
             &shared_root,
+            &metadata.shared_root_scan_watermark(&shared_root).unwrap(),
             &[(native_path.clone(), "Sample.bin".into(), fingerprint)],
         )
         .unwrap();
@@ -578,6 +580,7 @@ async fn complete_local_file_never_creates_a_transfer() {
     metadata
         .replace_root_memberships(
             &shared_root,
+            &metadata.shared_root_scan_watermark(&shared_root).unwrap(),
             &[(native_path.clone(), "Sample.bin".into(), fingerprint)],
         )
         .unwrap();
