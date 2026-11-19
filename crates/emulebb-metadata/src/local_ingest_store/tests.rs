@@ -79,9 +79,11 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
         .unwrap();
     let result = db
         .commit_local_ingest(
-            &a,
-            &recovery,
-            &media,
+            MetadataLocalIngestContent {
+                content: &a,
+                recovery: &recovery,
+                media: &media,
+            },
             None,
             &capture_jobs(&db, &a, None),
             &roots,
@@ -112,9 +114,11 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
     // mutation, index row or membership reassignment may survive this error.
     assert!(
         db.commit_local_ingest(
-            &b,
-            &recovery,
-            &oversized,
+            MetadataLocalIngestContent {
+                content: &b,
+                recovery: &recovery,
+                media: &oversized
+            },
             Some(&old),
             &capture_jobs(&db, &b, Some(&old)),
             &roots,
@@ -138,9 +142,11 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
     epoch.store(2, Ordering::Release);
     assert!(
         db.commit_local_ingest(
-            &b,
-            &recovery,
-            &media,
+            MetadataLocalIngestContent {
+                content: &b,
+                recovery: &recovery,
+                media: &media
+            },
             Some(&old),
             &capture_jobs(&db, &b, Some(&old)),
             &roots,
@@ -153,9 +159,11 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
     assert_eq!(db.local_file_instance(&b.path).unwrap().unwrap(), old);
     let result = db
         .commit_local_ingest(
-            &b,
-            &recovery,
-            &media,
+            MetadataLocalIngestContent {
+                content: &b,
+                recovery: &recovery,
+                media: &media,
+            },
             Some(&old),
             &capture_jobs(&db, &b, Some(&old)),
             &roots,
@@ -184,9 +192,11 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
     let c = content(&root, "66");
     assert!(
         db.commit_local_ingest(
-            &c,
-            &recovery,
-            &media,
+            MetadataLocalIngestContent {
+                content: &c,
+                recovery: &recovery,
+                media: &media
+            },
             Some(&old),
             &capture_jobs(&db, &c, Some(&old)),
             &roots,
@@ -207,9 +217,11 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
     );
     assert!(
         db.commit_local_ingest(
-            &c,
-            &recovery,
-            &media,
+            MetadataLocalIngestContent {
+                content: &c,
+                recovery: &recovery,
+                media: &media
+            },
             None,
             &capture_jobs(&db, &c, None),
             &roots,
@@ -235,9 +247,11 @@ fn savepoint_recovery_failure_preserves_owned_binding_without_recovery_rows() {
     let epoch = AtomicU64::new(0);
     let result = db
         .commit_local_ingest(
-            &content,
-            &malformed,
-            &MetadataTransferMediaMetadata::default(),
+            MetadataLocalIngestContent {
+                content: &content,
+                recovery: &malformed,
+                media: &MetadataTransferMediaMetadata::default(),
+            },
             None,
             &capture_jobs(&db, &content, None),
             &[],
@@ -299,14 +313,16 @@ fn fallback_rechecks_binding_changed_after_actual_recovery_transaction_abort() {
     let worker = std::thread::spawn(move || {
         FALLBACK_GATE.with(|gate| *gate.borrow_mut() = Some((reached, resume)));
         worker_db.commit_local_ingest(
-            &worker_stale,
-            &MetadataAichRecoverySet {
-                root: [0x22; 20],
-                size: worker_stale.file_size,
-                parts: vec![vec![0x33; 40]],
-                part_roots: vec![[0x22; 20]],
+            MetadataLocalIngestContent {
+                content: &worker_stale,
+                recovery: &MetadataAichRecoverySet {
+                    root: [0x22; 20],
+                    size: worker_stale.file_size,
+                    parts: vec![vec![0x33; 40]],
+                    part_roots: vec![[0x22; 20]],
+                },
+                media: &MetadataTransferMediaMetadata::default(),
             },
-            &MetadataTransferMediaMetadata::default(),
             Some(&worker_expected),
             &capture_jobs(&worker_db, &worker_stale, Some(&worker_expected)),
             &[MetadataIngestRoot {
@@ -480,9 +496,11 @@ fn ingest_projection_and_copy_readers_skip_paired_exclusion_before_selecting_sib
     let epoch = AtomicU64::new(0);
     let committed = db
         .commit_local_ingest(
-            &sibling,
-            &recovery,
-            &MetadataTransferMediaMetadata::default(),
+            MetadataLocalIngestContent {
+                content: &sibling,
+                recovery: &recovery,
+                media: &MetadataTransferMediaMetadata::default(),
+            },
             Some(&expected),
             &capture_jobs(&db, &sibling, Some(&expected)),
             &[],
@@ -533,9 +551,11 @@ fn ingest_job_snapshot_fences_absence_and_generation_after_real_fallback_abort()
     let epoch = AtomicU64::new(0);
     assert!(
         db.commit_local_ingest(
-            &content,
-            &recovery,
-            &MetadataTransferMediaMetadata::default(),
+            MetadataLocalIngestContent {
+                content: &content,
+                recovery: &recovery,
+                media: &MetadataTransferMediaMetadata::default()
+            },
             None,
             &absent,
             &[],
@@ -561,9 +581,11 @@ fn ingest_job_snapshot_fences_absence_and_generation_after_real_fallback_abort()
     let worker = std::thread::spawn(move || {
         FALLBACK_GATE.with(|gate| *gate.borrow_mut() = Some((reached, resume)));
         worker_db.commit_local_ingest(
-            &input,
-            &recovery,
-            &MetadataTransferMediaMetadata::default(),
+            MetadataLocalIngestContent {
+                content: &input,
+                recovery: &recovery,
+                media: &MetadataTransferMediaMetadata::default(),
+            },
             None,
             &captured,
             &[],

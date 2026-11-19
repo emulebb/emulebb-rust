@@ -45,7 +45,10 @@ pub struct MetadataDownloadGeometry {
 
 #[derive(Debug)]
 pub enum MetadataDownloadExecutionRow {
-    Header(MetadataDownloadExecutionHeader, MetadataDownloadGeometry),
+    Header(
+        Box<MetadataDownloadExecutionHeader>,
+        MetadataDownloadGeometry,
+    ),
     Piece(MetadataTransferPiece),
     Md4([u8; 16]),
     Aich([u8; 20]),
@@ -164,7 +167,7 @@ impl MetadataStore {
             "acquired AICH hashset differs from execution geometry"
         );
         consume(MetadataDownloadExecutionRow::Header(
-            MetadataDownloadExecutionHeader {
+            Box::new(MetadataDownloadExecutionHeader {
                 token,
                 file_hash: row.file_hash,
                 display_name: row.display_name,
@@ -192,7 +195,7 @@ impl MetadataStore {
                 delivered_path: row.delivered_path,
                 source_fingerprint: row.source_fingerprint,
                 payload_fingerprint: row.payload_fingerprint,
-            },
+            }),
             MetadataDownloadGeometry {
                 pieces: counts.0,
                 md4_hashes: counts.1,

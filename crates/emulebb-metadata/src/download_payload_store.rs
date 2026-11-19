@@ -36,7 +36,7 @@ pub struct MetadataDownloadPayloadPage {
 enum PayloadRead {
     Ineligible,
     Full,
-    Value(MetadataDownloadPayload),
+    Value(Box<MetadataDownloadPayload>),
 }
 fn read(conn: &Connection, id: JobId, allowance: usize) -> Result<PayloadRead> {
     let sql = format!("SELECT j.execution_generation,lower(hex(k.ed2k_hash)),j.display_name,
@@ -90,7 +90,7 @@ fn read(conn: &Connection, id: JobId, allowance: usize) -> Result<PayloadRead> {
     );
     let path = crate::native_path::path_from_row(row, 11, 12)?;
     let root: String = row.get(6)?;
-    Ok(PayloadRead::Value(MetadataDownloadPayload {
+    Ok(PayloadRead::Value(Box::new(MetadataDownloadPayload {
         token: JobToken {
             job_id: id,
             generation: crate::sql_value::unsigned(row, 0)?,
@@ -129,7 +129,7 @@ fn read(conn: &Connection, id: JobId, allowance: usize) -> Result<PayloadRead> {
                 extractor_version: row.get(26)?,
             },
         },
-    }))
+    })))
 }
 impl MetadataStore {
     /// At most `limit` indexed visible IDs are examined, even when all are
@@ -175,7 +175,7 @@ impl MetadataStore {
                         bytes <= crate::download_job_store::JOB_PAGE_BYTES,
                         "decoded payload row exceeds allowance"
                     );
-                    entries.push(value);
+                    entries.push(*value);
                 }
             }
             cursor = Some(id);
@@ -190,7 +190,7 @@ impl MetadataStore {
     pub fn download_payload_is_current(&self, expected: &MetadataDownloadPayload) -> Result<bool> {
         let conn = self.connection()?;
         Ok(
-            matches!(read(&conn,expected.token.job_id,crate::download_job_store::JOB_PAGE_BYTES)?, PayloadRead::Value(current) if current==*expected),
+            matches!(read(&conn,expected.token.job_id,crate::download_job_store::JOB_PAGE_BYTES)?, PayloadRead::Value(current) if *current==*expected),
         )
     }
     /// Resolve the sole unfinished job only at content-serving admission. The
@@ -214,7 +214,7 @@ impl MetadataStore {
             .map(|id| read(&conn, id, crate::download_job_store::JOB_PAGE_BYTES))
             .transpose()?
         {
-            Some(PayloadRead::Value(value)) => Ok(Some(value)),
+            Some(PayloadRead::Value(value)) => Ok(Some(*value)),
             Some(PayloadRead::Full) => anyhow::bail!("payload row exceeds allowance"),
             _ => Ok(None),
         }
@@ -234,7 +234,7 @@ impl MetadataStore {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let current = matches!(read(&tx,expected.token.job_id,crate::download_job_store::JOB_PAGE_BYTES)?,
-            PayloadRead::Value(current) if current==*expected);
+            PayloadRead::Value(current) if *current==*expected);
         let excluded: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM download_delivery_exclusions
             WHERE platform=?1 AND native_path=?2)",

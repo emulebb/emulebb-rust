@@ -57,7 +57,7 @@ fn payload(store: &MetadataStore, marker: u8) -> MetadataDownloadPayload {
     )
     .unwrap()
     {
-        PayloadRead::Value(value) => value,
+        PayloadRead::Value(value) => *value,
         _ => panic!("verified job must be a candidate"),
     }
 }

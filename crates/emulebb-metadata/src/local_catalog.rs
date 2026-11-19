@@ -10,6 +10,9 @@ use rusqlite::{Row, params};
 
 const CATALOG_COUNT_SQL: &str = "SELECT count(*) FROM temp.session_library_catalog";
 
+/// Ordered complete-share eligibility and optional partial offers from one SQL snapshot.
+pub type MetadataVerifiedShareBatch = Vec<(bool, Option<MetadataPartialOffer>)>;
+
 // All eligible-copy readers compare both actual identity observations. This
 // fragment accepts only a source-code SQL alias, never request input.
 macro_rules! unexcluded_identity_sql {
@@ -148,7 +151,7 @@ impl MetadataStore {
     pub fn try_verified_share_batch(
         &self,
         hashes: &[[u8; 16]],
-    ) -> Result<Option<Vec<(bool, Option<MetadataPartialOffer>)>>> {
+    ) -> Result<Option<MetadataVerifiedShareBatch>> {
         anyhow::ensure!(
             hashes.len() <= 200,
             "shared eligibility batch exceeds 200 hashes"

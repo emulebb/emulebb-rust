@@ -229,9 +229,11 @@ impl LocalMutationRegistry {
                             })
                             .collect::<Result<Vec<_>>>()?;
                         match metadata.commit_local_ingest(
-                            &prepared.content,
-                            &prepared.recovery,
-                            &prepared.media,
+                            emulebb_metadata::MetadataLocalIngestContent {
+                                content: &prepared.content,
+                                recovery: &prepared.recovery,
+                                media: &prepared.media,
+                            },
                             expected.as_ref(),
                             &jobs,
                             &roots,
