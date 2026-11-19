@@ -199,6 +199,110 @@ async fn cancelled_explicit_root_writer_is_published_before_drain() {
 }
 
 #[tokio::test]
+async fn cancelled_watch_edit_publishes_only_addressed_root_without_scan() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let base = crate::unique_runtime_dir("root-watch-owner");
+    let roots: Vec<_> = ["alpha", "beta"]
+        .into_iter()
+        .map(|name| crate::SharedDirectoryRoot {
+            path: base.join(name).to_string_lossy().into_owned(),
+            watch_enabled: false,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        })
+        .collect();
+    core.metadata_store
+        .clone()
+        .replace_shared_directory_roots(
+            &roots
+                .iter()
+                .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
+                    path: root.path.clone(),
+                    watch_enabled: root.watch_enabled,
+                    monitor_owned: root.monitor_owned,
+                    shareable: root.shareable,
+                    accessible: root.accessible,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    core.state.lock().await.shared_directories = roots.clone();
+    let id = core.metadata_store.library_root_page(0, 100).unwrap().items[0].id;
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let writer = {
+        let core = core.clone();
+        tokio::spawn(async move { core.patch_library_root_watch(id, true).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .unwrap();
+    assert!(
+        core.metadata_store
+            .library_root(id)
+            .unwrap()
+            .unwrap()
+            .watch_enabled
+    );
+    assert_eq!(core.state.lock().await.shared_directories, roots);
+    writer.abort();
+    let _ = writer.await;
+    gate.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), owner.close_and_drain())
+        .await
+        .unwrap()
+        .unwrap();
+    let cached = core.state.lock().await.shared_directories.clone();
+    assert!(cached[0].watch_enabled);
+    assert_eq!(cached[1], roots[1]);
+    assert!(!core.shared_reload_running.load(Ordering::Acquire));
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn managed_root_watch_edit_preserves_ownership_and_missing_id_is_absent() {
+    let core =
+        crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+            .unwrap();
+    let incoming = crate::unique_runtime_dir("managed-root-watch-owner");
+    core.metadata_store
+        .clone()
+        .replace_implicit_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
+            path: incoming.to_string_lossy().into_owned(),
+            watch_enabled: false,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+    let id = core.metadata_store.library_root_page(0, 100).unwrap().items[0].id;
+    let result = core
+        .patch_library_root_watch(id, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.managed && result.watch_enabled);
+    assert!(
+        core.patch_library_root_watch(i64::MAX, true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!core.shared_reload_running.load(Ordering::Acquire));
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
 async fn cancelled_root_request_still_scans_committed_directory() {
     let core =
         crate::EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())

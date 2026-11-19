@@ -71,6 +71,11 @@ pub(crate) enum CategoryCommand {
         id: i64,
         sharing: CategorySharingContext,
     },
+    PatchRootWatch {
+        id: i64,
+        enabled: bool,
+        sharing: CategorySharingContext,
+    },
     ReplaceRoots {
         expected: Vec<crate::SharedDirectoryRoot>,
         implicit: Vec<crate::SharedDirectoryRoot>,
@@ -81,6 +86,7 @@ pub(crate) enum CategoryCommand {
 }
 
 pub(super) enum CategoryDbCommand {
+    PatchRootWatch(i64, bool),
     PatchDownload {
         patch: emulebb_metadata::MetadataDownloadPatch,
         publication: emulebb_ed2k::ed2k_transfer::PreparedDownloadPatch,
@@ -106,6 +112,7 @@ pub(super) enum CategoryDbCommand {
 }
 
 pub(super) enum CategoryWrite {
+    RootWatch(Option<emulebb_metadata::MetadataLibraryRoot>),
     DownloadPatched(
         Result<
             Option<emulebb_metadata::MetadataDownloadPatched>,
@@ -135,6 +142,9 @@ pub(super) fn execute(
     command: CategoryDbCommand,
 ) -> anyhow::Result<CategoryWrite> {
     match command {
+        CategoryDbCommand::PatchRootWatch(id, enabled) => store
+            .patch_library_root_watch(id, enabled)
+            .map(CategoryWrite::RootWatch),
         CategoryDbCommand::PatchDownload {
             patch,
             publication,
@@ -239,6 +249,7 @@ impl CategoryCommand {
                 .saturating_add(comment.as_ref().map_or(0, String::capacity))
                 .saturating_add(sharing.incoming.as_os_str().len()),
             Self::Delete { sharing, .. } => sharing.incoming.as_os_str().len(),
+            Self::PatchRootWatch { .. } => 0,
             Self::ReplaceRoots {
                 expected,
                 implicit,
@@ -268,6 +279,29 @@ impl CategoryCommand {
 }
 
 impl PersistenceOwner {
+    pub(crate) async fn patch_root_watch(
+        &self,
+        id: i64,
+        enabled: bool,
+        sharing: CategorySharingContext,
+    ) -> Result<Option<emulebb_metadata::MetadataLibraryRoot>, PersistenceError> {
+        // Reserve native path and publication workspace before committing the edit.
+        let charge = FIXED_CHARGE + CATEGORY_PROBE_BYTES;
+        match self
+            .submit_reserved(charge, || {
+                Ok(Command::Category(CategoryCommand::PatchRootWatch {
+                    id,
+                    enabled,
+                    sharing,
+                }))
+            })
+            .await?
+        {
+            Response::RootWatch(root) => Ok(root),
+            _ => Err(PersistenceError::Worker),
+        }
+    }
+
     pub(crate) async fn replace_explicit_roots(
         &self,
         mut command: CategoryCommand,
@@ -485,6 +519,53 @@ pub(super) async fn process(
         unreachable!()
     };
     let command = match command {
+        CategoryCommand::PatchRootWatch {
+            id,
+            enabled,
+            sharing,
+        } => {
+            let mutation = sharing
+                .runtime
+                .begin_category_root_mutation()
+                .await
+                .map_err(|_| PersistenceError::Worker)?;
+            let (response, receive) = oneshot::channel();
+            db.send(DbRequest {
+                command: DbCommand::Category(CategoryDbCommand::PatchRootWatch(id, enabled)),
+                response,
+            })
+            .map_err(|_| PersistenceError::Worker)?;
+            let DbResponse::Category(CategoryWrite::RootWatch(root)) = receive
+                .await
+                .map_err(|_| PersistenceError::CommitUnknown)??
+            else {
+                return Err(PersistenceError::Worker);
+            };
+            #[cfg(test)]
+            {
+                let gate = publication_gate.lock().unwrap().clone();
+                if let Some(gate) = gate {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+            }
+            if let Some(root) = &root {
+                let display =
+                    emulebb_metadata::NativePath::from(root.path.as_path()).display_path();
+                for cached in &mut state.lock().await.shared_directories {
+                    if cached.path == display {
+                        cached.watch_enabled = root.watch_enabled;
+                    }
+                }
+                // WHY: a watch edit changes subscriptions only; it must not reserve
+                // a catalog scan or disturb another root's cached health.
+                sharing.root_change.watch_changed();
+            }
+            if let Some(epoch) = mutation.finish() {
+                sharing.runtime.finish_scoped_root_publication(epoch).await;
+            }
+            return Ok(Response::RootWatch(root));
+        }
         CategoryCommand::CreateDownload(command) => {
             return Ok(Response::DownloadCreated(
                 super::download_create::process(
@@ -536,7 +617,9 @@ pub(super) async fn process(
         CategoryCommand::Create { sharing, .. }
         | CategoryCommand::Update { sharing, .. }
         | CategoryCommand::Delete { sharing, .. } => Some(sharing.clone()),
-        CategoryCommand::ReplaceRoots { .. } => unreachable!(),
+        CategoryCommand::ReplaceRoots { .. } | CategoryCommand::PatchRootWatch { .. } => {
+            unreachable!()
+        }
         CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => None,
     };
     let mut publication = match &command {
@@ -589,7 +672,9 @@ pub(super) async fn process(
             CategoryCommand::PatchDownload(_) | CategoryCommand::CreateDownload(_) => {
                 unreachable!()
             }
-            CategoryCommand::ReplaceRoots { .. } => unreachable!(),
+            CategoryCommand::ReplaceRoots { .. } | CategoryCommand::PatchRootWatch { .. } => {
+                unreachable!()
+            }
             CategoryCommand::Delete { id, .. } => {
                 let Some(existing) = state.categories.get(&id) else {
                     return Ok(Response::Category(Ok(None)));

@@ -580,6 +580,22 @@ impl EmulebbCore {
             .await
     }
 
+    /// Change one root's watch policy by immutable identity, including managed roots.
+    /// The admitted persistence owner completes publication even if the caller disconnects.
+    pub async fn patch_library_root_watch(
+        &self,
+        id: i64,
+        enabled: bool,
+    ) -> Result<Option<emulebb_metadata::MetadataLibraryRoot>> {
+        ensure!(id > 0, "root id must be positive");
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        Ok(owner
+            .patch_root_watch(id, enabled, self.category_sharing_context())
+            .await?)
+    }
+
     pub async fn remove_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
         self.replace_shared_directory_roots(ExplicitRootEdit::Remove(path.to_owned()))
             .await
