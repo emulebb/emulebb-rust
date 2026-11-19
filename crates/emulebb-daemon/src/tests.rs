@@ -633,7 +633,10 @@ fn load_parses_bootstrap_and_canonical_sqlite_settings() {
     assert_eq!(profile.ed2k.tcp_error_flooder_interval_minutes, 2);
     assert_eq!(profile.ed2k.tcp_error_flooder_threshold, 20);
     assert!(!profile.nat.enabled);
-    assert_eq!(profile.nat.backend_order, vec!["upnp-miniupnpc"]);
+    assert_eq!(
+        profile.nat.backend_order,
+        vec![emulebb_ed2k::nat::UPNP_MINIUPNPC_BACKEND]
+    );
     assert!(!profile.initial_shared_directory_reload);
     assert!(!profile.kad.publish_shared_files_enabled);
     assert_eq!(
@@ -661,6 +664,7 @@ fn transport_listeners_follow_the_admitted_networks() {
         values.network.ed2k_enabled = ed2k;
         values.network.kad_enabled = kad;
         let projected = runtime_settings::from_values(values, Vec::new());
+        assert!(projected.nat.validate().is_ok());
         assert_eq!(projected.ed2k.listen_port.is_some(), ed2k || kad);
         assert_eq!(projected.kad.listen_port.is_some(), ed2k || kad);
     }

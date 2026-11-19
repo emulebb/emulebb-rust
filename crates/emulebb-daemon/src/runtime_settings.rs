@@ -138,8 +138,8 @@ pub(super) fn from_values(
         .backend_order
         .iter()
         .map(|backend| match backend {
-            NatBackend::PcpNatpmp => "pcp-natpmp".to_owned(),
-            NatBackend::Upnp => "upnp-miniupnpc".to_owned(),
+            NatBackend::PcpNatpmp => emulebb_ed2k::nat::PCP_NATPMP_BACKEND.to_owned(),
+            NatBackend::Upnp => emulebb_ed2k::nat::UPNP_MINIUPNPC_BACKEND.to_owned(),
         })
         .collect();
     nat.pcp_server_ip = values.network.nat.pcp_server_ip.map(|ip| ip.to_string());
