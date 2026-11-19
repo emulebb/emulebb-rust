@@ -829,12 +829,6 @@ export function SharingView(props: {
     setWatchNewRoot(false);
   };
 
-  const setRootWatching = (rootPath: string, watchEnabled: boolean) =>
-    props.client.patch("shared-directories", {
-      confirmReplaceRoots: true,
-      roots: roots.map((root) => ({ path: root.path, watchEnabled: root.path === rootPath ? watchEnabled : root.watchEnabled }))
-    });
-
   const removeRoot = (rootPath: string) =>
     props.client.delete(`shared-directories/roots?path=${encodeURIComponent(rootPath)}`);
 
@@ -902,10 +896,7 @@ export function SharingView(props: {
                 <tr key={root.path}>
                   <td class="path-cell" title={displayPath(root.path)}>{displayPath(root.path)}</td>
                   <td>Folder tree</td>
-                  <td><input type="checkbox" aria-label={`Watch ${displayPath(root.path)}`} checked={root.watchEnabled} onChange={(event) => {
-                    const enabled = event.currentTarget.checked;
-                    void props.run(() => setRootWatching(root.path, enabled), "Watch policy saved");
-                  }} /></td>
+                  <td>{root.watchEnabled ? "Enabled" : "Off"}</td>
                   <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "available"} /></td>
                   <td>
                     <Action title="Remove" icon={<Trash2 size={15} />} onClick={() => {
