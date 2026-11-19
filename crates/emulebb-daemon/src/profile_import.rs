@@ -495,6 +495,7 @@ fn validate_manifest(manifest: ProfileImportManifest) -> Result<ValidatedImport>
         let accessible = path.is_dir();
         shared_roots.push(MetadataSharedDirectoryRoot {
             path: root.path,
+            watch_enabled: false,
             monitor_owned: false,
             shareable: accessible,
             accessible,

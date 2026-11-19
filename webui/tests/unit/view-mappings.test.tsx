@@ -9,6 +9,24 @@ afterEach(() => { vi.restoreAllMocks(); });
 const run = async (operation: () => Promise<unknown>) => { await operation(); };
 
 describe("canonical view mappings", () => {
+  it("opts a new root into watching without replacing other root choices", async () => {
+    const client = new RestClient();
+    const post = vi.spyOn(client, "post").mockResolvedValue({});
+    const patch = vi.spyOn(client, "patch").mockResolvedValue({});
+    render(<SharingView directories={{ roots: [
+      { path: "/library", watchEnabled: false, accessible: true, shareable: true },
+      { path: "/intake", watchEnabled: true, accessible: true, shareable: true }
+    ] }} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
+    expect(screen.getByLabelText("Watch for changes")).not.toBeChecked();
+    fireEvent.input(screen.getByRole("textbox", { name: "Server folder path" }), { target: { value: "/new" } });
+    fireEvent.click(screen.getByLabelText("Watch for changes"));
+    fireEvent.click(screen.getByRole("button", { name: "Add root" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("shared-directories/roots", { path: "/new", watchEnabled: true }));
+    expect(post).toHaveBeenCalledOnce();
+    expect(patch).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByLabelText("Watch for changes")).not.toBeChecked());
+  });
+
   it("uses total shared-file diagnostics rather than a bounded snapshot page and does not invent shared bytes", () => {
     const { unmount } = render(<Overview snapshot={{ status: { runtimeDiagnostics: { sharedFileCount: 1001 } } }}
       stats={{ sharedFiles: 3, sharedBytes: 123 }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]}

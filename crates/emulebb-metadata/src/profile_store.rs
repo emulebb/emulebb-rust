@@ -1170,6 +1170,7 @@ mod tests {
         store.update_category(&category, incoming).unwrap();
         let explicit = crate::MetadataSharedDirectoryRoot {
             path: "explicit".into(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

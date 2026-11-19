@@ -170,7 +170,7 @@ async fn removed_shared_root_survives_core_restart() {
 
     let file_hash = {
         let core = open_core(&metadata_path, &transfer_root);
-        core.add_shared_directory_root(&runtime_dir.display().to_string())
+        core.add_shared_directory_root(&runtime_dir.display().to_string(), false)
             .await
             .unwrap();
         let share = core

@@ -48,6 +48,7 @@ fn recovery_transaction_abort_repeats_conditional_binding_root_index_and_project
     db.clone()
         .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -283,6 +284,7 @@ fn fallback_rechecks_binding_changed_after_actual_recovery_transaction_abort() {
     db.clone()
         .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -400,6 +402,7 @@ fn ingest_projection_and_copy_readers_skip_paired_exclusion_before_selecting_sib
     let mut db = MetadataStore::in_memory().unwrap();
     db.replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
         path: root.to_string_lossy().into_owned(),
+        watch_enabled: false,
         monitor_owned: false,
         shareable: true,
         accessible: true,

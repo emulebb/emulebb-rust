@@ -810,6 +810,7 @@ export function SharingView(props: {
   run: RunFunction;
 }) {
   const [path, setPath] = useState("");
+  const [watchNewRoot, setWatchNewRoot] = useState(false);
   const [ignorePattern, setIgnorePattern] = useState("");
   const roots = props.directories?.roots ?? [];
   const customPatterns = props.ignores?.custom ?? [];
@@ -823,8 +824,9 @@ export function SharingView(props: {
     if (!nextPath || pathError) {
       return;
     }
-    await props.client.post("shared-directories/roots", { path: nextPath });
+    await props.client.post("shared-directories/roots", { path: nextPath, watchEnabled: watchNewRoot });
     setPath("");
+    setWatchNewRoot(false);
   };
 
   const removeRoot = (rootPath: string) =>
@@ -865,7 +867,7 @@ export function SharingView(props: {
             </button>
           </div>
         </div>
-        <p class="hint">Incoming and category folders are shared automatically. Change the completed-file destination in Settings, then restart the service to apply it. Additional folder trees below are recursive and monitored.</p>
+        <p class="hint">Incoming and category folders are shared automatically. Additional folder trees are recursive. Watching is optional and off by default; use Reload to scan on demand.</p>
         <form class="form-row" onSubmit={(event) => {
           event.preventDefault();
           if (!pathError) {
@@ -873,6 +875,7 @@ export function SharingView(props: {
           }
         }}>
           <input class="form-control share-root-input" value={path} placeholder="Server folder path" aria-label="Server folder path" aria-invalid={pathError ? "true" : "false"} onInput={(event) => setPath(event.currentTarget.value)} />
+          <label><input type="checkbox" checked={watchNewRoot} onChange={(event) => setWatchNewRoot(event.currentTarget.checked)} /> Watch for changes</label>
           <button class="btn" type="submit" disabled={!path.trim() || Boolean(pathError)}><FolderPlus size={16} />Add root</button>
         </form>
         {pathError && <p class="field-error">{pathError}</p>}
@@ -883,6 +886,7 @@ export function SharingView(props: {
               <tr>
                 <th class="root-path-column">Folder</th>
                 <th class="root-mode-column">Mode</th>
+                <th>Watch</th>
                 <th class="root-status-column">Status</th>
                 <th class="root-actions-column">Actions</th>
               </tr>
@@ -892,7 +896,8 @@ export function SharingView(props: {
                 <tr key={root.path}>
                   <td class="path-cell" title={displayPath(root.path)}>{displayPath(root.path)}</td>
                   <td>Folder tree</td>
-                  <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "monitored"} /></td>
+                  <td>{root.watchEnabled ? "Enabled" : "Off"}</td>
+                  <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "available"} /></td>
                   <td>
                     <Action title="Remove" icon={<Trash2 size={15} />} onClick={() => {
                       if (window.confirm("Remove this shared folder tree?")) {
@@ -902,7 +907,7 @@ export function SharingView(props: {
                   </td>
                 </tr>
               ))}
-              {roots.length === 0 && <EmptyRow colSpan={4} text="No shared folders." />}
+              {roots.length === 0 && <EmptyRow colSpan={5} text="No shared folders." />}
             </tbody>
           </table>
         </TableScroll>

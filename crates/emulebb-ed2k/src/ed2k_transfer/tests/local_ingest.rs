@@ -18,6 +18,7 @@ fn runtime(label: &str) -> (Arc<Ed2kTransferRuntime>, PathBuf) {
         .clone()
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

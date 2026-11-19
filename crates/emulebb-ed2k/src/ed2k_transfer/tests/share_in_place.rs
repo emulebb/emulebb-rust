@@ -477,6 +477,7 @@ async fn root_member_upload_withdraws_changed_path_without_erasing_hash_cache() 
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
             path: shared_root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -568,6 +569,7 @@ async fn complete_local_file_never_creates_a_transfer() {
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
             path: shared_root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

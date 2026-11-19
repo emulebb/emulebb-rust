@@ -201,18 +201,6 @@ pub struct Ed2kLocalIngestSummary {
     pub path: String,
 }
 
-/// One persisted share-in-place entry used by the incremental shared-directory
-/// reload to decide whether a scanned file can be reused without re-hashing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ed2kReloadIndexEntry {
-    /// ED2K file hash of the persisted share (lowercase hex), used to resolve the
-    /// reused `LocalShare` without re-hashing the payload.
-    pub file_hash: String,
-    /// Native file identity, size, and timestamps captured when the hash was
-    /// computed. `None` is always a reload miss.
-    pub source_fingerprint: Option<NativeFileFingerprint>,
-}
-
 /// Opaque process-local identifier for one pending callback ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ed2kCallbackTicketId(pub(super) u64);

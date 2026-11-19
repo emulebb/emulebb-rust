@@ -102,6 +102,20 @@ pub struct MetadataLocalFileInstance {
     pub secondary_identity: Option<crate::NativeFileIdentity>,
 }
 
+/// One indexed path/fingerprint lookup for a shared-root reload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataLocalReloadEntry {
+    pub path_id: i64,
+    pub file_hash: [u8; 16],
+    pub source_fingerprint: NativeFileFingerprint,
+}
+
+pub(crate) const LOCAL_RELOAD_ENTRY_SQL: &str =
+    "SELECT i.path_id,k.ed2k_hash,i.verified_fingerprint
+    FROM local_paths p JOIN local_file_instances i ON i.path_id=p.id
+    JOIN known_files k ON k.id=i.known_file_id
+    WHERE p.platform=?1 AND p.native_path=?2";
+
 /// Local content hashes computed by Rust or accepted from a stock hash cache.
 #[derive(Debug, Clone)]
 pub struct MetadataVerifiedLocalContent {
@@ -694,40 +708,50 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
-    /// Enumerate verified path identities for an incremental shared-root scan.
-    /// Membership is intentionally independent; the scan decides which paths
-    /// still belong to configured roots.
-    pub fn verified_local_file_instances(&self) -> Result<Vec<MetadataLocalFileInstance>> {
+    /// Capture only numeric path IDs and binary hashes for missing-source counts.
+    /// No native paths, fingerprints or geometry are retained in this snapshot.
+    pub fn local_reload_identities(&self) -> Result<Vec<(i64, [u8; 16])>> {
         let conn = self.connection()?;
         let mut statement = conn.prepare(
-            "SELECT local_paths.platform, local_paths.native_path,
-                    lower(hex(known_files.ed2k_hash)), local_file_instances.size_bytes,
-                    local_file_instances.verified_fingerprint,local_file_instances.secondary_identity
+            "SELECT local_file_instances.path_id,known_files.ed2k_hash
              FROM local_file_instances
-             JOIN local_paths ON local_paths.id = local_file_instances.path_id
-             JOIN known_files ON known_files.id = local_file_instances.known_file_id
-             ORDER BY local_paths.platform, local_paths.native_path",
+             JOIN known_files ON known_files.id=local_file_instances.known_file_id",
         )?;
-        let rows = statement.query_map([], |row| {
-            let bytes: Vec<u8> = row.get(4)?;
-            let fingerprint =
-                NativeFileFingerprint::from_storage_bytes(&bytes).ok_or_else(|| {
-                    rusqlite::Error::InvalidColumnType(
-                        4,
-                        "verified_fingerprint".to_string(),
-                        rusqlite::types::Type::Blob,
-                    )
-                })?;
-            Ok(MetadataLocalFileInstance {
-                path: path_from_row(row, 0, 1)?,
-                file_hash: row.get(2)?,
-                file_size: crate::sql_value::unsigned::<u64>(row, 3)?,
-                verified_fingerprint: fingerprint,
-                secondary_identity: crate::native_file::optional_identity_from_row(row, 5)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let mut rows = statement.query([])?;
+        let mut identities = Vec::new();
+        while let Some(row) = rows.next()? {
+            let hash = row
+                .get_ref(1)?
+                .as_blob()?
+                .try_into()
+                .context("stored ED2K hash must contain 16 bytes")?;
+            identities.push((row.get(0)?, hash));
+        }
+        Ok(identities)
+    }
+
+    /// Read one persisted native fingerprint through the unique path index.
+    /// Root membership remains independent; the scan establishes current intent.
+    pub fn local_reload_entry(&self, path: &Path) -> Result<Option<MetadataLocalReloadEntry>> {
+        let native = NativePath::from(path);
+        let conn = self.connection()?;
+        let mut statement = conn.prepare_cached(LOCAL_RELOAD_ENTRY_SQL)?;
+        let mut rows = statement.query(params![NativePath::platform(), native.storage_bytes()])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(MetadataLocalReloadEntry {
+            path_id: row.get(0)?,
+            file_hash: row
+                .get_ref(1)?
+                .as_blob()?
+                .try_into()
+                .context("stored ED2K hash must contain 16 bytes")?,
+            source_fingerprint: NativeFileFingerprint::from_storage_bytes(
+                row.get_ref(2)?.as_blob()?,
+            )
+            .context("invalid persisted native fingerprint")?,
+        }))
     }
 
     /// Find a verified prior path after a rename or hard link. A matching
@@ -1143,6 +1167,7 @@ mod tests {
         store
             .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
                 path: root.to_string_lossy().into_owned(),
+                watch_enabled: false,
                 monitor_owned: false,
                 shareable: true,
                 accessible: true,
@@ -1331,6 +1356,7 @@ mod tests {
         store
             .replace_shared_directory_roots(&[crate::MetadataSharedDirectoryRoot {
                 path: root.to_string_lossy().into_owned(),
+                watch_enabled: false,
                 monitor_owned: false,
                 shareable: true,
                 accessible: true,

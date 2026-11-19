@@ -984,13 +984,14 @@ pub(super) fn validate_shared_directory_root_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
     for name in object.keys() {
-        if name.as_str() != "path" {
+        if !matches!(name.as_str(), "path" | "watchEnabled") {
             return Err(invalid_body_error(format!(
                 "unknown shared-directory root field: {name}"
             )));
         }
     }
-    validate_path_text_body_field(object.get("path"), "path")
+    validate_path_text_body_field(object.get("path"), "path")?;
+    validate_optional_boolean_body_field(object, "watchEnabled")
 }
 
 pub(super) fn validate_shared_file_ignore_pattern_body_fields(

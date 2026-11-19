@@ -131,8 +131,7 @@ pub use model::{
     Ed2kCallbackDispatchPermit, Ed2kCallbackDownload, Ed2kCallbackReservation, Ed2kCallbackRoute,
     Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest,
     Ed2kDeliveryOwnership, Ed2kDeliveryState, Ed2kFileServingView, Ed2kLocalIngestSummary,
-    Ed2kPieceState, Ed2kReloadIndexEntry, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob,
-    Ed2kTransferState,
+    Ed2kPieceState, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 pub(crate) use model::{
     Ed2kAichHashset, Ed2kCallbackClaim, Ed2kCallbackClaimError, Ed2kCallbackClaimToken,

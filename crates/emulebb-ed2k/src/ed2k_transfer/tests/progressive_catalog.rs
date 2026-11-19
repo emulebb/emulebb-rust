@@ -31,6 +31,7 @@ async fn progressive_catalog_requires_explicit_initial_hydration() {
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -193,6 +194,7 @@ async fn byte_capped_catalog_pages_advance_past_rejected_candidate_without_skipp
     metadata
         .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

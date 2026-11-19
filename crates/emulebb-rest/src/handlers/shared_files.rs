@@ -147,7 +147,11 @@ pub(crate) async fn add_shared_directory_root(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    match state.core.add_shared_directory_root(&request.path).await {
+    match state
+        .core
+        .add_shared_directory_root(&request.path, request.watch_enabled)
+        .await
+    {
         Ok(directories) => api_ok(directories).into_response(),
         Err(error) => super::persistence::persistence_error(error),
     }

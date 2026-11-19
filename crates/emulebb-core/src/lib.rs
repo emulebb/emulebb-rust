@@ -525,7 +525,7 @@ pub struct EmulebbCore {
     category_probe_gate: TestWorkerGate,
     #[cfg(test)]
     category_probe_waiting: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    shared_root_change: Arc<tokio::sync::Notify>,
+    shared_root_change: Arc<shared_dir_monitor::RootChangeSignal>,
     category_probe_sender: Arc<
         std::sync::Mutex<
             Option<tokio::sync::mpsc::Sender<persistence_owner::category::CategoryProbeJob>>,
@@ -763,7 +763,7 @@ impl EmulebbCore {
             category_probe_gate: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             category_probe_waiting: Arc::new(std::sync::Mutex::new(None)),
-            shared_root_change: Arc::new(tokio::sync::Notify::new()),
+            shared_root_change: Arc::default(),
             category_probe_sender: Arc::new(std::sync::Mutex::new(None)),
             category_probe_slot: Arc::new(tokio::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),

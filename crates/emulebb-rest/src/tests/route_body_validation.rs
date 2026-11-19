@@ -846,12 +846,12 @@ async fn shared_directories_patch_body_uses_canonical_root_validation() {
             "path must be a non-empty string path",
         ),
         (
-            r#"{"roots":[{"path":"C:/Shared","depth":1}],"confirmReplaceRoots":true}"#,
-            "unknown shared-directory root field: depth",
+            r#"{"roots":[{"path":"C:/Shared","unexpected":1}],"confirmReplaceRoots":true}"#,
+            "unknown shared-directory root field: unexpected",
         ),
         (
-            r#"{"roots":[{"path":"C:/Shared","recursive":true}],"confirmReplaceRoots":true}"#,
-            "unknown shared-directory root field: recursive",
+            r#"{"roots":[{"path":"C:/Shared","watchEnabled":"true"}],"confirmReplaceRoots":true}"#,
+            "watchEnabled must be a boolean",
         ),
     ];
 
@@ -876,8 +876,12 @@ async fn shared_directory_root_operation_body_uses_canonical_validation() {
         (r#"{"path":1}"#, "path must be a non-empty string path"),
         (r#"{"path":"   "}"#, "path must not be empty"),
         (
-            r#"{"path":"C:/Shared","recursive":true}"#,
-            "unknown JSON field: recursive",
+            r#"{"path":"C:/Shared","unexpected":true}"#,
+            "unknown JSON field: unexpected",
+        ),
+        (
+            r#"{"path":"C:/Shared","watchEnabled":null}"#,
+            "watchEnabled must be a boolean",
         ),
     ];
 

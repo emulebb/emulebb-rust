@@ -116,9 +116,9 @@ pub use kad_routing_store::{
     KAD_ROUTING_MAX_CONTACTS, KadRoutingContact, KadRoutingContactType, KadRoutingSnapshot,
 };
 pub use local_file_store::{
-    MetadataContentConflict, MetadataLocalFileInstance, MetadataLocalShareEntry,
-    MetadataSharedFileCursor, MetadataSharedFilePage, MetadataSharedFileQuery,
-    MetadataVerifiedLocalContent,
+    MetadataContentConflict, MetadataLocalFileInstance, MetadataLocalReloadEntry,
+    MetadataLocalShareEntry, MetadataSharedFileCursor, MetadataSharedFilePage,
+    MetadataSharedFileQuery, MetadataVerifiedLocalContent,
 };
 pub use model::{MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataSharedDirectoryRoot};
 pub use native_file::{

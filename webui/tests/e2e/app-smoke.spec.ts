@@ -718,7 +718,7 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await expect(page.getByText("Folder added")).toBeVisible();
   const sharedDirectoryPost = requests.find((request) => request.method === "POST" && request.path === "shared-directories/roots");
   expect(sharedDirectoryPost).toBeDefined();
-  expect(JSON.parse(sharedDirectoryPost?.body ?? "{}")).toEqual({ path: "C:\\More\\Shared" });
+  expect(JSON.parse(sharedDirectoryPost?.body ?? "{}")).toEqual({ path: "C:\\More\\Shared", watchEnabled: false });
 
   const ignoresPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Share Ignores" }) });
   await ignoresPanel.getByRole("textbox", { name: "File name ignore pattern" }).fill(" *.private.bin ");
