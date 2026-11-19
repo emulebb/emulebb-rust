@@ -1592,11 +1592,11 @@ async fn apply_monitor_action(core: &EmulebbCore, roots: &[(PathBuf, i64)], acti
         MonitorAction::ScanRequired(paths) => Some(paths),
     };
     drop(_scan);
-    if let Some(paths) = loss {
-        if let Err(error) = mark_watcher_loss(core, roots, &paths).await {
-            core.shared_monitor_fault.store(true, Ordering::Release);
-            tracing::warn!(%error, "failed to persist watcher loss; explicit scan required");
-        }
+    if let Some(paths) = loss
+        && let Err(error) = mark_watcher_loss(core, roots, &paths).await
+    {
+        core.shared_monitor_fault.store(true, Ordering::Release);
+        tracing::warn!(%error, "failed to persist watcher loss; explicit scan required");
     }
 }
 

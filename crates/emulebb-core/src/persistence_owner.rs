@@ -130,7 +130,7 @@ enum Command {
 }
 
 enum Response {
-    Settings(settings::Outcome),
+    Settings(Box<settings::Outcome>),
     RootRead(crate::LibraryReply<crate::library_roots::Value>),
     RootLoss,
     ContentObserved(Result<(), PersistenceError>),
@@ -359,7 +359,7 @@ enum KadMergeOutcome {
 }
 
 enum DbResponse {
-    Settings(settings::SqlOutcome),
+    Settings(Box<settings::SqlOutcome>),
     RootRead(crate::library_roots::Value),
     RootLoss,
     SearchRead(search_read::Value),
@@ -520,7 +520,7 @@ impl PersistenceOwner {
                         let writing = command.writes();
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| settings::execute(&store, command)));
                         let result = match outcome {
-                            Ok(value) => value.map(DbResponse::Settings),
+                            Ok(value) => value.map(|outcome| DbResponse::Settings(Box::new(outcome))),
                             Err(_) => Err(if writing { PersistenceError::CommitUnknown } else { PersistenceError::Worker }),
                         };
                         drop(request.command);
