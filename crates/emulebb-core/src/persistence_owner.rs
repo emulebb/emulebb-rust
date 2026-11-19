@@ -461,7 +461,7 @@ pub(crate) struct PersistenceOwner {
     #[cfg(test)]
     fault: Arc<std::sync::atomic::AtomicU8>,
     #[cfg(test)]
-    pub(crate) publication_gate: Arc<StdMutex<Option<Arc<PublicationGate>>>>,
+    publication_gate: Arc<StdMutex<Option<Arc<PublicationGate>>>>,
     #[cfg(test)]
     worker_started: Arc<tokio::sync::Notify>,
     #[cfg(test)]
