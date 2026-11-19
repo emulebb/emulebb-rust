@@ -853,14 +853,16 @@ async fn settings_patch_preserves_unspecified_section_fields() {
 async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let runtime_dir = unique_test_dir("snapshot");
     let transfer_root = runtime_dir.join("transfers");
-    let first_file = runtime_dir.join("First.Snapshot.bin");
-    let second_file = runtime_dir.join("Second.Snapshot.bin");
+    let library_dir = runtime_dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    let first_file = library_dir.join("First.Snapshot.bin");
+    let second_file = library_dir.join("Second.Snapshot.bin");
     std::fs::write(&first_file, b"first snapshot payload").unwrap();
     std::fs::write(&second_file, b"second snapshot payload").unwrap();
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
-    core.create_library_root(&runtime_dir.display().to_string(), false)
+    core.create_library_root(&library_dir.display().to_string(), false)
         .await
         .unwrap()
         .unwrap();

@@ -261,18 +261,6 @@ pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> S
     }
 }
 
-pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> SharedDirectoryRoot {
-    let path = long_path(Path::new(&root.path));
-    let accessible = path.is_dir();
-    SharedDirectoryRoot {
-        path: normal_path_display(&root.path),
-        watch_enabled: root.watch_enabled,
-        monitor_owned: root.monitor_owned,
-        shareable: accessible,
-        accessible,
-    }
-}
-
 /// Incoming and category destinations are mandatory recursive share roots.
 /// They are derived from current settings rather than exposed as editable roots.
 fn root_sql_failure(error: anyhow::Error) -> anyhow::Error {
