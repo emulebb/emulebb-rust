@@ -1225,9 +1225,6 @@ struct ReloadHashTarget {
     file_size: u64,
     /// Native file fingerprint captured at planning time, when available.
     source_fingerprint: Option<NativeFileFingerprint>,
-    /// Existing hashes for this path, used to exclude them from the count of
-    /// hashes pruned because their paths disappeared from the complete scan.
-    stale_hashes: Vec<String>,
 }
 
 struct ReusedReloadShare {
@@ -1358,7 +1355,6 @@ fn reload_hash_target(
     disk_key: String,
     file_size: u64,
     source_fingerprint: Option<NativeFileFingerprint>,
-    stale_hashes: Vec<String>,
     reason: &str,
 ) -> ReloadHashTarget {
     ReloadHashTarget {
@@ -1370,7 +1366,6 @@ fn reload_hash_target(
         key,
         file_size,
         source_fingerprint,
-        stale_hashes,
     }
 }
 
@@ -1481,7 +1476,6 @@ async fn plan_incremental_reload_with_pruning(
                             disk_key,
                             size,
                             fingerprint,
-                            vec![file_hash],
                             "changed",
                         ));
                     }
@@ -1520,7 +1514,6 @@ async fn plan_incremental_reload_with_pruning(
                         disk_key,
                         size,
                         fingerprint,
-                        Vec::new(),
                         "new",
                     ));
                 }
