@@ -328,18 +328,29 @@ impl PersistenceOwner {
     }
 }
 
-async fn process_explicit_roots(
-    state: &Arc<Mutex<CoreState>>,
-    db: &mpsc::SyncSender<DbRequest>,
-    request: &mut Request,
-    continuation: &mut Option<CategoryContinuation>,
+struct RootReplacement {
     expected: Vec<crate::SharedDirectoryRoot>,
     implicit: Vec<crate::SharedDirectoryRoot>,
     proposed: Vec<crate::SharedDirectoryRoot>,
     sharing: CategorySharingContext,
     reload: Option<crate::shared_directories::ReloadReservation>,
+}
+
+async fn process_explicit_roots(
+    state: &Arc<Mutex<CoreState>>,
+    db: &mpsc::SyncSender<DbRequest>,
+    request: &mut Request,
+    continuation: &mut Option<CategoryContinuation>,
+    replacement: RootReplacement,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    let RootReplacement {
+        expected,
+        implicit,
+        proposed,
+        sharing,
+        reload,
+    } = replacement;
     let root_mutation = sharing
         .runtime
         .begin_category_root_mutation()
@@ -489,11 +500,13 @@ pub(super) async fn process(
                 db,
                 request,
                 continuation,
-                expected,
-                implicit,
-                proposed,
-                sharing,
-                reload,
+                RootReplacement {
+                    expected,
+                    implicit,
+                    proposed,
+                    sharing,
+                    reload,
+                },
                 #[cfg(test)]
                 publication_gate,
             )
