@@ -1,6 +1,5 @@
 use std::{
     env, fs,
-    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
@@ -473,20 +472,10 @@ fn create_default_profile_bootstrap(
         .rest
         .bind_addr
         .context("canonical REST bind_addr is missing")?;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(settings_path)
-        .with_context(|| format!("failed to create {}", settings_path.display()))?;
-    file.write_all(text.as_bytes())
-        .with_context(|| format!("failed to write {}", settings_path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync {}", settings_path.display()))?;
+    let owned_directory = settings_path
+        .parent()
+        .context("bootstrap settings have no parent directory")?;
+    host_bootstrap::publish(owned_directory, text, host_bootstrap::Publication::Create)?;
     eprintln!("Created eMuleBB profile at {}", profile_dir.display());
     eprintln!("WebUI: http://{listener}/  API key: see emulebb-rust-settings.toml");
     Ok(())

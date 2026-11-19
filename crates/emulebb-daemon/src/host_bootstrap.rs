@@ -50,15 +50,31 @@ pub fn write(profile_dir: &Path, rest: RestBootstrapSettings) -> Result<()> {
     validate(&rest)?;
     let lease = ProfileLease::acquire(profile_dir, true)?;
     let text = toml::to_string(&DaemonBootstrapSettings { rest })?;
-    let mut temporary = tempfile::NamedTempFile::new_in(lease.directory())?;
+    publish(lease.directory(), &text, Publication::Replace)
+}
+
+pub(super) enum Publication {
+    Create,
+    Replace,
+}
+
+/// Publish complete, synced bootstrap bytes under an already-held profile lease.
+/// Creation never replaces an existing file, including one published externally.
+pub(super) fn publish(profile_dir: &Path, text: &str, mode: Publication) -> Result<()> {
+    // WHY: writing the final name directly can leave a truncated bootstrap after
+    // interruption. Readers must see either the existing file or complete bytes.
+    let mut temporary = tempfile::NamedTempFile::new_in(profile_dir)?;
     temporary.write_all(text.as_bytes())?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist(lease.directory().join(PROFILE_SETTINGS_FILE))
-        .map_err(|error| error.error)
-        .context("failed to publish bootstrap settings")?;
+    let destination = profile_dir.join(PROFILE_SETTINGS_FILE);
+    match mode {
+        Publication::Create => temporary.persist_noclobber(destination),
+        Publication::Replace => temporary.persist(destination),
+    }
+    .map_err(|error| error.error)
+    .context("failed to publish bootstrap settings")?;
     #[cfg(unix)]
-    std::fs::File::open(lease.directory())?.sync_all()?;
+    std::fs::File::open(profile_dir)?.sync_all()?;
     Ok(())
 }
 
@@ -118,7 +134,7 @@ mod tests {
         );
         for text in [
             "[rest]\napi_key = '0123456789abcdef0123456789abcdef'",
-            "[rest]\nbindAddr = '127.0.0.1:20017'",
+            "[rest]\nunknown_field = 'sample'",
             "[rest]\nbind_addr = 'invalid'",
             "[rest]\napi_key = 'short'",
             "[unknown]\nvalue=1",
@@ -126,5 +142,33 @@ mod tests {
             std::fs::write(root.path().join(PROFILE_SETTINGS_FILE), text).unwrap();
             assert!(read(root.path()).is_err());
         }
+    }
+
+    #[test]
+    fn initial_publication_preserves_an_existing_file_without_truncating_it() {
+        let root = tempfile::tempdir().unwrap();
+        let _lease = ProfileLease::acquire(root.path(), false).unwrap();
+        let path = root.path().join(PROFILE_SETTINGS_FILE);
+        let existing = b"operator-owned contents";
+        std::fs::write(&path, existing).unwrap();
+
+        assert!(publish(root.path(), "replacement", Publication::Create).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), existing);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn failed_initial_publication_can_retry_without_partial_bootstrap() {
+        let root = tempfile::tempdir().unwrap();
+        let _lease = ProfileLease::acquire(root.path(), false).unwrap();
+        let path = root.path().join(PROFILE_SETTINGS_FILE);
+        std::fs::create_dir(&path).unwrap();
+        assert!(publish(root.path(), "complete bytes", Publication::Create).is_err());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+
+        std::fs::remove_dir(&path).unwrap();
+        publish(root.path(), "complete bytes", Publication::Create).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "complete bytes");
     }
 }

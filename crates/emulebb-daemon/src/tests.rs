@@ -2,6 +2,7 @@ use super::*;
 use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface, NetworkInterfaceAddress};
 use emulebb_settings::{BOOTSTRAP_SETTINGS_SURFACE, SettingSurfaceClass};
 use std::collections::BTreeSet;
+use std::io::Write;
 
 fn metadata_store(profile: &DaemonProfile) -> MetadataStore {
     MetadataStore::open(profile.metadata_path()).unwrap()
