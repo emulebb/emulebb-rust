@@ -179,6 +179,17 @@ impl fmt::Display for QueuedLowIdSourceFixtureError {
 impl std::error::Error for QueuedLowIdSourceFixtureError {}
 
 impl EmulebbCore {
+    /// Resolve only the selected generation; diagnostics cannot wake a replacement.
+    async fn diagnostic_selected_transfer(
+        &self,
+        hash: Ed2kHash,
+    ) -> anyhow::Result<Option<crate::Transfer>> {
+        let Some(token) = self.download_attempts.selected_token(hash.0) else {
+            return Ok(None);
+        };
+        self.selected_transfer(token).await
+    }
+
     /// Arm the responder-side prerequisite for one exact client-UDP queue-full
     /// transition. Packet receive, decision, encoding, transport, and requester
     /// application all remain on their ordinary production paths.
@@ -280,9 +291,8 @@ impl EmulebbCore {
         fixture: &QueuedLowIdSourceFixture,
     ) -> Result<(), QueuedLowIdSourceFixtureError> {
         let file_hash = Ed2kHash::from_bytes(fixture.file_hash);
-        let file_hash_hex = file_hash.to_string();
         let transfer = self
-            .transfers()
+            .diagnostic_selected_transfer(file_hash)
             .await
             .map_err(|error| {
                 fixture_failure(
@@ -291,8 +301,6 @@ impl EmulebbCore {
                     error.to_string(),
                 )
             })?
-            .into_iter()
-            .find(|transfer| transfer.hash == file_hash_hex)
             .ok_or_else(|| {
                 fixture_failure(
                     fixture,
@@ -374,9 +382,8 @@ impl EmulebbCore {
         control: &QueuedSourceReaskControl,
     ) -> Result<(), QueuedSourceReaskControlError> {
         let file_hash = Ed2kHash::from_bytes(control.file_hash);
-        let file_hash_hex = file_hash.to_string();
         let transfer = self
-            .transfers()
+            .diagnostic_selected_transfer(file_hash)
             .await
             .map_err(|error| {
                 queued_source_control_error(
@@ -384,8 +391,6 @@ impl EmulebbCore {
                     error.to_string(),
                 )
             })?
-            .into_iter()
-            .find(|transfer| transfer.hash == file_hash_hex)
             .ok_or_else(|| {
                 queued_source_control_error(
                     QueuedSourceReaskControlErrorKind::TransferNotFound,
