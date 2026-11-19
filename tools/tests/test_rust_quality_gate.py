@@ -150,7 +150,7 @@ class TestDiagnosticsGate(unittest.TestCase):
     def test_workspace_gate_includes_local_kad_swarm(self) -> None:
         label, command = QUALITY_GATE.test_workspace_step()
         self.assertEqual(label, "workspace tests")
-        self.assertEqual(command, ["cargo", "test", "--workspace", "--locked"])
+        self.assertEqual(command, ["cargo", "test", "--workspace", "--locked", "--no-fail-fast"])
 
     def test_composite_gates_do_not_duplicate_kad_swarm(self) -> None:
         for gate in ("ci", "ci-test"):
