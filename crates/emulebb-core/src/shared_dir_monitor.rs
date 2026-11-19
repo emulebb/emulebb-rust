@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
+use notify_debouncer_full::notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
@@ -121,6 +121,11 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
         event.paths.iter().cloned().map(variant).collect()
     };
     match event.kind {
+        // A directory notification does not enumerate all descendants. Native
+        // recursive registration can miss children created before it catches up.
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => {
+            vec![MonitorAction::ScanRequired(event.paths.clone())]
+        }
         EventKind::Create(_)
         | EventKind::Modify(
             ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any | ModifyKind::Other,
@@ -154,9 +159,14 @@ pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
                 }
             }
         },
-        EventKind::Remove(_) => map_paths(MonitorAction::Remove),
-        // Access / Other / Any: no shared-catalog consequence.
-        EventKind::Access(_) | EventKind::Other | EventKind::Any => Vec::new(),
+        EventKind::Remove(RemoveKind::File) => map_paths(MonitorAction::Remove),
+        EventKind::Remove(_) => {
+            let mut actions = map_paths(MonitorAction::Remove);
+            actions.push(MonitorAction::ScanRequired(event.paths.clone()));
+            actions
+        }
+        EventKind::Other | EventKind::Any => vec![MonitorAction::ScanRequired(event.paths.clone())],
+        EventKind::Access(_) => Vec::new(),
     }
 }
 
@@ -1568,15 +1578,24 @@ async fn apply_monitor_action(core: &EmulebbCore, roots: &[(PathBuf, i64)], acti
     } else {
         Some(core.shared_reload_gate.lock().await)
     };
-    match action {
-        MonitorAction::Share(path) => auto_share_monitored_path(core, &path).await,
-        MonitorAction::Remove(path) => auto_unshare_monitored_path(core, &path).await,
-        MonitorAction::Rename { from, to } => auto_relocate_monitored_path(core, &from, &to).await,
-        MonitorAction::ScanRequired(paths) => {
-            if let Err(error) = mark_watcher_loss(core, roots, &paths).await {
-                core.shared_monitor_fault.store(true, Ordering::Release);
-                tracing::warn!(%error, "failed to persist watcher loss; explicit scan required");
-            }
+    let loss = match action {
+        MonitorAction::Share(path) => auto_share_monitored_path(core, &path)
+            .await
+            .then(|| vec![path]),
+        MonitorAction::Remove(path) => {
+            auto_unshare_monitored_path(core, &path).await;
+            None
+        }
+        MonitorAction::Rename { from, to } => auto_relocate_monitored_path(core, &from, &to)
+            .await
+            .then(|| vec![from, to]),
+        MonitorAction::ScanRequired(paths) => Some(paths),
+    };
+    drop(_scan);
+    if let Some(paths) = loss {
+        if let Err(error) = mark_watcher_loss(core, roots, &paths).await {
+            core.shared_monitor_fault.store(true, Ordering::Release);
+            tracing::warn!(%error, "failed to persist watcher loss; explicit scan required");
         }
     }
 }
@@ -1587,7 +1606,8 @@ async fn apply_monitor_action(core: &EmulebbCore, roots: &[(PathBuf, i64)], acti
 /// would reread unchanged payload bytes, churn the catalog, and briefly make the
 /// file unavailable. If the native fingerprint changed during the move, relocate first and
 /// then let the regular share path rehash exactly once from the destination.
-async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path) {
+/// Returns true for a directory destination whose descendants require a scan.
+async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path) -> bool {
     // WHY: expanding a paired rename into Remove + Share globally unshares the
     // hash, rereads unchanged content, and leaves stale source rows when a large
     // burst outruns the serial consumer. Preserve the source identity atomically.
@@ -1601,20 +1621,23 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
         .get(&old_key)
         .cloned();
     let Some(previous) = previous else {
-        auto_share_monitored_path(core, to).await;
-        return;
+        return auto_share_monitored_path(core, to).await;
     };
     let metadata = match tokio::fs::metadata(&new_key).await {
         Ok(metadata) if metadata.is_file() => metadata,
+        Ok(metadata) if metadata.is_dir() => {
+            auto_unshare_monitored_path(core, from).await;
+            return true;
+        }
         _ => {
             auto_unshare_monitored_path(core, from).await;
-            return;
+            return false;
         }
     };
     match load_shared_file_ignore_policy(core) {
         Ok(policy) if policy.should_ignore(&new_key, &metadata) => {
             auto_unshare_monitored_path(core, from).await;
-            return;
+            return false;
         }
         Ok(_) => {}
         Err(error) => {
@@ -1623,7 +1646,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
                 error = %error,
                 "failed to load shared-file exclusions for monitored rename",
             );
-            return;
+            return false;
         }
     }
     let (_, _file_size, source_fingerprint) =
@@ -1637,11 +1660,10 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
         .is_some_and(|(stored, current)| stored.safely_matches(current));
     if !identity_unchanged {
         auto_unshare_monitored_path(core, from).await;
-        auto_share_monitored_path(core, to).await;
-        return;
+        return auto_share_monitored_path(core, to).await;
     }
     let Some(fingerprint) = source_fingerprint.as_ref() else {
-        return;
+        return false;
     };
     let metadata = core.metadata_store.clone();
     let new_path = new_key.clone();
@@ -1666,11 +1688,11 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(from = %from.display(), to = %to.display(), %error, "failed to cache renamed shared path");
-            return;
+            return false;
         }
         Err(error) => {
             tracing::warn!(from = %from.display(), to = %to.display(), %error, "renamed shared path cache task panicked");
-            return;
+            return false;
         }
     }
     match admit_monitored_path(core, &new_key, fingerprint, &previous.hash).await {
@@ -1681,7 +1703,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
                 .await
             {
                 tracing::warn!(from = %from.display(), %error, "failed to withdraw renamed old path");
-                return;
+                return false;
             }
             let current_hash = previous.hash.clone();
             let mut state = core.state.lock().await;
@@ -1707,6 +1729,7 @@ async fn auto_relocate_monitored_path(core: &EmulebbCore, from: &Path, to: &Path
             tracing::warn!(from = %from.display(), to = %to.display(), %error, "failed to admit renamed shared path")
         }
     }
+    false
 }
 
 /// Stop the live shared-directory monitor (if running). Idempotent.
@@ -1766,21 +1789,26 @@ async fn stop_monitor_locked(core: &EmulebbCore) -> anyhow::Result<()> {
 /// source-path -> hash mapping so a later remove can resolve it. Re-sharing an
 /// already-shared identical file is cheap/idempotent. A vanished/unreadable file
 /// (settled then disappeared) is logged and skipped, not propagated.
-async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
+/// Returns true when the existing metadata read discovers a directory event.
+async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) -> bool {
     let key = monitor_shared_key(path);
     let metadata = match tokio::fs::metadata(&key).await {
         Ok(metadata) if metadata.is_file() => metadata,
+        Ok(metadata) if metadata.is_dir() => {
+            auto_unshare_monitored_path(core, path).await;
+            return true;
+        }
         // Windows can report an ambiguous rename/modify event for a path that
         // has already disappeared. Reconcile it as a removal so the old hash is
-        // not left offered until a manual reload. Directory events are harmless
-        // because directories never have an entry in the path -> share map.
+        // not left offered until a manual reload. Other non-file types cannot
+        // contribute a verified file entry.
         Ok(_) => {
             auto_unshare_monitored_path(core, path).await;
-            return;
+            return false;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             auto_unshare_monitored_path(core, path).await;
-            return;
+            return false;
         }
         Err(error) => {
             tracing::warn!(
@@ -1788,7 +1816,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
                 error = %error,
                 "failed to stat monitored file (skipping)",
             );
-            return;
+            return false;
         }
     };
     let (_, _file_size, source_fingerprint) =
@@ -1811,7 +1839,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
     }) {
         // Another event in the same logical write burst already ingested this
         // settled identity. A stat is enough; do not re-read the payload.
-        return;
+        return false;
     }
     // WHY: an unpaired destination event is a common Windows rename shape.
     // Reuse a vanished path's verified native identity before starting a full
@@ -1839,13 +1867,15 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
         {
             continue;
         }
-        Box::pin(auto_relocate_monitored_path(core, &old_path, &key)).await;
+        if Box::pin(auto_relocate_monitored_path(core, &old_path, &key)).await {
+            return true;
+        }
         if core
             .metadata_store
             .local_file_has_root_membership(&key)
             .unwrap_or(false)
         {
-            return;
+            return false;
         }
     }
     match core
@@ -1920,6 +1950,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
             );
         }
     }
+    false
 }
 
 /// Auto-remove a file the live monitor saw removed / renamed away. The file is
@@ -2760,6 +2791,157 @@ mod tests {
     }
 
     #[test]
+    fn subtree_and_unknown_events_report_incomplete_scope() {
+        for kind in [
+            EventKind::Create(CreateKind::Folder),
+            EventKind::Remove(RemoveKind::Folder),
+            EventKind::Any,
+            EventKind::Other,
+        ] {
+            let event = debounced(kind, vec!["/share/subtree"]);
+            assert_eq!(
+                classify_event(&event),
+                vec![loss_notice(&["/share/subtree"])]
+            );
+        }
+    }
+
+    #[test]
+    fn untyped_removal_keeps_file_work_and_reports_possible_subtree_loss() {
+        for kind in [RemoveKind::Any, RemoveKind::Other] {
+            let event = debounced(EventKind::Remove(kind), vec!["/share/subtree"]);
+            assert_eq!(
+                classify_event(&event),
+                vec![remove("/share/subtree"), loss_notice(&["/share/subtree"])]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subtree_notifications_recover_only_by_explicit_scan_and_preserve_content_hashes() {
+        let root = std::env::temp_dir().join(format!("watch-subtree-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let core = EmulebbCore::new_in_memory(
+            "watch-subtree",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap();
+        configure_test_shared_root(&core, &root).await;
+        let id = core.metadata_store.library_root_page(0, 100).unwrap().items[0].id;
+        core.patch_library_root_watch(id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        let bindings = watched_root_identities(&core).await.unwrap();
+        let branch = root.join("branch");
+        std::fs::create_dir_all(&branch).unwrap();
+        std::fs::write(branch.join("sample.bin"), b"subtree payload").unwrap();
+
+        // An untyped create is identified by the existing stat, without a
+        // recursive event expansion or an automatic inventory walk.
+        apply_monitor_action(&core, &bindings, MonitorAction::Share(branch.clone())).await;
+        assert!(
+            core.library_root(id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        assert!(!core.shared_reload_running.load(Ordering::Acquire));
+        assert!(!core.shared_reload_pending.load(Ordering::Acquire));
+        assert!(core.shares().await.is_empty());
+        core.reload_shared_directories().await.unwrap();
+        assert!(
+            !core
+                .library_root(id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        let hash = core.shares().await[0].hash.clone();
+
+        let moved = root.join("moved");
+        std::fs::rename(&branch, &moved).unwrap();
+        apply_monitor_action(
+            &core,
+            &bindings,
+            MonitorAction::Rename {
+                from: branch,
+                to: moved.clone(),
+            },
+        )
+        .await;
+        assert!(
+            core.library_root(id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        assert!(!core.shared_reload_running.load(Ordering::Acquire));
+        core.reload_shared_directories().await.unwrap();
+        let shares = core.shares().await;
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].hash, hash);
+        assert_eq!(
+            shares[0].path,
+            moved.join("sample.bin").display().to_string()
+        );
+        assert_eq!(core.metadata_store.table_count("known_files").unwrap(), 1);
+        assert!(
+            !core
+                .library_root(id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+
+        std::fs::remove_dir_all(&moved).unwrap();
+        let notice = debounced(
+            EventKind::Remove(RemoveKind::Folder),
+            vec![moved.to_str().unwrap()],
+        );
+        for action in classify_event(&notice) {
+            apply_monitor_action(&core, &bindings, action).await;
+        }
+        assert!(
+            core.library_root(id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        assert!(!core.shared_reload_running.load(Ordering::Acquire));
+        core.reload_shared_directories().await.unwrap();
+        assert!(core.shares().await.is_empty());
+        assert!(
+            !core
+                .library_root(id)
+                .await
+                .unwrap()
+                .value()
+                .as_ref()
+                .unwrap()
+                .scan_required
+        );
+        core.drain_persistence().await.unwrap();
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn data_modify_event_classifies_as_share() {
         let kind = EventKind::Modify(ModifyKind::Data(
             notify_debouncer_full::notify::event::DataChange::Content,
@@ -3490,7 +3672,7 @@ mod tests {
         let hash = core.shares().await[0].hash.clone();
         std::fs::rename(&source, &destination).unwrap();
 
-        auto_relocate_monitored_path(&core, &source, &destination).await;
+        assert!(!auto_relocate_monitored_path(&core, &source, &destination).await);
 
         assert!(
             core.metadata_store
