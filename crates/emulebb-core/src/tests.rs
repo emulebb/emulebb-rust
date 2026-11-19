@@ -17,6 +17,7 @@ async fn configure_test_shared_root(core: &EmulebbCore, file: &Path) {
     let path = emulebb_ed2k::long_path::normal_path_display(std::fs::canonicalize(root).unwrap());
     core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
         path: path.clone(),
+        watch_enabled: false,
         monitor_owned: false,
         shareable: true,
         accessible: true,
@@ -25,6 +26,7 @@ async fn configure_test_shared_root(core: &EmulebbCore, file: &Path) {
         .clone()
         .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
             path,
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

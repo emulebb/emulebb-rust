@@ -36,6 +36,7 @@ async fn non_utf8_shared_path_survives_restart_rename_and_delete() {
         .unwrap();
         core.set_shared_directories(SharedDirectoriesUpdate {
             roots: vec![SharedDirectoryRootUpdate {
+                watch_enabled: false,
                 path: shared_root.display().to_string(),
             }],
             confirm_replace_roots: true,

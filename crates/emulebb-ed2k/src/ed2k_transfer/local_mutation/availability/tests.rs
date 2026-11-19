@@ -127,6 +127,7 @@ async fn offline_root_is_not_hidden_and_another_present_copy_wins() {
         .clone()
         .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
             path: path.parent().unwrap().to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: false,

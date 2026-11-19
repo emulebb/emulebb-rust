@@ -47,6 +47,7 @@ fn configure_roots(runtime: &Ed2kTransferRuntime, roots: &[&Path]) {
         .iter()
         .map(|root| MetadataSharedDirectoryRoot {
             path: root.to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,

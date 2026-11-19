@@ -455,6 +455,7 @@ export type SharedFilePublication = {
 
 export type SharedDirectoryRoot = {
   path: string;
+  watchEnabled: boolean;
   shareable?: boolean;
   accessible?: boolean;
   [key: string]: unknown;

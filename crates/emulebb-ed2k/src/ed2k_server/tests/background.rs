@@ -1195,6 +1195,7 @@ async fn cached_offer_batch_preserves_a_copy_in_another_root() {
                 .into_iter()
                 .map(|path| emulebb_metadata::MetadataSharedDirectoryRoot {
                     path: path.to_string_lossy().into_owned(),
+                    watch_enabled: false,
                     monitor_owned: false,
                     shareable: true,
                     accessible: true,

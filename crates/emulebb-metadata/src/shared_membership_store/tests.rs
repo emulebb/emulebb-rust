@@ -11,6 +11,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
     let file = nested.join("Sample.bin");
     let roots = [&root, &nested].map(|path| MetadataSharedDirectoryRoot {
         path: path.to_string_lossy().into_owned(),
+        watch_enabled: false,
         monitor_owned: false,
         shareable: true,
         accessible: true,
@@ -108,8 +109,36 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         PathBuf::from("Sample.bin"),
         fingerprint.clone(),
     );
+    let invalid_member = (
+        file.clone(),
+        PathBuf::from("../Sample.bin"),
+        fingerprint.clone(),
+    );
+    assert!(
+        store
+            .replace_root_memberships(
+                &root,
+                std::iter::once(verified_file.clone()).chain(std::iter::once(invalid_member)),
+            )
+            .is_err()
+    );
+    let counts: (i64, i64) = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM shared_file_memberships),
+                (SELECT count(*) FROM temp.session_verified_local_paths)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        counts,
+        (0, 0),
+        "late invalid input must roll back streamed admission"
+    );
     store
-        .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
+        .replace_root_memberships(&root, std::iter::once(verified_file.clone()))
         .unwrap();
     store
         .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
@@ -177,7 +206,12 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         .replace_root_memberships(&root, &[verified_file])
         .unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 1);
-    store.replace_root_memberships(&root, &[]).unwrap();
+    store
+        .replace_root_memberships(
+            &root,
+            std::iter::empty::<(PathBuf, PathBuf, NativeFileFingerprint)>(),
+        )
+        .unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 0);
 
     // An upload holding the old fingerprint must not withdraw a path that

@@ -338,6 +338,7 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
     seed_core
         .set_shared_directories(SharedDirectoriesUpdate {
             roots: vec![SharedDirectoryRootUpdate {
+                watch_enabled: false,
                 path: shared_root.display().to_string(),
             }],
             confirm_replace_roots: true,

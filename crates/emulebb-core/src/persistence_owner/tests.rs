@@ -48,6 +48,7 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
     let mut roots_store = store.clone();
     let root_row = crate::SharedDirectoryRoot {
         path: root.to_string_lossy().into_owned(),
+        watch_enabled: false,
         monitor_owned: false,
         shareable: true,
         accessible: true,
@@ -55,6 +56,7 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
     roots_store
         .replace_shared_directory_roots(&[emulebb_metadata::MetadataSharedDirectoryRoot {
             path: root_row.path.clone(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -100,7 +102,7 @@ async fn root_sql_failure_keeps_state_and_serving_then_retry_succeeds() {
         sharing: category::CategorySharingContext {
             runtime: Arc::clone(&runtime),
             incoming: Arc::new(root.join("incoming")),
-            root_change: Arc::new(tokio::sync::Notify::new()),
+            root_change: Arc::default(),
             probe_sender: std::sync::Weak::new(),
         },
         reload: None,
@@ -156,6 +158,7 @@ async fn cancelled_explicit_root_writer_is_published_before_drain() {
                         implicit: vec![],
                         proposed: vec![crate::SharedDirectoryRoot {
                             path: root.to_string_lossy().into_owned(),
+                            watch_enabled: false,
                             monitor_owned: false,
                             shareable: true,
                             accessible: true,
@@ -163,7 +166,7 @@ async fn cancelled_explicit_root_writer_is_published_before_drain() {
                         sharing: category::CategorySharingContext {
                             runtime,
                             incoming: Arc::new(root.join("incoming")),
-                            root_change: Arc::new(tokio::sync::Notify::new()),
+                            root_change: Arc::default(),
                             probe_sender: std::sync::Weak::new(),
                         },
                         reload: None,
@@ -215,7 +218,7 @@ async fn cancelled_root_request_still_scans_committed_directory() {
     let writer = {
         let core = core.clone();
         let path = root.to_string_lossy().into_owned();
-        tokio::spawn(async move { core.add_shared_directory_root(&path).await })
+        tokio::spawn(async move { core.add_shared_directory_root(&path, false).await })
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
@@ -276,7 +279,7 @@ async fn sealed_reload_handoff_reports_committed_root_without_scan() {
     let writer = {
         let core = core.clone();
         let path = root.to_string_lossy().into_owned();
-        tokio::spawn(async move { core.add_shared_directory_root(&path).await })
+        tokio::spawn(async move { core.add_shared_directory_root(&path, false).await })
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
@@ -329,6 +332,7 @@ async fn explicit_root_continuation_reconciles_each_removed_root() {
         .into_iter()
         .map(|name| crate::SharedDirectoryRoot {
             path: base.join(name).to_string_lossy().into_owned(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -338,6 +342,7 @@ async fn explicit_root_continuation_reconciles_each_removed_root() {
         .iter()
         .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
             path: root.path.clone(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -405,7 +410,7 @@ async fn explicit_root_continuation_reconciles_each_removed_root() {
             sharing: category::CategorySharingContext {
                 runtime: Arc::clone(&runtime),
                 incoming: Arc::new(base.join("incoming")),
-                root_change: Arc::new(tokio::sync::Notify::new()),
+                root_change: Arc::default(),
                 probe_sender: std::sync::Weak::new(),
             },
             reload: None,

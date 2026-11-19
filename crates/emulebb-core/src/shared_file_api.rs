@@ -11,7 +11,7 @@ struct SharedFilePublicationContext {
 
 enum ExplicitRootEdit {
     Replace(Vec<SharedDirectoryRoot>),
-    Add(String),
+    Add(String, bool),
     Remove(String),
 }
 
@@ -529,6 +529,11 @@ impl EmulebbCore {
             request.confirm_replace_roots,
             "confirmReplaceRoots must be true"
         );
+        let watch_policies: Vec<_> = request
+            .roots
+            .iter()
+            .map(|root| root.watch_enabled)
+            .collect();
         let paths = request.roots.into_iter().map(|root| root.path).collect();
         let crate::shared_dir_monitor::RootIoResult::Canonical(paths) =
             crate::shared_dir_monitor::run_root_io(
@@ -541,10 +546,11 @@ impl EmulebbCore {
         };
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
-        for canonical_path in paths {
+        for (canonical_path, watch_enabled) in paths.into_iter().zip(watch_policies) {
             if seen.insert(canonical_path.clone()) {
                 roots.push(SharedDirectoryRoot {
                     path: canonical_path,
+                    watch_enabled,
                     monitor_owned: false,
                     shareable: true,
                     accessible: true,
@@ -555,7 +561,11 @@ impl EmulebbCore {
             .await
     }
 
-    pub async fn add_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
+    pub async fn add_shared_directory_root(
+        &self,
+        path: &str,
+        watch_enabled: bool,
+    ) -> Result<SharedDirectories> {
         let crate::shared_dir_monitor::RootIoResult::Canonical(mut paths) =
             crate::shared_dir_monitor::run_root_io(
                 self,
@@ -566,7 +576,7 @@ impl EmulebbCore {
             unreachable!()
         };
         let canonical_path = paths.pop().expect("one canonical root");
-        self.replace_shared_directory_roots(ExplicitRootEdit::Add(canonical_path))
+        self.replace_shared_directory_roots(ExplicitRootEdit::Add(canonical_path, watch_enabled))
             .await
     }
 
@@ -586,10 +596,11 @@ impl EmulebbCore {
             let expected = self.state.lock().await.shared_directories.clone();
             let roots = match &edit {
                 ExplicitRootEdit::Replace(roots) => roots.clone(),
-                ExplicitRootEdit::Add(path) => {
+                ExplicitRootEdit::Add(path, watch_enabled) => {
                     let mut roots = expected.clone();
                     roots.push(SharedDirectoryRoot {
                         path: path.clone(),
+                        watch_enabled: *watch_enabled,
                         monitor_owned: false,
                         shareable: true,
                         accessible: true,

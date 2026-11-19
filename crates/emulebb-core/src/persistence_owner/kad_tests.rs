@@ -100,7 +100,7 @@ async fn final_kad_waits_for_cancelled_category_sql_and_reserved_probe_bytes() {
                     sharing: category::CategorySharingContext {
                         runtime,
                         incoming: Arc::new(incoming),
-                        root_change: Arc::new(tokio::sync::Notify::new()),
+                        root_change: Arc::default(),
                         probe_sender: std::sync::Weak::new(),
                     },
                 })

@@ -35,6 +35,7 @@ impl MetadataIndexedFileOrigin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSharedDirectoryRoot {
     pub path: String,
+    pub watch_enabled: bool,
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,

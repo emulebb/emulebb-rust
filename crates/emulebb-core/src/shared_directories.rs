@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::IndexedSharedDirectoryRoot;
+use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{MetadataSharedDirectoryRoot, NativeFileFingerprint, NativePath};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
@@ -18,15 +19,36 @@ use walkdir::WalkDir;
 #[serde(rename_all = "camelCase")]
 pub struct SharedDirectoryRoot {
     pub path: String,
+    pub watch_enabled: bool,
     #[serde(skip)]
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,
 }
 
+/// Recognize a watch-only edit without changing root coverage or cached health.
+/// Such an edit refreshes subscriptions without scheduling a catalog scan.
+pub(crate) fn root_watch_policy_only_changed(
+    expected: &[SharedDirectoryRoot],
+    proposed: &[SharedDirectoryRoot],
+) -> bool {
+    expected.len() == proposed.len()
+        && expected.iter().zip(proposed).all(|(old, new)| {
+            old.path == new.path
+                && old.monitor_owned == new.monitor_owned
+                && old.shareable == new.shareable
+                && old.accessible == new.accessible
+        })
+        && expected
+            .iter()
+            .zip(proposed)
+            .any(|(old, new)| old.watch_enabled != new.watch_enabled)
+}
+
 /// Consolidate recursive roots without inventing parents or altering native paths.
 /// Configured ancestors cover descendants unless an unavailable ancestor would
-/// hide an independently eligible child root.
+/// hide an independently eligible child root, or the child has its own watch
+/// opt-in beneath an unwatched ancestor.
 /// Imports and every user-facing root mutation use this same policy.
 pub fn consolidate_shared_directory_roots(
     roots: impl IntoIterator<Item = MetadataSharedDirectoryRoot>,
@@ -38,11 +60,14 @@ pub fn consolidate_shared_directory_roots(
         if combined.iter().any(|(parent_root, parent)| {
             key.starts_with(parent)
                 && (!eligible || (parent_root.shareable && parent_root.accessible))
+                && (!root.watch_enabled || parent_root.watch_enabled)
         }) {
             continue;
         }
         combined.retain(|(child_root, child)| {
-            !child.starts_with(&key) || (!eligible && child_root.shareable && child_root.accessible)
+            !child.starts_with(&key)
+                || (!eligible && child_root.shareable && child_root.accessible)
+                || (child_root.watch_enabled && !root.watch_enabled)
         });
         combined.push((root, key));
     }
@@ -258,11 +283,14 @@ pub struct SharedDirectoriesUpdate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SharedDirectoryRootUpdate {
     pub path: String,
+    #[serde(default)]
+    pub watch_enabled: bool,
 }
 
 pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {
     SharedDirectoryRoot {
         path: normal_path_display(&root.path),
+        watch_enabled: root.watch_enabled,
         monitor_owned: false,
         shareable: root.shareable,
         accessible: root.accessible,
@@ -274,6 +302,7 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
     let accessible = path.is_dir();
     SharedDirectoryRoot {
         path: normal_path_display(&root.path),
+        watch_enabled: root.watch_enabled,
         monitor_owned: root.monitor_owned,
         shareable: accessible,
         accessible,
@@ -342,6 +371,7 @@ pub(crate) async fn implicit_shared_directory_roots(
         .into_iter()
         .map(|root| SharedDirectoryRoot {
             path: root.path,
+            watch_enabled: root.watch_enabled,
             monitor_owned: root.monitor_owned,
             shareable: root.shareable,
             accessible: root.accessible,
@@ -1045,8 +1075,15 @@ pub(crate) async fn scan_shared_directory_roots(
             match collect_shared_directory_files_with_policy(&root_path, &mut collected, &policy) {
                 Ok(skipped) => {
                     skipped_intake_count += skipped;
-                    files.extend(collected.iter().cloned());
-                    root_files.push((root_path, collected));
+                    let members = collected
+                        .iter()
+                        .map(|file| ScannedRootMember {
+                            path: file.path.clone(),
+                            source_fingerprint: file.source_fingerprint.clone(),
+                        })
+                        .collect();
+                    files.extend(collected);
+                    root_files.push((root_path, members));
                 }
                 Err(error) => {
                     tracing::warn!(root = %root.path, %error, "shared root scan failed");
@@ -1054,6 +1091,10 @@ pub(crate) async fn scan_shared_directory_roots(
                 }
             }
         }
+        // A watched child can coexist with an unwatched covering root. Keep
+        // both membership snapshots, but plan each normalized path only once.
+        files.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+        files.dedup_by(|left, right| left.key == right.key);
         Ok(SharedScanResult {
             files,
             root_files,
@@ -1066,34 +1107,38 @@ pub(crate) async fn scan_shared_directory_roots(
 
 pub(crate) struct SharedScanResult {
     files: Vec<ScannedSharedFile>,
-    root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
+    root_files: Vec<(PathBuf, Vec<ScannedRootMember>)>,
     inaccessible_roots: Vec<PathBuf>,
     skipped_intake_count: usize,
 }
 
 async fn persist_scanned_roots(
     core: &EmulebbCore,
-    root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
+    root_files: Vec<(PathBuf, Vec<ScannedRootMember>)>,
 ) -> Result<()> {
     for (root, files) in root_files {
         let normalized_root = long_path(&root);
-        let members = files
-            .into_iter()
-            .filter_map(|file| {
-                let fingerprint = file.source_fingerprint?;
-                let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
-                Some((file.path, relative, fingerprint))
-            })
-            .collect::<Vec<_>>();
         let metadata = core.metadata_store.clone();
         let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
         tokio::task::spawn_blocking(move || {
             let _root_mutation = root_mutation;
-            metadata.replace_root_memberships(&root, &members)
+            let members = files.into_iter().filter_map(|file| {
+                let fingerprint = file.source_fingerprint?;
+                let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
+                Some((file.path, relative, fingerprint))
+            });
+            metadata.replace_root_memberships(&root, members)
         })
         .await??;
     }
     Ok(())
+}
+
+// WHY: root admission outlives hashing. Retain only its path and fingerprint,
+// rather than a second copy of every planning key and disk identifier.
+struct ScannedRootMember {
+    path: PathBuf,
+    source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 #[derive(Debug, Clone)]
@@ -1213,9 +1258,6 @@ struct ReloadHashTarget {
     file_size: u64,
     /// Native file fingerprint captured at planning time, when available.
     source_fingerprint: Option<NativeFileFingerprint>,
-    /// Existing hashes for this path, used to exclude them from the count of
-    /// hashes pruned because their paths disappeared from the complete scan.
-    stale_hashes: Vec<String>,
 }
 
 struct ReusedReloadShare {
@@ -1346,7 +1388,6 @@ fn reload_hash_target(
     disk_key: String,
     file_size: u64,
     source_fingerprint: Option<NativeFileFingerprint>,
-    stale_hashes: Vec<String>,
     reason: &str,
 ) -> ReloadHashTarget {
     ReloadHashTarget {
@@ -1358,7 +1399,6 @@ fn reload_hash_target(
         key,
         file_size,
         source_fingerprint,
-        stale_hashes,
     }
 }
 
@@ -1394,10 +1434,16 @@ async fn plan_incremental_reload_with_pruning(
     files: Vec<ScannedSharedFile>,
     prune_missing_sources: bool,
 ) -> Result<ReloadPlan> {
-    let index = core.ed2k_transfers.verified_local_reload_index().await?;
     let metadata = core.metadata_store.clone();
     let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
+        // WHY: a warm scan already retains the catalog and current inventory.
+        // Keep only compact pruning identities; read fingerprints by path.
+        let original_identities = if prune_missing_sources {
+            metadata.local_reload_identities()?
+        } else {
+            Vec::new()
+        };
         let failures = failure_entries
             .into_iter()
             .map(|failure| (failure.source_path.clone(), failure))
@@ -1412,7 +1458,8 @@ async fn plan_incremental_reload_with_pruning(
         };
         let mut to_hash = Vec::new();
         let mut reused_shares = Vec::new();
-        let mut scanned_source_keys = HashSet::with_capacity(files.len());
+        let mut scanned_source_ids = HashSet::with_capacity(files.len());
+        let mut kept_hashes = HashSet::new();
         for file in files {
             let ScannedSharedFile {
                 path,
@@ -1421,7 +1468,10 @@ async fn plan_incremental_reload_with_pruning(
                 file_size: size,
                 source_fingerprint: fingerprint,
             } = file;
-            scanned_source_keys.insert(key.clone());
+            let cached = metadata.local_reload_entry(&key)?;
+            if let Some(entry) = &cached {
+                scanned_source_ids.insert(entry.path_id);
+            }
             if fingerprint.is_none() {
                 // WHY: failure to inspect a file is not evidence of changed
                 // bytes. Retry its metadata later without scheduling a payload read.
@@ -1433,51 +1483,33 @@ async fn plan_incremental_reload_with_pruning(
                 stats.skipped_failed_count += 1;
                 continue;
             }
-            match index.get(&key) {
+            match cached {
                 // Reuse only when the persisted native fingerprint safely
                 // matches the current filesystem state.
-                Some(entries) => {
-                    if let Some(entry) = entries.iter().find(|entry| {
-                        entry
-                            .source_fingerprint
-                            .as_ref()
-                            .zip(fingerprint.as_ref())
-                            .is_some_and(|(stored, current)| stored.safely_matches(current))
-                    }) {
+                Some(entry) => {
+                    kept_hashes.insert(entry.file_hash);
+                    let file_hash = Ed2kHash::from_bytes(entry.file_hash).to_string();
+                    if fingerprint
+                        .as_ref()
+                        .is_some_and(|current| entry.source_fingerprint.safely_matches(current))
+                    {
                         stats.reused_count += 1;
-                        stats.stale_hash_count += entries.len().saturating_sub(1);
                         reused_shares.push(ReusedReloadShare {
-                            file_hash: entry.file_hash.clone(),
-                            source_path: path.clone(),
-                            source_fingerprint: fingerprint.clone(),
+                            file_hash,
+                            source_path: path,
+                            source_fingerprint: fingerprint,
                         });
                     } else {
                         stats.planned_hash_count += 1;
-                        stats.stale_hash_count += entries.len();
-                        let missing_fingerprint = fingerprint.is_none()
-                            || entries
-                                .iter()
-                                .any(|entry| entry.source_fingerprint.is_none());
-                        if missing_fingerprint {
-                            stats.missing_fingerprint_count += 1;
-                        } else {
-                            stats.changed_count += 1;
-                        }
+                        stats.stale_hash_count += 1;
+                        stats.changed_count += 1;
                         to_hash.push(reload_hash_target(
                             path,
                             key,
                             disk_key,
                             size,
                             fingerprint,
-                            entries
-                                .iter()
-                                .map(|entry| entry.file_hash.clone())
-                                .collect(),
-                            if missing_fingerprint {
-                                "missingFingerprint"
-                            } else {
-                                "changed"
-                            },
+                            "changed",
                         ));
                     }
                 }
@@ -1498,6 +1530,7 @@ async fn plan_incremental_reload_with_pruning(
                             current,
                             evidence,
                         )?;
+                        kept_hashes.insert(existing.file_hash.parse::<Ed2kHash>()?.0);
                         stats.reused_count += 1;
                         reused_shares.push(ReusedReloadShare {
                             file_hash: existing.file_hash,
@@ -1514,33 +1547,17 @@ async fn plan_incremental_reload_with_pruning(
                         disk_key,
                         size,
                         fingerprint,
-                        Vec::new(),
                         "new",
                     ));
                 }
             }
         }
-        let kept_hashes = reused_shares
+        stats.pruned_count = original_identities
             .iter()
-            .map(|share| share.file_hash.to_ascii_lowercase())
-            .chain(
-                to_hash
-                    .iter()
-                    .flat_map(|target| target.stale_hashes.iter())
-                    .map(|hash| hash.to_ascii_lowercase()),
-            )
-            .collect::<HashSet<_>>();
-        let pruned_hashes = if prune_missing_sources {
-            index
-                .iter()
-                .filter(|(key, _)| !scanned_source_keys.contains(*key))
-                .flat_map(|(_, entries)| entries.iter().map(|entry| entry.file_hash.clone()))
-                .filter(|hash| !kept_hashes.contains(&hash.to_ascii_lowercase()))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        stats.pruned_count = pruned_hashes.len();
+            .filter(|(path_id, hash)| {
+                !scanned_source_ids.contains(path_id) && !kept_hashes.contains(hash)
+            })
+            .count();
         stats.planned_hash_bytes = to_hash.iter().map(|target| target.file_size).sum();
         Ok::<_, anyhow::Error>(ReloadPlan {
             to_hash,
@@ -1892,14 +1909,14 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         .store(plan.to_hash.len() as i64, Ordering::Relaxed);
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
 
-    for reused in &plan.reused_shares {
+    for reused in plan.reused_shares {
         // Register the source path -> hash so the live directory monitor can
         // de-offer this file if its source is deleted at runtime (HASH-1).
         register_monitor_shared_hash(
             core,
-            reused.source_path.clone(),
+            reused.source_path,
             &reused.file_hash,
-            reused.source_fingerprint.clone(),
+            reused.source_fingerprint,
         )
         .await;
     }
@@ -2453,12 +2470,12 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         "shared-directory reload planned (incremental skip of unchanged files)"
     );
 
-    for reused in &plan.reused_shares {
+    for reused in plan.reused_shares {
         register_monitor_shared_hash(
             &core,
-            reused.source_path.clone(),
+            reused.source_path,
             &reused.file_hash,
-            reused.source_fingerprint.clone(),
+            reused.source_fingerprint,
         )
         .await;
     }
@@ -2467,7 +2484,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     if core.lifecycle_state_name() != "running" {
         return Ok(());
     }
+    tracing::info!("shared-directory reload committing root memberships");
     persist_scanned_roots(&core, root_files).await?;
+    tracing::info!("shared-directory reload committed root memberships");
     // WHY: shutdown must join the durable root transaction, but starting a full
     // catalog rebuild afterward delays profile release for an unused cache.
     // Startup revalidates the committed memberships before offering them.
@@ -2475,6 +2494,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         return Ok(());
     }
     let background_core = core.clone();
+    tracing::info!("shared-directory reload rebuilding complete catalog");
     if core
         .ed2k_transfers
         .refresh_complete_shared_catalog_while(move || {

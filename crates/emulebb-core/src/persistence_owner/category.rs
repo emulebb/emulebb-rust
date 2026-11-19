@@ -49,7 +49,7 @@ impl CategoryContinuation {
 pub(crate) struct CategorySharingContext {
     pub runtime: Arc<emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime>,
     pub incoming: Arc<std::path::PathBuf>,
-    pub root_change: Arc<tokio::sync::Notify>,
+    pub root_change: Arc<crate::shared_dir_monitor::RootChangeSignal>,
     pub probe_sender: std::sync::Weak<StdMutex<Option<async_mpsc::Sender<CategoryProbeJob>>>>,
 }
 
@@ -281,8 +281,18 @@ impl PersistenceOwner {
             .ok_or(PersistenceError::TooLarge)?;
         match self
             .submit_reserved(charge, || {
-                if let (Some(core), CategoryCommand::ReplaceRoots { reload, .. }) =
-                    (core, &mut command)
+                if let (
+                    Some(core),
+                    CategoryCommand::ReplaceRoots {
+                        reload,
+                        expected,
+                        proposed,
+                        ..
+                    },
+                ) = (core, &mut command)
+                    && !crate::shared_directories::root_watch_policy_only_changed(
+                        expected, proposed,
+                    )
                 {
                     *reload = Some(crate::shared_directories::reserve_root_reload(core)?);
                 }
@@ -351,6 +361,8 @@ async fn process_explicit_roots(
         sharing,
         reload,
     } = replacement;
+    let watch_only =
+        crate::shared_directories::root_watch_policy_only_changed(&expected, &proposed);
     let root_mutation = sharing
         .runtime
         .begin_category_root_mutation()
@@ -391,6 +403,7 @@ async fn process_explicit_roots(
             .into_iter()
             .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
                 path: root.path,
+                watch_enabled: root.watch_enabled,
                 monitor_owned: root.monitor_owned,
                 shareable: root.shareable,
                 accessible: root.accessible,
@@ -427,6 +440,7 @@ async fn process_explicit_roots(
         }
     }
     state.lock().await.shared_directories = proposed;
+    let scan_owned = reload.is_some();
     if let Some(reload) = reload {
         // The root transaction already committed. A terminal seal before this
         // handoff must not turn a missing scan intent into a successful receipt.
@@ -435,7 +449,11 @@ async fn process_explicit_roots(
             .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
     }
     let clean_epoch = root_mutation.finish();
-    sharing.root_change.notify_one();
+    if scan_owned || watch_only {
+        sharing.root_change.watch_changed();
+    } else {
+        sharing.root_change.scan_required();
+    }
     if removed.is_empty() {
         if let Some(epoch) = clean_epoch {
             sharing.runtime.finish_scoped_root_publication(epoch).await;
@@ -696,7 +714,7 @@ pub(super) async fn process(
     if let Some(sharing) = sharing
         && root_changed
     {
-        sharing.root_change.notify_one();
+        sharing.root_change.scan_required();
         if let Some(old_root) = old_root {
             let lease = request
                 .permit

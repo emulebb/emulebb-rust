@@ -75,6 +75,33 @@ const TARGETED_REHASH_DEBOUNCE: Duration = Duration::from_secs(2);
 const TARGETED_REHASH_RETRY_DELAY: Duration = Duration::from_secs(2);
 const TARGETED_REHASH_MAX_ATTEMPTS: usize = 3;
 
+/// Coalesce watch refreshes while retaining any scan not already owned by a
+/// committed root command. A watch-only notification cannot erase scan intent.
+#[derive(Default)]
+pub(crate) struct RootChangeSignal {
+    wake: tokio::sync::Notify,
+    scan: AtomicBool,
+}
+
+impl RootChangeSignal {
+    pub(crate) fn watch_changed(&self) {
+        self.wake.notify_one();
+    }
+
+    pub(crate) fn scan_required(&self) {
+        self.scan.store(true, Ordering::Release);
+        self.wake.notify_one();
+    }
+
+    async fn notified(&self) {
+        self.wake.notified().await;
+    }
+
+    fn take_scan_request(&self) -> bool {
+        self.scan.swap(false, Ordering::AcqRel)
+    }
+}
+
 /// `notify` 8.x uses one fixed 16 KiB `ReadDirectoryChangesW` buffer for a
 /// recursive Windows watch. Even a modest settled mutation burst can mean an
 /// earlier buffer overflow was silently dropped (renames are especially costly
@@ -303,19 +330,40 @@ fn monitor_action_channel(
 /// it tears both down so neither the watcher thread nor the consumer task leaks
 /// across a disconnect / reconfigure.
 pub(crate) struct SharedDirMonitor {
-    /// Held purely for its RAII `Drop`: dropping the debouncer stops/joins the
-    /// OS watcher thread. Never read after construction (the watch set is fixed
-    /// at start), hence the allow.
-    _debouncer:
+    /// Re-register roots in place after event loss; dropping this joins the
+    /// native watcher without leaving an unowned thread.
+    debouncer:
         Option<Debouncer<notify_debouncer_full::notify::RecommendedWatcher, RecommendedCache>>,
+    #[cfg(target_os = "linux")]
+    watched_roots: Vec<PathBuf>,
     consumer: tokio::task::JoinHandle<()>,
 }
 
 impl SharedDirMonitor {
+    /// Restore native recursive coverage before the reconciliation scan.
+    /// Existing registrations stay installed while new directories are added.
+    #[cfg(target_os = "linux")]
+    fn refresh_watch_coverage(&mut self) -> usize {
+        let Some(debouncer) = self.debouncer.as_mut() else {
+            return 0;
+        };
+        let mut refreshed = 0;
+        for root in &self.watched_roots {
+            match debouncer.watch(root, RecursiveMode::Recursive) {
+                Ok(()) => refreshed += 1,
+                Err(error) => tracing::warn!(
+                    root = %root.display(), %error,
+                    "failed to restore shared-directory recursive watch coverage",
+                ),
+            }
+        }
+        refreshed
+    }
+
     /// Stop the monitor: drop it so the debouncer's `Drop` stops the OS watcher
     /// thread and the [`SharedDirMonitor`] `Drop` aborts the consumer task.
     pub(crate) async fn stop(&mut self) -> anyhow::Result<()> {
-        self._debouncer.take();
+        self.debouncer.take();
         self.consumer.abort();
         match (&mut self.consumer).await {
             Ok(()) => Ok(()),
@@ -350,7 +398,10 @@ where
     F: Fn(MonitorAction) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    if roots.is_empty() {
+    if roots
+        .iter()
+        .all(|root| !root.watch_enabled || !root.accessible)
+    {
         return None;
     }
 
@@ -382,9 +433,9 @@ where
         }
     };
 
-    let mut watched_root_count = 0usize;
+    let mut watched_roots = Vec::new();
     for root in roots {
-        if !root.accessible {
+        if !root.watch_enabled || !root.accessible {
             continue;
         }
         let path = Path::new(&root.path);
@@ -392,7 +443,7 @@ where
             Ok(()) => {
                 // notify-debouncer-full 0.7 manages the file-id cache roots
                 // together with the watcher registration.
-                watched_root_count += 1;
+                watched_roots.push(path.to_path_buf());
                 tracing::info!(
                     root = %root.path,
                     "watching shared directory for auto-pickup",
@@ -412,7 +463,7 @@ where
         }
     }
 
-    if watched_root_count == 0 {
+    if watched_roots.is_empty() {
         // No root could be watched -- nothing to consume; drop the debouncer.
         drop(debouncer);
         return None;
@@ -420,7 +471,9 @@ where
 
     let consumer = tokio::spawn(run_consumer(action_rx, reconcile_required, apply));
     Some(SharedDirMonitor {
-        _debouncer: Some(debouncer),
+        debouncer: Some(debouncer),
+        #[cfg(target_os = "linux")]
+        watched_roots,
         consumer,
     })
 }
@@ -652,29 +705,20 @@ async fn run_shared_root_health_worker(
         Duration::from_secs(2),
     );
     loop {
-        let changed = tokio::select! {
-            _ = root_check.tick() => false,
-            _ = core.shared_root_change.notified() => true,
+        let change = tokio::select! {
+            _ = root_check.tick() => None,
+            _ = core.shared_root_change.notified() => Some(core.shared_root_change.take_scan_request()),
             Some(job) = probes.recv() => {
                 run_category_probe(&core, job).await;
                 continue;
             }
         };
-        if changed {
-            root_availability.clear();
-        }
         let health_round = async {
             if let Err(error) =
-                reconcile_root_availability(&core, &mut root_availability, &mut pending_rejoin)
+                reconcile_root_health(&core, &mut root_availability, &mut pending_rejoin, change)
                     .await
             {
                 tracing::warn!(%error, "failed to reconcile shared-root availability");
-            }
-            if changed && core.lifecycle_state_name() == "running" {
-                rebuild_shared_directory_watch(&core).await;
-                if let Err(error) = core.reload_shared_directories_detached().await {
-                    tracing::warn!(%error, "failed to queue category-root scan");
-                }
             }
         };
         tokio::pin!(health_round);
@@ -687,7 +731,32 @@ async fn run_shared_root_health_worker(
     }
 }
 
+async fn reconcile_root_health(
+    core: &EmulebbCore,
+    previous: &mut HashMap<PathBuf, bool>,
+    pending_rejoin: &mut HashMap<PathBuf, Option<i64>>,
+    change: Option<bool>,
+) -> anyhow::Result<()> {
+    if change.is_some() {
+        previous.clear();
+    }
+    // WHY: an explicit root command already owns a reserved scan. Treating its
+    // watch refresh as recovery queues another full inventory after that scan.
+    reconcile_root_availability(core, previous, pending_rejoin, change.is_none()).await?;
+    if let Some(scan_required) = change
+        && core.lifecycle_state_name() == "running"
+    {
+        rebuild_shared_directory_watch(core).await;
+        if scan_required {
+            core.reload_shared_directories_detached().await?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) enum RootIoRequest {
+    #[cfg(target_os = "linux")]
+    RefreshWatchCoverage(Arc<tokio::sync::Mutex<Option<SharedDirMonitor>>>),
     Inspect(Vec<SharedDirectoryRoot>),
     InspectDelivery(Vec<SharedDirectoryRoot>, PathBuf, NativeFileFingerprint),
     Replace(Vec<SharedDirectoryRoot>, usize),
@@ -696,6 +765,8 @@ pub(crate) enum RootIoRequest {
 }
 
 pub(crate) enum RootIoResult {
+    #[cfg(target_os = "linux")]
+    WatchesRefreshed(usize),
     Inspected(Vec<(SharedDirectoryRoot, bool)>),
     Canonical(Vec<String>),
     Remaining(Vec<SharedDirectoryRoot>),
@@ -739,12 +810,21 @@ pub(crate) async fn run_root_io(
             request => request,
         };
         match request {
+            #[cfg(target_os = "linux")]
+            RootIoRequest::RefreshWatchCoverage(monitor) => {
+                let mut slot = monitor.blocking_lock();
+                Ok(RootIoResult::WatchesRefreshed(
+                    slot.as_mut()
+                        .map_or(0, SharedDirMonitor::refresh_watch_coverage),
+                ))
+            }
             RootIoRequest::Inspect(roots) => {
                 let roots = crate::shared_directories::consolidate_shared_directory_roots(
                     roots
                         .into_iter()
                         .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
                             path: root.path,
+                            watch_enabled: root.watch_enabled,
                             monitor_owned: root.monitor_owned,
                             shareable: root.shareable,
                             accessible: root.accessible,
@@ -758,6 +838,7 @@ pub(crate) async fn run_root_io(
                             (
                                 SharedDirectoryRoot {
                                     path: root.path,
+                                    watch_enabled: root.watch_enabled,
                                     monitor_owned: root.monitor_owned,
                                     shareable: root.shareable,
                                     accessible: root.accessible,
@@ -777,6 +858,7 @@ pub(crate) async fn run_root_io(
                         .into_iter()
                         .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
                             path: root.path,
+                            watch_enabled: root.watch_enabled,
                             monitor_owned: root.monitor_owned,
                             shareable: root.shareable,
                             accessible: root.accessible,
@@ -790,6 +872,7 @@ pub(crate) async fn run_root_io(
                             (
                                 SharedDirectoryRoot {
                                     path: root.path,
+                                    watch_enabled: root.watch_enabled,
                                     monitor_owned: root.monitor_owned,
                                     shareable: root.shareable,
                                     accessible: root.accessible,
@@ -872,6 +955,7 @@ async fn reconcile_root_availability(
     core: &EmulebbCore,
     previous: &mut HashMap<PathBuf, bool>,
     pending_rejoin: &mut HashMap<PathBuf, Option<i64>>,
+    allow_recovery_scan: bool,
 ) -> anyhow::Result<()> {
     let current = root_availability_snapshot(core).await?;
     let changed = current
@@ -986,8 +1070,9 @@ async fn reconcile_root_availability(
             pending_rejoin.remove(&path);
         }
     }
-    if recovered
-        || (!pending_rejoin.is_empty() && !core.shared_reload_running.load(Ordering::Acquire))
+    if allow_recovery_scan
+        && (recovered
+            || (!pending_rejoin.is_empty() && !core.shared_reload_running.load(Ordering::Acquire)))
     {
         core.reload_shared_directories_detached().await?;
     }
@@ -1354,6 +1439,31 @@ async fn rebuild_shared_directory_watch(core: &EmulebbCore) {
                     auto_relocate_monitored_path(&applier, &from, &to).await
                 }
                 MonitorAction::Reconcile => {
+                    // A scan repairs catalog contents, but cannot repair native
+                    // watches lost alongside directory-creation events. Re-arm
+                    // the existing watcher first so the scan bridges that gap.
+                    // Use the tracked I/O owner: registration walks directories
+                    // and must survive caller cancellation without an orphan job.
+                    #[cfg(target_os = "linux")]
+                    match run_root_io(
+                        &applier,
+                        RootIoRequest::RefreshWatchCoverage(Arc::clone(
+                            &applier.shared_dir_monitor,
+                        )),
+                    )
+                    .await
+                    {
+                        Ok(RootIoResult::WatchesRefreshed(roots)) => {
+                            tracing::info!(
+                                roots,
+                                "refreshed shared-directory recursive watch coverage"
+                            );
+                        }
+                        Ok(_) => unreachable!(),
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to refresh shared-directory watch coverage");
+                        }
+                    }
                     if let Err(error) = applier.reload_shared_directories_detached().await {
                         tracing::warn!(
                             error = %error,
@@ -1778,6 +1888,75 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn coalesced_watch_refresh_keeps_an_unowned_scan_request() {
+        let signal = super::RootChangeSignal::default();
+        signal.scan_required();
+        signal.watch_changed();
+        signal.notified().await;
+        assert!(signal.take_scan_request());
+        signal.watch_changed();
+        signal.notified().await;
+        assert!(!signal.take_scan_request());
+        signal.watch_changed();
+        signal.scan_required();
+        signal.notified().await;
+        assert!(signal.take_scan_request());
+    }
+
+    #[tokio::test]
+    async fn root_watch_refresh_does_not_repeat_a_reserved_scan() {
+        let core = crate::EmulebbCore::new_in_memory(
+            "test",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap();
+        let root = crate::unique_runtime_dir("root-scan-owner");
+        let execution = core.shared_reload_gate.lock().await;
+        core.add_shared_directory_root(&root.to_string_lossy(), false)
+            .await
+            .unwrap();
+        core.shared_root_change.notified().await;
+        let scan_required = core.shared_root_change.take_scan_request();
+        assert!(!scan_required, "the committed root command owns this scan");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while core
+                .shared_reload_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            core.shared_reload_running
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let mut previous = std::collections::HashMap::new();
+        let mut pending = std::collections::HashMap::new();
+        super::reconcile_root_health(&core, &mut previous, &mut pending, Some(scan_required))
+            .await
+            .unwrap();
+        assert!(
+            !core
+                .shared_reload_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            "watch refresh must not schedule a second full inventory"
+        );
+        // Category changes have no pre-reserved scan and must retain one.
+        super::reconcile_root_health(&core, &mut previous, &mut pending, Some(true))
+            .await
+            .unwrap();
+        assert!(
+            core.shared_reload_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        drop(execution);
+        core.drain_persistence().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use emulebb_metadata::MetadataSharedDirectoryRoot;
     use notify_debouncer_full::notify::Event;
@@ -1786,6 +1965,82 @@ mod tests {
     use std::sync::Mutex;
     use std::task::Poll;
     use std::time::Instant;
+
+    #[test]
+    fn unwatched_roots_do_not_create_a_native_monitor() {
+        let monitor = start_monitor(
+            &[SharedDirectoryRoot {
+                path: std::env::temp_dir().display().to_string(),
+                watch_enabled: false,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }],
+            |_| async { panic!("an unwatched root must not deliver actions") },
+        );
+        assert!(monitor.is_none());
+    }
+
+    /// Model a missed native directory-registration event independently of
+    /// kernel queue timing, then prove the existing consumer sees later writes.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tracked_watch_refresh_restores_missing_recursive_subscription() {
+        let root =
+            std::env::temp_dir().join(format!("emulebb-watch-refresh-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        let target = nested.join("after-refresh.bin");
+        std::fs::create_dir_all(&nested).unwrap();
+        let core = EmulebbCore::new_in_memory(
+            "watch-refresh",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap();
+        let observed = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&observed);
+        let expected = target.clone();
+        let mut monitor = start_monitor(
+            &[SharedDirectoryRoot {
+                path: root.to_string_lossy().into_owned(),
+                accessible: true,
+                watch_enabled: true,
+                monitor_owned: false,
+                shareable: true,
+            }],
+            move |action| {
+                let signal = Arc::clone(&signal);
+                let matches = action == MonitorAction::Share(expected.clone());
+                async move {
+                    if matches {
+                        signal.notify_one();
+                    }
+                }
+            },
+        )
+        .unwrap();
+        // Root registration initially includes the child. Remove only that
+        // native subscription, leaving the directory and consumer in place.
+        monitor
+            .debouncer
+            .as_mut()
+            .unwrap()
+            .unwatch(&nested)
+            .unwrap();
+        *core.shared_dir_monitor.lock().await = Some(monitor);
+        let result = run_root_io(
+            &core,
+            RootIoRequest::RefreshWatchCoverage(Arc::clone(&core.shared_dir_monitor)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, RootIoResult::WatchesRefreshed(1)));
+        std::fs::write(&target, b"changed after repaired subscription").unwrap();
+        tokio::time::timeout(Duration::from_secs(20), observed.notified())
+            .await
+            .expect("repaired recursive watch did not deliver the file event");
+        stop_shared_directory_monitor(&core).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn cancelled_stop_retains_the_join_for_the_next_stop() {
@@ -1892,7 +2147,7 @@ mod tests {
             .unwrap();
         assert!(core.shared_root_health_worker.lock().await.is_none());
         assert!(core.shared_source_reconcile_worker.lock().await.is_none());
-        core.shared_root_change.notify_one();
+        core.shared_root_change.scan_required();
         tokio::time::timeout(
             Duration::from_secs(5),
             core.start_shared_directory_monitor(),
@@ -1963,7 +2218,7 @@ mod tests {
             let core = Arc::clone(&core);
             let root = root.clone();
             tokio::spawn(async move {
-                core.add_shared_directory_root(&root.to_string_lossy())
+                core.add_shared_directory_root(&root.to_string_lossy(), false)
                     .await
             })
         };
@@ -2090,7 +2345,7 @@ mod tests {
             tokio::spawn(async move {
                 let mut previous = HashMap::from([(root, true)]);
                 let mut pending = HashMap::new();
-                let _ = reconcile_root_availability(&core, &mut previous, &mut pending).await;
+                let _ = reconcile_root_availability(&core, &mut previous, &mut pending, true).await;
             })
         };
         *core.shared_root_health_worker.lock().await = Some(worker);
@@ -2157,6 +2412,7 @@ mod tests {
     async fn configure_test_shared_root(core: &EmulebbCore, root: &Path) {
         core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
             path: root.display().to_string(),
+            watch_enabled: false,
             monitor_owned: false,
             shareable: true,
             accessible: true,
@@ -2165,6 +2421,7 @@ mod tests {
         metadata
             .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
                 path: root.display().to_string(),
+                watch_enabled: false,
                 monitor_owned: false,
                 shareable: true,
                 accessible: true,
@@ -2614,7 +2871,7 @@ mod tests {
         let mut pending_rejoin = HashMap::new();
 
         std::fs::rename(&root, &offline).unwrap();
-        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin, true)
             .await
             .unwrap();
         assert!(core.shares().await.is_empty());
@@ -2629,7 +2886,7 @@ mod tests {
         core.metadata_store
             .set_shared_root_accessible(&root, true)
             .unwrap();
-        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin, true)
             .await
             .unwrap();
         assert!(
@@ -2640,7 +2897,7 @@ mod tests {
         );
 
         std::fs::rename(&offline, &root).unwrap();
-        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin, true)
             .await
             .unwrap();
         assert!(pending_rejoin.contains_key(&root));
@@ -2661,7 +2918,7 @@ mod tests {
         })
         .await
         .expect("rejoin reload should finish");
-        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin)
+        reconcile_root_availability(&core, &mut availability, &mut pending_rejoin, true)
             .await
             .unwrap();
         assert!(pending_rejoin.is_empty());

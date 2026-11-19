@@ -91,6 +91,53 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         }
         tx.commit().unwrap();
     }
+    let identities = store.local_reload_identities().unwrap();
+    assert_eq!(identities.len(), 100_000);
+    assert!(
+        identities.capacity() * std::mem::size_of::<(i64, [u8; 16])>() < 4 * 1024 * 1024,
+        "100k pruning identities must remain compact"
+    );
+    let late_path = root.join("sample-100000.bin");
+    let late = store.local_reload_entry(&late_path).unwrap().unwrap();
+    assert_eq!(late.path_id, 100_001);
+    assert_eq!(
+        late.file_hash.as_slice(),
+        format!("{:016}", 100_000).as_bytes()
+    );
+    assert_eq!(late.source_fingerprint.storage_bytes(), fingerprint);
+    assert!(identities.contains(&(late.path_id, late.file_hash)));
+    assert!(
+        store
+            .local_reload_entry(&root.join("absent.bin"))
+            .unwrap()
+            .is_none()
+    );
+    {
+        let conn = store.connection().unwrap();
+        let mut statement = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::local_file_store::LOCAL_RELOAD_ENTRY_SQL
+            ))
+            .unwrap();
+        let path = NativePath::from(late_path);
+        let plan = statement
+            .query_map(
+                params![NativePath::platform(), path.storage_bytes()],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter().all(|line| !line.starts_with("SCAN ")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter().any(|line| line.starts_with("SEARCH p ")),
+            "{plan:?}"
+        );
+    }
     // Withdrawn memberships remain enumerable for bounded root reconciliation.
     store.connection().unwrap().execute("UPDATE shared_file_memberships SET removed_at_ms=1 WHERE root_id=1 AND known_file_id=1", []).unwrap();
     let affected_first = store.category_root_hash_page(&root, 0, 128).unwrap();
