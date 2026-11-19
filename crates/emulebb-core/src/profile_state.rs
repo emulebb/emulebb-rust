@@ -1,32 +1,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use anyhow::{Context, Result};
+use crate::{Category, CoreState, Friend, ServerInfo, SharedDirectoryRoot};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
-use emulebb_ed2k::long_path::normal_path_display;
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
-use emulebb_settings::{
-    AppSettings, AppSettingsUpdate, SECTION_CORE, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER,
-    SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, app_settings_update_is_empty,
-    apply_daemon_settings_update, apply_ed2k_settings_update, apply_ip_filter_settings_update,
-    apply_kad_settings_update, apply_nat_settings_update, apply_vpn_guard_settings_update,
-    core_settings_from_values, core_settings_to_values, core_settings_update_is_empty,
-    section_settings_from_values, section_settings_to_values, validate_ed2k_settings,
-};
-
-use crate::{
-    Category, CoreState, Friend, ServerInfo, SharedDirectoryRoot, apply_core_settings_update,
-};
 
 pub(crate) fn load_core_state(
     metadata: &MetadataStore,
     shared_directories: Vec<SharedDirectoryRoot>,
 ) -> Result<CoreState> {
-    let core_setting_rows = metadata.load_settings_section(SECTION_CORE)?;
-    let core_settings = core_settings_from_values(
-        core_setting_rows
-            .iter()
-            .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
-    )?;
+    let settings = crate::settings::RuntimeSettings::startup(metadata.load_app_settings()?);
     let categories = metadata
         .load_categories()?
         .into_iter()
@@ -61,7 +44,7 @@ pub(crate) fn load_core_state(
         // Network trust votes apply only to evidence received in this process.
         kad_aich_search_votes: Default::default(),
         transfers: HashMap::new(),
-        core_settings,
+        settings,
         categories,
         friends,
         servers,
@@ -85,166 +68,6 @@ pub(crate) fn load_core_state(
         kad_running: false,
         last_source_count_emit_at: None,
     })
-}
-
-pub(crate) fn has_persisted_core_settings(metadata: &MetadataStore) -> Result<bool> {
-    metadata.has_settings_section(SECTION_CORE)
-}
-
-#[cfg(test)]
-pub(crate) fn persist_core_settings(
-    metadata: &MetadataStore,
-    core_settings: &crate::CoreSettings,
-) -> Result<()> {
-    let entries = core_settings_to_values(core_settings)?;
-    metadata.replace_settings_section(
-        SECTION_CORE,
-        entries
-            .iter()
-            .map(|(key, value_json)| (*key, value_json.as_str())),
-    )?;
-    Ok(())
-}
-
-const APP_SETTINGS_SECTIONS: [&str; 7] = [
-    SECTION_CORE,
-    SECTION_DAEMON,
-    SECTION_ED2K,
-    SECTION_KAD,
-    SECTION_NAT,
-    SECTION_VPN_GUARD,
-    SECTION_IP_FILTER,
-];
-
-pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings> {
-    let sections = APP_SETTINGS_SECTIONS
-        .iter()
-        .map(|section| {
-            Ok((
-                (*section).to_owned(),
-                metadata.load_settings_section(section)?,
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>>>()?;
-    app_settings_from_sections(&sections)
-}
-
-fn app_settings_from_sections(
-    sections: &BTreeMap<String, Vec<(String, String)>>,
-) -> Result<AppSettings> {
-    let mut daemon = decode_settings_section(sections, SECTION_DAEMON)?;
-    normalize_daemon_settings_paths(&mut daemon);
-    let ed2k = decode_settings_section(sections, SECTION_ED2K)?;
-    validate_ed2k_settings(&ed2k)?;
-    let rows = sections
-        .get(SECTION_CORE)
-        .context("core settings snapshot is missing")?;
-    Ok(AppSettings {
-        core: core_settings_from_values(
-            rows.iter()
-                .map(|(key, value)| (key.as_str(), value.as_str())),
-        )?,
-        daemon,
-        ed2k,
-        kad: decode_settings_section(sections, SECTION_KAD)?,
-        nat: decode_settings_section(sections, SECTION_NAT)?,
-        vpn_guard: decode_settings_section(sections, SECTION_VPN_GUARD)?,
-        ip_filter: decode_settings_section(sections, SECTION_IP_FILTER)?,
-    })
-}
-
-pub(crate) fn persist_app_settings_update(
-    metadata: &MetadataStore,
-    update: AppSettingsUpdate,
-) -> Result<AppSettings> {
-    anyhow::ensure!(
-        !app_settings_update_is_empty(&update),
-        "settings PATCH requires at least one settings section"
-    );
-    let changed = [
-        (SECTION_CORE, update.core.is_some()),
-        (SECTION_DAEMON, update.daemon.is_some()),
-        (SECTION_ED2K, update.ed2k.is_some()),
-        (SECTION_KAD, update.kad.is_some()),
-        (SECTION_NAT, update.nat.is_some()),
-        (SECTION_VPN_GUARD, update.vpn_guard.is_some()),
-        (SECTION_IP_FILTER, update.ip_filter.is_some()),
-    ];
-    metadata.update_settings_sections(&APP_SETTINGS_SECTIONS, move |sections| {
-        let candidate = apply_app_settings_update(app_settings_from_sections(sections)?, update)?;
-        // No SQL writes occur until the whole candidate validates and serializes.
-        for (section, changed) in changed {
-            if !changed {
-                continue;
-            }
-            let entries = match section {
-                SECTION_CORE => core_settings_to_values(&candidate.core)?
-                    .into_iter()
-                    .map(|(key, value)| (key.to_owned(), value))
-                    .collect(),
-                SECTION_DAEMON => section_settings_to_values(&candidate.daemon)?,
-                SECTION_ED2K => section_settings_to_values(&candidate.ed2k)?,
-                SECTION_KAD => section_settings_to_values(&candidate.kad)?,
-                SECTION_NAT => section_settings_to_values(&candidate.nat)?,
-                SECTION_VPN_GUARD => section_settings_to_values(&candidate.vpn_guard)?,
-                SECTION_IP_FILTER => section_settings_to_values(&candidate.ip_filter)?,
-                _ => unreachable!("selected application settings section"),
-            };
-            sections.insert(section.to_owned(), entries);
-        }
-        Ok(candidate)
-    })
-}
-
-fn apply_app_settings_update(
-    mut settings: AppSettings,
-    update: AppSettingsUpdate,
-) -> Result<AppSettings> {
-    if let Some(update) = update.core {
-        anyhow::ensure!(
-            !core_settings_update_is_empty(&update),
-            "settings.core PATCH requires at least one core setting"
-        );
-        apply_core_settings_update(&mut settings.core, update)?;
-    }
-    if let Some(update) = update.daemon {
-        apply_daemon_settings_update(&mut settings.daemon, update);
-        normalize_daemon_settings_paths(&mut settings.daemon);
-    }
-    if let Some(update) = update.ed2k {
-        apply_ed2k_settings_update(&mut settings.ed2k, update)?;
-    }
-    if let Some(update) = update.kad {
-        apply_kad_settings_update(&mut settings.kad, update);
-    }
-    if let Some(update) = update.nat {
-        apply_nat_settings_update(&mut settings.nat, update);
-    }
-    if let Some(update) = update.vpn_guard {
-        apply_vpn_guard_settings_update(&mut settings.vpn_guard, update);
-    }
-    if let Some(update) = update.ip_filter {
-        apply_ip_filter_settings_update(&mut settings.ip_filter, update);
-    }
-    validate_ed2k_settings(&settings.ed2k)?;
-    Ok(settings)
-}
-
-fn decode_settings_section<T>(
-    sections: &BTreeMap<String, Vec<(String, String)>>,
-    section: &str,
-) -> Result<T>
-where
-    T: Default + serde::de::DeserializeOwned,
-{
-    let rows = sections
-        .get(section)
-        .with_context(|| format!("settings snapshot is missing {section}"))?;
-    Ok(section_settings_from_values(
-        section,
-        rows.iter()
-            .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
-    )?)
 }
 
 pub(crate) fn persist_friend(
@@ -305,13 +128,6 @@ pub(crate) fn category_from_metadata(category: MetadataCategory) -> Category {
         temp_dir: category.temp_dir,
         destination_dir: category.destination_dir,
         comment: category.comment,
-    }
-}
-
-fn normalize_daemon_settings_paths(settings: &mut emulebb_settings::DaemonSettings) {
-    if let Some(path) = settings.incoming_dir.as_mut() {
-        let display = normal_path_display(path.display().to_string());
-        *path = std::path::PathBuf::from(display);
     }
 }
 

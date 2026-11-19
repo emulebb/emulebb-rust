@@ -870,14 +870,12 @@ mod tests {
             canonical.saved.storage.incoming_directory.mode,
             emulebb_settings::product::ValueMode::Custom
         );
-        let actual: String = store.connection().unwrap().query_row(
-            "SELECT json_extract(value_json, '$') FROM settings WHERE section = 'daemon' AND key = 'incomingDir'", [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(actual, wanted.to_str().unwrap());
         assert_eq!(store.shared_directory_roots().unwrap().len(), 1);
-        store
-            .put_setting_json("daemon", "incomingDir", "null")
-            .unwrap();
+        let mut edit = emulebb_settings::product::SettingsEdit::default();
+        edit.set.storage.incoming_directory = emulebb_settings::product::PartialValue::Set(
+            wanted.with_extension("operator-incoming"),
+        );
+        let edited = store.edit_app_settings(&edit).unwrap();
         store.replace_shared_directory_roots(&[]).unwrap();
         drop(store);
         let store = MetadataStore::from_connection_with_profile_lease(
@@ -889,13 +887,7 @@ mod tests {
         )
         .unwrap();
         assert!(!store.initialized_new_schema());
-        assert_eq!(
-            store
-                .load_setting_json("daemon", "incomingDir")
-                .unwrap()
-                .as_deref(),
-            Some("null")
-        );
+        assert_eq!(store.load_app_settings().unwrap(), edited);
         assert!(store.shared_directory_roots().unwrap().is_empty());
         drop(store);
         std::fs::remove_file(path).unwrap();

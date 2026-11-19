@@ -1143,7 +1143,7 @@ pub fn download_coordinator_config_from_policy(
     config: &Ed2kRuntimeConfig,
 ) -> Ed2kDownloadCoordinatorConfig {
     Ed2kDownloadCoordinatorConfig {
-        max_connections: config.max_concurrent_downloads,
+        max_connections: config.max_connections,
         max_connections_per_window: config.max_new_connections_per_five_seconds,
         connection_window: DEFAULT_CONNECTION_WINDOW,
         max_half_open_connections: config.max_half_open_connections,

@@ -72,6 +72,57 @@ impl SettingsApplicationStatus {
     }
 }
 
+/// A validated application target, not a claim that runtime consumers accepted it.
+/// The persistence owner publishes effective values only after applying them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsApplicationPlan {
+    candidate: SettingsValues,
+    pending_restart: Vec<SettingKey>,
+}
+
+impl SettingsApplicationPlan {
+    /// Keep restart-bound values in use. If the resulting live candidate would
+    /// violate a dependency, defer every desired difference until restart.
+    pub fn new(
+        effective: &SettingsValues,
+        desired: &SettingsValues,
+    ) -> Result<Self, SettingsError> {
+        for values in [effective, desired] {
+            let issues = values.validate();
+            if !issues.is_empty() {
+                return Err(SettingsError::Validation(issues));
+            }
+        }
+        let mut candidate = effective.clone();
+        for spec in setting_specs() {
+            if spec.application == ApplyMode::Live {
+                let key = SettingKey(spec.key);
+                let copied = candidate.copy_key_from(desired, key);
+                debug_assert!(copied, "compiled setting has a typed value");
+            }
+        }
+        // WHY: individually valid desired settings can depend on restart-bound
+        // changes. Applying any part of that incompatible live candidate would
+        // contradict the coherent effective snapshot; leave it entirely intact.
+        if !candidate.validate().is_empty() {
+            candidate = effective.clone();
+        }
+        let pending_restart = desired.differing_keys(&candidate);
+        Ok(Self {
+            candidate,
+            pending_restart,
+        })
+    }
+
+    pub fn candidate(&self) -> &SettingsValues {
+        &self.candidate
+    }
+
+    pub fn pending_restart(&self) -> &[SettingKey] {
+        &self.pending_restart
+    }
+}
+
 /// Data only: the envelope carries the saved revision in meta.settingsRevision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

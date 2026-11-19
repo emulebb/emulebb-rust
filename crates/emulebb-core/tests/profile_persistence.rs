@@ -5,8 +5,8 @@ use std::{
 };
 
 use emulebb_core::{
-    AppSettingsUpdate, CategoryCreate, CoreSettingsUpdate, DownloadCreate, DownloadCreateSource,
-    EmulebbCore, FriendCreate, LocalShareCreate, NullableStringField, ServerCreate, ServerUpdate,
+    CategoryCreate, DownloadCreate, DownloadCreateSource, EmulebbCore, FriendCreate,
+    LocalShareCreate, NullableStringField, ServerCreate, ServerUpdate,
 };
 use emulebb_index::FileIndex;
 
@@ -18,11 +18,15 @@ async fn profile_state_survives_core_restart() {
 
     {
         let core = open_core(&metadata_path, &transfer_root);
-        core.update_core_settings(CoreSettingsUpdate {
-            download_limit_ki_bps: Some(2048),
-            network_kademlia: Some(false),
-            ..CoreSettingsUpdate::default()
-        })
+        core.update_settings(
+            &serde_json::from_value(serde_json::json!({
+                "expectedRevision":"1", "set":{
+                    "transfers":{"downloadLimitBytesPerSecond":2097152},
+                    "network":{"kadEnabled":false}
+                }
+            }))
+            .unwrap(),
+        )
         .await
         .unwrap();
         let category = core
@@ -54,9 +58,9 @@ async fn profile_state_survives_core_restart() {
     }
 
     let reloaded = open_core(&metadata_path, &transfer_root);
-    let core_settings = reloaded.core_settings().await;
-    assert_eq!(core_settings.download_limit_ki_bps, 2048);
-    assert!(!core_settings.network_kademlia);
+    let values = reloaded.effective_settings().await.unwrap();
+    assert_eq!(values.transfers.download_limit_bytes_per_second, 2097152);
+    assert!(!values.network.kad_enabled);
 
     let categories = reloaded.categories().await.unwrap();
     assert_eq!(categories.len(), 1);
@@ -107,57 +111,38 @@ async fn network_and_upload_settings_survive_core_restart() {
 
     {
         let core = open_core(&metadata_path, &transfer_root);
-        let update: AppSettingsUpdate = serde_json::from_value(serde_json::json!({
-            "core": {
-                "uploadLimitKiBps": 2048,
-                "uploadClientDataRate": 64,
-                "baseUploadSlots": 5,
-                "uploadSlotElasticPercent": 70,
-                "queueSize": 4000
-            },
-            "ed2k": {
-                "listenPort": 11719,
-                "reconnectEnabled": false,
-                "safeServerConnect": true,
-                "addServersFromServer": true,
-                "serverKeepaliveMinutes": 45,
-                "uploadQueue": {
-                    "elasticUnderfillSecs": 12,
-                    "waitingTimeoutSecs": 1800,
-                    "grantedTimeoutSecs": 7,
-                    "uploadTimeoutSecs": 45,
-                    "sessionTransferPercent": 75,
-                    "sessionTimeLimitSecs": 3600
-                }
-            },
-            "kad": {
-                "listenPort": 11719
+        let patch = serde_json::from_value(serde_json::json!({
+            "expectedRevision":"1", "set": {
+                "network": {"p2p":{"tcpPort":11719,"udpPort":11719},
+                    "servers":{"autoReconnect":false,"safeConnect":true,"acceptServerListUpdates":true,"keepaliveMinutes":45}},
+                "transfers":{"uploadLimitBytesPerSecond":2097152,"upload":{
+                    "targetClientRateBytesPerSecond":65536,"baseSlots":5,"elasticPercent":70,"queueCapacity":4000,
+                    "sessionTransferPercent":75,"sessionTimeLimitSeconds":3600}}
             }
-        }))
-        .unwrap();
-
-        core.update_app_settings(update).await.unwrap();
+        })).unwrap();
+        core.update_settings(&patch).await.unwrap();
     }
-
     let reloaded = open_core(&metadata_path, &transfer_root);
-    let settings = reloaded.app_settings().await.unwrap();
-    assert_eq!(settings.core.upload_limit_ki_bps, 2048);
-    assert_eq!(settings.core.upload_client_data_rate, 64);
-    assert_eq!(settings.core.base_upload_slots, 5);
-    assert_eq!(settings.core.upload_slot_elastic_percent, 70);
-    assert_eq!(settings.core.queue_size, 4000);
-    assert_eq!(settings.ed2k.listen_port, Some(11719));
-    assert!(!settings.ed2k.reconnect_enabled);
-    assert!(settings.ed2k.safe_server_connect);
-    assert!(settings.ed2k.add_servers_from_server);
-    assert_eq!(settings.ed2k.server_keepalive_minutes, 45);
-    assert_eq!(settings.ed2k.upload_queue.elastic_underfill_secs, 12);
-    assert_eq!(settings.ed2k.upload_queue.waiting_timeout_secs, 1800);
-    assert_eq!(settings.ed2k.upload_queue.granted_timeout_secs, 7);
-    assert_eq!(settings.ed2k.upload_queue.upload_timeout_secs, 45);
-    assert_eq!(settings.ed2k.upload_queue.session_transfer_percent, 75);
-    assert_eq!(settings.ed2k.upload_queue.session_time_limit_secs, 3600);
-    assert_eq!(settings.kad.listen_port, Some(11719));
+    let settings = reloaded.effective_settings().await.unwrap();
+    assert_eq!(settings.transfers.upload_limit_bytes_per_second, 2097152);
+    assert_eq!(
+        settings
+            .transfers
+            .upload
+            .target_client_rate_bytes_per_second,
+        65536
+    );
+    assert_eq!(settings.transfers.upload.base_slots, 5);
+    assert_eq!(settings.transfers.upload.elastic_percent, 70);
+    assert_eq!(settings.transfers.upload.queue_capacity, 4000);
+    assert_eq!(settings.network.p2p.tcp_port, 11719);
+    assert_eq!(settings.network.p2p.udp_port, 11719);
+    assert!(!settings.network.servers.auto_reconnect);
+    assert!(settings.network.servers.safe_connect);
+    assert!(settings.network.servers.accept_server_list_updates);
+    assert_eq!(settings.network.servers.keepalive_minutes, 45);
+    assert_eq!(settings.transfers.upload.session_transfer_percent, 75);
+    assert_eq!(settings.transfers.upload.session_time_limit_seconds, 3600);
 }
 
 #[tokio::test]

@@ -20,6 +20,8 @@ struct PageMeta {
     next_cursor: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings_revision: Option<emulebb_settings::product::SettingsRevision>,
 }
 pub(super) fn item<T: Serialize>(status: StatusCode, data: T) -> Response {
     (
@@ -30,6 +32,25 @@ pub(super) fn item<T: Serialize>(status: StatusCode, data: T) -> Response {
                 api_version: "v1",
                 next_cursor: None,
                 has_more: None,
+                settings_revision: None,
+            },
+        }),
+    )
+        .into_response()
+}
+pub(super) fn settings_item<T: Serialize>(
+    data: T,
+    revision: emulebb_settings::product::SettingsRevision,
+) -> Response {
+    (
+        StatusCode::OK,
+        Json(Success {
+            data,
+            meta: PageMeta {
+                api_version: "v1",
+                next_cursor: None,
+                has_more: None,
+                settings_revision: Some(revision),
             },
         }),
     )
@@ -44,6 +65,7 @@ pub(super) fn page<T: Serialize>(data: T, next_cursor: Option<String>, has_more:
                 api_version: "v1",
                 next_cursor: Some(next_cursor),
                 has_more: Some(has_more),
+                settings_revision: None,
             },
         }),
     )

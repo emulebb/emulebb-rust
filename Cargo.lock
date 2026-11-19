@@ -857,6 +857,7 @@ dependencies = [
  "emulebb-ed2k",
  "emulebb-index",
  "emulebb-metadata",
+ "emulebb-settings",
  "futures-util",
  "hex",
  "http-body-util",

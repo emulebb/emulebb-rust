@@ -10,6 +10,30 @@ use crate::download_attempts::DownloadAttemptGuard;
 pub(crate) mod discovery_fixture;
 use crate::source_publish::emule_high_id_source_type;
 
+/// Seed current product values before constructing the runtime under test.
+fn test_index_with_settings(index: FileIndex, values: serde_json::Value) -> FileIndex {
+    let edit = emulebb_settings::product::SettingsEdit {
+        set: serde_json::from_value(values).unwrap(),
+        ..Default::default()
+    };
+    index.metadata_store().edit_app_settings(&edit).unwrap();
+    index
+}
+
+async fn update_test_settings(
+    core: &EmulebbCore,
+    values: serde_json::Value,
+) -> LibraryReply<SettingsSnapshot> {
+    let revision = core.settings().await.unwrap().value().revision();
+    core.update_settings(&emulebb_settings::product::SettingsPatch {
+        expected_revision: revision,
+        set: serde_json::from_value(values).unwrap(),
+        reset: Vec::new(),
+    })
+    .await
+    .unwrap()
+}
+
 async fn configure_test_shared_root(core: &EmulebbCore, file: &Path) {
     let root = file.parent().unwrap();
     // WHY: this fixture bypasses the API, but must retain its canonical root
