@@ -41,7 +41,7 @@ const MAX_LONG_FS_BYTES: usize = 2 * 1024 * 1024;
 // storage is charged separately before any owner-held clones are made.
 const PUBLICATION_WORKSPACE: usize = 4 * 1024 * 1024;
 
-enum PathMutation<'a> {
+pub(super) enum PathMutation<'a> {
     Withdraw {
         path: &'a std::path::Path,
         expected: Option<&'a emulebb_metadata::NativeFileFingerprint>,
@@ -311,59 +311,8 @@ impl LocalMutationRegistry {
         }
     }
 
-    /// Admit a typed stale-source withdrawal before cloning its payload.
-    pub(super) fn submit_withdrawal(
-        &self,
-        runtime: &super::Ed2kTransferRuntime,
-        hash: &str,
-        path: &std::path::Path,
-        expected: Option<&emulebb_metadata::NativeFileFingerprint>,
-        queue_rehash: bool,
-        manifest_guard: super::store::ScopedLockGuard<String>,
-        stripe_guard: super::SharedFileMutation,
-    ) -> Result<oneshot::Receiver<Result<usize>>> {
-        self.submit_path_mutation(
-            runtime,
-            hash,
-            PathMutation::Withdraw {
-                path,
-                expected,
-                queue_rehash,
-            },
-            manifest_guard,
-            stripe_guard,
-        )
-    }
-
-    /// Admit one verified copy with its catalog publication owned by the registry.
-    pub(super) fn submit_admission(
-        &self,
-        runtime: &super::Ed2kTransferRuntime,
-        hash: &str,
-        root: &std::path::Path,
-        path: &std::path::Path,
-        relative: &std::path::Path,
-        fingerprint: &emulebb_metadata::NativeFileFingerprint,
-        observed_root: Option<u64>,
-        manifest_guard: super::store::ScopedLockGuard<String>,
-        stripe_guard: super::SharedFileMutation,
-    ) -> Result<oneshot::Receiver<Result<usize>>> {
-        self.submit_path_mutation(
-            runtime,
-            hash,
-            PathMutation::Admit {
-                root,
-                path,
-                relative,
-                fingerprint,
-                observed_root,
-            },
-            manifest_guard,
-            stripe_guard,
-        )
-    }
-
-    fn submit_path_mutation(
+    /// Admit a typed path mutation before cloning its owner-held payload.
+    pub(super) fn submit_path_mutation(
         &self,
         runtime: &super::Ed2kTransferRuntime,
         hash: &str,

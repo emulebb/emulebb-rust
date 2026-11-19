@@ -403,10 +403,12 @@ mod tests {
         // though Rust may reuse the consumed range allocation.
         assert!(retained + converted_bytes + 65_536 < PUBLICATION_WORKSPACE);
         assert!(selected_bytes <= 648_808);
-        assert!(
-            HASH_REPRESENTATION + PUBLICATION_WORKSPACE + COPY_PATHS_AND_CONTROL
-                < PREPARED_ALLOWANCE
-        );
+        const {
+            assert!(
+                HASH_REPRESENTATION + PUBLICATION_WORKSPACE + COPY_PATHS_AND_CONTROL
+                    < PREPARED_ALLOWANCE
+            );
+        }
     }
 
     #[test]

@@ -1513,8 +1513,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         transport,
                         peer_addr,
                         transfer_runtime,
-                        file_hash_hex,
-                        job_token,
+                        notify::FileDescriptionTarget {
+                            hash: file_hash_hex,
+                            job: job_token,
+                        },
                         connected_peer_source(peer_addr, &session_state),
                         &packet.payload,
                         Ed2kStringEncoding::from_unicode_support(

@@ -137,13 +137,17 @@ pub(super) fn handle_buddy_ping_pong(transport: &Ed2kTransport, peer_addr: Socke
     );
 }
 
+pub(super) struct FileDescriptionTarget<'a> {
+    pub hash: &'a str,
+    pub job: emulebb_metadata::JobToken,
+}
+
 /// OP_FILEDESC: the peer's file rating/comment description.
 pub(super) async fn handle_file_desc(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,
     transfer_runtime: &Ed2kTransferRuntime,
-    file_hash_hex: &str,
-    job_token: emulebb_metadata::JobToken,
+    target: FileDescriptionTarget<'_>,
     mut source: Ed2kSourceHint,
     payload: &[u8],
     encoding: Ed2kStringEncoding,
@@ -156,7 +160,8 @@ pub(super) async fn handle_file_desc(
         .collect();
     dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "file_desc", || {
         format!(
-            "file_hash={file_hash_hex} rating={} comment_len={}",
+            "file_hash={} rating={} comment_len={}",
+            target.hash,
             file_desc.rating,
             comment.chars().count()
         )
@@ -164,7 +169,7 @@ pub(super) async fn handle_file_desc(
     source.file_comment = comment;
     source.file_rating = file_desc.rating;
     transfer_runtime
-        .remember_source_file_description(job_token, source)
+        .remember_source_file_description(target.job, source)
         .await?;
     Ok(())
 }

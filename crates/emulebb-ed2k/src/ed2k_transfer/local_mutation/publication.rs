@@ -4,7 +4,7 @@ use crate::ed2k_transfer as transfer;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 enum Selection {
-    Ready(Option<transfer::Ed2kSharedEntry>),
+    Ready(Option<Box<transfer::Ed2kSharedEntry>>),
     NeedProbe,
 }
 type PayloadProof = (
@@ -116,12 +116,14 @@ impl ContentPublication {
         let (local, mut partial) = self.metadata.shared_path_projection(text)?;
         if self.metadata.library_sharing_enabled(text)? != Some(true) {
             drop(prepared);
-            return Ok(Selection::Ready(self.partial(text, partial)?));
+            return Ok(Selection::Ready(
+                (self.partial(text, partial)?).map(Box::new),
+            ));
         }
         if local {
             drop(prepared);
             drop(partial);
-            return Ok(Selection::Ready(self.local(text)?));
+            return Ok(Selection::Ready((self.local(text)?).map(Box::new)));
         }
         if let Some((candidate, proof)) = prepared {
             // Do not overlap a maximum partial with the payload exact-row
@@ -136,21 +138,23 @@ impl ContentPublication {
             }
             if physical {
                 drop(partial);
-                return Ok(Selection::Ready(Some(
+                return Ok(Selection::Ready(Some(Box::new(
                     transfer::transfer_sql::shared_entry_from_catalog_entry(candidate.catalog)?,
-                )));
+                ))));
             }
             drop(candidate);
             let (local, fresh) = self.metadata.shared_path_projection(text)?;
             if local {
                 drop(fresh);
-                return Ok(Selection::Ready(self.local(text)?));
+                return Ok(Selection::Ready((self.local(text)?).map(Box::new)));
             }
             partial = fresh;
         } else if self.metadata.download_payload_candidate(text)?.is_some() {
             return Ok(Selection::NeedProbe);
         }
-        Ok(Selection::Ready(self.partial(text, partial)?))
+        Ok(Selection::Ready(
+            (self.partial(text, partial)?).map(Box::new),
+        ))
     }
     fn probe(&self, text: &str) -> Result<Option<PayloadProof>> {
         let Some(candidate) = self.metadata.download_payload_candidate(text)? else {
@@ -236,7 +240,7 @@ impl ContentPublication {
                 continue;
             }
             let (next, content, stripe) = match self.select(&text, None)? {
-                Selection::Ready(next) => (next, content, stripe),
+                Selection::Ready(next) => (next.map(|entry| *entry), content, stripe),
                 Selection::NeedProbe => {
                     self.dirty.store(true, Ordering::Release);
                     drop(stripe);
@@ -271,7 +275,7 @@ impl ContentPublication {
                     let Selection::Ready(next) = self.select(&text, prepared)? else {
                         continue;
                     };
-                    (next, content, stripe)
+                    (next.map(|entry| *entry), content, stripe)
                 }
             };
             let published = self.publish_entries(cut, vec![(hash, next)])?;
@@ -301,7 +305,7 @@ impl ContentPublication {
                 continue;
             }
             let next = match self.select(&text, None)? {
-                Selection::Ready(next) => next,
+                Selection::Ready(next) => next.map(|entry| *entry),
                 Selection::NeedProbe => return Ok(()),
             };
             if self.publish_entries(cut, vec![(hash, next)])? {
@@ -374,7 +378,7 @@ impl ContentPublication {
                 let Selection::Ready(next) = self.select(text, proof)? else {
                     break;
                 };
-                replacements.push((*hash, next));
+                replacements.push((*hash, next.map(|entry| *entry)));
             }
             if replacements.len() != texts.len() {
                 continue;
