@@ -139,8 +139,11 @@ mod tests {
         assert_eq!(db.shared_directory_roots().unwrap().len(), 2);
         for root in db.shared_directory_roots().unwrap() {
             let runtime_path = emulebb_ed2k::long_path::normal_path_display(&root.path);
-            db.replace_root_memberships(Path::new(&runtime_path), &[])
-                .unwrap();
+            db.replace_root_memberships(
+                Path::new(&runtime_path),
+                std::iter::empty::<(PathBuf, PathBuf, emulebb_metadata::NativeFileFingerprint)>(),
+            )
+            .unwrap();
         }
     }
     #[test]

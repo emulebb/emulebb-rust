@@ -1,6 +1,9 @@
 //! Root membership is the durable sharing intent for verified local paths.
 
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Borrow,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
@@ -317,15 +320,20 @@ impl MetadataStore {
     /// Commit one successful full scan of a root. The caller supplies only
     /// scanned local paths with their live fingerprints; a failed or incomplete
     /// scan must never call this. Only safely matched cache entries are admitted.
-    pub fn replace_root_memberships(
+    /// Input is consumed within the transaction, without collecting a snapshot.
+    pub fn replace_root_memberships<M>(
         &self,
         root: &Path,
-        paths: &[(PathBuf, PathBuf, NativeFileFingerprint)],
-    ) -> Result<()> {
+        paths: impl IntoIterator<Item = M>,
+    ) -> Result<()>
+    where
+        M: Borrow<(PathBuf, PathBuf, NativeFileFingerprint)>,
+    {
+        let paths = paths.into_iter();
         let started = std::time::Instant::now();
         tracing::debug!(
             phase = "connectionWait",
-            paths = paths.len(),
+            minimum_paths = paths.size_hint().0,
             "root admission"
         );
         let native_root = NativePath::from(root);
@@ -351,7 +359,10 @@ impl MetadataStore {
             "CREATE TEMP TABLE IF NOT EXISTS scanned_membership_paths(path_id INTEGER PRIMARY KEY);
             DELETE FROM temp.scanned_membership_paths;",
         )?;
-        for (path, relative, current_fingerprint) in paths {
+        // WHY: admission is atomic, but its input need not be another complete
+        // library allocation. Consume each scan record inside this transaction.
+        for member in paths {
+            let (path, relative, current_fingerprint) = member.borrow();
             if crate::delivery_exclusion_store::identity_is_excluded(
                 &tx,
                 current_fingerprint.identity,

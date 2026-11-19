@@ -1151,6 +1151,12 @@ async fn root_scan_keeps_successful_membership_separate_from_offline_root() {
         .unwrap();
     assert_eq!(scan.root_files.len(), 1);
     assert_eq!(scan.root_files[0].1.len(), 1);
+    assert_eq!(scan.files.len(), 1);
+    assert_eq!(scan.root_files[0].1[0].path, scan.files[0].path);
+    assert_eq!(
+        scan.root_files[0].1[0].source_fingerprint,
+        scan.files[0].source_fingerprint
+    );
     assert_eq!(scan.inaccessible_roots, vec![offline]);
     fs::remove_dir_all(available).ok();
 }

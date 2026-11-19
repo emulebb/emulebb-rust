@@ -1045,8 +1045,15 @@ pub(crate) async fn scan_shared_directory_roots(
             match collect_shared_directory_files_with_policy(&root_path, &mut collected, &policy) {
                 Ok(skipped) => {
                     skipped_intake_count += skipped;
-                    files.extend(collected.iter().cloned());
-                    root_files.push((root_path, collected));
+                    let members = collected
+                        .iter()
+                        .map(|file| ScannedRootMember {
+                            path: file.path.clone(),
+                            source_fingerprint: file.source_fingerprint.clone(),
+                        })
+                        .collect();
+                    files.extend(collected);
+                    root_files.push((root_path, members));
                 }
                 Err(error) => {
                     tracing::warn!(root = %root.path, %error, "shared root scan failed");
@@ -1066,34 +1073,38 @@ pub(crate) async fn scan_shared_directory_roots(
 
 pub(crate) struct SharedScanResult {
     files: Vec<ScannedSharedFile>,
-    root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
+    root_files: Vec<(PathBuf, Vec<ScannedRootMember>)>,
     inaccessible_roots: Vec<PathBuf>,
     skipped_intake_count: usize,
 }
 
 async fn persist_scanned_roots(
     core: &EmulebbCore,
-    root_files: Vec<(PathBuf, Vec<ScannedSharedFile>)>,
+    root_files: Vec<(PathBuf, Vec<ScannedRootMember>)>,
 ) -> Result<()> {
     for (root, files) in root_files {
         let normalized_root = long_path(&root);
-        let members = files
-            .into_iter()
-            .filter_map(|file| {
-                let fingerprint = file.source_fingerprint?;
-                let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
-                Some((file.path, relative, fingerprint))
-            })
-            .collect::<Vec<_>>();
         let metadata = core.metadata_store.clone();
         let root_mutation = core.ed2k_transfers.begin_category_root_mutation().await?;
         tokio::task::spawn_blocking(move || {
             let _root_mutation = root_mutation;
-            metadata.replace_root_memberships(&root, &members)
+            let members = files.into_iter().filter_map(|file| {
+                let fingerprint = file.source_fingerprint?;
+                let relative = file.path.strip_prefix(&normalized_root).ok()?.to_path_buf();
+                Some((file.path, relative, fingerprint))
+            });
+            metadata.replace_root_memberships(&root, members)
         })
         .await??;
     }
     Ok(())
+}
+
+// WHY: root admission outlives hashing. Retain only its path and fingerprint,
+// rather than a second copy of every planning key and disk identifier.
+struct ScannedRootMember {
+    path: PathBuf,
+    source_fingerprint: Option<NativeFileFingerprint>,
 }
 
 #[derive(Debug, Clone)]
@@ -1892,14 +1903,14 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         .store(plan.to_hash.len() as i64, Ordering::Relaxed);
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
 
-    for reused in &plan.reused_shares {
+    for reused in plan.reused_shares {
         // Register the source path -> hash so the live directory monitor can
         // de-offer this file if its source is deleted at runtime (HASH-1).
         register_monitor_shared_hash(
             core,
-            reused.source_path.clone(),
+            reused.source_path,
             &reused.file_hash,
-            reused.source_fingerprint.clone(),
+            reused.source_fingerprint,
         )
         .await;
     }
@@ -2453,12 +2464,12 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         "shared-directory reload planned (incremental skip of unchanged files)"
     );
 
-    for reused in &plan.reused_shares {
+    for reused in plan.reused_shares {
         register_monitor_shared_hash(
             &core,
-            reused.source_path.clone(),
+            reused.source_path,
             &reused.file_hash,
-            reused.source_fingerprint.clone(),
+            reused.source_fingerprint,
         )
         .await;
     }
@@ -2467,7 +2478,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     if core.lifecycle_state_name() != "running" {
         return Ok(());
     }
+    tracing::info!("shared-directory reload committing root memberships");
     persist_scanned_roots(&core, root_files).await?;
+    tracing::info!("shared-directory reload committed root memberships");
     // WHY: shutdown must join the durable root transaction, but starting a full
     // catalog rebuild afterward delays profile release for an unused cache.
     // Startup revalidates the committed memberships before offering them.
@@ -2475,6 +2488,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         return Ok(());
     }
     let background_core = core.clone();
+    tracing::info!("shared-directory reload rebuilding complete catalog");
     if core
         .ed2k_transfers
         .refresh_complete_shared_catalog_while(move || {
