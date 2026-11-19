@@ -959,39 +959,30 @@ fn validate_shared_file_comment_rating_body_fields(
     Ok(())
 }
 
-pub(super) fn validate_shared_directories_patch_body_fields(
-    object: &JsonObject,
-) -> Result<(), Box<Response>> {
-    let Some(roots) = object.get("roots").and_then(serde_json::Value::as_array) else {
-        return Err(invalid_body_error("roots must be an array"));
-    };
-    for root in roots {
-        validate_shared_directory_root_body(root)?;
-    }
-    Ok(())
-}
-
-fn validate_shared_directory_root_body(value: &serde_json::Value) -> Result<(), Box<Response>> {
-    let Some(object) = value.as_object() else {
-        return Err(invalid_body_error(
-            "shared-directory root must be an object with path",
-        ));
-    };
-    validate_shared_directory_root_body_fields(object)
-}
-
-pub(super) fn validate_shared_directory_root_body_fields(
+pub(super) fn validate_library_root_create_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
     for name in object.keys() {
         if !matches!(name.as_str(), "path" | "watchEnabled") {
             return Err(invalid_body_error(format!(
-                "unknown shared-directory root field: {name}"
+                "unknown library root field: {name}"
             )));
         }
     }
     validate_path_text_body_field(object.get("path"), "path")?;
     validate_optional_boolean_body_field(object, "watchEnabled")
+}
+
+pub(super) fn validate_library_root_patch_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    if !object
+        .get("watchEnabled")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err(invalid_body_error("watchEnabled must be a boolean"));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_shared_file_ignore_pattern_body_fields(

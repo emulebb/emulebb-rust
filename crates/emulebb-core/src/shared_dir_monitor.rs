@@ -759,9 +759,7 @@ pub(crate) enum RootIoRequest {
     RefreshWatchCoverage(Arc<tokio::sync::Mutex<Option<SharedDirMonitor>>>),
     Inspect(Vec<SharedDirectoryRoot>),
     InspectDelivery(Vec<SharedDirectoryRoot>, PathBuf, NativeFileFingerprint),
-    Replace(Vec<SharedDirectoryRoot>, usize),
     Canonical(Vec<String>),
-    Remove(String, Vec<SharedDirectoryRoot>),
 }
 
 pub(crate) enum RootIoResult {
@@ -769,7 +767,6 @@ pub(crate) enum RootIoResult {
     WatchesRefreshed(usize),
     Inspected(Vec<(SharedDirectoryRoot, bool)>),
     Canonical(Vec<String>),
-    Remaining(Vec<SharedDirectoryRoot>),
 }
 
 pub(crate) enum RootSqlResult {
@@ -849,61 +846,12 @@ pub(crate) async fn run_root_io(
                         .collect(),
                 ))
             }
-            RootIoRequest::Replace(mut roots, first_explicit) => {
-                for root in roots.iter_mut().skip(first_explicit) {
-                    *root = crate::shared_directories::refresh_shared_directory_row(root);
-                }
-                let roots = crate::shared_directories::consolidate_shared_directory_roots(
-                    roots
-                        .into_iter()
-                        .map(|root| emulebb_metadata::MetadataSharedDirectoryRoot {
-                            path: root.path,
-                            watch_enabled: root.watch_enabled,
-                            monitor_owned: root.monitor_owned,
-                            shareable: root.shareable,
-                            accessible: root.accessible,
-                        }),
-                );
-                Ok(RootIoResult::Inspected(
-                    roots
-                        .into_iter()
-                        .map(|root| {
-                            let observed = long_path(Path::new(&root.path)).is_dir();
-                            (
-                                SharedDirectoryRoot {
-                                    path: root.path,
-                                    watch_enabled: root.watch_enabled,
-                                    monitor_owned: root.monitor_owned,
-                                    shareable: root.shareable,
-                                    accessible: root.accessible,
-                                },
-                                observed,
-                            )
-                        })
-                        .collect(),
-                ))
-            }
             RootIoRequest::Canonical(paths) => Ok(RootIoResult::Canonical(
                 paths
                     .iter()
                     .map(|path| crate::shared_file_api::canonical_shared_directory_root(path))
                     .collect::<anyhow::Result<_>>()?,
             )),
-            RootIoRequest::Remove(path, roots) => {
-                let canonical = crate::shared_file_api::removable_shared_directory_root(&path)?;
-                let key =
-                    crate::shared_directories::shared_root_comparison_key(Path::new(&canonical));
-                Ok(RootIoResult::Remaining(
-                    roots
-                        .into_iter()
-                        .filter(|root| {
-                            crate::shared_directories::shared_root_comparison_key(Path::new(
-                                &root.path,
-                            )) != key
-                        })
-                        .collect(),
-                ))
-            }
             RootIoRequest::InspectDelivery(..) => unreachable!(),
         }
     }));
@@ -1913,8 +1861,9 @@ mod tests {
         .unwrap();
         let root = crate::unique_runtime_dir("root-scan-owner");
         let execution = core.shared_reload_gate.lock().await;
-        core.add_shared_directory_root(&root.to_string_lossy(), false)
+        core.create_library_root(&root.to_string_lossy(), false)
             .await
+            .unwrap()
             .unwrap();
         core.shared_root_change.notified().await;
         let scan_required = core.shared_root_change.take_scan_request();
@@ -2218,7 +2167,7 @@ mod tests {
             let core = Arc::clone(&core);
             let root = root.clone();
             tokio::spawn(async move {
-                core.add_shared_directory_root(&root.to_string_lossy(), false)
+                core.create_library_root(&root.to_string_lossy(), false)
                     .await
             })
         };

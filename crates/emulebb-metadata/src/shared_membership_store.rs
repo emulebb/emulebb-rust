@@ -10,6 +10,73 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
+const LIBRARY_ROOT_SELECT: &str = "SELECT r.id,p.platform,p.native_path,r.watch_enabled,
+    EXISTS(SELECT 1 FROM shared_directory_root_origins o WHERE o.root_id=r.id AND o.origin='implicit'),
+    r.accessible,r.shareable,r.last_scanned_at_ms,length(p.native_path)
+    FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx
+    JOIN local_paths p ON p.id=r.path_id";
+
+fn library_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::MetadataLibraryRoot> {
+    root_path_bytes(row)?;
+    Ok(crate::MetadataLibraryRoot {
+        id: row.get(0)?,
+        path: crate::native_path::path_from_row(row, 1, 2)?,
+        watch_enabled: row.get(3)?,
+        managed: row.get(4)?,
+        accessible: row.get(5)?,
+        shareable: row.get(6)?,
+        last_scanned_at_ms: row.get(7)?,
+    })
+}
+
+// A native Windows extended path fits in 64 KiB. Inspect SQLite's byte count
+// before decoding; corrupt or oversized rows cannot defeat response admission.
+fn root_path_bytes(row: &rusqlite::Row<'_>) -> rusqlite::Result<usize> {
+    let bytes: i64 = row.get(8)?;
+    if !(1..=65_536).contains(&bytes) {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            8,
+            rusqlite::types::Type::Integer,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "root path exceeds read budget",
+            )
+            .into(),
+        ));
+    }
+    usize::try_from(bytes).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(8, bytes))
+}
+
+fn library_root_on_connection(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> Result<Option<crate::MetadataLibraryRoot>> {
+    conn.prepare_cached(&format!(
+        "{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id=?1"
+    ))?
+    .query_row([id], library_root_row)
+    .optional()
+    .map_err(Into::into)
+}
+
+fn root_paths_overlap(left: &Path, right: &Path) -> bool {
+    // Compare native components, so sibling names sharing a textual prefix do
+    // not overlap. Windows follows the existing root policy's case folding;
+    // undecodable native components retain exact equality.
+    left.components()
+        .zip(right.components())
+        .all(|(left, right)| {
+            if cfg!(windows) {
+                match (left.as_os_str().to_str(), right.as_os_str().to_str()) {
+                    (Some(left), Some(right)) => left.to_lowercase() == right.to_lowercase(),
+                    _ => left == right,
+                }
+            } else {
+                left == right
+            }
+        })
+}
+
 #[derive(Debug)]
 pub struct ObservedRootChanged;
 impl std::fmt::Display for ObservedRootChanged {
@@ -20,6 +87,170 @@ impl std::fmt::Display for ObservedRootChanged {
 impl std::error::Error for ObservedRootChanged {}
 
 impl MetadataStore {
+    /// Create one explicit root at an already normalized absolute path and return
+    /// its committed identity. An active duplicate or ancestor/descendant conflict
+    /// leaves existing policies, origins and observed health unchanged.
+    pub fn create_library_root(
+        &self,
+        path: &Path,
+        watch_enabled: bool,
+        accessible: bool,
+    ) -> Result<Option<crate::MetadataLibraryRoot>> {
+        ensure!(path.is_absolute(), "root path must be absolute");
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        {
+            // WHY: validate and insert under the same writer transaction, so
+            // simultaneous parent/child requests cannot both pass admission.
+            let mut roots = tx.prepare_cached("SELECT p.platform,p.native_path FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx JOIN local_paths p ON p.id=r.path_id WHERE r.enabled=1 AND r.deleted_at_ms IS NULL")?;
+            let paths = roots.query_map([], |row| crate::native_path::path_from_row(row, 0, 1))?;
+            for existing in paths {
+                if root_paths_overlap(path, &existing?) {
+                    return Ok(None);
+                }
+            }
+        }
+        let path_id = crate::store::upsert_local_path(&tx, path)?;
+        let inserted = tx.execute(
+            "INSERT INTO shared_directory_roots(path_id,watch_enabled,accessible,created_at_ms)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING",
+            params![path_id, watch_enabled, accessible, unix_ms()],
+        )?;
+        if inserted == 0 {
+            return Ok(None);
+        }
+        let id = tx.last_insert_rowid();
+        tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) VALUES(?1,'explicit',0,1,?2)", params![id, accessible])?;
+        let root = library_root_on_connection(&tx, id)?;
+        ensure!(root.is_some(), "created root is not active");
+        tx.commit()?;
+        Ok(root)
+    }
+
+    /// Page one exact root's content for bounded internal reconciliation.
+    /// Retired IDs remain valid and cannot be redirected by re-adding their path.
+    pub fn library_root_hash_page(
+        &self,
+        id: i64,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, [u8; 16])>> {
+        ensure!(
+            id > 0 && after >= 0 && (1..=128).contains(&limit),
+            "invalid root membership page"
+        );
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare_cached("SELECT m.known_file_id,k.ed2k_hash FROM shared_file_memberships m INDEXED BY shared_file_memberships_root_content_idx JOIN known_files k ON k.id=m.known_file_id WHERE m.root_id=?1 AND m.known_file_id>?2 GROUP BY m.known_file_id ORDER BY m.known_file_id LIMIT ?3")?;
+        let mut rows = stmt.query(params![id, after, i64::try_from(limit)?])?;
+        let mut page = Vec::with_capacity(limit);
+        while let Some(row) = rows.next()? {
+            let hash: Vec<u8> = row.get(1)?;
+            let hash = hash
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid content hash"))?;
+            page.push((row.get(0)?, hash));
+        }
+        Ok(page)
+    }
+
+    /// Read one current resource without resolving or probing its filesystem path.
+    pub fn library_root(&self, id: i64) -> Result<Option<crate::MetadataLibraryRoot>> {
+        ensure!(id > 0, "root id must be positive");
+        let conn = self.connection()?;
+        library_root_on_connection(&conn, id)
+    }
+
+    /// Page the active-ID index; retired roots do not inflate page traversal.
+    pub fn library_root_page(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<crate::MetadataLibraryRootPage> {
+        ensure!(after >= 0, "root continuation must be nonnegative");
+        ensure!(
+            (1..=100).contains(&limit),
+            "root page limit must be between 1 and 100"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let total: i64 = tx.query_row("SELECT count(*) FROM shared_directory_roots INDEXED BY shared_directory_roots_active_id_idx WHERE enabled=1 AND deleted_at_ms IS NULL", [], |row| row.get(0))?;
+        let (items, more) = {
+            let mut stmt = tx.prepare_cached(&format!("{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id>?1 ORDER BY r.id LIMIT ?2"))?;
+            let mut rows = stmt.query(params![after, i64::try_from(limit + 1)?])?;
+            let mut items = Vec::with_capacity(limit);
+            let mut bytes = 0;
+            let mut more = false;
+            while let Some(row) = rows.next()? {
+                if items.len() == limit {
+                    more = true;
+                    break;
+                }
+                let path_bytes = root_path_bytes(row)?;
+                // WHY: a count limit alone can retain megabytes of native paths.
+                // Allow one long path, then continue by ID before decoding another.
+                if !items.is_empty() && bytes + path_bytes > 32 * 1024 {
+                    more = true;
+                    break;
+                }
+                bytes += path_bytes;
+                items.push(library_root_row(row)?);
+            }
+            (items, more)
+        };
+        let next_id = more.then(|| items.last().expect("nonempty root page").id);
+        tx.commit()?;
+        Ok(crate::MetadataLibraryRootPage {
+            items,
+            total: u64::try_from(total)?,
+            next_id,
+        })
+    }
+
+    /// Commit only the addressed watch policy, retaining the receipt in the same transaction.
+    /// The serialized root owner publishes this result before completing its request.
+    pub fn patch_library_root_watch(
+        &self,
+        id: i64,
+        watch_enabled: bool,
+    ) -> Result<Option<crate::MetadataLibraryRoot>> {
+        ensure!(id > 0, "root id must be positive");
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE shared_directory_roots SET watch_enabled=?2 WHERE id=?1 AND enabled=1 AND deleted_at_ms IS NULL AND watch_enabled!=?2", params![id, watch_enabled])?;
+        let result = library_root_on_connection(&tx, id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Retire one explicit root by ID, preserving memberships and native identity history.
+    pub fn delete_library_root(&self, id: i64) -> Result<crate::MetadataLibraryRootDelete> {
+        ensure!(id > 0, "root id must be positive");
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(root) = library_root_on_connection(&tx, id)? else {
+            return Ok(crate::MetadataLibraryRootDelete::Missing);
+        };
+        if root.managed {
+            return Ok(crate::MetadataLibraryRootDelete::Managed);
+        }
+        let removed = tx.execute(
+            "DELETE FROM shared_directory_root_origins WHERE root_id=?1 AND origin='explicit'",
+            [id],
+        )?;
+        ensure!(
+            removed == 1,
+            "active unmanaged root lacks explicit ownership"
+        );
+        // WHY: retiring one root must not recompute other roots' observed health
+        // from origin snapshots, which can predate their latest availability probe.
+        let now = unix_ms();
+        tx.execute("UPDATE shared_directory_roots SET monitor_owned=0,shareable=0,accessible=0,enabled=0,deleted_at_ms=?2 WHERE id=?1", params![id, now])?;
+        tx.execute("UPDATE shared_file_memberships SET removed_at_ms=?2 WHERE root_id=?1 AND removed_at_ms IS NULL", params![id, now])?;
+        tx.commit()?;
+        Ok(crate::MetadataLibraryRootDelete::Deleted(root))
+    }
+
     pub fn shared_root_last_scan_ms(&self, root: &Path) -> Result<Option<i64>> {
         let native = NativePath::from(root);
         self.connection()?
@@ -27,7 +258,8 @@ impl MetadataStore {
                 "SELECT shared_directory_roots.last_scanned_at_ms
                  FROM shared_directory_roots
                  JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
-                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2",
+                 WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+                   AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_ms IS NULL",
                 params![NativePath::platform(), native.storage_bytes()],
                 |row| row.get(0),
             )
@@ -476,6 +708,7 @@ impl MetadataStore {
                      SELECT shared_directory_roots.id FROM shared_directory_roots
                      JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
                      WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
+                       AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_ms IS NULL
                  ) AND removed_at_ms IS NULL",
                 params![NativePath::platform(), native.storage_bytes(), unix_ms()],
             )?

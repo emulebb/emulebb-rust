@@ -413,22 +413,6 @@ impl MetadataStore {
         Ok(())
     }
 
-    /// Commit explicit roots only if the implicit-root snapshot is still current.
-    pub fn replace_explicit_roots_if_implicit_matches(
-        &self,
-        expected: &[MetadataSharedDirectoryRoot],
-        roots: &[MetadataSharedDirectoryRoot],
-    ) -> Result<bool> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if Self::implicit_roots_on_connection(&tx)? != expected {
-            return Ok(false);
-        }
-        Self::replace_root_origins_in_transaction(&tx, roots, "explicit", unix_ms())?;
-        tx.commit()?;
-        Ok(true)
-    }
-
     pub fn search_index_by_origin(
         &self,
         query: &str,
@@ -582,7 +566,7 @@ impl MetadataStore {
                     enabled, created_at_ms, deleted_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, NULL)
-                ON CONFLICT(path_id) DO NOTHING
+                ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING
                 "#,
                 params![
                     path_id,
@@ -597,7 +581,7 @@ impl MetadataStore {
             // Incoming/category membership must not reset an operator choice.
             if origin == "explicit" {
                 tx.execute(
-                    "UPDATE shared_directory_roots SET watch_enabled=?2 WHERE path_id=?1",
+                    "UPDATE shared_directory_roots SET watch_enabled=?2 WHERE path_id=?1 AND deleted_at_ms IS NULL",
                     params![path_id, bool_to_i64(root.watch_enabled)],
                 )?;
             }
@@ -605,7 +589,7 @@ impl MetadataStore {
                 "INSERT INTO shared_directory_root_origins(
                     root_id, origin, monitor_owned, shareable, accessible
                  ) VALUES (
-                    (SELECT id FROM shared_directory_roots WHERE path_id = ?1),
+                    (SELECT id FROM shared_directory_roots WHERE path_id = ?1 AND deleted_at_ms IS NULL),
                     ?2, ?3, ?4, ?5
                  ) ON CONFLICT(root_id, origin) DO UPDATE SET
                     monitor_owned = excluded.monitor_owned,
@@ -772,7 +756,7 @@ pub(crate) fn refresh_shared_root_eligibility(
                 shareable = coalesce((SELECT max(shareable) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
                 accessible = coalesce((SELECT max(shareable * accessible) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
                 enabled = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN 1 ELSE 0 END,
-                deleted_at_ms = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE ?1 END",
+                deleted_at_ms = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE coalesce(deleted_at_ms, ?1) END",
         params![now],
     )?;
     tx.execute(
@@ -1230,6 +1214,438 @@ mod tests {
         let roots = store.shared_directory_roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].path, "/tmp/beta");
+    }
+
+    fn library_root_config(path: &Path, watch_enabled: bool) -> MetadataSharedDirectoryRoot {
+        MetadataSharedDirectoryRoot {
+            path: path.to_string_lossy().into_owned(),
+            watch_enabled,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }
+    }
+
+    #[test]
+    fn root_pages_stop_before_decoding_paths_beyond_the_byte_budget() {
+        let store = MetadataStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join("root-page-byte-budget");
+        let mut ids = Vec::new();
+        for name in ["a", "b", "c"] {
+            let path = base.join(name.repeat(20 * 1024));
+            ids.push(
+                store
+                    .create_library_root(&path, false, false)
+                    .unwrap()
+                    .unwrap()
+                    .id,
+            );
+        }
+        let mut after = 0;
+        for (index, id) in ids.iter().enumerate() {
+            let page = store.library_root_page(after, 100).unwrap();
+            assert_eq!(page.total, 3);
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].id, *id);
+            assert_eq!(page.next_id, (index < 2).then_some(*id));
+            after = *id;
+        }
+        assert!(
+            store
+                .library_root_page(after, 100)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let conn = store.connection().unwrap();
+        conn.execute("UPDATE local_paths SET native_path=zeroblob(65538) WHERE id=(SELECT path_id FROM shared_directory_roots WHERE id=?1)", [ids[0]]).unwrap();
+        drop(conn);
+        assert!(store.library_root(ids[0]).is_err());
+        assert!(store.library_root_page(0, 100).is_err());
+    }
+
+    #[test]
+    fn root_creation_rejects_overlaps_but_allows_siblings_and_retired_paths() {
+        let store = MetadataStore::in_memory().unwrap();
+        let parent = std::env::temp_dir().join("emulebb-root-overlap");
+        let path = parent.join("shared");
+        let child = path.join("rare");
+        let root = store
+            .create_library_root(&path, true, false)
+            .unwrap()
+            .unwrap();
+        for conflict in [&path, &parent, &child] {
+            assert!(
+                store
+                    .create_library_root(conflict, false, true)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(store.library_root(root.id).unwrap(), Some(root.clone()));
+        let sibling = store
+            .create_library_root(&parent.join("shared-other"), false, true)
+            .unwrap()
+            .unwrap();
+        assert_ne!(root.id, sibling.id);
+        store.delete_library_root(root.id).unwrap();
+        assert!(
+            store
+                .create_library_root(&child, false, true)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn concurrent_parent_and_child_creation_admits_only_one_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("metadata.sqlite");
+        let first = MetadataStore::open(&database).unwrap();
+        let second = MetadataStore::open(&database).unwrap();
+        let parent = directory.path().join("library");
+        let child = parent.join("rare");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writers: Vec<_> = [(first, parent), (second, child)]
+            .into_iter()
+            .map(|(store, path)| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .create_library_root(&path, false, true)
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+        let admitted = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .filter(|created| *created)
+            .count();
+        assert_eq!(admitted, 1);
+        assert_eq!(
+            MetadataStore::open(&database)
+                .unwrap()
+                .library_root_page(0, 100)
+                .unwrap()
+                .total,
+            1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_overlap_comparison_ignores_case_without_collapsing_siblings() {
+        let store = MetadataStore::in_memory().unwrap();
+        store
+            .create_library_root(Path::new(r"C:\Library\Shared"), false, true)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .create_library_root(Path::new(r"c:\library\SHARED\Rare"), false, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .create_library_root(Path::new(r"c:\LIBRARY"), false, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .create_library_root(Path::new(r"c:\Library\SharedOther"), false, true)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn creating_a_root_preserves_active_path_conflicts_and_allocates_a_fresh_id() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let path = std::env::temp_dir().join("emulebb-root-create");
+        let first = store
+            .create_library_root(&path, true, false)
+            .unwrap()
+            .unwrap();
+        assert!(!first.managed && first.watch_enabled && !first.accessible);
+        assert!(
+            store
+                .create_library_root(&path, false, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.library_root(first.id).unwrap(), Some(first.clone()));
+        store.delete_library_root(first.id).unwrap();
+        let next = store
+            .create_library_root(&path, false, true)
+            .unwrap()
+            .unwrap();
+        assert!(next.id > first.id);
+        store
+            .replace_implicit_shared_directory_roots(&[library_root_config(&path, false)])
+            .unwrap();
+        let managed = store.library_root(next.id).unwrap().unwrap();
+        assert!(managed.managed);
+        assert!(
+            store
+                .create_library_root(&path, true, false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.library_root(next.id).unwrap(), Some(managed));
+        assert!(
+            store
+                .create_library_root(Path::new("relative"), false, true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn root_membership_pages_keep_retired_and_replacement_resources_separate() {
+        let store = MetadataStore::in_memory().unwrap();
+        let path = std::env::temp_dir().join("emulebb-root-membership-identities");
+        let first = store
+            .create_library_root(&path, false, true)
+            .unwrap()
+            .unwrap();
+        store.delete_library_root(first.id).unwrap();
+        let next = store
+            .create_library_root(&path, false, true)
+            .unwrap()
+            .unwrap();
+        {
+            let mut conn = store.connection().unwrap();
+            let tx = conn.transaction().unwrap();
+            for (n, root) in [(1u8, first.id), (2u8, next.id)] {
+                let file = upsert_local_path(&tx, &path.join(format!("sample-{n}.bin"))).unwrap();
+                let fingerprint = crate::NativeFileFingerprint {
+                    identity: crate::NativeFileIdentity::Unix {
+                        device_id: 1,
+                        inode_number: u64::from(n),
+                    },
+                    size_bytes: 1,
+                    modified: crate::NativeFileTimestamp::new(1, 0).unwrap(),
+                    changed: None,
+                };
+                tx.execute("INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES(?1,?2,1,'sample.bin',0,0,0)", params![n, vec![n;16]]).unwrap();
+                tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) VALUES(?1,?2,1,?3,?4,0)", params![file,n,fingerprint.identity.storage_bytes(),fingerprint.storage_bytes()]).unwrap();
+                tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_ms,last_seen_at_ms,removed_at_ms) VALUES(?1,?2,?3,'sample.bin',0,0,0)", params![root,file,n]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            store.library_root_hash_page(first.id, 0, 1).unwrap(),
+            vec![(1, [1; 16])]
+        );
+        assert_eq!(
+            store.library_root_hash_page(next.id, 0, 1).unwrap(),
+            vec![(2, [2; 16])]
+        );
+        assert!(
+            store
+                .library_root_hash_page(first.id, 1, 128)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.category_root_hash_page(&path, 0, 128).unwrap(),
+            vec![(2, [2; 16])]
+        );
+        assert!(store.library_root_hash_page(first.id, 0, 129).is_err());
+    }
+
+    #[test]
+    fn deleting_one_root_preserves_another_roots_observed_health() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join("emulebb-root-resource-health");
+        let alpha = base.join("alpha");
+        let beta = base.join("beta");
+        store
+            .replace_shared_directory_roots(&[
+                library_root_config(&alpha, false),
+                library_root_config(&beta, true),
+            ])
+            .unwrap();
+        let roots = store.library_root_page(0, 100).unwrap().items;
+        let alpha_id = roots.iter().find(|root| root.path == alpha).unwrap().id;
+        let beta_id = roots.iter().find(|root| root.path == beta).unwrap().id;
+        store.set_shared_root_accessible(&beta, false).unwrap();
+        let before = store.library_root(beta_id).unwrap().unwrap();
+        assert!(!before.accessible);
+        assert!(matches!(
+            store.delete_library_root(alpha_id).unwrap(),
+            crate::MetadataLibraryRootDelete::Deleted(_)
+        ));
+        assert_eq!(store.library_root(beta_id).unwrap(), Some(before));
+    }
+
+    #[test]
+    fn root_resource_ids_retire_without_retargeting_or_reusing_path_history() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let path = std::env::temp_dir().join("emulebb-root-resource-history");
+        let root = library_root_config(&path, false);
+        store
+            .replace_shared_directory_roots(std::slice::from_ref(&root))
+            .unwrap();
+        let first = store.library_root_page(0, 10).unwrap().items.remove(0);
+        assert!(first.id > 0);
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE shared_directory_roots SET last_scanned_at_ms=123 WHERE id=?1",
+                [first.id],
+            )
+            .unwrap();
+        assert!(
+            store
+                .patch_library_root_watch(first.id, true)
+                .unwrap()
+                .unwrap()
+                .watch_enabled
+        );
+        store
+            .replace_shared_directory_roots(&[library_root_config(&path, true)])
+            .unwrap();
+        assert_eq!(
+            store.library_root_page(0, 10).unwrap().items[0].id,
+            first.id
+        );
+        assert!(matches!(
+            store.delete_library_root(first.id).unwrap(),
+            crate::MetadataLibraryRootDelete::Deleted(_)
+        ));
+        assert!(store.library_root(first.id).unwrap().is_none());
+        store.replace_shared_directory_roots(&[root]).unwrap();
+        let replacement = store.library_root_page(0, 10).unwrap().items.remove(0);
+        assert!(replacement.id > first.id);
+        assert!(!replacement.watch_enabled);
+        assert!(
+            store
+                .patch_library_root_watch(first.id, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.delete_library_root(first.id).unwrap(),
+            crate::MetadataLibraryRootDelete::Missing
+        );
+        assert_eq!(
+            store.library_root(replacement.id).unwrap(),
+            Some(replacement)
+        );
+        assert_eq!(store.shared_root_last_scan_ms(&path).unwrap(), None);
+        let retained: (i64, i64) = store.connection().unwrap().query_row(
+            "SELECT (SELECT count(*) FROM local_paths),(SELECT last_scanned_at_ms FROM shared_directory_roots WHERE id=?1)",
+            [first.id], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, (1, 123));
+    }
+
+    #[test]
+    fn root_pages_include_managed_resources_and_preserve_required_ownership() {
+        let mut store = MetadataStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join("emulebb-root-resource-page");
+        store
+            .replace_shared_directory_roots(&[library_root_config(&base.join("user"), false)])
+            .unwrap();
+        store
+            .replace_implicit_shared_directory_roots(&[library_root_config(
+                &base.join("incoming"),
+                false,
+            )])
+            .unwrap();
+        let first = store.library_root_page(0, 1).unwrap();
+        assert_eq!(first.total, 2);
+        assert_eq!(first.items.len(), 1);
+        assert!(!first.items[0].managed);
+        let second = store.library_root_page(first.next_id.unwrap(), 1).unwrap();
+        assert_eq!(second.total, 2);
+        assert!(second.next_id.is_none());
+        let incoming = &second.items[0];
+        assert!(incoming.managed);
+        assert_eq!(
+            store.delete_library_root(incoming.id).unwrap(),
+            crate::MetadataLibraryRootDelete::Managed
+        );
+        assert!(
+            store
+                .patch_library_root_watch(incoming.id, true)
+                .unwrap()
+                .unwrap()
+                .watch_enabled
+        );
+        store
+            .replace_implicit_shared_directory_roots(&[library_root_config(
+                &base.join("incoming"),
+                false,
+            )])
+            .unwrap();
+        assert!(
+            store
+                .library_root(incoming.id)
+                .unwrap()
+                .unwrap()
+                .watch_enabled
+        );
+        assert_eq!(store.library_root_page(0, 100).unwrap().total, 2);
+        assert!(store.library_root_page(0, 0).is_err());
+        assert!(store.library_root_page(0, 101).is_err());
+    }
+
+    #[test]
+    fn root_watch_patch_preserves_other_connection_changes_after_a_stale_read() {
+        let database =
+            std::env::temp_dir().join(format!("emulebb-root-resource-{}.sqlite", Uuid::new_v4()));
+        let base = std::env::temp_dir().join("emulebb-root-resource-interleaving");
+        {
+            let mut first = MetadataStore::open(&database).unwrap();
+            first
+                .replace_shared_directory_roots(&[
+                    library_root_config(&base.join("alpha"), false),
+                    library_root_config(&base.join("beta"), false),
+                ])
+                .unwrap();
+            let stale = first.library_root_page(0, 100).unwrap();
+            let alpha_id = stale.items[0].id;
+            let beta_id = stale.items[1].id;
+            let mut other = MetadataStore::open(&database).unwrap();
+            other
+                .replace_shared_directory_roots(&[
+                    library_root_config(&base.join("alpha"), false),
+                    library_root_config(&base.join("beta"), true),
+                    library_root_config(&base.join("gamma"), false),
+                ])
+                .unwrap();
+            first
+                .patch_library_root_watch(alpha_id, true)
+                .unwrap()
+                .unwrap();
+            let current = other.library_root_page(0, 100).unwrap();
+            assert_eq!(current.total, 3);
+            assert!(
+                current
+                    .items
+                    .iter()
+                    .find(|root| root.id == beta_id)
+                    .unwrap()
+                    .watch_enabled
+            );
+            assert!(
+                current
+                    .items
+                    .iter()
+                    .find(|root| root.id == alpha_id)
+                    .unwrap()
+                    .watch_enabled
+            );
+            assert_eq!(current.items[2].path, base.join("gamma"));
+        }
+        std::fs::remove_file(database).unwrap();
     }
 
     #[test]

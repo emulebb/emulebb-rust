@@ -38,7 +38,7 @@ import {
   SearchItem,
   SearchResult,
   CursorPage,
-  SharedDirectories,
+  LibraryScan,
   SharedFileIgnores,
   SharedFile,
   SettingsSurface,
@@ -90,7 +90,7 @@ type AuthenticationState = "checking" | "authenticated" | "unauthenticated";
 const client = new RestClient();
 
 const settingsSectionTabs: Record<string, Tab> = {
-  sharedDirectories: "sharing",
+  libraryRoots: "sharing",
   categories: "categories",
   servers: "servers",
   kad: "kad",
@@ -172,7 +172,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [settingsSectionTarget, setSettingsSectionTarget] = useState<string | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
-  const [sharedDirectories, setSharedDirectories] = useState<SharedDirectories | null>(null);
+  const [libraryScan, setLibraryScan] = useState<LibraryScan | null>(null);
   const [sharedFileIgnores, setSharedFileIgnores] = useState<SharedFileIgnores | null>(null);
   const [sharedFiles, setSharedFiles] = useState<SharedFile[]>([]);
   const [uploads, setUploads] = useState<Upload[]>([]);
@@ -207,7 +207,7 @@ export function App({ appearance }: { appearance: Appearance }) {
     setSettingsSurface(null);
     setCategories([]);
     setFriends([]);
-    setSharedDirectories(null);
+    setLibraryScan(null);
     setSharedFileIgnores(null);
     setSharedFiles([]);
     setUploads([]);
@@ -382,12 +382,12 @@ export function App({ appearance }: { appearance: Appearance }) {
     let cancelled = false;
     const loadSharing = async () => {
       try {
-        const [nextSharedDirectories, nextSharedFileIgnores] = await Promise.all([
-          client.get<SharedDirectories>("shared-directories"),
-          client.get<SharedFileIgnores>("shared-directories/ignores")
+        const [nextLibraryScan, nextSharedFileIgnores] = await Promise.all([
+          client.get<LibraryScan>("library/scan"),
+          client.get<SharedFileIgnores>("library/ignores")
         ]);
         if (!cancelled) {
-          setSharedDirectories(nextSharedDirectories);
+          setLibraryScan(nextLibraryScan);
           setSharedFileIgnores(nextSharedFileIgnores);
         }
       } catch (caught) {
@@ -902,7 +902,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 uploads={uploads}
                 uploadQueue={uploadQueue}
                 sharedFiles={sharedFiles}
-                sharedDirectories={sharedDirectories}
+                libraryScan={libraryScan}
                 kad={kad}
               />
             )}
@@ -956,7 +956,8 @@ export function App({ appearance }: { appearance: Appearance }) {
             )}
             {tab === "sharing" && (
               <SharingView
-                directories={sharedDirectories}
+                refreshGeneration={refreshGeneration}
+                directories={libraryScan}
                 ignores={sharedFileIgnores}
                 stats={stats}
                 sharedFiles={sharedFiles}

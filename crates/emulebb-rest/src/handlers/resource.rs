@@ -52,6 +52,13 @@ pub(super) fn page<T: Serialize>(data: T, next_cursor: Option<String>, has_more:
 pub(super) fn invalid(message: impl Into<String>) -> Response {
     api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message).into_response()
 }
+pub(super) fn identity(value: &str) -> Result<i64, Box<Response>> {
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0 && id.to_string() == value)
+        .ok_or_else(|| Box::new(invalid("identity must be a positive decimal i64 string")))
+}
 pub(super) fn encode_cursor(scope: &str, position: &str) -> String {
     hex::encode(format!("{scope}|{position}"))
 }

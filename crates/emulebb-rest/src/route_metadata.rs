@@ -521,7 +521,6 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const LIBRARY_TAGS: &[&str] = &["limit", "cursor"];
     const DOWNLOADS: &[&str] = &["view", "category", "cursor", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
-    const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
     const UPLOAD_QUEUE: &[&str] = &["offset", "limit", "includeScoreBreakdown"];
 
@@ -588,12 +587,11 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("POST", "/api/v1/servers/operations/disconnect")
         | ("POST", "/api/v1/servers/operations/import-met-url")
         | ("POST", "/api/v1/searches")
-        | ("GET", "/api/v1/shared-directories")
-        | ("PATCH", "/api/v1/shared-directories")
-        | ("POST", "/api/v1/shared-directories/roots")
-        | ("GET", "/api/v1/shared-directories/ignores")
-        | ("POST", "/api/v1/shared-directories/ignores")
-        | ("POST", "/api/v1/shared-directories/operations/reload")
+        | ("POST", "/api/v1/library/roots")
+        | ("GET", "/api/v1/library/ignores")
+        | ("POST", "/api/v1/library/ignores")
+        | ("GET", "/api/v1/library/scan")
+        | ("POST", "/api/v1/library/scan")
         | ("GET", "/api/v1/uploads")
         | ("GET", "/api/v1/upload-queue")
         | ("POST", "/api/v1/downloads")
@@ -610,12 +608,12 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
         ("POST", "/api/v1/library/files/sharing") => Some(NONE),
         ("GET", "/api/v1/library/tags") => Some(LIBRARY_TAGS),
+        ("GET", "/api/v1/library/roots") => Some(LIBRARY_TAGS),
         ("POST", "/api/v1/library/tags") => Some(NONE),
         ("GET", "/api/v1/downloads") => Some(DOWNLOADS),
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),
-        ("DELETE", "/api/v1/shared-directories/roots") => Some(SHARED_DIRECTORY_ROOT),
-        ("DELETE", "/api/v1/shared-directories/ignores") => Some(SHARED_FILE_IGNORE_PATTERN),
+        ("DELETE", "/api/v1/library/ignores") => Some(SHARED_FILE_IGNORE_PATTERN),
         _ => route_query_fields_for_parameterized(method, path),
     }
 }
@@ -634,6 +632,7 @@ fn route_query_fields_for_parameterized(
         .split('/')
         .collect::<Vec<_>>();
     match (method, segments.as_slice()) {
+        ("GET" | "PATCH" | "DELETE", ["library", "roots", _]) => Some(NONE),
         ("GET" | "DELETE", ["library", "tags", _]) => Some(NONE),
         ("GET", ["library", "files", _, "tags"]) => Some(LIBRARY_TAGS),
         ("GET", ["categories", _])
@@ -646,7 +645,7 @@ fn route_query_fields_for_parameterized(
         | ("DELETE", ["searches", _])
         | ("GET", ["shared-files", _])
         | ("PATCH", ["shared-files", _])
-        | ("PATCH", ["shared-directories", "ignores", "defaults", _])
+        | ("PATCH", ["library", "ignores", "defaults", _])
         | ("GET", ["shared-files", _, "ed2k-link"])
         | ("GET", ["shared-files", _, "comments"])
         | ("GET", ["downloads", _])

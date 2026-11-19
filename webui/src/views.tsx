@@ -50,7 +50,8 @@ import {
   SearchResultMedia,
   SearchResult,
   ServerItem,
-  SharedDirectories,
+  LibraryScan,
+  LibraryRoot,
   SharedFileIgnores,
   SharedFile,
   SettingsSectionResourceSpec,
@@ -118,12 +119,12 @@ export function Overview(props: {
   uploads: Upload[];
   uploadQueue: Upload[];
   sharedFiles: SharedFile[];
-  sharedDirectories: SharedDirectories | null;
+  libraryScan: LibraryScan | null;
   kad: KadStatus;
 }) {
   const connectedServers = props.servers.filter((item) => item.connected).length;
-  const reload = props.sharedDirectories?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? props.snapshot?.status?.sharedStartupCache?.reloadProgress ?? {};
-  const startupStages = startupStageRows(props.snapshot, props.sharedDirectories, props.kad, connectedServers);
+  const reload = props.libraryScan?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? props.snapshot?.status?.sharedStartupCache?.reloadProgress ?? {};
+  const startupStages = startupStageRows(props.snapshot, props.libraryScan, props.kad, connectedServers);
   return (
     <section class="view-grid">
       <Metric
@@ -182,7 +183,7 @@ export function Overview(props: {
 
 function startupStageRows(
   snapshot: Snapshot | null,
-  directories: SharedDirectories | null,
+  directories: LibraryScan | null,
   kad: KadStatus,
   connectedServers: number
 ) {
@@ -799,7 +800,8 @@ function formatMediaDuration(totalSeconds: number): string {
 }
 
 export function SharingView(props: {
-  directories: SharedDirectories | null;
+  refreshGeneration: number;
+  directories: LibraryScan | null;
   ignores: SharedFileIgnores | null;
   stats: Record<string, unknown>;
   sharedFiles: SharedFile[];
@@ -812,7 +814,23 @@ export function SharingView(props: {
   const [path, setPath] = useState("");
   const [watchNewRoot, setWatchNewRoot] = useState(false);
   const [ignorePattern, setIgnorePattern] = useState("");
-  const roots = props.directories?.roots ?? [];
+  const [rootCursor, setRootCursor] = useState<string | null>(null);
+  const [rootPage, setRootPage] = useState<CursorPage<LibraryRoot> | null>(null);
+  const [rootsLoading, setRootsLoading] = useState(false);
+  const [rootsError, setRootsError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setRootsLoading(true);
+    setRootsError("");
+    const query = new URLSearchParams({ limit: "100" });
+    if (rootCursor) query.set("cursor", rootCursor);
+    void props.client.getPage<LibraryRoot>(`library/roots?${query}`)
+      .then((value) => { if (!cancelled) setRootPage(value); })
+      .catch((error) => { if (!cancelled) setRootsError(errorMessage(error)); })
+      .finally(() => { if (!cancelled) setRootsLoading(false); });
+    return () => { cancelled = true; };
+  }, [props.client, props.refreshGeneration, rootCursor]);
+  const roots = rootPage?.data ?? [];
   const customPatterns = props.ignores?.custom ?? [];
   const defaultIgnores = props.ignores?.defaults ?? [];
   const reload = props.directories?.reloadProgress ?? {};
@@ -824,29 +842,28 @@ export function SharingView(props: {
     if (!nextPath || pathError) {
       return;
     }
-    await props.client.post("shared-directories/roots", { path: nextPath, watchEnabled: watchNewRoot });
+    await props.client.post("library/roots", { path: nextPath, watchEnabled: watchNewRoot });
     setPath("");
     setWatchNewRoot(false);
   };
 
-  const removeRoot = (rootPath: string) =>
-    props.client.delete(`shared-directories/roots?path=${encodeURIComponent(rootPath)}`);
+  const removeRoot = (id: string) => props.client.delete(`library/roots/${id}`);
 
   const addIgnorePattern = async () => {
     const pattern = ignorePattern.trim();
     if (!pattern) {
       return;
     }
-    await props.client.post("shared-directories/ignores", { pattern });
+    await props.client.post("library/ignores", { pattern });
     setIgnorePattern("");
   };
 
   const removeIgnorePattern = (pattern: string) =>
-    props.client.delete(`shared-directories/ignores?pattern=${encodeURIComponent(pattern)}`);
+    props.client.delete(`library/ignores?pattern=${encodeURIComponent(pattern)}`);
 
   return (
     <section class="view-grid">
-      <Metric label="Roots" value={String(roots.length)} />
+      <Metric label="Roots on page" value={String(roots.length)} />
       <Metric label="Shared Files" value={String(sharedFileCount ?? "n/a")} />
       <Metric label="Shared Bytes" value="n/a" />
       <Metric label="Active Uploads" value={String(props.uploads.length)} />
@@ -861,7 +878,7 @@ export function SharingView(props: {
           <h2>Shared Folders</h2>
           <div class="row-actions">
             <StatusPill value={sharingRunState(reload, props.directories?.hashingCount ?? 0)} />
-            <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("shared-directories/operations/reload"), "Reload queued")}>
+            <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("library/scan"), "Reload queued")}>
               <RefreshCw size={15} />
               Reload
             </button>
@@ -879,7 +896,11 @@ export function SharingView(props: {
           <button class="btn" type="submit" disabled={!path.trim() || Boolean(pathError)}><FolderPlus size={16} />Add root</button>
         </form>
         {pathError && <p class="field-error">{pathError}</p>}
-        <h3 class="panel-subhead">Configured Roots</h3>
+        <div class="section-title"><h3 class="panel-subhead">Configured Roots</h3>
+          <CursorControls cursor={rootCursor} nextCursor={rootPage?.meta.nextCursor ?? null} loading={rootsLoading}
+            change={(cursor) => { setRootPage(null); setRootCursor(cursor); }} />
+        </div>
+        {rootsError && <div class="notice alert alert-danger">{rootsError}</div>}
         <TableScroll label="Shared folders">
           <table class="table table-vcenter card-table root-table">
             <thead>
@@ -893,17 +914,21 @@ export function SharingView(props: {
             </thead>
             <tbody>
               {roots.map((root) => (
-                <tr key={root.path}>
+                <tr key={root.id}>
                   <td class="path-cell" title={displayPath(root.path)}>{displayPath(root.path)}</td>
-                  <td>Folder tree</td>
-                  <td>{root.watchEnabled ? "Enabled" : "Off"}</td>
+                  <td>{root.managed ? "Managed" : "Folder tree"}</td>
+                  <td><input type="checkbox" checked={root.watchEnabled} aria-label={`Watch ${displayPath(root.path)}`}
+                    onChange={(event) => {
+                      const watchEnabled = event.currentTarget.checked;
+                      void props.run(() => props.client.patch(`library/roots/${root.id}`, { watchEnabled }), "Watch policy updated");
+                    }} /></td>
                   <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "available"} /></td>
                   <td>
-                    <Action title="Remove" icon={<Trash2 size={15} />} onClick={() => {
+                    {!root.managed && <Action title="Remove" icon={<Trash2 size={15} />} onClick={() => {
                       if (window.confirm("Remove this shared folder tree?")) {
-                        void props.run(() => removeRoot(root.path), "Folder removed");
+                        void props.run(() => removeRoot(root.id), "Folder removed");
                       }
-                    }} />
+                    }} />}
                   </td>
                 </tr>
               ))}
@@ -953,7 +978,7 @@ export function SharingView(props: {
                   <td><code>{rule.pattern}</code></td>
                   <td>{rule.matchKind}</td>
                   <td><StatusPill value={rule.enabled ? "enabled" : "disabled"} /></td>
-                  <td><button class="btn btn-sm" type="button" onClick={() => void props.run(() => props.client.patch(`shared-directories/ignores/defaults/${encodeURIComponent(rule.key)}`, { enabled: !rule.enabled }), rule.enabled ? "Default ignore disabled" : "Default ignore enabled")}>{rule.enabled ? "Disable" : "Enable"}</button></td>
+                  <td><button class="btn btn-sm" type="button" onClick={() => void props.run(() => props.client.patch(`library/ignores/defaults/${encodeURIComponent(rule.key)}`, { enabled: !rule.enabled }), rule.enabled ? "Default ignore disabled" : "Default ignore enabled")}>{rule.enabled ? "Disable" : "Enable"}</button></td>
                 </tr>
               ))}
             </tbody>
@@ -1025,7 +1050,7 @@ export function SharingView(props: {
   );
 }
 
-function sharingRunState(reload: NonNullable<SharedDirectories["reloadProgress"]>, hashingCount: number): string {
+function sharingRunState(reload: NonNullable<LibraryScan["reloadProgress"]>, hashingCount: number): string {
   if (reload.pending) {
     return "queued";
   }
@@ -1035,7 +1060,7 @@ function sharingRunState(reload: NonNullable<SharedDirectories["reloadProgress"]
   return "monitored";
 }
 
-function ActiveHashList(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["active"] }) {
+function ActiveHashList(props: { files: NonNullable<LibraryScan["reloadProgress"]>["active"] }) {
   const files = props.files ?? [];
   if (files.length === 0) {
     return <p class="empty">No files are hashing right now.</p>;
@@ -1065,7 +1090,7 @@ function ActiveHashList(props: { files: NonNullable<SharedDirectories["reloadPro
   );
 }
 
-function DiskProgressTable(props: { disks: NonNullable<SharedDirectories["reloadProgress"]>["disks"] }) {
+function DiskProgressTable(props: { disks: NonNullable<LibraryScan["reloadProgress"]>["disks"] }) {
   const disks = props.disks ?? [];
   return (
     <TableScroll label="Disk hashing progress">
@@ -1096,7 +1121,7 @@ function DiskProgressTable(props: { disks: NonNullable<SharedDirectories["reload
   );
 }
 
-function RecentHashTable(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["recent"] }) {
+function RecentHashTable(props: { files: NonNullable<LibraryScan["reloadProgress"]>["recent"] }) {
   const files = props.files ?? [];
   return (
     <TableScroll label="Recently hashed files">
@@ -1127,7 +1152,7 @@ function RecentHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
   );
 }
 
-function QueuedHashTable(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["upcoming"] }) {
+function QueuedHashTable(props: { files: NonNullable<LibraryScan["reloadProgress"]>["upcoming"] }) {
   const files = props.files ?? [];
   return (
     <TableScroll label="Queued hashing work">

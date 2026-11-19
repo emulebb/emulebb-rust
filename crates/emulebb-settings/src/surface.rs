@@ -725,11 +725,11 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
 
 const SETTINGS_SECTION_RESOURCES: &[SettingsSectionResourceSpec] = &[
     SettingsSectionResourceSpec {
-        name: "sharedDirectories",
+        name: "libraryRoots",
         class: SettingSurfaceClass::ExistingSectionResource,
-        route: "/api/v1/shared-directories",
+        route: "/api/v1/library/roots",
         ui_section: "Sharing",
-        description: "Shared root ownership and reload operations.",
+        description: "Library root ownership and watch policy.",
     },
     SettingsSectionResourceSpec {
         name: "categories",

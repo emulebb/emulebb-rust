@@ -243,7 +243,10 @@ for (const width of [320, 390]) {
       await scroll.focus();
       await page.keyboard.press("ArrowRight");
       await expect.poll(() => scroll.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+      const watch = table.getByRole("checkbox").first();
       const action = table.getByTitle("Remove", { exact: true }).first();
+      await page.keyboard.press("Tab");
+      await expect(watch).toBeFocused();
       await page.keyboard.press("Tab");
       await expect(action).toBeFocused();
       await expect.poll(() => action.evaluate((element) => {

@@ -1168,9 +1168,18 @@ async fn removing_root_withdraws_live_share_but_preserves_verified_hash() {
     assert_eq!(core.shares().await.len(), 1);
     assert_eq!(core.shared_catalog_count().await, 1);
 
-    core.remove_shared_directory_root(&runtime_dir.display().to_string())
-        .await
+    let page = core.library_root_page(0, 100).await.unwrap();
+    let id = page
+        .value()
+        .roots
+        .iter()
+        .find(|root| !root.managed)
+        .expect("explicit root")
+        .id
+        .parse()
         .unwrap();
+    drop(page);
+    core.delete_library_root(id).await.unwrap();
     core.reload_shared_directories().await.unwrap();
     assert!(core.shares().await.is_empty());
     assert_eq!(core.shared_catalog_count().await, 0);

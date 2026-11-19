@@ -14,7 +14,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-/// One configured shared-directory root exposed through the eMuleBB REST contract.
+/// Runtime descriptor used by library scanning and native subscriptions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedDirectoryRoot {
@@ -24,25 +24,6 @@ pub struct SharedDirectoryRoot {
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,
-}
-
-/// Recognize a watch-only edit without changing root coverage or cached health.
-/// Such an edit refreshes subscriptions without scheduling a catalog scan.
-pub(crate) fn root_watch_policy_only_changed(
-    expected: &[SharedDirectoryRoot],
-    proposed: &[SharedDirectoryRoot],
-) -> bool {
-    expected.len() == proposed.len()
-        && expected.iter().zip(proposed).all(|(old, new)| {
-            old.path == new.path
-                && old.monitor_owned == new.monitor_owned
-                && old.shareable == new.shareable
-                && old.accessible == new.accessible
-        })
-        && expected
-            .iter()
-            .zip(proposed)
-            .any(|(old, new)| old.watch_enabled != new.watch_enabled)
 }
 
 /// Consolidate recursive roots without inventing parents or altering native paths.
@@ -270,23 +251,6 @@ impl Default for SharedDirectoryReloadProgress {
     }
 }
 
-/// Replacement request for the configured shared-directory roots.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SharedDirectoriesUpdate {
-    pub roots: Vec<SharedDirectoryRootUpdate>,
-    pub confirm_replace_roots: bool,
-}
-
-/// Shared-directory root input accepted by the REST API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SharedDirectoryRootUpdate {
-    pub path: String,
-    #[serde(default)]
-    pub watch_enabled: bool,
-}
-
 pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {
     SharedDirectoryRoot {
         path: normal_path_display(&root.path),
@@ -294,18 +258,6 @@ pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> S
         monitor_owned: false,
         shareable: root.shareable,
         accessible: root.accessible,
-    }
-}
-
-pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> SharedDirectoryRoot {
-    let path = long_path(Path::new(&root.path));
-    let accessible = path.is_dir();
-    SharedDirectoryRoot {
-        path: normal_path_display(&root.path),
-        watch_enabled: root.watch_enabled,
-        monitor_owned: root.monitor_owned,
-        shareable: accessible,
-        accessible,
     }
 }
 

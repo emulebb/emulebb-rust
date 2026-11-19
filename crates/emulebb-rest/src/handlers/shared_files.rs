@@ -1,8 +1,4 @@
-//! Shared-file and shared-directory REST handlers (`/shared-files`,
-//! `/shared-directories`).
-//!
-//! Extracted verbatim from `lib.rs` during the maintainability restructuring;
-//! behavior is unchanged.
+//! Shared-file detail and library ignore-policy handlers.
 
 use axum::{
     body::Bytes,
@@ -13,8 +9,8 @@ use axum::{
 use serde_json::{Value, json};
 
 use emulebb_core::{
-    SharedDirectoriesUpdate, SharedDirectoryRootUpdate, SharedFileIgnorePatternUpdate,
-    SharedFileIgnoreRuleUpdate, SharedFileListCursor, SharedFileListQuery, SharedFileUpdate,
+    SharedFileIgnorePatternUpdate, SharedFileIgnoreRuleUpdate, SharedFileListCursor,
+    SharedFileListQuery, SharedFileUpdate,
 };
 
 use crate::handlers::prelude::*;
@@ -121,64 +117,6 @@ fn validate_optional_token(
     Err(format!("{field} has an unsupported value"))
 }
 
-pub(crate) async fn shared_directories(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(state.core.shared_directories().await)
-}
-
-pub(crate) async fn update_shared_directories(
-    State(state): State<RestState>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let request = match parse_required_json_body::<SharedDirectoriesUpdate>(&body) {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    match state.core.set_shared_directories(request).await {
-        Ok(directories) => api_ok(directories).into_response(),
-        Err(error) => super::persistence::persistence_error(error),
-    }
-}
-
-pub(crate) async fn add_shared_directory_root(
-    State(state): State<RestState>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let request = match parse_required_json_body::<SharedDirectoryRootUpdate>(&body) {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    match state
-        .core
-        .add_shared_directory_root(&request.path, request.watch_enabled)
-        .await
-    {
-        Ok(directories) => api_ok(directories).into_response(),
-        Err(error) => super::persistence::persistence_error(error),
-    }
-}
-
-pub(crate) async fn remove_shared_directory_root(
-    State(state): State<RestState>,
-    RawQuery(raw_query): RawQuery,
-) -> impl IntoResponse {
-    let query = match parse_optional_query::<SharedDirectoryRootQuery>(raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(response) => return *response,
-    };
-    let Some(path) = query.path else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            "path is required",
-        )
-        .into_response();
-    };
-    match state.core.remove_shared_directory_root(&path).await {
-        Ok(directories) => api_ok(directories).into_response(),
-        Err(error) => super::persistence::persistence_error(error),
-    }
-}
-
 pub(crate) async fn shared_file_ignores(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.shared_file_ignores() {
         Ok(exclusions) => api_ok(exclusions).into_response(),
@@ -256,26 +194,6 @@ pub(crate) async fn update_shared_file_ignore_rule(
         .await
     {
         Ok(exclusions) => api_ok(exclusions).into_response(),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            error.to_string(),
-        )
-        .into_response(),
-    }
-}
-
-pub(crate) async fn reload_shared_directories(State(state): State<RestState>) -> impl IntoResponse {
-    // Hashing a large shared library takes far longer than any HTTP timeout, so
-    // the scan + MD4/ed2k hash runs on a detached background task: the request
-    // returns promptly with the queued count while hashing continues to
-    // completion independent of this connection. Progress is observable via
-    // `hashingCount` on `GET /api/v1/shared-directories` and the growing
-    // `GET /api/v1/shared-files` total.
-    match state.core.reload_shared_directories_detached().await {
-        Ok(queued) => {
-            api_ok(json!({ "ok": true, "started": true, "queued": queued })).into_response()
-        }
         Err(error) => api_error(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",
