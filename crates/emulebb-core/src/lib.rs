@@ -1539,6 +1539,10 @@ impl EmulebbCore {
                 let reask_register = self.ed2k_reask_handle.lock().unwrap().clone();
                 let egress_route = network.egress_route;
                 let prepared_execution = prepared.take().map(|ready| {
+                    let alternate_files = a4af_alternates
+                        .get(&source_endpoint_key(&ready.source))
+                        .cloned()
+                        .unwrap_or_default();
                     let options = emulebb_ed2k::ed2k_tcp::Ed2kPreparedDownloadOptions {
                         job_token,
                         timeout,
@@ -1551,11 +1555,7 @@ impl EmulebbCore {
                         source: ready.source,
                         download: Box::pin(async move {
                             ready.peer.remember_availability(job_token).await?;
-                            Ok(Ed2kPeerDownloadReport::single(
-                                job_token,
-                                file_hash,
-                                ready.peer.download(options).await?,
-                            ))
+                            ready.peer.download_files(options, alternate_files).await
                         }),
                     }
                 });

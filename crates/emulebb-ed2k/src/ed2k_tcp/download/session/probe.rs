@@ -127,9 +127,28 @@ impl Ed2kPreparedPeer {
     /// Continue on the prepared socket. File metadata and HELLO are not resent;
     /// the normal session still owns hashsets, part selection, storage and SUI.
     pub async fn download(
-        mut self: Box<Self>,
+        self: Box<Self>,
         options: Ed2kPreparedDownloadOptions,
     ) -> Result<Ed2kPeerDownloadOutcome> {
+        let report = self.download_files(options, Vec::new()).await?;
+        report
+            .file_outcomes
+            .first()
+            .map(|result| result.outcome)
+            .context("prepared peer download returned no file outcome")
+    }
+
+    /// Continue selected files on this one connection, retaining HELLO/security
+    /// across A4AF transitions and reporting earlier outcomes if a later file fails.
+    pub async fn download_files(
+        mut self: Box<Self>,
+        options: Ed2kPreparedDownloadOptions,
+        alternate_files: Vec<super::super::startup::Ed2kPeerDownloadFile>,
+    ) -> Result<super::super::startup::Ed2kPeerDownloadReport> {
+        use super::super::startup::{
+            ConnectedDownloadOptions, Ed2kPeerDownloadFile, drive_connected_download_files,
+            prepare_peer_download_files,
+        };
         let token = options.job_token;
         self.check_job(token).await?;
         let runtime = self.runtime.as_ref();
@@ -141,7 +160,29 @@ impl Ed2kPreparedPeer {
             manifest.file_hash == hash_hex && manifest.file_size == self.file_size,
             "prepared connection differs from admitted execution"
         );
+        let mut files = Vec::with_capacity(alternate_files.len().saturating_add(1));
+        files.push(Ed2kPeerDownloadFile {
+            job_token: token,
+            file_hash: hash,
+            display_name: manifest.display_name.clone(),
+            file_size: self.file_size,
+            current_source_count: options.current_source_count,
+        });
         drop(manifest);
+        files.extend(alternate_files);
+        prepare_peer_download_files(
+            runtime,
+            &files,
+            Ed2kSourceHint {
+                ip: self.peer.ip.to_string(),
+                tcp_port: self.peer.tcp_port,
+                user_hash: Some(hex::encode(self.availability.user_hash)),
+                connect_options: Some(self.profile.connect_options),
+                file_comment: String::new(),
+                file_rating: 0,
+            },
+        )
+        .await?;
         drop(self.preparation.take());
         let mut state = self.state.take().expect("prepared state has one owner");
         state.startup_file_requests_sent = true;
@@ -178,32 +219,29 @@ impl Ed2kPreparedPeer {
                 .await,
             "rejected prepared peer identity"
         );
-        let result = drive_download_session(DownloadSessionOptions {
-            job_token: token,
-            dispatcher: &mut self.dispatcher,
-            peer_addr,
-            hello_identity: self.hello_identity,
-            secure_ident: self.secure_ident.as_ref(),
-            transfer_runtime: runtime,
-            file_hash: hash,
-            file_hash_hex: &hash_hex,
-            timeout: options.timeout,
-            send_initial_requests: true,
-            source_exchange_allowed: state.source_exchange_allowed,
-            initial_hello_complete: true,
-            initial_secure_ident_started: state.secure_ident_started,
-            peer_user_hash: Some(self.availability.user_hash),
-            peer_connect_options: Some(self.profile.connect_options),
-            connection_state: None,
-            prepared_state: Some(PreparedDownloadSession {
-                state,
-                metadata: std::mem::take(&mut self.metadata),
-            }),
-            established_context: options.established_context.as_ref(),
-            upload_facet: Some(&mut upload_facet),
-            upload_context: options.upload_context.as_ref(),
-            reask_register: options.reask_register,
-        })
+        let connection_state = state.connection_state();
+        let result = drive_connected_download_files(
+            ConnectedDownloadOptions {
+                dispatcher: &mut self.dispatcher,
+                peer_addr,
+                hello_identity: self.hello_identity,
+                secure_ident: self.secure_ident.as_ref(),
+                transfer_runtime: runtime,
+                timeout: options.timeout,
+                peer_user_hash: Some(self.availability.user_hash),
+                peer_connect_options: Some(self.profile.connect_options),
+                connection_state,
+                prepared: Some(PreparedDownloadSession {
+                    state,
+                    metadata: std::mem::take(&mut self.metadata),
+                }),
+                established_context: options.established_context.as_ref(),
+                upload_facet: &mut upload_facet,
+                upload_context: options.upload_context.as_ref(),
+                reask_register: options.reask_register,
+            },
+            files,
+        )
         .await;
         upload_facet.release(runtime).await;
         result

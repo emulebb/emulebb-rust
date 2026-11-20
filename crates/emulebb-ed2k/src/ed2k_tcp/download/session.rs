@@ -254,6 +254,11 @@ pub(in crate::ed2k_tcp) struct PreparedDownloadSession {
     state: DownloadSessionState,
     metadata: std::collections::VecDeque<crate::ed2k_tcp::EmuleTcpPacket>,
 }
+impl PreparedDownloadSession {
+    pub(in crate::ed2k_tcp) fn source_exchange_allowed(&self) -> bool {
+        self.state.source_exchange_allowed
+    }
+}
 
 pub(in crate::ed2k_tcp) async fn drive_download_session(
     options: DownloadSessionOptions<'_>,

@@ -5,6 +5,192 @@ use crate::ed2k_tcp::{
 
 fn assert_worker_owned<T: Send + 'static>(_: &T) {}
 
+#[tokio::test]
+async fn prepared_a4af_keeps_one_socket_and_retains_outcomes_after_a_later_close() {
+    use crate::ed2k_tcp::{Ed2kPeerDownloadFile, Ed2kPeerFileDownloadOutcome};
+    for termination in 0..3 {
+        let has_tail = termination != 0;
+        let root = unique_test_dir("prepared-peer-a4af");
+        let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+        let secure = test_peer_secure_ident();
+        let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let source = source(addr);
+        let primary = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
+            source.file_hash,
+            "Primary.bin".into(),
+            16,
+        );
+        let alternate = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
+            Ed2kHash([0x52; 16]),
+            "Alternate.bin".into(),
+            32,
+        );
+        let tail = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
+            Ed2kHash([0x53; 16]),
+            "Tail.bin".into(),
+            48,
+        );
+        drop(runtime.ensure_job(&primary).await.unwrap());
+        drop(
+            runtime
+                .store_md4_hashset(primary.token, Vec::new())
+                .await
+                .unwrap(),
+        );
+        let primary_hash: Ed2kHash = primary.file_hash.parse().unwrap();
+        let alternate_hash: Ed2kHash = alternate.file_hash.parse().unwrap();
+        let tail_hash: Ed2kHash = tail.file_hash.parse().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(read_packet(&mut stream).await[5], OP_HELLO);
+            stream.write_all(&test_peer_hello(addr)).await.unwrap();
+            assert_eq!(read_packet(&mut stream).await[5], OP_SECIDENTSTATE);
+            assert_eq!(read_packet(&mut stream).await[5], OP_MULTIPACKET_EXT2);
+            let answer = crate::ed2k_tcp::encode_multipacket_ext2_answer(
+                &Ed2kFileIdentifier {
+                    file_hash: primary_hash,
+                    file_size: Some(16),
+                    aich_root: None,
+                },
+                "Primary.bin",
+                crate::ed2k_string::Ed2kStringEncoding::Utf8,
+                true,
+                Some(&[1, 0, 0]),
+            )
+            .unwrap();
+            stream.write_all(&answer).await.unwrap();
+            // The next frame must change files, not repeat HELLO, repeat the
+            // prepared metadata request, or queue for the no-needed-parts file.
+            let request = read_packet(&mut stream).await;
+            assert_startup_multipacket_ext2_with_source_exchange(
+                request[0],
+                request[5],
+                &request[6..],
+                &alternate_hash,
+                32,
+                false,
+                false,
+            );
+            stream
+                .write_all(&encode_file_req_ans_nofil(&alternate_hash))
+                .await
+                .unwrap();
+            if has_tail {
+                let request = read_packet(&mut stream).await;
+                assert_startup_multipacket_ext2_with_source_exchange(
+                    request[0],
+                    request[5],
+                    &request[6..],
+                    &tail_hash,
+                    48,
+                    false,
+                    false,
+                );
+                if termination == 1 {
+                    drop(stream);
+                } else {
+                    stream
+                        .write_all(&encode_packet(OP_EDONKEYPROT, OP_FILESTATUS, &[0]))
+                        .await
+                        .unwrap();
+                    let mut byte = [0];
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                        0
+                    );
+                }
+            } else {
+                let mut byte = [0];
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                    .await
+                    .is_err(),
+                "A4AF must retain the original physical connection"
+            );
+        });
+        let mut input = options(&runtime, &source, &secure);
+        input.file_size = 16;
+        let Ed2kPeerProbeOutcome::Available(prepared) = probe_file_from_peer(input).await.unwrap()
+        else {
+            panic!("missing prepared peer");
+        };
+        let mut alternates = vec![Ed2kPeerDownloadFile {
+            job_token: alternate.token,
+            file_hash: alternate_hash,
+            display_name: "Alternate.bin".into(),
+            file_size: 32,
+            current_source_count: usize::MAX,
+        }];
+        if has_tail {
+            alternates.push(Ed2kPeerDownloadFile {
+                job_token: tail.token,
+                file_hash: tail_hash,
+                display_name: "Tail.bin".into(),
+                file_size: 48,
+                current_source_count: usize::MAX,
+            });
+        }
+        let report = prepared
+            .download_files(
+                Ed2kPreparedDownloadOptions {
+                    job_token: primary.token,
+                    timeout: Duration::from_secs(3),
+                    current_source_count: usize::MAX,
+                    upload_context: None,
+                    established_context: None,
+                    reask_register: None,
+                },
+                alternates,
+            )
+            .await
+            .unwrap();
+        let mut expected = vec![
+            Ed2kPeerFileDownloadOutcome {
+                observed_peer: Some((addr, [0x42; 16])),
+                job_token: primary.token,
+                file_hash: primary_hash,
+                outcome: Ed2kPeerDownloadOutcome::NoNeededParts,
+            },
+            Ed2kPeerFileDownloadOutcome {
+                observed_peer: Some((addr, [0x42; 16])),
+                job_token: alternate.token,
+                file_hash: alternate_hash,
+                outcome: Ed2kPeerDownloadOutcome::FileNotFound,
+            },
+        ];
+        if termination == 1 {
+            expected.push(Ed2kPeerFileDownloadOutcome {
+                observed_peer: Some((addr, [0x42; 16])),
+                job_token: tail.token,
+                file_hash: tail_hash,
+                outcome: Ed2kPeerDownloadOutcome::AcceptedButIncomplete,
+            });
+        }
+        assert_eq!(report.file_outcomes, expected);
+        assert_eq!(report.terminal_error.is_some(), termination == 2);
+        assert_eq!(runtime.download_resource_snapshot().connections, 0);
+        let first = runtime.try_admit_source_probe().unwrap();
+        let second = runtime.try_admit_source_probe().unwrap();
+        drop((first, second));
+        server.await.unwrap();
+    }
+}
+
 fn source(peer: SocketAddr) -> Ed2kFoundSource {
     Ed2kFoundSource {
         file_hash: Ed2kHash([0x51; 16]),
