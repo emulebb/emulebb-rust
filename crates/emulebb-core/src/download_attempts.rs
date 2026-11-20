@@ -105,6 +105,7 @@ impl DownloadAttemptControl {
         self.changed.notify_waiters();
     }
 
+    #[cfg(test)]
     pub(crate) fn try_enter(
         self: &Arc<Self>,
         token: JobToken,
@@ -206,6 +207,16 @@ impl DownloadAttemptControl {
             .is_some_and(|entry| {
                 entry.kind == Kind::Active && entry.token == token && !entry.cancel.is_cancelled()
             })
+    }
+    /// Preparation may record peer observations, but never grants payload or
+    /// passive-request authority (which continues to require `owns`).
+    pub(crate) fn owns_observation(&self, token: JobToken) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .get(&token.job_id)
+            .is_some_and(|entry| entry.token == token && !entry.cancel.is_cancelled())
     }
     /// Capture authority before a passive request starts network work.
     pub(crate) fn selected_token(&self, hash: [u8; 16]) -> Option<JobToken> {
@@ -382,6 +393,23 @@ impl Drop for DownloadVerificationGuard {
     }
 }
 impl DownloadAttemptGuard {
+    /// Avoid spending a peer reask on readiness the current cohort cannot admit.
+    /// Native reservations and promotion still recheck after the network wait.
+    pub(crate) fn preparation_has_headroom(&self, construction_starts: usize) -> bool {
+        let state = self.control.state.lock().unwrap_or_else(|p| p.into_inner());
+        let active = state
+            .entries
+            .values()
+            .filter(|entry| entry.kind == Kind::Active)
+            .count();
+        let preparing = state.entries.len() - active;
+        state.entries.get(&self.token.job_id).is_some_and(|entry| {
+            entry.nonce == self.nonce && entry.token == self.token && !entry.cancel.is_cancelled()
+        }) && state.entries.len() <= state.active_limit()
+            && state.entries.len() <= state.window.total
+            && preparing <= construction_starts
+    }
+
     /// Promote the same ownership record before resident/storage admission.
     /// Refusal leaves preparation owned; it never drops/recreates the guard.
     pub(crate) fn promote(&self) -> bool {

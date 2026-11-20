@@ -104,9 +104,6 @@ impl EmulebbCore {
         if self.download_attempts.available() == (0, 0) {
             return Ok(());
         }
-        let mut construction_starts = crate::download_admission::construction_starts(
-            self.ed2k_transfers.download_resource_snapshot(),
-        );
         let page = self
             .ed2k_transfers
             .download_jobs_after(*cursor, PAGE_SIZE, true)
@@ -123,20 +120,19 @@ impl EmulebbCore {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        *cursor = page.last().map(|job| job.token.job_id);
+        if page.is_empty() {
+            *cursor = None;
+        }
         drop(page);
         for (token, hash, known_size) in candidates {
             if shutdown.is_cancelled() {
                 break;
             }
-            let admission = if known_size {
-                if construction_starts == 0 {
-                    continue;
-                }
-                self.download_attempts.try_enter(token, hash)
-            } else {
-                self.download_attempts.try_prepare(token, hash)
-            };
+            if self.download_attempts.available().1 == 0 {
+                break;
+            }
+            *cursor = Some(token.job_id);
+            let admission = self.download_attempts.try_prepare(token, hash);
             let guard = match admission {
                 Ok(guard) => guard,
                 Err(AdmissionDenied::Duplicate | AdmissionDenied::Busy) => continue,
@@ -144,9 +140,6 @@ impl EmulebbCore {
                     anyhow::bail!("download admission nonce exhausted")
                 }
             };
-            if known_size {
-                construction_starts -= 1;
-            }
             let core = self.clone();
             let clock = clock.clone();
             let shutdown = shutdown.clone();
@@ -231,7 +224,46 @@ impl EmulebbCore {
         mut clock: watch::Receiver<()>,
         shutdown: CancellationToken,
     ) {
-        let result = self.hydrate_selected_download(&mut guard).await;
+        use crate::download_preparation::DownloadPreparation;
+        let mut prepared = match self.prepare_download_sources(&guard, &shutdown).await {
+            Ok(DownloadPreparation::Direct(source)) => Some(source),
+            Ok(DownloadPreparation::Finalization | DownloadPreparation::Callback) => None,
+            Ok(DownloadPreparation::Waiting) => return,
+            Err(error) => {
+                tracing::warn!(job_id = %guard.token().job_id, %error, "download source preparation deferred");
+                return;
+            }
+        };
+        if crate::download_admission::construction_starts(
+            self.ed2k_transfers.download_resource_snapshot(),
+        ) == 0
+            || !guard.promote()
+        {
+            if let Some(ready) = prepared.take() {
+                self.release_direct_download_source_leases(
+                    guard.token(),
+                    &[crate::source_endpoint_key(&ready.source)],
+                )
+                .await;
+            }
+            return;
+        }
+        let previous = guard.token();
+        let mut result = self.hydrate_selected_download(&mut guard).await;
+        if let Some(ready) = prepared.as_ref() {
+            let mut state = self.state.lock().await;
+            let endpoint = crate::source_endpoint_key(&ready.source);
+            if state.active_download_peer_endpoints.get(&endpoint) == Some(&previous) {
+                state
+                    .active_download_peer_endpoints
+                    .insert(endpoint, guard.token());
+            } else {
+                result = Ok(None);
+            }
+        }
+        if !matches!(result, Ok(Some(_))) {
+            drop(prepared.take());
+        }
         let Some(transfer) = self
             .finish_download_hydration(&guard, result, &mut clock, &shutdown)
             .await
@@ -246,7 +278,8 @@ impl EmulebbCore {
                 break;
             }
             crate::diag_sched::download_attempt_started(&transfer.hash, false);
-            let attempt = self.run_ed2k_download_attempt(&transfer, guard.token(), &cancel);
+            let attempt =
+                self.run_ed2k_download_attempt(&transfer, guard.token(), &cancel, prepared.take());
             tokio::pin!(attempt);
             let result = tokio::select! {
                 result = &mut attempt => result,
@@ -472,13 +505,18 @@ mod tests {
         let path = job.storage.as_ref().unwrap().path.clone();
         drop(allocated);
         std::fs::write(&path, b"foreign object").unwrap();
-        let guard = core
+        let mut guard = core
             .download_attempts
             .try_enter(token, "45454545454545454545454545454545".parse().unwrap())
             .unwrap();
-        let (_ticks, clock) = watch::channel(());
-        core.run_selected_download(guard, clock, CancellationToken::new())
-            .await;
+        let (_ticks, mut clock) = watch::channel(());
+        let result = core.hydrate_selected_download(&mut guard).await;
+        assert!(
+            core.finish_download_hydration(&guard, result, &mut clock, &CancellationToken::new())
+                .await
+                .is_none()
+        );
+        drop(guard);
         let failed = core.ed2k_transfers.download_job(id).await.unwrap().unwrap();
         assert_eq!(
             failed.storage_failure.as_ref().unwrap().code(),

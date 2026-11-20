@@ -863,7 +863,7 @@ async fn run_attempt_stops_immediately_when_pre_cancelled() {
     cancel.cancel();
 
     let result = core
-        .run_ed2k_download_attempt(&transfer, transfer.job_token(), &cancel)
+        .run_ed2k_download_attempt(&transfer, transfer.job_token(), &cancel, None)
         .await
         .unwrap();
     assert!(
@@ -931,7 +931,7 @@ async fn explicit_link_source_dials_without_server_config() {
     let attempt = tokio::spawn(async move {
         let _guard = guard;
         attempt_core
-            .run_ed2k_download_attempt(&transfer, transfer.job_token(), &attempt_cancel)
+            .run_ed2k_download_attempt(&transfer, transfer.job_token(), &attempt_cancel, None)
             .await
     });
 

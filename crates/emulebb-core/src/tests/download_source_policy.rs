@@ -244,8 +244,11 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
 
     // Re-registration is refused while the 45-minute block runs.
     let transfer = a4af_test_transfer(&core, &dead_file, "downloading");
-    core.register_download_source_candidates(&transfer, std::slice::from_ref(&source))
-        .await;
+    core.register_download_source_candidates(
+        &ed2k_source_batch::DownloadSourceTarget::from(&transfer),
+        std::slice::from_ref(&source),
+    )
+    .await;
     {
         let now = Instant::now();
         let state = core.state.lock().await;
@@ -315,8 +318,11 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
         );
     }
     let transfer = a4af_test_transfer(&core, &file, "downloading");
-    core.register_download_source_candidates(&transfer, std::slice::from_ref(&source))
-        .await;
+    core.register_download_source_candidates(
+        &ed2k_source_batch::DownloadSourceTarget::from(&transfer),
+        std::slice::from_ref(&source),
+    )
+    .await;
     assert_eq!(
         core.state
             .lock()
