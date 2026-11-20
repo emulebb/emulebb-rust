@@ -38,6 +38,7 @@ impl Ed2kTransferRuntime {
         let row = manifest_to_metadata(manifest)?;
         let dirty_piece_indexes =
             super::dirty_pieces::DirtyPieces::new(&self.local_mutations.residents, manifest)?;
+        let checkpoint_claim = self.manifest_checkpoint_state.lock().await.claim_insert()?;
         let transfer_dir = self.transfer_dir(manifest.token.job_id)?;
         tokio::fs::create_dir_all(&transfer_dir)
             .await
@@ -71,7 +72,7 @@ impl Ed2kTransferRuntime {
             let mut cache = cache.blocking_lock();
             let mut checkpoints = checkpoints.blocking_lock();
             cache.insert(token.job_id, current);
-            checkpoints.insert(
+            checkpoints.insert_claimed(
                 token,
                 Ed2kManifestCheckpointState {
                     revision,
@@ -79,6 +80,7 @@ impl Ed2kTransferRuntime {
                     last_persisted_at: Instant::now(),
                     dirty_piece_indexes,
                 },
+                checkpoint_claim,
             );
             Ok(())
         })

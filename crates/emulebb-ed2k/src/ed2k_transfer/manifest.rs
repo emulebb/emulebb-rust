@@ -26,7 +26,7 @@ pub(super) struct Ed2kManifestCheckpointState {
 
 /// Allocate a missing checkpoint bitmap before changing progress or committing SQL.
 pub(super) fn checkpoint_state<'a>(
-    states: &'a mut std::collections::HashMap<
+    states: &'a mut super::resident_table::ResidentTable<
         emulebb_metadata::JobToken,
         Ed2kManifestCheckpointState,
     >,
@@ -34,16 +34,30 @@ pub(super) fn checkpoint_state<'a>(
     manifest: &Ed2kResumeManifest,
     persisted_bytes_written: u64,
 ) -> Result<&'a mut Ed2kManifestCheckpointState> {
-    use std::collections::hash_map::Entry;
-    Ok(match states.entry(manifest.token) {
-        Entry::Occupied(entry) => entry.into_mut(),
-        Entry::Vacant(entry) => entry.insert(Ed2kManifestCheckpointState {
-            revision: 0,
-            persisted_bytes_written,
-            last_persisted_at: Instant::now(),
-            dirty_piece_indexes: super::dirty_pieces::DirtyPieces::new(residents, manifest)?,
-        }),
-    })
+    if !states.contains_key(&manifest.token) {
+        let claim = states.claim_insert()?;
+        let dirty = match super::dirty_pieces::DirtyPieces::new(residents, manifest) {
+            Ok(dirty) => dirty,
+            Err(error) => {
+                drop(claim);
+                states.reclaim_empty();
+                return Err(error);
+            }
+        };
+        states.insert_claimed(
+            manifest.token,
+            Ed2kManifestCheckpointState {
+                revision: 0,
+                persisted_bytes_written,
+                last_persisted_at: Instant::now(),
+                dirty_piece_indexes: dirty,
+            },
+            claim,
+        );
+    }
+    Ok(states
+        .get_mut(&manifest.token)
+        .expect("prepared checkpoint is present"))
 }
 
 pub(super) fn manifest_progress_bytes(manifest: &Ed2kResumeManifest) -> u64 {

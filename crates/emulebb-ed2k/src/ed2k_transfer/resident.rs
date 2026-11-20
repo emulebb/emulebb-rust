@@ -6,6 +6,9 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+mod bytes;
+pub(super) use bytes::ResidentBytes;
+
 // WHY: maximum supported geometry for 18 selected jobs plus four existing
 // mutation slots exceeds 64 MiB. The qualified fixed cap includes overlapping
 // reader-pinned replacements; it never expands at runtime.

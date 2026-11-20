@@ -582,6 +582,7 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
     assert_eq!(stored.pieces[0].prefix_bytes, 32);
     assert_eq!(stored.pieces[1].prefix_bytes, 64);
     let states = runtime.manifest_checkpoint_state.lock().await;
+    let table_bytes = states.charged_bytes();
     assert_eq!(states[&token].persisted_bytes_written, 96);
     assert!(states[&token].dirty_piece_indexes.is_empty());
     drop(states);
@@ -593,7 +594,10 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
             .lock()
             .unwrap()
             .bytes,
-        backing_bytes(&old).unwrap() + backing_bytes(&current).unwrap() + size_of::<u64>()
+        backing_bytes(&old).unwrap()
+            + backing_bytes(&current).unwrap()
+            + size_of::<u64>()
+            + table_bytes
     );
     drop(old);
     drop(reader_during_sql);
@@ -605,7 +609,7 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
             .lock()
             .unwrap()
             .bytes,
-        backing_bytes(&current).unwrap() + size_of::<u64>()
+        backing_bytes(&current).unwrap() + size_of::<u64>() + table_bytes
     );
 }
 
