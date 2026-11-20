@@ -15,6 +15,52 @@ fn manifest_fixture() -> Ed2kResumeManifest {
 }
 
 #[test]
+fn reader_departure_before_unwrap_still_requires_mutable_allowance() {
+    let control = Arc::new(ResidentControl::default());
+    let mut current = control.copy_manifest(&manifest_fixture()).unwrap();
+    let reader = current.clone();
+    assert!(Arc::get_mut(&mut current.0).is_none());
+    drop(reader);
+    let allocation = Arc::try_unwrap(current.0).unwrap();
+    assert!(allocation.reservation.bytes < MANIFEST_BYTES);
+    let draft = ResidentManifest::edit_unwrapped(allocation).unwrap();
+    assert_eq!(control.usage.lock().unwrap().bytes, MANIFEST_BYTES);
+    let current = draft.freeze().unwrap();
+    assert_eq!(
+        control.usage.lock().unwrap().bytes,
+        backing_bytes(&current).unwrap()
+    );
+}
+
+#[test]
+fn owned_edit_refusal_returns_intact_pin_after_unwrap_and_can_be_readmitted() {
+    let control = Arc::new(ResidentControl::default());
+    let mut current = control.copy_manifest(&manifest_fixture()).unwrap();
+    let reader = current.clone();
+    assert!(Arc::get_mut(&mut current.0).is_none());
+    drop(reader);
+    let mut held = Vec::new();
+    while let Ok(permit) = control.reserve(current.token.job_id) {
+        held.push(permit);
+    }
+    let before = control.usage.lock().unwrap().bytes;
+    let allocation = Arc::try_unwrap(current.0).unwrap();
+    let (current, error) = ResidentManifest::edit_unwrapped(allocation).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<LocalMutationError>(),
+        Some(LocalMutationError::Busy)
+    ));
+    assert_eq!(current.display_name, "Sample.bin");
+    assert_eq!(control.usage.lock().unwrap().bytes, before);
+    drop(held);
+    let draft = current.try_edit_owned().unwrap();
+    assert_eq!(control.usage.lock().unwrap().bytes, MANIFEST_BYTES);
+    drop(draft);
+    assert_eq!(control.usage.lock().unwrap().bytes, 0);
+    assert_eq!(control.usage.lock().unwrap().jobs, 0);
+}
+
+#[test]
 fn maximum_geometry_reports_concurrent_resident_requirement() {
     let mut manifest = manifest_fixture();
     let job = super::super::Ed2kTransferJob {
