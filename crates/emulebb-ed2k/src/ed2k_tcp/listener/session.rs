@@ -705,6 +705,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             peer_user_hash: Some(hello_profile.identity.user_hash),
                             peer_connect_options: Some(hello_profile.connect_options),
                             connection_state: Some(&mut connection_state),
+                            prepared_state: None,
                             established_context: Some(&established_context),
                             upload_facet: None,
                             upload_context: None,

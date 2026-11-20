@@ -17,7 +17,8 @@ pub(in crate::ed2k_tcp) use session::{
     DownloadConnectionState, DownloadSessionOptions, drive_download_session,
 };
 pub use session::{
-    Ed2kPeerAvailability, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, probe_file_from_peer,
+    Ed2kPeerAvailability, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, Ed2kPreparedDownloadOptions,
+    Ed2kPreparedPeer, probe_file_from_peer,
 };
 pub use startup::{
     Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions, Ed2kPeerDownloadReport,

@@ -105,7 +105,8 @@ use download::{DownloadWindowLimits, next_download_read_timeout, select_download
 pub use download::{
     Ed2kPeerAvailability, Ed2kPeerDownloadFile, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
     Ed2kPeerDownloadReport, Ed2kPeerFileDownloadOutcome, Ed2kPeerProbeOptions,
-    Ed2kPeerProbeOutcome, download_file_from_peer, download_files_from_peer, probe_file_from_peer,
+    Ed2kPeerProbeOutcome, Ed2kPreparedDownloadOptions, Ed2kPreparedPeer, download_file_from_peer,
+    download_files_from_peer, probe_file_from_peer,
 };
 pub(crate) use dump::dump_ed2k_tcp_download_meta;
 pub use established_peer::Ed2kEstablishedPeerContext;

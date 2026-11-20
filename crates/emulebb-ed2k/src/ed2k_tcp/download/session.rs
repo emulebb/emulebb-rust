@@ -63,7 +63,8 @@ mod state;
 
 use parts::{DownloadPartPacket, handle_download_part_packet};
 pub use probe::{
-    Ed2kPeerAvailability, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, probe_file_from_peer,
+    Ed2kPeerAvailability, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, Ed2kPreparedDownloadOptions,
+    Ed2kPreparedPeer, probe_file_from_peer,
 };
 use reask_detach::incomplete_or_detached_queued_source;
 use startup::{DownloadStartupStep, HASHSET_STALL_UPLOAD_FALLBACK, advance_download_startup};
@@ -237,14 +238,21 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
     pub(in crate::ed2k_tcp) peer_connect_options: Option<u8>,
     /// Mutable connection-scoped profile reused across A4AF file sessions.
-    /// `None` retains the callback/test compatibility initialization above.
+    /// Otherwise initialize from the explicit HELLO/security fields above.
     pub(in crate::ed2k_tcp) connection_state: Option<&'a mut DownloadConnectionState>,
+    /// An owned probe's file/hello state, retained on the same physical socket.
+    pub(in crate::ed2k_tcp) prepared_state: Option<PreparedDownloadSession>,
     pub(in crate::ed2k_tcp) established_context: Option<&'a Ed2kEstablishedPeerContext>,
     pub(in crate::ed2k_tcp) upload_facet: Option<&'a mut PeerUploadFacet>,
     pub(in crate::ed2k_tcp) upload_context: Option<&'a Ed2kPeerUploadContext>,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its TCP
     /// socket onto UDP reask via this handle. `None` keeps the legacy TCP-only path.
     pub(in crate::ed2k_tcp) reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
+}
+
+pub(in crate::ed2k_tcp) struct PreparedDownloadSession {
+    state: DownloadSessionState,
+    metadata: std::collections::VecDeque<crate::ed2k_tcp::EmuleTcpPacket>,
 }
 
 pub(in crate::ed2k_tcp) async fn drive_download_session(
@@ -268,6 +276,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         peer_connect_options,
         reask_register,
         connection_state,
+        prepared_state,
         established_context,
         mut upload_facet,
         upload_context,
@@ -285,14 +294,21 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         "download session hash differs from its captured job"
     );
     let mut request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
-    let mut session_state = DownloadSessionState::new(
-        initial_hello_complete,
-        initial_secure_ident_started,
-        source_exchange_allowed,
-        peer_user_hash,
-        peer_connect_options,
-        connection_state.as_deref(),
-    );
+    let (mut session_state, mut prepared_metadata) = if let Some(prepared) = prepared_state {
+        (prepared.state, prepared.metadata)
+    } else {
+        (
+            DownloadSessionState::new(
+                initial_hello_complete,
+                initial_secure_ident_started,
+                source_exchange_allowed,
+                peer_user_hash,
+                peer_connect_options,
+                connection_state.as_deref(),
+            ),
+            std::collections::VecDeque::new(),
+        )
+    };
     session_state.pending_aich_recovery_parts = initial_aich_recovery_parts(&manifest);
 
     let session_result = async {
@@ -301,7 +317,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 return Ok(Ed2kPeerDownloadOutcome::Completed);
             }
 
-            advance_download_startup(DownloadStartupStep {
+            if prepared_metadata.is_empty() {
+                advance_download_startup(DownloadStartupStep {
                 transport,
                 peer_addr,
                 secure_ident,
@@ -313,7 +330,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 request_file_identifier: &request_file_identifier,
                 session_state: &mut session_state,
             })
-            .await?;
+                .await?;
+            }
 
             if manifest.md4_hashset_acquired && session_state.upload_accepted {
                 match pump_download_request_window(
@@ -395,7 +413,15 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 });
             let packet = match tokio::time::timeout(
                 read_timeout,
-                transport.read_packet_diagnostic("native_download", peer_addr, "session"),
+                async {
+                    // WHY: apply already-received metadata through the normal
+                    // AICH/name/availability handlers, without another wire ask.
+                    if let Some(packet) = prepared_metadata.pop_front() {
+                        Ok(Some(packet))
+                    } else {
+                        transport.read_packet_diagnostic("native_download", peer_addr, "session").await
+                    }
+                },
             )
             .await
             {

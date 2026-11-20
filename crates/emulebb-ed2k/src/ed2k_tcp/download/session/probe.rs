@@ -6,19 +6,22 @@ use crate::ed2k_tcp::{
     encode_hello_request, encode_multipacket_ext2_request, encode_multipacket_request,
     encode_request_filename, encode_set_req_file_id,
 };
-use crate::ed2k_transfer::{ED2K_PART_SIZE, Ed2kSourceConnectionAdmission};
+use crate::ed2k_transfer::{
+    ED2K_PART_SIZE, Ed2kPeerConnectionGuard, Ed2kSourceConnectionAdmission,
+    Ed2kSourceConnectionPermit,
+};
 
 /// Inputs contain compact verified-part status, without execution/storage state.
-pub struct Ed2kPeerProbeOptions<'a> {
+pub struct Ed2kPeerProbeOptions<'request> {
     pub bind_ip: Ipv4Addr,
     pub egress_route: crate::networking::EgressRoute,
-    pub peer: &'a Ed2kFoundSource,
+    pub peer: &'request Ed2kFoundSource,
     pub hello_identity: Ed2kHelloIdentity,
-    pub secure_ident: &'a Ed2kSecureIdent,
-    pub transfer_runtime: &'a Ed2kTransferRuntime,
+    pub secure_ident: std::sync::Arc<Ed2kSecureIdent>,
+    pub transfer_runtime: std::sync::Arc<Ed2kTransferRuntime>,
     pub file_size: u64,
     /// One bit per data part, or empty when no local part is verified.
-    pub verified_parts: &'a [bool],
+    pub verified_parts: &'request [bool],
     /// Deadline covers connection, hello, security and metadata together.
     pub timeout: Duration,
 }
@@ -33,12 +36,178 @@ pub struct Ed2kPeerAvailability {
     pub available_parts: Vec<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Ed2kPeerProbeOutcome {
     /// No socket was opened because shared preparation/connection limits refused.
     Deferred,
     FileNotFound,
-    Available(Ed2kPeerAvailability),
+    Available(Box<Ed2kPreparedPeer>),
+}
+
+/// Linear connection ownership across preparation, admission and execution.
+/// Dropping an unselected peer closes its socket before releasing its permits.
+pub struct Ed2kPreparedPeer {
+    dispatcher: Ed2kPeerDispatcher,
+    state: Option<DownloadSessionState>,
+    metadata: std::collections::VecDeque<EmuleTcpPacket>,
+    availability: Ed2kPeerAvailability,
+    profile: crate::ed2k_tcp::hello::DecodedHelloProfile,
+    peer: Ed2kFoundSource,
+    file_size: u64,
+    runtime: std::sync::Arc<Ed2kTransferRuntime>,
+    secure_ident: std::sync::Arc<Ed2kSecureIdent>,
+    hello_identity: Ed2kHelloIdentity,
+    preparation: Option<tokio::sync::OwnedSemaphorePermit>,
+    _connection: Ed2kSourceConnectionPermit,
+    _peer_connection: Ed2kPeerConnectionGuard,
+}
+
+impl std::fmt::Debug for Ed2kPreparedPeer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Ed2kPreparedPeer")
+            .field("peer", &self.availability.peer)
+            .field("file_hash", &self.peer.file_hash)
+            .field("parts", &self.availability.available_parts.len())
+            .finish()
+    }
+}
+
+/// Execution context is supplied only after Core admits and hydrates the job.
+pub struct Ed2kPreparedDownloadOptions {
+    pub job_token: emulebb_metadata::JobToken,
+    pub timeout: Duration,
+    pub current_source_count: usize,
+    pub upload_context: Option<Ed2kPeerUploadContext>,
+    pub established_context: Option<Ed2kEstablishedPeerContext>,
+    pub reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
+}
+
+impl Ed2kPreparedPeer {
+    pub fn availability(&self) -> &Ed2kPeerAvailability {
+        &self.availability
+    }
+
+    /// Persist this exact reply under the captured job's current authority.
+    /// The immutable content match is checked before the owned delta's SQL fence.
+    pub async fn remember_availability(&self, token: emulebb_metadata::JobToken) -> Result<()> {
+        self.check_job(token).await?;
+        self.runtime
+            .remember_source_availability(
+                token,
+                Ed2kSourceHint {
+                    ip: self.peer.ip.to_string(),
+                    tcp_port: self.peer.tcp_port,
+                    user_hash: Some(hex::encode(self.availability.user_hash)),
+                    connect_options: Some(self.profile.connect_options),
+                    file_comment: String::new(),
+                    file_rating: 0,
+                },
+                self.file_size,
+                self.availability.available_parts.clone(),
+            )
+            .await
+    }
+
+    async fn check_job(&self, token: emulebb_metadata::JobToken) -> Result<()> {
+        let job = self
+            .runtime
+            .download_job(token.job_id)
+            .await?
+            .context("missing prepared job")?;
+        anyhow::ensure!(
+            job.token == token
+                && job.file_hash == self.peer.file_hash.to_string()
+                && job.expected_size_bytes == Some(self.file_size),
+            "prepared peer differs from captured job"
+        );
+        Ok(())
+    }
+
+    /// Continue on the prepared socket. File metadata and HELLO are not resent;
+    /// the normal session still owns hashsets, part selection, storage and SUI.
+    pub async fn download(
+        mut self: Box<Self>,
+        options: Ed2kPreparedDownloadOptions,
+    ) -> Result<Ed2kPeerDownloadOutcome> {
+        let token = options.job_token;
+        self.check_job(token).await?;
+        let runtime = self.runtime.as_ref();
+        let peer_addr = self.availability.peer;
+        let hash = self.peer.file_hash;
+        let hash_hex = hash.to_string();
+        let manifest = runtime.manifest(token).await?;
+        anyhow::ensure!(
+            manifest.file_hash == hash_hex && manifest.file_size == self.file_size,
+            "prepared connection differs from admitted execution"
+        );
+        drop(manifest);
+        drop(self.preparation.take());
+        let mut state = self.state.take().expect("prepared state has one owner");
+        state.startup_file_requests_sent = true;
+        state.source_exchange_allowed = runtime
+            .should_request_source_exchange(
+                token,
+                peer_addr,
+                Some(self.availability.user_hash),
+                options.current_source_count,
+                std::time::Instant::now(),
+            )
+            .await;
+        remember_connected_peer_source(
+            runtime,
+            token,
+            peer_addr,
+            self.availability.user_hash,
+            self.profile.connect_options,
+        )
+        .await?;
+        if let Some(software) = &self.profile.client_software {
+            runtime.note_download_source_software(token, peer_addr, software.clone());
+        }
+        let mut upload_facet =
+            PeerUploadFacet::new(peer_addr, self.dispatcher.mode.is_obfuscated());
+        anyhow::ensure!(
+            upload_facet
+                .bind_hello(
+                    runtime,
+                    peer_addr,
+                    self.dispatcher.mode.is_obfuscated(),
+                    &self.profile
+                )
+                .await,
+            "rejected prepared peer identity"
+        );
+        let result = drive_download_session(DownloadSessionOptions {
+            job_token: token,
+            dispatcher: &mut self.dispatcher,
+            peer_addr,
+            hello_identity: self.hello_identity,
+            secure_ident: self.secure_ident.as_ref(),
+            transfer_runtime: runtime,
+            file_hash: hash,
+            file_hash_hex: &hash_hex,
+            timeout: options.timeout,
+            send_initial_requests: true,
+            source_exchange_allowed: state.source_exchange_allowed,
+            initial_hello_complete: true,
+            initial_secure_ident_started: state.secure_ident_started,
+            peer_user_hash: Some(self.availability.user_hash),
+            peer_connect_options: Some(self.profile.connect_options),
+            connection_state: None,
+            prepared_state: Some(PreparedDownloadSession {
+                state,
+                metadata: std::mem::take(&mut self.metadata),
+            }),
+            established_context: options.established_context.as_ref(),
+            upload_facet: Some(&mut upload_facet),
+            upload_context: options.upload_context.as_ref(),
+            reask_register: options.reask_register,
+        })
+        .await;
+        upload_facet.release(runtime).await;
+        result
+    }
 }
 
 /// Obtain validated availability without entering the upload queue, requesting
@@ -67,17 +236,22 @@ pub async fn probe_file_from_peer(
         Ed2kSourceConnectionAdmission::Admitted { permit, .. } => permit,
         Ed2kSourceConnectionAdmission::Denied { .. } => return Ok(Ed2kPeerProbeOutcome::Deferred),
     };
-    tokio::time::timeout(options.timeout, run_probe(&options, parts))
-        .await
-        .context("peer availability probe timed out")?
+    tokio::time::timeout(
+        options.timeout,
+        run_probe(options, parts, _probe, _connection),
+    )
+    .await
+    .context("peer availability probe timed out")?
 }
 
 async fn run_probe(
-    options: &Ed2kPeerProbeOptions<'_>,
+    options: Ed2kPeerProbeOptions<'_>,
     parts: usize,
+    preparation: tokio::sync::OwnedSemaphorePermit,
+    connection: Ed2kSourceConnectionPermit,
 ) -> Result<Ed2kPeerProbeOutcome> {
     let peer_addr = SocketAddr::from((options.peer.ip, options.peer.tcp_port));
-    let runtime = options.transfer_runtime;
+    let runtime = options.transfer_runtime.as_ref();
     anyhow::ensure!(
         !runtime
             .ban_store()
@@ -119,6 +293,8 @@ async fn run_probe(
     );
     let mut requested = false;
     let mut file_name = None;
+    let mut observed_profile = None;
+    let mut metadata = std::collections::VecDeque::with_capacity(2);
     // WHY: metadata probes must retire even when a peer floods unrelated control
     // frames. Packet framing/decompression retain the transport's existing caps.
     for _ in 0..64 {
@@ -155,6 +331,19 @@ async fn run_probe(
                 state.peer_secure_ident.peer_sec_ident = profile.misc_options1.secure_ident;
                 state.remote_supports_unicode = profile.misc_options1.unicode_support;
                 state.hello_complete = true;
+                let connection = DownloadConnectionState::from_inbound_hello(
+                    &profile,
+                    &state.peer_secure_ident,
+                    state.secure_ident_started,
+                );
+                state = DownloadSessionState::new(
+                    true,
+                    state.secure_ident_started,
+                    false,
+                    Some(profile.identity.user_hash),
+                    Some(profile.connect_options),
+                    Some(&connection),
+                );
                 if profile.supports_secure_ident && !state.peer_secure_ident.requested_peer_key {
                     let challenge = begin_secure_ident_probe(&mut state.peer_secure_ident);
                     transport
@@ -165,6 +354,7 @@ async fn run_probe(
                             &challenge,
                         )
                         .await?;
+                    state.secure_ident_started = true;
                 }
                 if !requested {
                     let verified = options.verified_parts.iter().copied();
@@ -210,12 +400,13 @@ async fn run_probe(
                     }
                     requested = true;
                 }
+                observed_profile = Some(profile);
             }
             (OP_EMULEPROT, OP_SECIDENTSTATE) => {
                 secure_ident::handle_secident_state(
                     &mut transport,
                     peer_addr,
-                    options.secure_ident,
+                    options.secure_ident.as_ref(),
                     &mut state,
                     &packet.payload,
                 )
@@ -225,7 +416,7 @@ async fn run_probe(
                 secure_ident::handle_public_key(
                     &mut transport,
                     peer_addr,
-                    options.secure_ident,
+                    options.secure_ident.as_ref(),
                     &mut state,
                     &packet.payload,
                 )
@@ -234,7 +425,7 @@ async fn run_probe(
             (OP_EMULEPROT, OP_SIGNATURE) => secure_ident::handle_signature(
                 &transport,
                 peer_addr,
-                options.secure_ident,
+                options.secure_ident.as_ref(),
                 &mut state,
                 runtime,
                 &packet.payload,
@@ -263,14 +454,47 @@ async fn run_probe(
                 )? {
                     ProbeReply::NotFound => return Ok(Ed2kPeerProbeOutcome::FileNotFound),
                     ProbeReply::Parts(available_parts) => {
-                        return Ok(Ed2kPeerProbeOutcome::Available(Ed2kPeerAvailability {
-                            peer: peer_addr,
-                            user_hash: state.peer_user_hash.context("missing probe identity")?,
-                            file_name,
-                            available_parts,
-                        }));
+                        metadata.push_back(packet);
+                        return Ok(Ed2kPeerProbeOutcome::Available(Box::new(
+                            Ed2kPreparedPeer {
+                                availability: Ed2kPeerAvailability {
+                                    peer: peer_addr,
+                                    user_hash: state
+                                        .peer_user_hash
+                                        .context("missing probe identity")?,
+                                    file_name,
+                                    available_parts,
+                                },
+                                dispatcher: transport,
+                                state: Some(state),
+                                metadata,
+                                profile: observed_profile.context("missing probe profile")?,
+                                peer: options.peer.clone(),
+                                file_size: options.file_size,
+                                runtime: options.transfer_runtime,
+                                secure_ident: options.secure_ident,
+                                hello_identity: options.hello_identity,
+                                preparation: Some(preparation),
+                                _connection: connection,
+                                _peer_connection: _peer,
+                            },
+                        )));
                     }
-                    ProbeReply::Continue => {}
+                    ProbeReply::Continue => {
+                        if matches!(
+                            (packet.protocol, packet.opcode),
+                            (OP_EDONKEYPROT, OP_REQFILENAMEANSWER)
+                                | (
+                                    OP_EMULEPROT,
+                                    OP_MULTIPACKETANSWER | OP_MULTIPACKETANSWER_EXT2
+                                )
+                        ) {
+                            // Keep at most the last incomplete metadata answer
+                            // before final status; never retain unrelated frames.
+                            metadata.clear();
+                            metadata.push_back(packet);
+                        }
+                    }
                 }
             }
             _ => {}

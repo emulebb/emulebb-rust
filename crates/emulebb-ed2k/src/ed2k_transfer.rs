@@ -76,6 +76,7 @@ mod model;
 mod outbound_admission;
 mod payload_reconcile;
 mod peer_connections;
+pub(crate) use peer_connections::Ed2kPeerConnectionGuard;
 mod piece_store;
 mod reask_reciprocity;
 mod reload_index;

@@ -264,6 +264,7 @@ pub async fn download_files_from_peer(
                 peer_user_hash: peer.user_hash,
                 peer_connect_options: peer.obfuscation_options,
                 connection_state: Some(&mut connection_state),
+                prepared_state: None,
                 established_context: established_context.as_ref(),
                 upload_facet: Some(&mut upload_facet),
                 upload_context: upload_context.as_ref(),
