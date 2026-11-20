@@ -41,7 +41,8 @@ mod callback;
 mod catalog;
 mod category_cache;
 pub use category_cache::{
-    CategoryCacheFence, CategoryCacheMutation, DownloadPatchFence, PreparedDownloadPatch,
+    CategoryCacheFence, CategoryCacheMutation, DownloadPatchFence, PreparedCategoryCacheMutation,
+    PreparedDownloadPatch,
 };
 mod completed_verification;
 mod completion_rehash;

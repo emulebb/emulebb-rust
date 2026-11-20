@@ -20,7 +20,7 @@ pub struct DownloadPatchFence {
 pub struct PreparedDownloadPatch {
     token: JobToken,
     hash: emulebb_kad_proto::Ed2kHash,
-    cache: CategoryCacheMutation,
+    cache: ScalarCacheMutation,
     guards: Arc<PatchGuards>,
 }
 
@@ -78,19 +78,16 @@ impl Ed2kTransferRuntime {
         }
         drop(current);
         let cache = self
-            .prepare_category_cache(
-                |manifest| {
-                    manifest.token == token
-                        && (patch
-                            .name
-                            .as_ref()
-                            .is_some_and(|name| *name != manifest.display_name)
-                            || patch
-                                .category_id
-                                .is_some_and(|category| category != manifest.category_id))
-                },
-                None,
-            )
+            .prepare_scalar_cache(|manifest| {
+                manifest.token == token
+                    && (patch
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| *name != manifest.display_name)
+                        || patch
+                            .category_id
+                            .is_some_and(|category| category != manifest.category_id))
+            })
             .await?;
         Ok(Some(PreparedDownloadPatch {
             token,

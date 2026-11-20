@@ -156,6 +156,7 @@ async fn prepared_assignment_finishes_after_commit_and_request_cancellation_unde
     let (release, resume) = std::sync::mpsc::channel();
     let (done, finished) = tokio::sync::oneshot::channel();
     let worker = tokio::task::spawn_blocking(move || {
+        let plan = plan.prepare().unwrap();
         assert!(
             metadata
                 .assign_transfer_category(job.token.job_id, Some(category.id))
@@ -170,10 +171,8 @@ async fn prepared_assignment_finishes_after_commit_and_request_cancellation_unde
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        runtime.manifest_cache.lock().await[&job.token.job_id].category_id,
-        None
-    );
+    assert!(runtime.manifest_cache.try_lock().is_err());
+    assert_eq!(old.category_id, None);
     let mut held = Vec::new();
     while let Ok(permit) = runtime.local_mutations.residents.reserve(job.token.job_id) {
         held.push(permit);
@@ -219,13 +218,17 @@ async fn failed_category_admission_leaves_sql_and_cache_unchanged_and_releases_f
         ED2K_PART_SIZE,
     );
     drop(runtime.ensure_job(&job).await.unwrap());
-    let mut held = Vec::new();
-    while let Ok(permit) = runtime.local_mutations.residents.reserve(job.token.job_id) {
-        held.push(permit);
-    }
-    let error = runtime
+    let control = &runtime.local_mutations.residents;
+    let held = control
+        .reserve_bytes(128 * 1024 * 1024 - control.used_bytes())
+        .unwrap();
+    let request = runtime
         .prepare_category_assignment(job.token.job_id, Some(category.id))
         .await
+        .unwrap();
+    let error = tokio::task::spawn_blocking(move || request.prepare())
+        .await
+        .unwrap()
         .err()
         .expect("full budget must refuse before SQL");
     assert!(matches!(
@@ -253,6 +256,7 @@ async fn failed_category_admission_leaves_sql_and_cache_unchanged_and_releases_f
     .unwrap();
     let metadata = runtime.metadata.clone();
     tokio::task::spawn_blocking(move || {
+        let plan = plan.prepare().unwrap();
         metadata
             .assign_transfer_category(job.token.job_id, Some(category.id))
             .unwrap();
@@ -286,6 +290,7 @@ async fn category_removal_publishes_all_prepared_members_and_preserves_old_reade
     let plan = runtime.prepare_category_removal(category.id).await.unwrap();
     let metadata = runtime.metadata.clone();
     tokio::task::spawn_blocking(move || {
+        let plan = plan.prepare().unwrap();
         assert!(metadata.delete_category(category.id, &root).unwrap());
         plan.publish().unwrap();
     })

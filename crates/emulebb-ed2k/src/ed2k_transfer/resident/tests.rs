@@ -57,7 +57,6 @@ fn owned_edit_refusal_returns_intact_pin_after_unwrap_and_can_be_readmitted() {
     assert_eq!(control.usage.lock().unwrap().bytes, MANIFEST_BYTES);
     drop(draft);
     assert_eq!(control.usage.lock().unwrap().bytes, 0);
-    assert_eq!(control.usage.lock().unwrap().jobs, 0);
 }
 
 #[test]
@@ -88,11 +87,12 @@ fn maximum_geometry_reports_concurrent_resident_requirement() {
         piece.block_bitmap = Some("55".repeat(7));
     }
     let one = backing_bytes(&manifest).unwrap();
-    let selected = MAX_JOBS * one;
+    let selected_jobs = 18;
+    let selected = selected_jobs * one;
     let writers = super::super::local_mutation::MAX_UNITS;
     let with_writer = selected + writers * MANIFEST_BYTES;
     eprintln!(
-        "resident capacity: per_job={one}, selected_jobs={MAX_JOBS}, selected_bytes={selected}, concurrent_writers={writers}, with_writers={with_writer}, cap={MAX_BYTES}"
+        "resident capacity: per_job={one}, selected_jobs={selected_jobs}, selected_bytes={selected}, concurrent_writers={writers}, with_writers={with_writer}, cap={MAX_BYTES}"
     );
     assert!(one <= MANIFEST_BYTES);
     assert!(
@@ -100,8 +100,8 @@ fn maximum_geometry_reports_concurrent_resident_requirement() {
         "resident cap must cover selected geometry plus all admitted replacements"
     );
     let control = Arc::new(ResidentControl::default());
-    let mut residents = Vec::with_capacity(MAX_JOBS);
-    for id in 1..=MAX_JOBS {
+    let mut residents = Vec::with_capacity(selected_jobs);
+    for id in 1..=selected_jobs {
         let job_id = JobId::new(id as i64).unwrap();
         let reservation = control.reserve(job_id).unwrap();
         let mut backing = manifest.clone();
@@ -140,7 +140,6 @@ fn maximum_geometry_reports_concurrent_resident_requirement() {
     );
     drop(residents);
     assert_eq!(control.usage.lock().unwrap().bytes, 0);
-    assert_eq!(control.usage.lock().unwrap().jobs, 0);
 }
 
 #[test]
@@ -158,7 +157,6 @@ fn preadmitted_write_preserves_old_pin_and_releases_replacement_slack() {
     assert!(old.comment.is_empty());
     assert_eq!(current.comment, "Updated");
     assert!(!Arc::ptr_eq(&old.0, &current.0));
-    assert_eq!(control.usage.lock().unwrap().jobs, 1);
     assert_eq!(
         control.usage.lock().unwrap().bytes,
         backing_bytes(&old).unwrap() + backing_bytes(&current).unwrap()
@@ -216,7 +214,7 @@ fn backing_release_wakes_existing_registry_without_task_completion() {
 }
 
 #[test]
-fn retained_charge_and_shared_job_slot_follow_last_owner() {
+fn retained_charges_follow_each_live_backing_owner() {
     let control = Arc::new(ResidentControl::default());
     let mut original = control.reserve(JobId::new(1).unwrap()).unwrap();
     original.resize(1024).unwrap();
@@ -225,19 +223,15 @@ fn retained_charge_and_shared_job_slot_follow_last_owner() {
     {
         let usage = control.usage.lock().unwrap();
         assert_eq!(usage.bytes, 3072);
-        assert_eq!(usage.jobs, 1);
     }
     drop(original);
     {
         let usage = control.usage.lock().unwrap();
         assert_eq!(usage.bytes, 2048);
-        assert_eq!(usage.jobs, 1);
     }
     drop(replacement);
     let usage = control.usage.lock().unwrap();
     assert_eq!(usage.bytes, 0);
-    assert_eq!(usage.jobs, 0);
-    assert!(usage.slots.is_empty());
 }
 
 #[test]
@@ -263,32 +257,49 @@ fn failed_growth_preserves_existing_charge_and_reservation() {
 }
 
 #[test]
-fn distinct_job_limit_survives_multiple_reservations_per_job() {
+fn many_distinct_jobs_and_reader_versions_are_admitted_by_bytes() {
     let control = Arc::new(ResidentControl::default());
     let mut reservations = Vec::new();
-    for id in 1..=MAX_JOBS {
+    for id in 1..=96 {
         let mut reservation = control.reserve(JobId::new(id as i64).unwrap()).unwrap();
         reservation.resize(1024).unwrap();
         reservations.push(reservation);
     }
-    assert!(
-        control
-            .reserve(JobId::new(MAX_JOBS as i64 + 1).unwrap())
-            .is_err()
-    );
-    let same_job = reservations[0].copy().unwrap();
-    drop(reservations.remove(0));
-    assert!(
-        control
-            .reserve(JobId::new(MAX_JOBS as i64 + 1).unwrap())
-            .is_err()
-    );
-    drop(same_job);
-    assert!(
-        control
-            .reserve(JobId::new(MAX_JOBS as i64 + 1).unwrap())
-            .is_ok()
-    );
+    let mut reader = reservations[0].copy().unwrap();
+    reader.resize(8192).unwrap();
+    assert_eq!(control.used_bytes(), 96 * 1024 + 8192);
+    drop(reservations);
+    assert_eq!(control.used_bytes(), 8192);
+    drop(reader);
+    assert_eq!(control.used_bytes(), 0);
+}
+
+#[test]
+fn write_credit_cannot_cross_job_or_budget_identity() {
+    for pinned in [false, true] {
+        let control = Arc::new(ResidentControl::default());
+        let other = Arc::new(ResidentControl::default());
+        let mut current = control.copy_manifest(&manifest_fixture()).unwrap();
+        let reader = pinned.then(|| current.clone());
+        for credit in [
+            control.reserve(JobId::new(2).unwrap()).unwrap(),
+            other.reserve(JobId::new(1).unwrap()).unwrap(),
+        ] {
+            assert!(
+                current
+                    .write_with(credit, |value| {
+                        value.comment = "Wrong owner".into();
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            assert!(current.comment.is_empty());
+        }
+        drop(reader);
+        drop(current);
+        assert_eq!(control.used_bytes(), 0);
+        assert_eq!(other.used_bytes(), 0);
+    }
 }
 
 #[tokio::test]
@@ -625,7 +636,6 @@ fn rejected_joint_admission_spends_no_credit_and_creates_no_retry_wake() {
     assert!(result.is_err());
     let usage = registry.residents.usage.lock().unwrap();
     assert_eq!(usage.bytes, 0);
-    assert_eq!(usage.jobs, 0);
     drop(usage);
     assert_eq!(registry.capacity_revision(), before);
 }

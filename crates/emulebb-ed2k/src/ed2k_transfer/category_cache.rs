@@ -5,6 +5,9 @@ use emulebb_metadata::{JobId, JobToken};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard};
 
+mod batch;
+pub use batch::{CategoryCacheMutation, PreparedCategoryCacheMutation};
+
 mod download_patch;
 pub use download_patch::{DownloadPatchFence, PreparedDownloadPatch};
 
@@ -18,78 +21,36 @@ pub struct CategoryCacheFence {
 /// Transfer this prepared plan to the existing blocking database owner before
 /// committing SQL. That owner publishes synchronously before its reply, even
 /// when the requesting client disconnects. Dropping an unsubmitted plan is safe.
-pub struct CategoryCacheMutation {
+struct ScalarCacheMutation {
     cache: Arc<Mutex<super::resident_table::ResidentCache>>,
-    category_id: Option<i64>,
     entries: Vec<(JobToken, Reservation)>,
+    _plan: super::resident::ResidentBytes,
     // Keep new hydration/category admission fenced until all entries publish.
     _fence: CategoryCacheFence,
 }
-impl CategoryCacheMutation {
+impl ScalarCacheMutation {
     /// Keep the same fence across the blocking reply and Core state publication.
-    pub fn retain_fence(&self) -> CategoryCacheFence {
+    fn retain_fence(&self) -> CategoryCacheFence {
         self._fence.clone()
-    }
-
-    /// Called by the existing blocking persistence worker after successful SQL.
-    /// Memory has already been admitted; no capacity wait or async boundary is
-    /// introduced after commit. Generation changes never patch a new execution.
-    pub fn publish(self) -> Result<()> {
-        let mut cache = self.cache.blocking_lock();
-        for (token, permit) in self.entries {
-            if let Some(current) = cache.get_mut(&token.job_id).filter(|m| m.token == token) {
-                current.write_with(permit, |current| {
-                    current.category_id = self.category_id;
-                    Ok(())
-                })?;
-            }
-        }
-        Ok(())
     }
 }
 impl Ed2kTransferRuntime {
-    /// Prepare the selected job's assignment before sending a database command.
-    pub async fn prepare_category_assignment(
-        &self,
-        job_id: JobId,
-        category_id: Option<i64>,
-    ) -> Result<CategoryCacheMutation> {
-        ensure!(
-            category_id.is_none_or(|id| id > 0),
-            "category ID must be positive"
-        );
-        self.prepare_category_cache(
-            |manifest| manifest.token.job_id == job_id && manifest.category_id != category_id,
-            category_id,
-        )
-        .await
-    }
-
-    /// Prepare every currently resident member before deleting a category.
-    pub async fn prepare_category_removal(
-        &self,
-        category_id: i64,
-    ) -> Result<CategoryCacheMutation> {
-        ensure!(category_id > 0, "category ID must be positive");
-        self.prepare_category_cache(|manifest| manifest.category_id == Some(category_id), None)
-            .await
-    }
-
-    async fn prepare_category_cache(
+    async fn prepare_scalar_cache(
         &self,
         selected: impl Fn(&ResidentManifest) -> bool,
-        category_id: Option<i64>,
-    ) -> Result<CategoryCacheMutation> {
+    ) -> Result<ScalarCacheMutation> {
         let fence = Arc::clone(&self.category_assignment_gate)
             .write_owned()
             .await;
         let cache = self.manifest_cache.lock().await;
         let count = cache.values().filter(|manifest| selected(manifest)).count();
-        ensure!(
-            count <= super::resident::MAX_JOBS,
-            LocalMutationError::TooLarge
-        );
+        let mut plan = self.local_mutations.residents.reserve_bytes(
+            count
+                .checked_mul(size_of::<(JobToken, Reservation)>())
+                .ok_or(LocalMutationError::TooLarge)?,
+        )?;
         let mut entries = Vec::with_capacity(count);
+        plan.resize(entries.capacity() * size_of::<(JobToken, Reservation)>())?;
         for current in cache.values().filter(|manifest| selected(manifest)) {
             entries.push((
                 current.token,
@@ -99,10 +60,10 @@ impl Ed2kTransferRuntime {
             ));
         }
         drop(cache);
-        Ok(CategoryCacheMutation {
+        Ok(ScalarCacheMutation {
             cache: Arc::clone(&self.manifest_cache),
-            category_id,
             entries,
+            _plan: plan,
             _fence: CategoryCacheFence {
                 _guard: Arc::new(fence),
             },

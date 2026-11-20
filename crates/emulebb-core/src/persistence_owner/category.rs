@@ -196,6 +196,17 @@ pub(super) fn execute(
             ))
         }
         CategoryDbCommand::Delete(value, incoming, publication) => {
+            let publication = publication.prepare().map_err(|error| {
+                match error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>() {
+                    Some(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy) => {
+                        PersistenceError::Busy
+                    }
+                    Some(emulebb_ed2k::ed2k_transfer::LocalMutationError::TooLarge) => {
+                        PersistenceError::TooLarge
+                    }
+                    _ => PersistenceError::Worker,
+                }
+            })?;
             let changed = store.delete_category(value.id, &incoming)?;
             if changed {
                 publication
