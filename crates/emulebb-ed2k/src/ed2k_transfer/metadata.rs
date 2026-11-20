@@ -405,6 +405,30 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
+    /// Persist status from a validated peer reply, never from discovery hints.
+    /// The owned peer-delta worker fences generation/intent and retains capacity
+    /// through commit even if its observer disconnects.
+    pub async fn remember_source_availability(
+        &self,
+        token: JobToken,
+        source: Ed2kSourceHint,
+        file_size_bytes: u64,
+        available_parts: Vec<bool>,
+    ) -> Result<()> {
+        self.apply_peer_delta(
+            token,
+            emulebb_metadata::MetadataDownloadPeerDelta::Availability {
+                source: source_to_metadata(source),
+                session_id: self.source_discovery_session,
+                file_size_bytes,
+                available_parts,
+                observed_at_s: chrono::Utc::now().timestamp().max(0),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn remember_source_file_description(
         &self,
         token: JobToken,

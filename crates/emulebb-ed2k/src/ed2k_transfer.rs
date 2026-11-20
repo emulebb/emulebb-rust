@@ -302,6 +302,7 @@ pub struct Ed2kTransferRuntime {
     share_eligibility: Arc<catalog::SharedEligibility>,
     local_mutations: Arc<local_mutation::LocalMutationRegistry>,
     source_probe_slots: Arc<tokio::sync::Semaphore>,
+    source_discovery_session: [u8; 16],
     shared_catalog_generation: Arc<AtomicU64>,
     /// Keyset cursor for a persisted catalog intentionally loaded only through
     /// the first publishable startup cohort. `pending` is claimed atomically so
@@ -832,6 +833,7 @@ impl Ed2kTransferRuntime {
             share_eligibility,
             local_mutations,
             source_probe_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            source_discovery_session: uuid::Uuid::new_v4().into_bytes(),
             shared_catalog_generation: Arc::new(AtomicU64::new(0)),
             shared_catalog_hydration_cursor: StdMutex::new(None),
             shared_payload_hydration_cursor: StdMutex::new(None),
