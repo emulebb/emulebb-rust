@@ -634,18 +634,18 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
         })
         .unwrap()
         .expect("fresh dispatch must admit the retained callback tail");
+    let captured = retry_session.current().unwrap().unwrap();
     assert_eq!(
-        retry_session.current().unwrap().unwrap().file_hash,
-        second_hash,
+        captured.file_hash, second_hash,
         "the closed session's current file was acknowledged, but its A4AF tail must survive"
     );
-    retry_session.acknowledge_current().unwrap();
+    retry_session.acknowledge_download(&captured).unwrap();
+    let captured = retry_session.current().unwrap().unwrap();
     assert_eq!(
-        retry_session.current().unwrap().unwrap().file_hash,
-        retry_hash,
+        captured.file_hash, retry_hash,
         "new retry work must follow the retained tail"
     );
-    retry_session.acknowledge_current().unwrap();
+    retry_session.acknowledge_download(&captured).unwrap();
     retry_session.finish().unwrap();
 }
 

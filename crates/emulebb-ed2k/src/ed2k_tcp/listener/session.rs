@@ -714,7 +714,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             reask_register: None,
                         })
                         .await?;
-                        callback_session.acknowledge_current().map_err(|error| {
+                        callback_session.acknowledge_download(&download).map_err(|error| {
                             anyhow::anyhow!(
                                 "failed to acknowledge callback session work for {peer_addr}: {error:?}"
                             )
