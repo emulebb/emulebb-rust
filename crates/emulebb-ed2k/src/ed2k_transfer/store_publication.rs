@@ -36,6 +36,8 @@ impl Ed2kTransferRuntime {
             .checked_add(1)
             .context("download progress revision exhausted")?;
         let row = manifest_to_metadata(manifest)?;
+        let dirty_piece_indexes =
+            super::dirty_pieces::DirtyPieces::new(&self.local_mutations.residents, manifest)?;
         let transfer_dir = self.transfer_dir(manifest.token.job_id)?;
         tokio::fs::create_dir_all(&transfer_dir)
             .await
@@ -75,7 +77,7 @@ impl Ed2kTransferRuntime {
                     revision,
                     persisted_bytes_written: progress,
                     last_persisted_at: Instant::now(),
-                    dirty_piece_indexes: Default::default(),
+                    dirty_piece_indexes,
                 },
             );
             Ok(())

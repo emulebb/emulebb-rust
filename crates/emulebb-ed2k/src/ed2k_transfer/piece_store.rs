@@ -618,7 +618,7 @@ impl Ed2kTransferRuntime {
                     permit,
                 )
                 .await?;
-            let should_checkpoint = self.should_checkpoint_manifest_unlocked(&manifest).await;
+            let should_checkpoint = self.should_checkpoint_manifest_unlocked(&manifest).await?;
             if should_checkpoint {
                 let mut file = self.take_payload_handle(token).await?;
                 file.flush().await?;
@@ -762,7 +762,7 @@ impl Ed2kTransferRuntime {
             }
 
             let should_checkpoint = checkpoint_reason.is_some()
-                || self.should_checkpoint_manifest_unlocked(&manifest).await;
+                || self.should_checkpoint_manifest_unlocked(&manifest).await?;
             if should_checkpoint {
                 // A pure progress checkpoint (no state transition) only dirties
                 // this piece's row, so it takes the single-piece UPDATE instead

@@ -178,7 +178,7 @@ impl Ed2kTransferRuntime {
             outcome,
             PieceWriteOutcome::Incomplete | PieceWriteOutcome::IchRehashFailed { .. }
         ) {
-            should_checkpoint = self.should_checkpoint_manifest_unlocked(manifest).await;
+            should_checkpoint = self.should_checkpoint_manifest_unlocked(manifest).await?;
             if should_checkpoint {
                 self.store_manifest_piece_progress_unlocked(manifest, piece_index, guard)
                     .await?;

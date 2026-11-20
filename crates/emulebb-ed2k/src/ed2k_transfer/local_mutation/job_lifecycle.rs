@@ -78,7 +78,7 @@ impl LocalMutationRegistry {
                         let manifests = cache.blocking_lock();
                         let states = checkpoints.blocking_lock();
                         let pending = states.get(&token).map(|state| &state.dirty_piece_indexes);
-                        let count = pending.map_or(0, std::collections::BTreeSet::len);
+                        let count = pending.map_or(0, |set| set.len());
                         let bytes = count
                             .checked_mul(
                                 std::mem::size_of::<emulebb_metadata::MetadataTransferPiece>() + 22,
@@ -91,10 +91,10 @@ impl LocalMutationRegistry {
                             .filter(|manifest| manifest.token == token);
                         let mut pieces = Vec::with_capacity(count);
                         if let Some(pending) = pending {
-                            for index in pending {
+                            for index in pending.iter() {
                                 let piece = manifest
-                                    .and_then(|manifest| manifest.pieces.get(*index as usize))
-                                    .filter(|piece| piece.piece_index == *index)
+                                    .and_then(|manifest| manifest.pieces.get(index as usize))
+                                    .filter(|piece| piece.piece_index == index)
                                     .ok_or_else(|| {
                                         anyhow!("stopping dirty execution has no current piece")
                                     })?;

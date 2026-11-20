@@ -83,6 +83,7 @@ mod resident;
 mod salvage;
 mod shared_catalog;
 pub use shared_catalog::{CategoryCatalogDecision, CategoryRootMutation, category_copy_matches};
+mod dirty_pieces;
 mod source_exchange;
 mod store;
 mod store_publication;

@@ -35,6 +35,11 @@ pub(super) struct Reservation {
     bytes: usize,
 }
 impl ResidentControl {
+    #[cfg(test)]
+    pub(super) fn used_bytes(&self) -> usize {
+        self.usage.lock().unwrap().bytes
+    }
+
     pub(super) fn new(capacity: Arc<super::local_mutation::capacity::CapacityControl>) -> Self {
         Self {
             usage: Mutex::default(),
@@ -49,11 +54,29 @@ impl ResidentControl {
         job: emulebb_metadata::JobId,
         admit: impl FnOnce() -> Result<T>,
     ) -> Result<(Reservation, T)> {
+        self.reserve_sized_with(job, MANIFEST_BYTES, admit)
+    }
+
+    /// Fixed bookkeeping backing uses its exact size, without taking a mutable
+    /// manifest allowance. The same job slot and resident ceiling own its life.
+    pub(super) fn reserve_bookkeeping(
+        self: &Arc<Self>,
+        job: emulebb_metadata::JobId,
+        bytes: usize,
+    ) -> Result<Reservation> {
+        self.reserve_sized_with(job, bytes, || Ok(()))
+            .map(|(reservation, ())| reservation)
+    }
+
+    fn reserve_sized_with<T>(
+        self: &Arc<Self>,
+        job: emulebb_metadata::JobId,
+        bytes: usize,
+        admit: impl FnOnce() -> Result<T>,
+    ) -> Result<(Reservation, T)> {
+        ensure!(bytes <= MANIFEST_BYTES, LocalMutationError::TooLarge);
         let mut usage = self.usage.lock().map_err(|_| LocalMutationError::Unknown)?;
-        ensure!(
-            usage.bytes + MANIFEST_BYTES <= MAX_BYTES,
-            LocalMutationError::Busy
-        );
+        ensure!(usage.bytes + bytes <= MAX_BYTES, LocalMutationError::Busy);
         let existing = usage.slots.get(&job).and_then(Weak::upgrade);
         if existing.is_none() && usage.jobs >= MAX_JOBS {
             return Err(LocalMutationError::Busy.into());
@@ -77,14 +100,8 @@ impl ResidentControl {
             usage.jobs += 1;
             slot
         });
-        usage.bytes += MANIFEST_BYTES;
-        Ok((
-            Reservation {
-                slot,
-                bytes: MANIFEST_BYTES,
-            },
-            admission,
-        ))
+        usage.bytes += bytes;
+        Ok((Reservation { slot, bytes }, admission))
     }
     /// Admission precedes constructing the private streamed representation.
     pub(super) fn reserve(self: &Arc<Self>, job: emulebb_metadata::JobId) -> Result<Reservation> {

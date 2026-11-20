@@ -593,7 +593,7 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
             .lock()
             .unwrap()
             .bytes,
-        backing_bytes(&old).unwrap() + backing_bytes(&current).unwrap()
+        backing_bytes(&old).unwrap() + backing_bytes(&current).unwrap() + size_of::<u64>()
     );
     drop(old);
     drop(reader_during_sql);
@@ -605,7 +605,7 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
             .lock()
             .unwrap()
             .bytes,
-        backing_bytes(&current).unwrap()
+        backing_bytes(&current).unwrap() + size_of::<u64>()
     );
 }
 
