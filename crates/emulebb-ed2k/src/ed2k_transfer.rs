@@ -41,7 +41,8 @@ mod callback;
 mod catalog;
 mod category_cache;
 pub use category_cache::{
-    CategoryCacheFence, CategoryCacheMutation, DownloadPatchFence, PreparedDownloadPatch,
+    CategoryCacheFence, CategoryCacheMutation, DownloadPatchFence, PreparedCategoryCacheMutation,
+    PreparedDownloadPatch,
 };
 mod completed_verification;
 mod completion_rehash;
@@ -80,11 +81,16 @@ mod reask_reciprocity;
 mod reload_index;
 mod requested_block;
 mod resident;
+mod resident_table;
+mod resource_admission;
+pub use resource_admission::DownloadResourceSnapshot;
 mod salvage;
 mod shared_catalog;
 pub use shared_catalog::{CategoryCatalogDecision, CategoryRootMutation, category_copy_matches};
+mod dirty_pieces;
 mod source_exchange;
 mod store;
+mod store_publication;
 
 pub use resident::{ResidentDraft, ResidentManifest};
 mod transfer_sql;
@@ -325,8 +331,9 @@ pub struct Ed2kTransferRuntime {
     /// destructive deletion. Unlike the manifest IO lock this may be held
     /// across slow filesystem work without delaying unrelated manifest reads.
     lifecycle_locks: Arc<StdMutex<HashMap<JobId, std::sync::Weak<Mutex<()>>>>>,
-    manifest_cache: Arc<Mutex<HashMap<JobId, ResidentManifest>>>,
-    manifest_checkpoint_state: Arc<Mutex<HashMap<JobToken, Ed2kManifestCheckpointState>>>,
+    manifest_cache: Arc<Mutex<resident_table::ResidentCache>>,
+    manifest_checkpoint_state:
+        Arc<Mutex<resident_table::ResidentTable<JobToken, Ed2kManifestCheckpointState>>>,
     /// Process-local download block reservations. Durable manifests describe
     /// bytes which reached the piece store; they never own network work. This
     /// registry therefore disappears on restart and its lease guards release
@@ -782,9 +789,14 @@ impl Ed2kTransferRuntime {
         let category_root_epoch = Arc::new(AtomicU64::new(0));
         let category_root_dirty = Arc::new(AtomicBool::new(false));
         let share_publication_failed = Arc::new(AtomicBool::new(false));
-        let manifest_cache = Arc::new(Mutex::new(HashMap::new()));
         let stripes = Arc::new(std::sync::Mutex::new(catalog::ShareStripes::default()));
         let local_mutations = Arc::new(local_mutation::LocalMutationRegistry::default());
+        let manifest_cache = Arc::new(Mutex::new(resident_table::ResidentCache::new(Arc::clone(
+            &local_mutations.residents,
+        ))?));
+        let checkpoint_state = Arc::new(Mutex::new(resident_table::ResidentTable::new(
+            Arc::clone(&local_mutations.residents),
+        )?));
         let share_eligibility = Arc::new(catalog::SharedEligibility::new(
             metadata.clone(),
             Arc::clone(&category_root_epoch),
@@ -835,7 +847,7 @@ impl Ed2kTransferRuntime {
             category_root_epoch_ready: Arc::new(Notify::new()),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             manifest_cache,
-            manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
+            manifest_checkpoint_state: checkpoint_state,
             download_block_leases: block_lease::DownloadBlockLeaseRegistry::default(),
             next_download_block_lease_id: Arc::new(AtomicU64::new(1)),
             payload_handles: Arc::new(StdMutex::new(HashMap::new())),

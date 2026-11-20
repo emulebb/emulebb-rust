@@ -104,7 +104,7 @@ impl Ed2kTransferRuntime {
         self.prepare_download_job_storage(job.token).await?;
         let _lifecycle_guard = self.lock_lifecycle(job.token.job_id).await;
         let _guard = self.lock_manifest(job.token).await;
-        self.load_manifest_or_rebuild_unlocked(job).await
+        self.load_manifest_or_rebuild_unlocked(job, &_guard).await
     }
 
     /// A running execution already has an admitted size. Peer claims cannot

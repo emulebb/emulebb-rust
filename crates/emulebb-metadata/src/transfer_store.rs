@@ -5,8 +5,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::{
-    DownloadIntent, JobId, JobToken, MetadataDownloadRetirement, NativeFileFingerprint,
-    NativeFileIdentity, NativePath,
+    DownloadIntent, JobId, JobToken, MetadataDownloadJobPublication, MetadataDownloadRetirement,
+    NativeFileFingerprint, NativeFileIdentity, NativePath,
     download_history_store::{record_completed_download, records_download_completion},
     native_path::{optional_path_from_row, path_from_row},
     store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
@@ -31,18 +31,18 @@ const PENDING_DELIVERY_PAGE_SQL: &str = "SELECT id FROM download_jobs
 
 impl super::MetadataStore {
     pub fn upsert_transfer_manifest(&self, manifest: &MetadataTransferManifest) -> Result<()> {
-        self.upsert_transfer_manifest_reconciled(manifest)
-            .map(|_| ())
+        self.upsert_transfer_manifest_reconciled(manifest, |_| Ok(()))
     }
 
     /// Persist progress while retaining any newer accepted AICH authority. The
-    /// returned row is the exact manifest committed, including identity-only
-    /// reconciliation; callers must publish this row rather than their stale
-    /// input. Piece progress and MD4 verification are never reset here.
-    pub fn upsert_transfer_manifest_reconciled(
+    /// preparation receives the canonical row while rollback is still possible.
+    /// Only a successful commit releases its prepared value for publication.
+    /// Piece progress and MD4 verification are never reset here.
+    pub fn upsert_transfer_manifest_reconciled<T>(
         &self,
         manifest: &MetadataTransferManifest,
-    ) -> Result<MetadataTransferManifest> {
+        prepare: impl FnOnce(MetadataTransferManifest) -> Result<T>,
+    ) -> Result<T> {
         crate::transfer_validation::validate_manifest(manifest)?;
         ensure!(
             manifest.display_name.len() <= crate::download_job_store::MAX_JOB_TEXT_BYTES,
@@ -112,6 +112,17 @@ impl super::MetadataStore {
         reconciled.intent = current.intent;
         reconciled.transfer_row_removed = current.removed_at_s.is_some();
         reconciled.category_id = current.category_id;
+        // Progress owns payload state, not operator presentation. An explicit
+        // metadata update may have committed after this writer took its snapshot.
+        let (priority, automatic, comment, rating) = tx.query_row(
+            "SELECT upload_priority,auto_upload_priority,comment,rating FROM download_jobs WHERE id=?1",
+            [manifest.token.job_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, u8>(3)?)),
+        )?;
+        reconciled.upload_priority = priority;
+        reconciled.auto_upload_priority = automatic;
+        reconciled.comment = comment;
+        reconciled.rating = rating;
         reconcile_manifest_aich_identity(&tx, &hash, &mut reconciled)?;
         let manifest = &reconciled;
         let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
@@ -224,8 +235,9 @@ impl super::MetadataStore {
             completed_at,
             transition,
         )?;
+        let prepared = prepare(reconciled)?;
         tx.commit()?;
-        Ok(reconciled)
+        Ok(prepared)
     }
 
     /// Assign a transfer without replacing unrelated progress or content state.
@@ -333,21 +345,29 @@ impl super::MetadataStore {
         }
     }
 
-    /// Publish bounded identity and sharing state under the existing SQLite mutex. The
+    /// Publish bounded identity, presentation and sharing state under the SQLite mutex. The
     /// captured token is rechecked here, never refreshed after network or I/O.
     pub fn publish_download_job_state<T>(
         &self,
         token: JobToken,
-        publish: impl FnOnce(MetadataTransferAichIdentity, bool) -> Result<T>,
+        publish: impl FnOnce(MetadataDownloadJobPublication) -> Result<T>,
     ) -> Result<T> {
         let conn = self.connection()?;
         let identity = read_download_job_aich_identity(&conn, token)?
             .ok_or_else(|| anyhow::anyhow!("stale or missing download job AICH identity"))?;
-        let enabled = conn.query_row(
-            "SELECT k.sharing_enabled FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id WHERE j.id=?1",
-            [token.job_id.get()], |row| row.get(0),
+        let state = conn.query_row(
+            "SELECT k.sharing_enabled,j.display_name,j.upload_priority,j.auto_upload_priority,j.comment,j.rating FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id WHERE j.id=?1",
+            [token.job_id.get()], |row| Ok(MetadataDownloadJobPublication {
+                identity: identity.clone(),
+                sharing_enabled: row.get(0)?,
+                display_name: row.get(1)?,
+                upload_priority: row.get(2)?,
+                auto_upload_priority: row.get(3)?,
+                comment: row.get(4)?,
+                rating: row.get(5)?,
+            }),
         )?;
-        publish(identity, enabled)
+        publish(state)
     }
 
     pub fn download_job_manifest(&self, id: JobId) -> Result<Option<MetadataTransferManifest>> {

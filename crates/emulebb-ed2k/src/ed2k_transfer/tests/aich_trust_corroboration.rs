@@ -216,7 +216,10 @@ async fn accepted_authority_retires_old_parts_without_another_vote_and_after_res
         // A delayed full checkpoint also cannot restore its old root, origin,
         // generation or acquired set. Its independent piece progress survives.
         let guard = runtime.lock_manifest(file_hash.token).await;
-        runtime.store_manifest_unlocked(&stale).await.unwrap();
+        runtime
+            .store_manifest_unlocked(&stale, guard.clone())
+            .await
+            .unwrap();
         drop(guard);
         let directory = runtime.root_dir.clone();
         drop(runtime);
@@ -523,7 +526,10 @@ async fn seed_servable_catalog(
     // The catalog must represent actual durable/cache MD4 authority, not a
     // catalog-only entry that a valid later manifest refresh must remove.
     let guard = runtime.lock_manifest(manifest.token).await;
-    runtime.store_manifest_unlocked(&servable).await.unwrap();
+    runtime
+        .store_manifest_unlocked(&servable, guard.clone())
+        .await
+        .unwrap();
     drop(guard);
     runtime
         .upsert_verified_catalog_entry_cached(&servable)

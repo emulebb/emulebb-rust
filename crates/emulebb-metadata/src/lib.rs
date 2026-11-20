@@ -151,15 +151,15 @@ pub use shared_membership_store::ObservedRootChanged;
 pub use store::{InitialProfileStorage, MetadataStore};
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataDeliveryOutputReservation, MetadataDownloadRetirement, MetadataFileImportRecord,
-    MetadataPartialShare, MetadataSharedSourceFailure, MetadataTransferAichIdentity,
-    MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferDeletionTombstone,
-    MetadataTransferDeletionTombstonePhase, MetadataTransferDeliveryAttempt,
-    MetadataTransferDeliveryAttemptPhase, MetadataTransferDeliveryOwnership,
-    MetadataTransferDeliveryState, MetadataTransferDirectoryDeletionAuthority,
-    MetadataTransferFileNameObservation, MetadataTransferManifest, MetadataTransferMediaMetadata,
-    MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
-    MetadataTransferSource,
+    MetadataDeliveryOutputReservation, MetadataDownloadJobPublication, MetadataDownloadRetirement,
+    MetadataFileImportRecord, MetadataPartialShare, MetadataSharedSourceFailure,
+    MetadataTransferAichIdentity, MetadataTransferCatalogEntry, MetadataTransferCounts,
+    MetadataTransferDeletionTombstone, MetadataTransferDeletionTombstonePhase,
+    MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
+    MetadataTransferDeliveryOwnership, MetadataTransferDeliveryState,
+    MetadataTransferDirectoryDeletionAuthority, MetadataTransferFileNameObservation,
+    MetadataTransferManifest, MetadataTransferMediaMetadata, MetadataTransferPiece,
+    MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferSource,
 };
 
 pub use download_hash_store::MetadataDownloadAichState;

@@ -1,16 +1,15 @@
 //! Selected execution backing, owned independently of cache membership and tasks.
 use super::{Ed2kResumeManifest, LocalMutationError};
 use anyhow::{Result, ensure};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex, Weak},
-};
+use std::sync::{Arc, Mutex};
+
+mod bytes;
+pub(super) use bytes::ResidentBytes;
 
 // WHY: maximum supported geometry for 18 selected jobs plus four existing
 // mutation slots exceeds 64 MiB. The qualified fixed cap includes overlapping
 // reader-pinned replacements; it never expands at runtime.
 const MAX_BYTES: usize = 128 * 1024 * 1024;
-pub(super) const MAX_JOBS: usize = 18;
 pub(super) const MANIFEST_BYTES: usize = 6 * 1024 * 1024;
 
 #[derive(Debug, Default)]
@@ -20,21 +19,24 @@ pub(super) struct ResidentControl {
 }
 #[derive(Debug, Default)]
 struct Usage {
-    jobs: usize,
     bytes: usize,
-    slots: BTreeMap<emulebb_metadata::JobId, Weak<Slot>>,
-}
-#[derive(Debug)]
-struct Slot {
-    control: Arc<ResidentControl>,
-    job: emulebb_metadata::JobId,
 }
 #[derive(Debug)]
 pub(super) struct Reservation {
-    slot: Arc<Slot>,
+    control: Arc<ResidentControl>,
+    job: emulebb_metadata::JobId,
     bytes: usize,
 }
 impl ResidentControl {
+    pub(super) fn budget_snapshot(&self) -> (usize, usize, usize) {
+        let used = self.usage.lock().map_or(MAX_BYTES, |usage| usage.bytes);
+        (used, MAX_BYTES, MANIFEST_BYTES)
+    }
+    #[cfg(test)]
+    pub(super) fn used_bytes(&self) -> usize {
+        self.usage.lock().unwrap().bytes
+    }
+
     pub(super) fn new(capacity: Arc<super::local_mutation::capacity::CapacityControl>) -> Self {
         Self {
             usage: Mutex::default(),
@@ -49,39 +51,36 @@ impl ResidentControl {
         job: emulebb_metadata::JobId,
         admit: impl FnOnce() -> Result<T>,
     ) -> Result<(Reservation, T)> {
+        self.reserve_sized_with(job, MANIFEST_BYTES, admit)
+    }
+
+    /// Fixed bookkeeping backing uses its exact size, without taking a mutable
+    /// manifest allowance. The shared resident ceiling owns its whole lifetime.
+    pub(super) fn reserve_bookkeeping(
+        self: &Arc<Self>,
+        job: emulebb_metadata::JobId,
+        bytes: usize,
+    ) -> Result<Reservation> {
+        self.reserve_sized_with(job, bytes, || Ok(()))
+            .map(|(reservation, ())| reservation)
+    }
+
+    fn reserve_sized_with<T>(
+        self: &Arc<Self>,
+        job: emulebb_metadata::JobId,
+        bytes: usize,
+        admit: impl FnOnce() -> Result<T>,
+    ) -> Result<(Reservation, T)> {
+        ensure!(bytes <= MANIFEST_BYTES, LocalMutationError::TooLarge);
         let mut usage = self.usage.lock().map_err(|_| LocalMutationError::Unknown)?;
-        ensure!(
-            usage.bytes + MANIFEST_BYTES <= MAX_BYTES,
-            LocalMutationError::Busy
-        );
-        let existing = usage.slots.get(&job).and_then(Weak::upgrade);
-        if existing.is_none() && usage.jobs >= MAX_JOBS {
-            return Err(LocalMutationError::Busy.into());
-        }
-        let admission = match admit() {
-            Ok(value) => value,
-            Err(error) => {
-                // A concurrent last-owner release may leave this upgraded Arc
-                // as the final Slot owner. Its Drop must run after the mutex.
-                drop(usage);
-                drop(existing);
-                return Err(error);
-            }
-        };
-        let slot = existing.unwrap_or_else(|| {
-            let slot = Arc::new(Slot {
-                control: Arc::clone(self),
-                job,
-            });
-            usage.slots.insert(job, Arc::downgrade(&slot));
-            usage.jobs += 1;
-            slot
-        });
-        usage.bytes += MANIFEST_BYTES;
+        ensure!(usage.bytes + bytes <= MAX_BYTES, LocalMutationError::Busy);
+        let admission = admit()?;
+        usage.bytes += bytes;
         Ok((
             Reservation {
-                slot,
-                bytes: MANIFEST_BYTES,
+                control: Arc::clone(self),
+                job,
+                bytes,
             },
             admission,
         ))
@@ -91,6 +90,21 @@ impl ResidentControl {
         self.reserve_with(job, || Ok(()))
             .map(|(reservation, ())| reservation)
     }
+
+    /// Category copies cannot grow payload geometry. Prepare and settle this
+    /// immutable replacement completely before the owning SQL transaction.
+    pub(super) fn copy_category(
+        self: &Arc<Self>,
+        manifest: &Ed2kResumeManifest,
+        category_id: Option<i64>,
+    ) -> Result<ResidentManifest> {
+        let (credit, ()) =
+            self.reserve_sized_with(manifest.token.job_id, backing_bytes(manifest)?, || Ok(()))?;
+        let mut copy = manifest.clone();
+        copy.category_id = category_id;
+        credit.publish(copy)
+    }
+    #[cfg(test)]
     pub(super) fn copy_manifest(
         self: &Arc<Self>,
         manifest: &Ed2kResumeManifest,
@@ -102,7 +116,6 @@ impl ResidentControl {
 impl Reservation {
     fn copy(&self) -> Result<Self> {
         let mut usage = self
-            .slot
             .control
             .usage
             .lock()
@@ -113,7 +126,8 @@ impl Reservation {
         );
         usage.bytes += MANIFEST_BYTES;
         Ok(Self {
-            slot: Arc::clone(&self.slot),
+            control: Arc::clone(&self.control),
+            job: self.job,
             bytes: MANIFEST_BYTES,
         })
     }
@@ -123,7 +137,6 @@ impl Reservation {
     fn resize(&mut self, bytes: usize) -> Result<()> {
         ensure!(bytes <= MANIFEST_BYTES, LocalMutationError::TooLarge);
         let mut usage = self
-            .slot
             .control
             .usage
             .lock()
@@ -139,13 +152,13 @@ impl Reservation {
         self.bytes = bytes;
         drop(usage);
         if released {
-            self.slot.control.capacity.wake();
+            self.control.capacity.wake();
         }
         Ok(())
     }
     fn transfer_write_allowance(&mut self, credit: &mut Self) -> Result<()> {
         ensure!(
-            Arc::ptr_eq(&self.slot, &credit.slot),
+            Arc::ptr_eq(&self.control, &credit.control) && self.job == credit.job,
             "resident write credit belongs to another job"
         );
         let growth = MANIFEST_BYTES - self.bytes;
@@ -169,35 +182,19 @@ impl Reservation {
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.slot
-            .control
+        self.control
             .usage
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .bytes -= self.bytes;
         // WHY: readers may outlive cache eviction and task completion. Their
         // actual backing release must wake the existing admission waiters.
-        self.slot.control.capacity.wake();
-    }
-}
-impl Drop for Slot {
-    fn drop(&mut self) {
-        let mut usage = self.control.usage.lock().unwrap_or_else(|p| p.into_inner());
-        usage.jobs -= 1;
-        if usage
-            .slots
-            .get(&self.job)
-            .is_some_and(|slot| std::ptr::eq(slot.as_ptr(), self))
-        {
-            usage.slots.remove(&self.job);
-        }
-        drop(usage);
         self.control.capacity.wake();
     }
 }
 #[derive(Debug)]
 struct Allocation {
-    // Backing is dropped before its byte/count reservation.
+    // Backing is dropped before its byte reservation.
     manifest: Ed2kResumeManifest,
     reservation: Reservation,
 }
@@ -212,20 +209,6 @@ impl std::ops::Deref for ResidentManifest {
     }
 }
 impl ResidentManifest {
-    /// Mutate unique backing in place; a pinned older view requires separately
-    /// admitted backing before cloning, never an uncharged copy-on-write.
-    pub(super) fn try_mut(&mut self) -> Result<&mut Ed2kResumeManifest> {
-        if Arc::get_mut(&mut self.0).is_none() {
-            let reservation = self.0.reservation.copy()?;
-            self.0 = Arc::new(Allocation {
-                manifest: self.0.manifest.clone(),
-                reservation,
-            });
-        }
-        let allocation = Arc::get_mut(&mut self.0).expect("unique admitted resident");
-        allocation.reservation.resize(MANIFEST_BYTES)?;
-        Ok(&mut allocation.manifest)
-    }
     /// Apply a synchronous delta with credit admitted before durable mutation.
     /// Readers acquired during SQL cannot force a new post-commit admission.
     pub(super) fn write_with(
@@ -241,7 +224,8 @@ impl ResidentManifest {
         } else {
             let reservation = credit.take().unwrap();
             ensure!(
-                Arc::ptr_eq(&self.0.reservation.slot, &reservation.slot),
+                Arc::ptr_eq(&self.0.reservation.control, &reservation.control)
+                    && self.0.reservation.job == reservation.job,
                 "resident write credit belongs to another job"
             );
             self.0 = Arc::new(Allocation {

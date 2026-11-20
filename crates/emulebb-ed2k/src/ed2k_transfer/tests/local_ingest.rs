@@ -260,7 +260,7 @@ async fn same_path_rebind_preserves_independent_complete_copy_and_live_partial_p
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.md4_hashset_acquired = true;
         manifest.verified_ranges = vec![Ed2kSharedRange { start: 0, end: 4 }];
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations

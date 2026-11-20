@@ -131,7 +131,7 @@ impl Ed2kTransferRuntime {
             );
             let reset_pieces =
                 reconcile_manifest_payload_len(&mut manifest, payload_len.unwrap_or(0));
-            if persist_reconciled_manifest(self, &manifest, reset_pieces).await? {
+            if persist_reconciled_manifest(self, &manifest, reset_pieces, &_manifest_guard).await? {
                 reconciliation.demoted_downloads =
                     reconciliation.demoted_downloads.saturating_add(1);
                 reconciliation.reset_pieces =
@@ -190,7 +190,8 @@ impl Ed2kTransferRuntime {
                 // Keep that evidence intact until the retained, exact-snapshot
                 // verification transition publishes the content-only proof.
                 if *manifest != *snapshot {
-                    self.store_manifest_unlocked(&manifest).await?;
+                    self.store_manifest_unlocked(&manifest, manifest_guard.clone())
+                        .await?;
                 }
                 if manifest.delivery_state == Ed2kDeliveryState::Delivered
                     && manifest.source_fingerprint != recovery.fingerprint
@@ -245,7 +246,8 @@ impl Ed2kTransferRuntime {
         }
         create_empty_payload(&payload_path).await?;
         let reset_pieces = demote_completed_manifest(&mut manifest);
-        self.store_manifest_unlocked(&manifest).await?;
+        self.store_manifest_unlocked(&manifest, _manifest_guard.clone())
+            .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         reconciliation.demoted_downloads = reconciliation.demoted_downloads.saturating_add(1);
         reconciliation.reset_pieces = reconciliation.reset_pieces.saturating_add(reset_pieces);
@@ -304,7 +306,9 @@ async fn persist_verified_canonical_state(
         );
         manifest.payload_fingerprint = payload_fingerprint;
         if manifest != *snapshot {
-            runtime.store_manifest_unlocked(&manifest).await?;
+            runtime
+                .store_manifest_unlocked(&manifest, _manifest_guard.clone())
+                .await?;
         }
     }
     Ok(())
@@ -646,6 +650,7 @@ async fn persist_reconciled_manifest(
     runtime: &Ed2kTransferRuntime,
     manifest: &Ed2kResumeManifest,
     reset_pieces: usize,
+    io: &super::store::ScopedLockGuard<emulebb_metadata::JobId>,
 ) -> Result<bool> {
     let persisted = runtime.load_manifest_unlocked(manifest.token).await?;
     if reset_pieces == 0
@@ -655,7 +660,9 @@ async fn persist_reconciled_manifest(
     {
         return Ok(false);
     }
-    runtime.store_manifest_unlocked(manifest).await?;
+    runtime
+        .store_manifest_unlocked(manifest, io.clone())
+        .await?;
     runtime.upsert_verified_catalog_entry(manifest).await;
     Ok(true)
 }
@@ -687,7 +694,10 @@ mod tests {
             .unwrap();
         manifest.pieces = pieces;
         rebuild_verified_ranges(&mut manifest);
-        runtime.store_manifest_unlocked(&manifest).await.unwrap();
+        runtime
+            .store_manifest_unlocked(&manifest, _guard.clone())
+            .await
+            .unwrap();
     }
 
     fn piece(piece_index: u32, state: Ed2kTransferState, bytes_written: u64) -> Ed2kPieceState {
@@ -1269,7 +1279,10 @@ mod tests {
                 .edit()
                 .unwrap();
             manifest.payload_fingerprint = None;
-            runtime.store_manifest_unlocked(&manifest).await.unwrap();
+            runtime
+                .store_manifest_unlocked(&manifest, _guard.clone())
+                .await
+                .unwrap();
         }
 
         let report = runtime.reconcile_download_storage(job.token).await.unwrap();

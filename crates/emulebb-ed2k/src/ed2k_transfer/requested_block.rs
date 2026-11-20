@@ -165,9 +165,6 @@ impl Ed2kTransferRuntime {
             // before the final whole-file reader opens the payload.
             self.invalidate_payload_handle(manifest.token);
         }
-        if outcome.is_completed() {
-            self.upsert_verified_catalog_entry(manifest).await;
-        }
         // A plain out-of-order block only dirties this piece's row (bitmap +
         // state), so it follows the batched progress-checkpoint policy: cache
         // the manifest and record the dirty piece between checkpoints, persist
@@ -181,7 +178,7 @@ impl Ed2kTransferRuntime {
             outcome,
             PieceWriteOutcome::Incomplete | PieceWriteOutcome::IchRehashFailed { .. }
         ) {
-            should_checkpoint = self.should_checkpoint_manifest_unlocked(manifest).await;
+            should_checkpoint = self.should_checkpoint_manifest_unlocked(manifest).await?;
             if should_checkpoint {
                 self.store_manifest_piece_progress_unlocked(manifest, piece_index, guard)
                     .await?;
@@ -191,7 +188,9 @@ impl Ed2kTransferRuntime {
                     .await?;
             }
         } else {
-            self.store_manifest_unlocked(manifest).await?;
+            self.store_manifest_unlocked(manifest, guard.clone())
+                .await?;
+            self.upsert_verified_catalog_entry(manifest).await;
         }
         log_append_piece_block(AppendPieceBlockLog {
             manifest,

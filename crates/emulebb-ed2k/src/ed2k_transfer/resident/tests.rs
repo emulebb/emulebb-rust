@@ -57,7 +57,6 @@ fn owned_edit_refusal_returns_intact_pin_after_unwrap_and_can_be_readmitted() {
     assert_eq!(control.usage.lock().unwrap().bytes, MANIFEST_BYTES);
     drop(draft);
     assert_eq!(control.usage.lock().unwrap().bytes, 0);
-    assert_eq!(control.usage.lock().unwrap().jobs, 0);
 }
 
 #[test]
@@ -88,11 +87,12 @@ fn maximum_geometry_reports_concurrent_resident_requirement() {
         piece.block_bitmap = Some("55".repeat(7));
     }
     let one = backing_bytes(&manifest).unwrap();
-    let selected = MAX_JOBS * one;
+    let selected_jobs = 18;
+    let selected = selected_jobs * one;
     let writers = super::super::local_mutation::MAX_UNITS;
     let with_writer = selected + writers * MANIFEST_BYTES;
     eprintln!(
-        "resident capacity: per_job={one}, selected_jobs={MAX_JOBS}, selected_bytes={selected}, concurrent_writers={writers}, with_writers={with_writer}, cap={MAX_BYTES}"
+        "resident capacity: per_job={one}, selected_jobs={selected_jobs}, selected_bytes={selected}, concurrent_writers={writers}, with_writers={with_writer}, cap={MAX_BYTES}"
     );
     assert!(one <= MANIFEST_BYTES);
     assert!(
@@ -100,8 +100,8 @@ fn maximum_geometry_reports_concurrent_resident_requirement() {
         "resident cap must cover selected geometry plus all admitted replacements"
     );
     let control = Arc::new(ResidentControl::default());
-    let mut residents = Vec::with_capacity(MAX_JOBS);
-    for id in 1..=MAX_JOBS {
+    let mut residents = Vec::with_capacity(selected_jobs);
+    for id in 1..=selected_jobs {
         let job_id = JobId::new(id as i64).unwrap();
         let reservation = control.reserve(job_id).unwrap();
         let mut backing = manifest.clone();
@@ -140,7 +140,6 @@ fn maximum_geometry_reports_concurrent_resident_requirement() {
     );
     drop(residents);
     assert_eq!(control.usage.lock().unwrap().bytes, 0);
-    assert_eq!(control.usage.lock().unwrap().jobs, 0);
 }
 
 #[test]
@@ -158,7 +157,6 @@ fn preadmitted_write_preserves_old_pin_and_releases_replacement_slack() {
     assert!(old.comment.is_empty());
     assert_eq!(current.comment, "Updated");
     assert!(!Arc::ptr_eq(&old.0, &current.0));
-    assert_eq!(control.usage.lock().unwrap().jobs, 1);
     assert_eq!(
         control.usage.lock().unwrap().bytes,
         backing_bytes(&old).unwrap() + backing_bytes(&current).unwrap()
@@ -216,7 +214,7 @@ fn backing_release_wakes_existing_registry_without_task_completion() {
 }
 
 #[test]
-fn retained_charge_and_shared_job_slot_follow_last_owner() {
+fn retained_charges_follow_each_live_backing_owner() {
     let control = Arc::new(ResidentControl::default());
     let mut original = control.reserve(JobId::new(1).unwrap()).unwrap();
     original.resize(1024).unwrap();
@@ -225,19 +223,15 @@ fn retained_charge_and_shared_job_slot_follow_last_owner() {
     {
         let usage = control.usage.lock().unwrap();
         assert_eq!(usage.bytes, 3072);
-        assert_eq!(usage.jobs, 1);
     }
     drop(original);
     {
         let usage = control.usage.lock().unwrap();
         assert_eq!(usage.bytes, 2048);
-        assert_eq!(usage.jobs, 1);
     }
     drop(replacement);
     let usage = control.usage.lock().unwrap();
     assert_eq!(usage.bytes, 0);
-    assert_eq!(usage.jobs, 0);
-    assert!(usage.slots.is_empty());
 }
 
 #[test]
@@ -263,32 +257,49 @@ fn failed_growth_preserves_existing_charge_and_reservation() {
 }
 
 #[test]
-fn distinct_job_limit_survives_multiple_reservations_per_job() {
+fn many_distinct_jobs_and_reader_versions_are_admitted_by_bytes() {
     let control = Arc::new(ResidentControl::default());
     let mut reservations = Vec::new();
-    for id in 1..=MAX_JOBS {
+    for id in 1..=96 {
         let mut reservation = control.reserve(JobId::new(id as i64).unwrap()).unwrap();
         reservation.resize(1024).unwrap();
         reservations.push(reservation);
     }
-    assert!(
-        control
-            .reserve(JobId::new(MAX_JOBS as i64 + 1).unwrap())
-            .is_err()
-    );
-    let same_job = reservations[0].copy().unwrap();
-    drop(reservations.remove(0));
-    assert!(
-        control
-            .reserve(JobId::new(MAX_JOBS as i64 + 1).unwrap())
-            .is_err()
-    );
-    drop(same_job);
-    assert!(
-        control
-            .reserve(JobId::new(MAX_JOBS as i64 + 1).unwrap())
-            .is_ok()
-    );
+    let mut reader = reservations[0].copy().unwrap();
+    reader.resize(8192).unwrap();
+    assert_eq!(control.used_bytes(), 96 * 1024 + 8192);
+    drop(reservations);
+    assert_eq!(control.used_bytes(), 8192);
+    drop(reader);
+    assert_eq!(control.used_bytes(), 0);
+}
+
+#[test]
+fn write_credit_cannot_cross_job_or_budget_identity() {
+    for pinned in [false, true] {
+        let control = Arc::new(ResidentControl::default());
+        let other = Arc::new(ResidentControl::default());
+        let mut current = control.copy_manifest(&manifest_fixture()).unwrap();
+        let reader = pinned.then(|| current.clone());
+        for credit in [
+            control.reserve(JobId::new(2).unwrap()).unwrap(),
+            other.reserve(JobId::new(1).unwrap()).unwrap(),
+        ] {
+            assert!(
+                current
+                    .write_with(credit, |value| {
+                        value.comment = "Wrong owner".into();
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            assert!(current.comment.is_empty());
+        }
+        drop(reader);
+        drop(current);
+        assert_eq!(control.used_bytes(), 0);
+        assert_eq!(other.used_bytes(), 0);
+    }
 }
 
 #[tokio::test]
@@ -407,6 +418,214 @@ async fn resident_pressure_rejects_prefix_before_payload_or_cache_mutation() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn ordinary_store_refuses_before_sql_when_credit_or_revision_is_exhausted() {
+    for exhausted_revision in [false, true] {
+        let root = crate::paths::unique_test_dir("resident-store-preadmission");
+        let runtime = super::super::Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            "66".repeat(16).parse().unwrap(),
+            "Sample.bin".into(),
+            super::super::ED2K_PART_SIZE,
+        );
+        let old = runtime.ensure_job(&job).await.unwrap();
+        let io = runtime.lock_manifest(job.token).await;
+        let before = runtime
+            .metadata
+            .download_job_manifest(job.token.job_id)
+            .unwrap()
+            .unwrap();
+        let mut proposed = (*old).clone();
+        proposed.pieces[0].bytes_written = 32;
+        let mut held = Vec::new();
+        if exhausted_revision {
+            runtime
+                .manifest_checkpoint_state
+                .lock()
+                .await
+                .get_mut(&job.token)
+                .unwrap()
+                .revision = u64::MAX;
+        } else {
+            while let Ok(permit) = runtime.local_mutations.residents.reserve(job.token.job_id) {
+                held.push(permit);
+            }
+        }
+        let error = runtime
+            .store_manifest_unlocked(&proposed, io.clone())
+            .await
+            .unwrap_err();
+        if exhausted_revision {
+            assert!(error.to_string().contains("revision exhausted"));
+        } else {
+            assert!(matches!(
+                error.downcast_ref::<LocalMutationError>(),
+                Some(LocalMutationError::Busy)
+            ));
+        }
+        assert_eq!(
+            runtime
+                .metadata
+                .download_job_manifest(job.token.job_id)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(Arc::ptr_eq(
+            &runtime.manifest_cache.lock().await[&job.token.job_id].0,
+            &old.0
+        ));
+        drop(held);
+        if exhausted_revision {
+            runtime
+                .manifest_checkpoint_state
+                .lock()
+                .await
+                .get_mut(&job.token)
+                .unwrap()
+                .revision = 0;
+        }
+        runtime
+            .store_manifest_unlocked(&proposed, io)
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .metadata
+                .download_job_manifest(job.token.job_id)
+                .unwrap()
+                .unwrap()
+                .pieces[0]
+                .prefix_bytes,
+            32
+        );
+        assert_eq!(old.pieces[0].bytes_written, 0);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_store_retains_io_until_publication_before_the_next_writer_snapshots() {
+    let root = crate::paths::unique_test_dir("resident-store-competing-writers");
+    let runtime = Arc::new(super::super::Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        "77".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        2 * super::super::ED2K_PART_SIZE,
+    );
+    let old = runtime.ensure_job(&job).await.unwrap();
+    let (reached, ready) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, resume);
+    let token = job.token;
+    let owner = Arc::clone(&runtime);
+    let caller = tokio::spawn(async move {
+        let io = owner.lock_manifest(token).await;
+        let mut proposal = owner.load_manifest_unlocked(token).await?.edit()?;
+        proposal.pieces[0].bytes_written = 32;
+        owner.store_manifest_unlocked(&proposal, io).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job_manifest(token.job_id)
+            .unwrap()
+            .unwrap()
+            .pieces[0]
+            .prefix_bytes,
+        32
+    );
+    let reader_during_sql = runtime.manifest_cache.lock().await[&token.job_id].clone();
+    assert_eq!(reader_during_sql.pieces[0].bytes_written, 0);
+    let mut held = Vec::new();
+    while let Ok(permit) = runtime.local_mutations.residents.reserve(token.job_id) {
+        held.push(permit);
+    }
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(
+        super::super::store::scoped_lock(&runtime.manifest_locks, token.job_id)
+            .try_lock_owned()
+            .is_none()
+    );
+    let (captured, snapshot) = tokio::sync::oneshot::channel();
+    let (allow, allowed) = tokio::sync::oneshot::channel();
+    let owner = Arc::clone(&runtime);
+    let second = tokio::spawn(async move {
+        let io = owner.lock_manifest(token).await;
+        let mut proposal = owner.load_manifest_unlocked(token).await?.edit()?;
+        let _ = captured.send(proposal.pieces[0].bytes_written);
+        let _ = allowed.await;
+        proposal.pieces[1].bytes_written = 64;
+        owner.store_manifest_unlocked(&proposal, io).await
+    });
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), snapshot)
+            .await
+            .unwrap()
+            .unwrap(),
+        32
+    );
+    drop(held);
+    allow.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let current = runtime.manifest_cache.lock().await[&token.job_id].clone();
+    assert_eq!(current.pieces[0].bytes_written, 32);
+    assert_eq!(current.pieces[1].bytes_written, 64);
+    assert_eq!(reader_during_sql.pieces[0].bytes_written, 0);
+    let stored = runtime
+        .metadata
+        .download_job_manifest(token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.pieces[0].prefix_bytes, 32);
+    assert_eq!(stored.pieces[1].prefix_bytes, 64);
+    let states = runtime.manifest_checkpoint_state.lock().await;
+    let table_bytes = states.charged_bytes();
+    assert_eq!(states[&token].persisted_bytes_written, 96);
+    assert!(states[&token].dirty_piece_indexes.is_empty());
+    drop(states);
+    let cache_bytes = runtime.manifest_cache.lock().await.charged_bytes();
+    assert_eq!(
+        runtime
+            .local_mutations
+            .residents
+            .usage
+            .lock()
+            .unwrap()
+            .bytes,
+        backing_bytes(&old).unwrap()
+            + backing_bytes(&current).unwrap()
+            + size_of::<u64>()
+            + table_bytes
+            + cache_bytes
+    );
+    drop(old);
+    drop(reader_during_sql);
+    assert_eq!(
+        runtime
+            .local_mutations
+            .residents
+            .usage
+            .lock()
+            .unwrap()
+            .bytes,
+        backing_bytes(&current).unwrap() + size_of::<u64>() + table_bytes + cache_bytes
+    );
+}
+
 #[test]
 fn rejected_joint_admission_spends_no_credit_and_creates_no_retry_wake() {
     let registry = super::super::local_mutation::LocalMutationRegistry::default();
@@ -417,7 +636,6 @@ fn rejected_joint_admission_spends_no_credit_and_creates_no_retry_wake() {
     assert!(result.is_err());
     let usage = registry.residents.usage.lock().unwrap();
     assert_eq!(usage.bytes, 0);
-    assert_eq!(usage.jobs, 0);
     drop(usage);
     assert_eq!(registry.capacity_revision(), before);
 }

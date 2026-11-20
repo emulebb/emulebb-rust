@@ -947,10 +947,10 @@ impl Ed2kTransferRuntime {
             };
         }
         // The caller's progress may be newer than SQL while its AICH authority
-        // is older. Preserve membership/media/MD4 state, but do not advertise a
-        // root retired by local/import acceptance during the work above.
+        // or presentation is older. Preserve membership/media/MD4 state, but
+        // resolve operator metadata and AICH authority at the final SQL fence.
         // Lock order: catalog -> servable-hash cache -> metadata connection.
-        // The identity-only callback acquires no further locks and does no I/O.
+        // The callback acquires no further locks and does no I/O.
         let mut entries = Arc::clone(&self.shared_catalog).write_owned().await;
         if expected_root_epoch
             .is_some_and(|epoch| self.category_root_epoch.load(Ordering::Acquire) != epoch)
@@ -963,7 +963,8 @@ impl Ed2kTransferRuntime {
         let hashes = Arc::clone(&self.servable_shared_hash_cache);
         let published = tokio::task::spawn_blocking(move || {
             let mut hashes = hashes.lock().expect("servable hash cache mutex poisoned");
-            metadata.publish_download_job_state(token, |identity, enabled| {
+            metadata.publish_download_job_state(token, |state| {
+                let enabled = state.sharing_enabled;
                 if enabled != expected_enabled {
                     return Ok(false);
                 }
@@ -975,7 +976,12 @@ impl Ed2kTransferRuntime {
                     new_entry = None;
                 }
                 if let Some(entry) = new_entry.as_mut() {
-                    entry.aich_root = identity.root;
+                    entry.aich_root = state.identity.root;
+                    entry.display_name = state.display_name;
+                    entry.upload_priority = state.upload_priority;
+                    entry.auto_upload_priority = state.auto_upload_priority;
+                    entry.comment = state.comment;
+                    entry.rating = state.rating;
                 }
                 entries.upsert_verified(file_hash, new_entry);
                 generation.fetch_add(1, Ordering::AcqRel);

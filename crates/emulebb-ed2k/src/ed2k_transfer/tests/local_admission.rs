@@ -332,7 +332,7 @@ async fn root_change_after_admission_restores_live_uncheckpointed_partial_and_co
     let mut manifest = Ed2kResumeManifest::new(&job);
     manifest.md4_hashset_acquired = true;
     manifest.verified_ranges = vec![Ed2kSharedRange { start: 0, end: 4 }];
-    runtime.manifest_cache.lock().await.insert(
+    runtime.manifest_cache.lock().await.insert_fixture(
         job.token.job_id,
         runtime
             .local_mutations
