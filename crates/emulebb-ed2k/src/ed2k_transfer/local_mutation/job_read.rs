@@ -218,10 +218,13 @@ impl LocalMutationRegistry {
                         let _ = reached.send(());
                         let _ = release.recv();
                     }
-                    let _category = categories.blocking_read();
                     let _content =
                         transfer::store::scoped_lock(&content_locks, manifest.file_hash.clone())
                             .blocking_lock_owned();
+                    // Match progress/patch publication: content before category.
+                    // A queued category writer must not strand a reader while
+                    // it waits for content held by another publication owner.
+                    let _category = categories.blocking_read();
                     let mut cache = cache.blocking_lock();
                     if let Some(current) = cache
                         .get(&token.job_id)

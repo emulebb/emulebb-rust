@@ -67,6 +67,7 @@ async fn root_resources_preserve_identity_ownership_and_independent_watch_policy
     let id = created["data"]["id"].as_str().unwrap().to_owned();
     assert_eq!(headers["location"], format!("/api/v1/library/roots/{id}"));
     assert_eq!(created["data"]["watchEnabled"], false);
+    assert_eq!(created["data"]["scanRequired"], false);
     assert_eq!(created["data"]["managed"], false);
     for path in [&child, &parent] {
         let (status, _, value) = request(

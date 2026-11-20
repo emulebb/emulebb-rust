@@ -78,6 +78,7 @@ pub use local_ingest_store::{
     MetadataIngestJobChanged, MetadataIngestPathChanged, MetadataIngestProjection,
     MetadataIngestRoot, MetadataLocalIngestContent,
 };
+mod library_scan_store;
 mod model;
 mod native_file;
 mod native_path;
@@ -92,6 +93,7 @@ mod schema_validation;
 mod search_model;
 mod search_store;
 mod shared_membership_store;
+pub use library_scan_store::MetadataRootScanWatermark;
 mod snapshot;
 mod sql_value;
 mod store;

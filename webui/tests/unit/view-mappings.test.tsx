@@ -28,11 +28,12 @@ describe("canonical view mappings", () => {
   it("updates a managed root watch policy by its ID", async () => {
     const client = new RestClient();
     vi.spyOn(client, "getPage").mockResolvedValue({ data: [
-      { id: "17", path: "/intake", watchEnabled: false, managed: true, accessible: true, shareable: true, lastScannedAt: null }
+      { id: "17", path: "/intake", watchEnabled: false, managed: true, accessible: true, shareable: true, scanRequired: true, lastScannedAt: null }
     ], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     const patch = vi.spyOn(client, "patch").mockResolvedValue({});
     render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
     fireEvent.click(await screen.findByLabelText("Watch /intake"));
+    expect(screen.getByText("Scan required")).toBeVisible();
     await waitFor(() => expect(patch).toHaveBeenCalledWith("library/roots/17", { watchEnabled: true }));
     expect(screen.queryByTitle("Remove")).not.toBeInTheDocument();
   });

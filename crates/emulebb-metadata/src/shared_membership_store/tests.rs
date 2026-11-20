@@ -118,6 +118,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         store
             .replace_root_memberships(
                 &root,
+                &store.shared_root_scan_watermark(&root).unwrap(),
                 std::iter::once(verified_file.clone()).chain(std::iter::once(invalid_member)),
             )
             .is_err()
@@ -138,15 +139,27 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         "late invalid input must roll back streamed admission"
     );
     store
-        .replace_root_memberships(&root, std::iter::once(verified_file.clone()))
+        .replace_root_memberships(
+            &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
+            std::iter::once(verified_file.clone()),
+        )
         .unwrap();
     store
-        .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
+        .replace_root_memberships(
+            &nested,
+            &store.shared_root_scan_watermark(&nested).unwrap(),
+            std::slice::from_ref(&nested_file),
+        )
         .unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 1);
     store.connection().unwrap().execute_batch("CREATE TEMP TRIGGER keep_active_membership BEFORE UPDATE OF removed_at_ms ON main.shared_file_memberships WHEN new.removed_at_ms IS NOT NULL BEGIN SELECT RAISE(ABORT,'live member withdrawn during scan'); END;").unwrap();
     store
-        .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
+        .replace_root_memberships(
+            &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
+            std::slice::from_ref(&verified_file),
+        )
         .unwrap();
     store
         .connection()
@@ -162,10 +175,18 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
     assert_eq!(store.active_shared_content_count().unwrap(), 0);
     assert!(store.local_file_instance(&file).unwrap().is_some());
     store
-        .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
+        .replace_root_memberships(
+            &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
+            std::slice::from_ref(&verified_file),
+        )
         .unwrap();
     store
-        .replace_root_memberships(&nested, std::slice::from_ref(&nested_file))
+        .replace_root_memberships(
+            &nested,
+            &store.shared_root_scan_watermark(&nested).unwrap(),
+            std::slice::from_ref(&nested_file),
+        )
         .unwrap();
     let page = store.active_local_share_page(None, 10).unwrap();
     assert_eq!(page.len(), 1);
@@ -190,7 +211,11 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
     store.set_shared_root_accessible(&root, true).unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 0);
     store
-        .replace_root_memberships(&root, std::slice::from_ref(&verified_file))
+        .replace_root_memberships(
+            &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
+            std::slice::from_ref(&verified_file),
+        )
         .unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 1);
     let mut changed = fingerprint.clone();
@@ -198,17 +223,23 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
     store
         .replace_root_memberships(
             &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
             &[(file.clone(), PathBuf::from("nested/Sample.bin"), changed)],
         )
         .unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 0);
     store
-        .replace_root_memberships(&root, &[verified_file])
+        .replace_root_memberships(
+            &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
+            &[verified_file],
+        )
         .unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 1);
     store
         .replace_root_memberships(
             &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
             std::iter::empty::<(PathBuf, PathBuf, NativeFileFingerprint)>(),
         )
         .unwrap();
@@ -232,6 +263,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
     store
         .replace_root_memberships(
             &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
             &[(
                 file.clone(),
                 PathBuf::from("nested/Sample.bin"),

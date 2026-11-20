@@ -39,7 +39,6 @@ hex.workspace = true
 ipnet.workspace = true
 md4.workspace = true
 notify.workspace = true
-notify-debouncer-full.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }

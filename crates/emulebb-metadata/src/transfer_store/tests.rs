@@ -768,6 +768,7 @@ fn failed_partial_projection_rolls_back_shared_path_withdrawal() {
     store
         .replace_root_memberships(
             &root,
+            &store.shared_root_scan_watermark(&root).unwrap(),
             &[(
                 path.clone(),
                 PathBuf::from("sample.bin"),

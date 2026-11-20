@@ -2,6 +2,39 @@ use super::super::tests::{setup, usage};
 use super::*;
 
 #[tokio::test]
+async fn loss_waits_for_admission_capacity_and_records_during_drain() {
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    let (store, _state, owner) = setup();
+    let path = std::env::temp_dir().join("root-loss-admission");
+    let root = store
+        .create_library_root(&path, true, true)
+        .unwrap()
+        .unwrap();
+    let initial = store.shared_root_scan_watermark(&path).unwrap();
+    let quota = Arc::clone(&owner.admission.lock().unwrap().quota);
+    quota.lock().unwrap().bytes = MAX_BYTES;
+    let held = ByteLease {
+        quota,
+        bytes: MAX_BYTES,
+    };
+    owner.admission.lock().unwrap().stopping = true;
+    let mut marking = Box::pin(owner.mark_root_scan_required(root.id));
+    let observed = poll_fn(|context| Poll::Ready(marking.as_mut().poll(context))).await;
+    assert!(matches!(observed, Poll::Pending));
+    assert!(!store.library_root(root.id).unwrap().unwrap().scan_required);
+    assert_eq!(store.shared_root_scan_watermark(&path).unwrap(), initial);
+    drop(held);
+    marking.await.unwrap();
+    assert_ne!(store.shared_root_scan_watermark(&path).unwrap(), initial);
+    assert!(store.library_root(root.id).unwrap().unwrap().scan_required);
+    assert_eq!(usage(&owner), (0, 0));
+    owner.close_and_drain().await.unwrap();
+}
+
+#[tokio::test]
 async fn root_reply_keeps_quota_through_projection_and_serialization() {
     let (store, _state, owner) = setup();
     let path = std::env::temp_dir().join("root-read-does-not-probe");
@@ -23,6 +56,12 @@ async fn root_reply_keeps_quota_through_projection_and_serialization() {
     );
     assert_eq!(json["accessible"], false);
     assert_eq!(json["watchEnabled"], false);
+    assert_eq!(json["scanRequired"], false);
+    owner.mark_root_scan_required(root.id).await.unwrap();
+    let current = owner.read_library_roots(Query::Get(root.id)).await.unwrap();
+    assert!(matches!(current.value(), Value::Root(Some(root)) if root.scan_required));
+    drop(current);
+    assert_eq!(serde_json::to_value(&reply).unwrap()["scanRequired"], false);
     store.patch_library_root_watch(root.id, true).unwrap();
     // The serialized response is a committed read snapshot, independent of later edits.
     assert_eq!(serde_json::to_value(&reply).unwrap()["watchEnabled"], false);
@@ -106,6 +145,7 @@ fn root_timestamps_use_unix_seconds_and_ids_remain_decimal_strings() {
         id: i64::MAX,
         path: std::env::temp_dir(),
         watch_enabled: false,
+        scan_required: true,
         managed: false,
         accessible: false,
         shareable: true,
@@ -114,4 +154,5 @@ fn root_timestamps_use_unix_seconds_and_ids_remain_decimal_strings() {
     let json = serde_json::to_value(root).unwrap();
     assert_eq!(json["id"], i64::MAX.to_string());
     assert_eq!(json["lastScannedAt"], 1234);
+    assert_eq!(json["scanRequired"], true);
 }

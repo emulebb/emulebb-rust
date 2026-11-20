@@ -460,6 +460,7 @@ export type LibraryRoot = {
   id: string;
   path: string;
   watchEnabled: boolean;
+  scanRequired: boolean;
   managed: boolean;
   shareable: boolean;
   accessible: boolean;

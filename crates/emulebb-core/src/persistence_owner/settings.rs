@@ -96,7 +96,7 @@ async fn sql(
         }
     })??;
     match result {
-        DbResponse::Settings(value) => Ok(value),
+        DbResponse::Settings(value) => Ok(*value),
         _ => Err(if writing {
             PersistenceError::CommitUnknown
         } else {
@@ -115,7 +115,7 @@ impl PersistenceOwner {
             })
             .await?
         {
-            Response::Settings(Ok(value)) => Ok(value),
+            Response::Settings(value) => (*value).map_err(|_| PersistenceError::Worker),
             _ => Err(PersistenceError::Worker),
         }
     }
@@ -143,15 +143,15 @@ impl PersistenceOwner {
             })
             .await?
         {
-            Response::Settings(value) => Ok(value),
+            Response::Settings(value) => Ok(*value),
             _ => Err(PersistenceError::Worker),
         }
     }
 }
 
 fn invalid(error: SettingsError) -> Result<Response, PersistenceError> {
-    Ok(Response::Settings(Err(SettingsMutationError::Invalid(
-        error,
+    Ok(Response::Settings(Box::new(Err(
+        SettingsMutationError::Invalid(error),
     ))))
 }
 
@@ -180,15 +180,20 @@ pub(super) async fn process(
             .map_err(|_| PersistenceError::Worker)?;
             let value = SettingsSnapshot::new(current, admitted.values().clone(), application)
                 .map_err(|_| PersistenceError::Worker)?;
-            Ok(Response::Settings(Ok(crate::LibraryReply { value, lease })))
+            Ok(Response::Settings(Box::new(Ok(crate::LibraryReply {
+                value,
+                lease,
+            }))))
         }
         SettingsCommand::Write(update) => {
             let SettingsUpdate { core, patch } = *update;
             let (expected, edit) = patch.into_parts();
             if current.revision != expected {
-                return Ok(Response::Settings(Err(SettingsMutationError::Conflict {
-                    actual: current.revision,
-                })));
+                return Ok(Response::Settings(Box::new(Err(
+                    SettingsMutationError::Conflict {
+                        actual: current.revision,
+                    },
+                ))));
             }
             let saved = match current.saved.edited(&edit) {
                 Ok(value) => value,
@@ -197,9 +202,9 @@ pub(super) async fn process(
             let revision = match expected.checked_next() {
                 Ok(value) => value,
                 Err(_) => {
-                    return Ok(Response::Settings(Err(
+                    return Ok(Response::Settings(Box::new(Err(
                         SettingsMutationError::RevisionExhausted,
-                    )));
+                    ))));
                 }
             };
             let plan = match SettingsApplicationPlan::new(admitted.values(), &saved.values()) {
@@ -230,7 +235,9 @@ pub(super) async fn process(
             .await?
             {
                 SqlOutcome::Write(Ok(committed)) if committed == predicted => {}
-                SqlOutcome::Write(Err(error)) => return Ok(Response::Settings(Err(error))),
+                SqlOutcome::Write(Err(error)) => {
+                    return Ok(Response::Settings(Box::new(Err(error))));
+                }
                 _ => return Err(PersistenceError::CommitUnknown),
             }
             #[cfg(test)]
@@ -248,7 +255,10 @@ pub(super) async fn process(
                 .await
                 .settings
                 .publish(plan.candidate().clone(), application);
-            Ok(Response::Settings(Ok(crate::LibraryReply { value, lease })))
+            Ok(Response::Settings(Box::new(Ok(crate::LibraryReply {
+                value,
+                lease,
+            }))))
         }
     }
 }
