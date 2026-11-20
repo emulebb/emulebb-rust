@@ -1,6 +1,161 @@
 use super::*;
 use crate::{DownloadIntent, DownloadJobRequest, store::upsert_local_path};
 
+#[test]
+fn preparation_status_uses_only_verified_checkpoints_and_data_parts() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = job(&store, 91, Some(48), 16);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET intent='started' WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO download_job_pieces
+        (job_id,piece_index,state,prefix_bytes,present_bytes,ich_corrupted,updated_at_s) VALUES
+        (?1,0,'Missing',16,16,0,0),(?1,1,'Verified',16,16,0,0)",
+            [job.token.job_id],
+        )
+        .unwrap();
+    let parts = store
+        .download_job_verified_parts(job.token)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parts.file_size_bytes, 48);
+    assert_eq!(parts.verified_parts, [false, true, false]);
+    assert!(
+        store
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .storage
+            .is_none()
+    );
+    let stale = crate::JobToken {
+        generation: job.token.generation + 1,
+        ..job.token
+    };
+    assert!(store.download_job_verified_parts(stale).unwrap().is_none());
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET intent='stopped' WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .download_job_verified_parts(job.token)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn preparation_status_bounds_geometry_before_allocation_and_checks_verified_extents() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = job(&store, 92, Some(65534 * 16), 16);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET intent='started' WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    let parts = store
+        .download_job_verified_parts(job.token)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parts.verified_parts.len(), 65534);
+    assert!(parts.verified_parts.iter().all(|verified| !verified));
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET expected_size_bytes=?2 WHERE id=?1",
+            params![job.token.job_id, 65535 * 16],
+        )
+        .unwrap();
+    assert!(store.download_job_verified_parts(job.token).is_err());
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET expected_size_bytes=15 WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO download_job_pieces
+        (job_id,piece_index,state,prefix_bytes,present_bytes,ich_corrupted,updated_at_s)
+        VALUES(?1,0,'Verified',14,14,0,0)",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(store.download_job_verified_parts(job.token).is_err());
+}
+
+#[test]
+fn preparation_status_requires_runnable_known_size_and_healthy_internal_storage() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = job(&store, 93, None, 16);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET intent='started' WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .download_job_verified_parts(job.token)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET expected_size_bytes=17 WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .download_job_verified_parts(job.token)
+            .unwrap()
+            .unwrap()
+            .verified_parts,
+        [false, false]
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET internal_storage_retired=1,removed_at_s=4 WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .download_job_verified_parts(job.token)
+            .unwrap()
+            .is_none()
+    );
+}
+
 fn job(store: &MetadataStore, byte: u8, size: Option<u64>, part_size: u64) -> DownloadJobRecord {
     store
         .admit_download_job(&DownloadJobRequest {

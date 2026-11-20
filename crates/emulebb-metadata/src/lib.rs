@@ -36,6 +36,7 @@ mod download_job_store;
 mod download_patch_store;
 pub use download_browse_store::{
     MetadataDownloadDetail, MetadataDownloadPart, MetadataDownloadPartPage,
+    MetadataDownloadVerifiedParts,
 };
 pub use download_patch_store::{
     DownloadPatchError, MetadataDownloadPatch, MetadataDownloadPatched,

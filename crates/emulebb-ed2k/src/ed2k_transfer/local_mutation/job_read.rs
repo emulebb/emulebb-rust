@@ -9,6 +9,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Exact(JobId),
     Detail(JobId),
     Parts(JobId, Option<u32>, usize),
+    VerifiedParts(emulebb_metadata::JobToken),
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
     TransferCounts,
@@ -35,6 +36,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Exact(Option<RetainedRead<DownloadJobRecord>>),
     Detail(Option<RetainedRead<emulebb_metadata::MetadataDownloadDetail>>),
     Parts(Option<RetainedRead<emulebb_metadata::MetadataDownloadPartPage>>),
+    VerifiedParts(Option<RetainedRead<emulebb_metadata::MetadataDownloadVerifiedParts>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
@@ -69,6 +71,7 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
+            JobRead::VerifiedParts(_) => 128 * 1024,
             JobRead::Parts(_, _, limit) => {
                 ensure!((1..=256).contains(&limit), "invalid part page size");
                 32 * 1024
@@ -167,6 +170,13 @@ impl LocalMutationRegistry {
                             value.map(|value| RetainedRead::new(value, capacity.take_result())),
                         )
                     }),
+                JobRead::VerifiedParts(token) => {
+                    metadata.download_job_verified_parts(token).map(|value| {
+                        JobReadResult::VerifiedParts(
+                            value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                        )
+                    })
+                }
                 JobRead::Endpoints(token, after, limit) => metadata
                     .download_job_source_endpoints_after(token, after, limit)
                     .map(|value| {
@@ -488,6 +498,21 @@ impl transfer::Ed2kTransferRuntime {
             unreachable!()
         };
         Ok(page)
+    }
+
+    /// Read only durable verification bits for a waiting job. The existing
+    /// transient loan follows the returned bitmap; no resident view is created.
+    pub async fn download_verified_parts(
+        &self,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataDownloadVerifiedParts>>> {
+        let JobReadResult::VerifiedParts(parts) = self
+            .read_job_metadata(JobRead::VerifiedParts(token))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(parts)
     }
 
     pub async fn download_job(&self, id: JobId) -> Result<Option<RetainedRead<DownloadJobRecord>>> {

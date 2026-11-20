@@ -40,7 +40,73 @@ pub struct MetadataDownloadPartPage {
     pub has_more: bool,
 }
 
+/// Compact durable status for source preparation, never execution hydration.
+#[derive(Debug)]
+pub struct MetadataDownloadVerifiedParts {
+    pub file_size_bytes: u64,
+    /// Data parts only; an exact-multiple protocol EOF slice is not included.
+    pub verified_parts: Vec<bool>,
+}
+
 impl MetadataStore {
+    /// Capture geometry and verified checkpoints in one generation-fenced
+    /// snapshot. Presence alone must never be advertised as verified content.
+    pub fn download_job_verified_parts(
+        &self,
+        token: crate::JobToken,
+    ) -> Result<Option<MetadataDownloadVerifiedParts>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let geometry = tx
+            .query_row(
+                "SELECT expected_size_bytes,part_size_bytes FROM download_jobs
+            WHERE id=?1 AND execution_generation=?2 AND intent='started'
+            AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL
+            AND delete_requested_at_s IS NULL AND storage_failure_code IS NULL
+            AND internal_storage_retired=0 AND expected_size_bytes>0",
+                params![token.job_id, i64::try_from(token.generation)?],
+                |row| {
+                    Ok((
+                        crate::sql_value::unsigned::<u64>(row, 0)?,
+                        crate::sql_value::unsigned::<u64>(row, 1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((size, part_size)) = geometry else {
+            return Ok(None);
+        };
+        ensure!(part_size > 0, "invalid part size");
+        let count = usize::try_from(size.div_ceil(part_size))?;
+        ensure!(
+            (1..=65534).contains(&count),
+            "unsupported source preparation geometry"
+        );
+        let mut verified_parts = vec![false; count];
+        {
+            let mut stmt = tx.prepare_cached(
+                "SELECT piece_index,present_bytes FROM download_job_pieces
+                WHERE job_id=?1 AND state='Verified' ORDER BY piece_index",
+            )?;
+            let mut rows = stmt.query([token.job_id])?;
+            while let Some(row) = rows.next()? {
+                let index = crate::sql_value::unsigned::<usize>(row, 0)?;
+                ensure!(index < count, "verified part outside job geometry");
+                let extent = (size - index as u64 * part_size).min(part_size);
+                ensure!(
+                    crate::sql_value::unsigned::<u64>(row, 1)? == extent,
+                    "invalid verified part extent"
+                );
+                verified_parts[index] = true;
+            }
+        }
+        tx.commit()?;
+        Ok(Some(MetadataDownloadVerifiedParts {
+            file_size_bytes: size,
+            verified_parts,
+        }))
+    }
+
     /// Read one header and its recorded delivery ownership in one snapshot.
     /// Bound native path backing before decoding it; no filesystem probe occurs.
     pub fn download_job_detail(&self, id: JobId) -> Result<Option<MetadataDownloadDetail>> {
