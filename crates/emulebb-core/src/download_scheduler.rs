@@ -16,6 +16,9 @@ const PAGE_SIZE: usize = 32;
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_SELECTION_INTERVAL: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+mod retirement_tests;
+
 /// Only selected jobs own this scalar clock. Completed network rounds may yield
 /// after inactivity; an in-flight payload operation is never timed out by it.
 struct SelectionProgress {
@@ -182,32 +185,14 @@ impl EmulebbCore {
         mut clock: watch::Receiver<()>,
         shutdown: CancellationToken,
     ) {
-        let transfer = match self.hydrate_selected_download(&mut guard).await {
-            Ok(Some(transfer)) => transfer,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(job_id = %guard.token().job_id, %error, "download hydration deferred");
-                if !matches!(
-                    error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>(),
-                    Some(
-                        emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy
-                            | emulebb_ed2k::ed2k_transfer::LocalMutationError::Closing
-                    )
-                ) {
-                    self.persist_selection_storage_failure(
-                        &guard,
-                        "STORAGE_PREPARATION_FAILED",
-                        &error,
-                        &mut clock,
-                        &shutdown,
-                    )
-                    .await;
-                }
-                return;
-            }
+        let result = self.hydrate_selected_download(&mut guard).await;
+        let Some(transfer) = self
+            .finish_download_hydration(&guard, result, &mut clock, &shutdown)
+            .await
+        else {
+            return;
         };
         let cancel = guard.cancellation();
-        let reask = self.ed2k_reask_handle.lock().unwrap().clone();
         let mut progress =
             SelectionProgress::new(self.ed2k_transfers.downloaded_session_bytes(guard.token()));
         loop {
@@ -266,10 +251,57 @@ impl EmulebbCore {
                 !cancel.is_cancelled() && !shutdown.is_cancelled(),
             );
         }
-        cancel.cancel();
+        self.retire_download_selection(&guard, &mut clock, &shutdown)
+            .await;
+    }
+
+    /// Every unsuccessful hydration can already own native storage/cache state.
+    /// Keep attempt ownership until the same retirement as a network worker ends.
+    async fn finish_download_hydration(
+        &self,
+        guard: &DownloadAttemptGuard,
+        result: Result<Option<Transfer>>,
+        clock: &mut watch::Receiver<()>,
+        shutdown: &CancellationToken,
+    ) -> Option<Transfer> {
+        match result {
+            Ok(Some(transfer)) => return Some(transfer),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(job_id = %guard.token().job_id, %error, "download hydration deferred");
+                if !matches!(
+                    error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>(),
+                    Some(
+                        emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy
+                            | emulebb_ed2k::ed2k_transfer::LocalMutationError::Closing
+                    )
+                ) {
+                    self.persist_selection_storage_failure(
+                        guard,
+                        "STORAGE_PREPARATION_FAILED",
+                        &error,
+                        clock,
+                        shutdown,
+                    )
+                    .await;
+                }
+            }
+        }
+        self.retire_download_selection(guard, clock, shutdown).await;
+        None
+    }
+
+    async fn retire_download_selection(
+        &self,
+        guard: &DownloadAttemptGuard,
+        clock: &mut watch::Receiver<()>,
+        shutdown: &CancellationToken,
+    ) {
+        guard.cancellation().cancel();
         // All attempt producers have returned. Retire UDP state before freeing
         // the slot; already emitted callbacks carry the old token and fail the
         // canceled ownership check. On disconnect the UDP loop is already gone.
+        let reask = self.ed2k_reask_handle.lock().unwrap().clone();
         if let Some(reask) = reask
             && let Err(error) = reask.retire_execution(guard.token()).await
         {
@@ -282,15 +314,15 @@ impl EmulebbCore {
         {
             tracing::error!(job_id = %guard.token().job_id, %error, "download selection release failed");
             self.persist_selection_storage_failure(
-                &guard,
+                guard,
                 "STORAGE_CHECKPOINT_FAILED",
                 &error,
-                &mut clock,
-                &shutdown,
+                clock,
+                shutdown,
             )
             .await;
         }
-        self.release_download_source_file(guard.token(), &transfer.hash)
+        self.release_download_source_file(guard.token(), &guard.hash().to_string())
             .await;
     }
 

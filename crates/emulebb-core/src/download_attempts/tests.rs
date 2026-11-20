@@ -201,6 +201,15 @@ fn initial_allocation_rebinds_one_slot_and_a_prior_cancellation_cannot_be_revive
     assert!(control.cancel_through(token(1, 1)));
     assert!(!guard.rebind(token(1, 2)));
     assert!(guard.cancellation().is_cancelled());
+    assert_eq!(
+        guard.token(),
+        token(1, 2),
+        "native generation remains known for retirement"
+    );
+    assert!(!control.owns(token(1, 2)));
+    assert!(control.selected_token(hash(1).0).is_none());
+    assert_eq!(guard.hash(), hash(1));
+    assert_eq!(control.snapshot(), vec![(token(1, 2), true)]);
     drop(guard);
     assert!(control.snapshot().is_empty());
 }

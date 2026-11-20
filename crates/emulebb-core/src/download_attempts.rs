@@ -361,6 +361,18 @@ impl DownloadAttemptGuard {
         self.token
     }
 
+    pub(crate) fn hash(&self) -> Ed2kHash {
+        self.control
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .get(&self.token.job_id)
+            .filter(|entry| entry.nonce == self.nonce)
+            .expect("owned download attempt disappeared")
+            .hash
+    }
+
     /// Bind the reserved slot to the generation issued by initial allocation.
     /// Cancellation survives this handoff; no later start can revive this guard.
     pub(crate) fn rebind(&mut self, token: JobToken) -> bool {
@@ -368,14 +380,20 @@ impl DownloadAttemptGuard {
             return false;
         }
         let mut state = self.control.state.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(entry) = state.entries.get_mut(&token.job_id).filter(|entry| {
-            entry.nonce == self.nonce && entry.token == self.token && !entry.cancel.is_cancelled()
-        }) else {
+        let Some(entry) = state
+            .entries
+            .get_mut(&token.job_id)
+            .filter(|entry| entry.nonce == self.nonce && entry.token == self.token)
+        else {
             return false;
         };
+        // WHY: native Begin may commit before cancellation wins its reply.
+        // Remember that exact generation for retirement without reactivating
+        // the canceled attempt or granting its callbacks new authority.
+        let active = !entry.cancel.is_cancelled();
         entry.token = token;
         self.token = token;
-        true
+        active
     }
     pub(crate) fn cancellation(&self) -> CancellationToken {
         self.cancel.clone()
