@@ -176,7 +176,9 @@ fn peer_deltas_preserve_chosen_name_and_verified_checkpoint_cannot_replay_old_na
             &MetadataDownloadPeerDelta::Rename("operator.bin".into()),
         )
         .unwrap();
-    let stored = store.upsert_transfer_manifest_reconciled(&stale).unwrap();
+    let stored = store
+        .upsert_transfer_manifest_reconciled(&stale, Ok)
+        .unwrap();
     assert_eq!(stored.display_name, "operator.bin");
     assert_eq!(
         store

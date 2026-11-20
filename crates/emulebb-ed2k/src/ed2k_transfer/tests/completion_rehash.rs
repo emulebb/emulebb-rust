@@ -230,7 +230,10 @@ async fn incomplete_hydration_requires_md4_authority() {
     manifest.md4_hashset.clear();
     {
         let _guard = runtime.lock_manifest(job.token).await;
-        runtime.store_manifest_unlocked(&manifest).await.unwrap();
+        runtime
+            .store_manifest_unlocked(&manifest, _guard.clone())
+            .await
+            .unwrap();
         runtime.remove_verified_catalog_entry(&job.file_hash).await;
     }
 

@@ -91,6 +91,7 @@ impl ResidentControl {
         self.reserve_with(job, || Ok(()))
             .map(|(reservation, ())| reservation)
     }
+    #[cfg(test)]
     pub(super) fn copy_manifest(
         self: &Arc<Self>,
         manifest: &Ed2kResumeManifest,
@@ -212,20 +213,6 @@ impl std::ops::Deref for ResidentManifest {
     }
 }
 impl ResidentManifest {
-    /// Mutate unique backing in place; a pinned older view requires separately
-    /// admitted backing before cloning, never an uncharged copy-on-write.
-    pub(super) fn try_mut(&mut self) -> Result<&mut Ed2kResumeManifest> {
-        if Arc::get_mut(&mut self.0).is_none() {
-            let reservation = self.0.reservation.copy()?;
-            self.0 = Arc::new(Allocation {
-                manifest: self.0.manifest.clone(),
-                reservation,
-            });
-        }
-        let allocation = Arc::get_mut(&mut self.0).expect("unique admitted resident");
-        allocation.reservation.resize(MANIFEST_BYTES)?;
-        Ok(&mut allocation.manifest)
-    }
     /// Apply a synchronous delta with credit admitted before durable mutation.
     /// Readers acquired during SQL cannot force a new post-commit admission.
     pub(super) fn write_with(

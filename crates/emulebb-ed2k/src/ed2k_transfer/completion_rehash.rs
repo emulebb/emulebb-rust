@@ -140,7 +140,8 @@ impl Ed2kTransferRuntime {
         if damaged_parts.is_empty() && manifest.verified_ranges == previous_ranges {
             return Ok(false);
         }
-        self.store_manifest_unlocked(&manifest).await?;
+        self.store_manifest_unlocked(&manifest, _guard.clone())
+            .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         tracing::warn!(
             event = "partial_recheck_completed",
@@ -174,7 +175,8 @@ impl Ed2kTransferRuntime {
             manifest.final_rehash_pending = true;
             manifest.payload_fingerprint = None;
             self.invalidate_payload_handle(token);
-            self.store_manifest_unlocked(&manifest).await?;
+            self.store_manifest_unlocked(&manifest, _guard.clone())
+                .await?;
             self.remove_verified_catalog_entry(&file_hash).await;
             let transfer_dir_id =
                 super::payload_reconcile::existing_transfer_directory_identity(&transfer_dir)
@@ -267,7 +269,8 @@ impl Ed2kTransferRuntime {
                 }
             }
 
-            self.store_manifest_unlocked(&manifest).await?;
+            self.store_manifest_unlocked(&manifest, _guard.clone())
+                .await?;
             self.upsert_verified_catalog_entry(&manifest).await;
 
             tracing::info!(
@@ -310,7 +313,8 @@ impl Ed2kTransferRuntime {
         manifest.final_rehash_pending = false;
         manifest.payload_fingerprint = None;
         rebuild_verified_ranges(&mut manifest);
-        self.store_manifest_unlocked(&manifest).await?;
+        self.store_manifest_unlocked(&manifest, _guard.clone())
+            .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         tracing::warn!(
             event = "final_completion_rehash_failed",

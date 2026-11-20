@@ -159,7 +159,6 @@ impl Ed2kTransferRuntime {
 
         rebuild_verified_ranges(manifest);
         super::mark_final_rehash_pending(manifest);
-        self.upsert_verified_catalog_entry(manifest).await;
         tracing::info!(
             file_hash = %manifest.file_hash,
             piece_index,

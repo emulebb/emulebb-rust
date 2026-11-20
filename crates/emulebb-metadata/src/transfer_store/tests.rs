@@ -74,6 +74,58 @@ fn completed_pending_download_manifest(store: &MetadataStore) -> MetadataTransfe
     manifest
 }
 
+#[test]
+fn rejected_resident_preparation_rolls_back_progress_transaction() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = completed_pending_download_manifest(&store);
+    let before = store
+        .download_job_manifest(manifest.token.job_id)
+        .unwrap()
+        .unwrap();
+    let result: Result<()> = store.upsert_transfer_manifest_reconciled(&manifest, |_| {
+        anyhow::bail!("synthetic resident refusal")
+    });
+    let error = result.err().expect("precommit preparation must refuse");
+    assert!(error.to_string().contains("synthetic resident refusal"));
+    assert_eq!(
+        store
+            .download_job_manifest(manifest.token.job_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn progress_snapshot_preserves_explicit_shared_presentation() {
+    let store = MetadataStore::in_memory().unwrap();
+    let stale = completed_pending_download_manifest(&store);
+    assert!(
+        store
+            .update_shared_content_metadata(
+                &stale.file_hash,
+                Some(("high", false)),
+                Some(("Current comment", 4))
+            )
+            .unwrap()
+            .is_some()
+    );
+    let canonical = store
+        .upsert_transfer_manifest_reconciled(&stale, Ok)
+        .unwrap();
+    assert_eq!(canonical.upload_priority, "high");
+    assert!(!canonical.auto_upload_priority);
+    assert_eq!(canonical.comment, "Current comment");
+    assert_eq!(canonical.rating, 4);
+    assert_eq!(
+        store
+            .download_job_manifest(stale.token.job_id)
+            .unwrap()
+            .unwrap(),
+        canonical
+    );
+}
+
 fn register_shared_test_job(store: &MetadataStore, id: crate::JobId) {
     let manifest = store.download_job_manifest(id).unwrap().unwrap();
     let root = std::env::temp_dir().join("metadata-job-catalog");
@@ -931,8 +983,17 @@ fn accepted_local_identity_and_stale_checkpoint_preserve_md4_verified_progress()
     assert_eq!(accepted.pieces, stale.pieces);
     assert_eq!(accepted.md4_hashset_acquired, stale.md4_hashset_acquired);
 
-    stale.comment = "newer independent checkpoint metadata".to_owned();
-    let canonical = store.upsert_transfer_manifest_reconciled(&stale).unwrap();
+    store
+        .update_shared_content_metadata(
+            &stale.file_hash,
+            None,
+            Some(("newer operator metadata", 0)),
+        )
+        .unwrap();
+    stale.comment = "stale checkpoint comment".to_owned();
+    let canonical = store
+        .upsert_transfer_manifest_reconciled(&stale, Ok)
+        .unwrap();
     assert_eq!(canonical.aich_root, accepted.aich_root);
     assert_eq!(canonical.aich_root_origin, accepted.aich_root_origin);
     assert_eq!(
@@ -941,7 +1002,7 @@ fn accepted_local_identity_and_stale_checkpoint_preserve_md4_verified_progress()
     );
     assert!(canonical.aich_hashset.is_empty());
     assert!(!canonical.aich_hashset_acquired);
-    assert_eq!(canonical.comment, stale.comment);
+    assert_eq!(canonical.comment, "newer operator metadata");
     assert_eq!(canonical.verified_ranges, stale.verified_ranges);
     assert_eq!(canonical.pieces, stale.pieces);
     assert_eq!(
@@ -1257,6 +1318,13 @@ fn transfer_snapshots_keep_unchanged_children_and_source_first_seen() {
          CREATE TEMP TRIGGER no_range_delete BEFORE DELETE ON main.download_job_verified_ranges BEGIN SELECT RAISE(ABORT,'unchanged range deleted'); END;"
     ).unwrap();
     manifest.comment = "updated comment".into();
+    store
+        .update_shared_content_metadata(
+            &manifest.file_hash,
+            None,
+            Some((&manifest.comment, manifest.rating)),
+        )
+        .unwrap();
     store.upsert_transfer_manifest(&manifest).unwrap();
     assert_eq!(
         store
@@ -2229,7 +2297,7 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     );
     manifest.transfer_row_removed = true;
     let canonical = store
-        .upsert_transfer_manifest_reconciled(&manifest)
+        .upsert_transfer_manifest_reconciled(&manifest, Ok)
         .unwrap();
     assert!(!canonical.transfer_row_removed);
     manifest = canonical;
@@ -3351,7 +3419,9 @@ fn stale_checkpoint_cannot_restore_owned_delivery_or_old_verification() {
                 )
                 .unwrap()
         );
-        let returned = store.upsert_transfer_manifest_reconciled(&stale).unwrap();
+        let returned = store
+            .upsert_transfer_manifest_reconciled(&stale, Ok)
+            .unwrap();
         assert_eq!(
             returned.delivery_ownership,
             MetadataTransferDeliveryOwnership::Unowned

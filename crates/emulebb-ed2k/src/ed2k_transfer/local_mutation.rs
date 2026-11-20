@@ -287,6 +287,13 @@ impl LocalMutationRegistry {
     }
 
     #[cfg(test)]
+    pub(super) fn take_publication_gate(
+        &self,
+    ) -> Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)> {
+        self.state.lock().unwrap().publication_gate.take()
+    }
+
+    #[cfg(test)]
     pub(super) fn signal_next_pending_drain(&self) -> oneshot::Receiver<()> {
         let (sender, receiver) = oneshot::channel();
         self.state.lock().unwrap().drain_pending = Some(sender);

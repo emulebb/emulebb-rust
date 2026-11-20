@@ -407,6 +407,208 @@ async fn resident_pressure_rejects_prefix_before_payload_or_cache_mutation() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn ordinary_store_refuses_before_sql_when_credit_or_revision_is_exhausted() {
+    for exhausted_revision in [false, true] {
+        let root = crate::paths::unique_test_dir("resident-store-preadmission");
+        let runtime = super::super::Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            "66".repeat(16).parse().unwrap(),
+            "Sample.bin".into(),
+            super::super::ED2K_PART_SIZE,
+        );
+        let old = runtime.ensure_job(&job).await.unwrap();
+        let io = runtime.lock_manifest(job.token).await;
+        let before = runtime
+            .metadata
+            .download_job_manifest(job.token.job_id)
+            .unwrap()
+            .unwrap();
+        let mut proposed = (*old).clone();
+        proposed.pieces[0].bytes_written = 32;
+        let mut held = Vec::new();
+        if exhausted_revision {
+            runtime
+                .manifest_checkpoint_state
+                .lock()
+                .await
+                .get_mut(&job.token)
+                .unwrap()
+                .revision = u64::MAX;
+        } else {
+            while let Ok(permit) = runtime.local_mutations.residents.reserve(job.token.job_id) {
+                held.push(permit);
+            }
+        }
+        let error = runtime
+            .store_manifest_unlocked(&proposed, io.clone())
+            .await
+            .unwrap_err();
+        if exhausted_revision {
+            assert!(error.to_string().contains("revision exhausted"));
+        } else {
+            assert!(matches!(
+                error.downcast_ref::<LocalMutationError>(),
+                Some(LocalMutationError::Busy)
+            ));
+        }
+        assert_eq!(
+            runtime
+                .metadata
+                .download_job_manifest(job.token.job_id)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(Arc::ptr_eq(
+            &runtime.manifest_cache.lock().await[&job.token.job_id].0,
+            &old.0
+        ));
+        drop(held);
+        if exhausted_revision {
+            runtime
+                .manifest_checkpoint_state
+                .lock()
+                .await
+                .get_mut(&job.token)
+                .unwrap()
+                .revision = 0;
+        }
+        runtime
+            .store_manifest_unlocked(&proposed, io)
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .metadata
+                .download_job_manifest(job.token.job_id)
+                .unwrap()
+                .unwrap()
+                .pieces[0]
+                .prefix_bytes,
+            32
+        );
+        assert_eq!(old.pieces[0].bytes_written, 0);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_store_retains_io_until_publication_before_the_next_writer_snapshots() {
+    let root = crate::paths::unique_test_dir("resident-store-competing-writers");
+    let runtime = Arc::new(super::super::Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        "77".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        2 * super::super::ED2K_PART_SIZE,
+    );
+    let old = runtime.ensure_job(&job).await.unwrap();
+    let (reached, ready) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, resume);
+    let token = job.token;
+    let owner = Arc::clone(&runtime);
+    let caller = tokio::spawn(async move {
+        let io = owner.lock_manifest(token).await;
+        let mut proposal = owner.load_manifest_unlocked(token).await?.edit()?;
+        proposal.pieces[0].bytes_written = 32;
+        owner.store_manifest_unlocked(&proposal, io).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job_manifest(token.job_id)
+            .unwrap()
+            .unwrap()
+            .pieces[0]
+            .prefix_bytes,
+        32
+    );
+    let reader_during_sql = runtime.manifest_cache.lock().await[&token.job_id].clone();
+    assert_eq!(reader_during_sql.pieces[0].bytes_written, 0);
+    let mut held = Vec::new();
+    while let Ok(permit) = runtime.local_mutations.residents.reserve(token.job_id) {
+        held.push(permit);
+    }
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(
+        super::super::store::scoped_lock(&runtime.manifest_locks, token.job_id)
+            .try_lock_owned()
+            .is_none()
+    );
+    let (captured, snapshot) = tokio::sync::oneshot::channel();
+    let (allow, allowed) = tokio::sync::oneshot::channel();
+    let owner = Arc::clone(&runtime);
+    let second = tokio::spawn(async move {
+        let io = owner.lock_manifest(token).await;
+        let mut proposal = owner.load_manifest_unlocked(token).await?.edit()?;
+        let _ = captured.send(proposal.pieces[0].bytes_written);
+        let _ = allowed.await;
+        proposal.pieces[1].bytes_written = 64;
+        owner.store_manifest_unlocked(&proposal, io).await
+    });
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), snapshot)
+            .await
+            .unwrap()
+            .unwrap(),
+        32
+    );
+    drop(held);
+    allow.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let current = runtime.manifest_cache.lock().await[&token.job_id].clone();
+    assert_eq!(current.pieces[0].bytes_written, 32);
+    assert_eq!(current.pieces[1].bytes_written, 64);
+    assert_eq!(reader_during_sql.pieces[0].bytes_written, 0);
+    let stored = runtime
+        .metadata
+        .download_job_manifest(token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.pieces[0].prefix_bytes, 32);
+    assert_eq!(stored.pieces[1].prefix_bytes, 64);
+    let states = runtime.manifest_checkpoint_state.lock().await;
+    assert_eq!(states[&token].persisted_bytes_written, 96);
+    assert!(states[&token].dirty_piece_indexes.is_empty());
+    drop(states);
+    assert_eq!(
+        runtime
+            .local_mutations
+            .residents
+            .usage
+            .lock()
+            .unwrap()
+            .bytes,
+        backing_bytes(&old).unwrap() + backing_bytes(&current).unwrap()
+    );
+    drop(old);
+    drop(reader_during_sql);
+    assert_eq!(
+        runtime
+            .local_mutations
+            .residents
+            .usage
+            .lock()
+            .unwrap()
+            .bytes,
+        backing_bytes(&current).unwrap()
+    );
+}
+
 #[test]
 fn rejected_joint_admission_spends_no_credit_and_creates_no_retry_wake() {
     let registry = super::super::local_mutation::LocalMutationRegistry::default();

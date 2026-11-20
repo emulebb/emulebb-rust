@@ -525,8 +525,10 @@ impl Ed2kTransferRuntime {
         }
         rebuild_verified_ranges(&mut manifest);
         super::mark_final_rehash_pending(&mut manifest);
+        self.store_manifest_unlocked(&manifest, _guard.clone())
+            .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
-        self.store_manifest_unlocked(&manifest).await
+        Ok(())
     }
 
     /// Append one downloaded block into a requested piece.
@@ -720,9 +722,6 @@ impl Ed2kTransferRuntime {
                 // handle before the final whole-file reader opens the payload.
                 self.invalidate_payload_handle(token);
             }
-            if outcome.is_completed() {
-                self.upsert_verified_catalog_entry(&manifest).await;
-            }
         } else {
             let ich_candidate = {
                 let piece = manifest
@@ -780,7 +779,9 @@ impl Ed2kTransferRuntime {
                     self.store_manifest_piece_progress_unlocked(&manifest, piece_index, guard)
                         .await?;
                 } else {
-                    self.store_manifest_unlocked(&manifest).await?;
+                    self.store_manifest_unlocked(&manifest, guard.clone())
+                        .await?;
+                    self.upsert_verified_catalog_entry(&manifest).await;
                 }
                 log_append_piece_block(AppendPieceBlockLog {
                     manifest: &manifest,
@@ -812,7 +813,9 @@ impl Ed2kTransferRuntime {
         }
 
         let should_checkpoint = true;
-        self.store_manifest_unlocked(&manifest).await?;
+        self.store_manifest_unlocked(&manifest, guard.clone())
+            .await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
         log_append_piece_block(AppendPieceBlockLog {
             manifest: &manifest,
             piece_index,
@@ -1170,7 +1173,8 @@ impl Ed2kTransferRuntime {
                 manifest.final_rehash_pending = true;
                 manifest.payload_fingerprint = None;
                 self.invalidate_payload_handle(*token);
-                self.store_manifest_unlocked(&manifest).await?;
+                self.store_manifest_unlocked(&manifest, _manifest_guard.clone())
+                    .await?;
                 self.upsert_verified_catalog_entry(&manifest).await;
                 Ok(())
             }
@@ -1265,7 +1269,8 @@ impl Ed2kTransferRuntime {
             }
         }
         rebuild_verified_ranges(&mut manifest);
-        self.store_manifest_unlocked(&manifest).await?;
+        self.store_manifest_unlocked(&manifest, _manifest_guard.clone())
+            .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         warn!(
             file_hash = failure.file_hash,

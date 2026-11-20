@@ -85,6 +85,7 @@ mod shared_catalog;
 pub use shared_catalog::{CategoryCatalogDecision, CategoryRootMutation, category_copy_matches};
 mod source_exchange;
 mod store;
+mod store_publication;
 
 pub use resident::{ResidentDraft, ResidentManifest};
 mod transfer_sql;
