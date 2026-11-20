@@ -423,6 +423,81 @@ fn rejected_joint_admission_spends_no_credit_and_creates_no_retry_wake() {
 }
 
 #[tokio::test]
+async fn hydration_waits_for_content_without_holding_a_category_reader() {
+    use super::super::local_mutation::job_read::{JobRead, JobReadResult};
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+        time::Duration,
+    };
+    let root = crate::paths::unique_test_dir("resident-hydration-lock-order");
+    let runtime = super::super::Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        "88".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        super::super::ED2K_PART_SIZE,
+    );
+    drop(runtime.ensure_job(&job).await.unwrap());
+    runtime
+        .manifest_cache
+        .lock()
+        .await
+        .remove(&job.token.job_id);
+    let content = runtime.lock_content(&job.file_hash).await;
+    let (reached, ready) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, resume);
+    let receipt = runtime
+        .local_mutations
+        .submit_job_read(&runtime, JobRead::SelectExecution(job.token))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    release.send(()).unwrap();
+    // The held guard owns two strong mutex references. Two more prove the
+    // hydration worker has entered its content-lock wait, without a sleep race.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .content_locks
+                .lock()
+                .unwrap()
+                .get(&job.file_hash)
+                .is_some_and(|lock| lock.strong_count() >= 4)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut writer = Box::pin(Arc::clone(&runtime.category_assignment_gate).write_owned());
+    let Poll::Ready(writer) = poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx))).await else {
+        panic!("hydration retained category read while waiting for content");
+    };
+    drop(writer);
+    let category = runtime.category_assignment_gate.read().await;
+    drop(content);
+    let JobReadResult::Execution(Some(current)) =
+        tokio::time::timeout(Duration::from_secs(5), receipt)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("missing selected execution");
+    };
+    assert_eq!(current.token, job.token);
+    drop(category);
+}
+
+#[tokio::test]
 async fn stale_private_hydration_cannot_activate_after_committed_metadata_change() {
     use super::super::local_mutation::job_read::JobRead;
     let root = crate::paths::unique_test_dir("resident-hydration-observation");
