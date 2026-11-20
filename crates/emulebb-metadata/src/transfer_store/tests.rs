@@ -85,7 +85,7 @@ fn rejected_resident_preparation_rolls_back_progress_transaction() {
     let result: Result<()> = store.upsert_transfer_manifest_reconciled(&manifest, |_| {
         anyhow::bail!("synthetic resident refusal")
     });
-    let error = result.err().expect("precommit preparation must refuse");
+    let error = result.expect_err("precommit preparation must refuse");
     assert!(error.to_string().contains("synthetic resident refusal"));
     assert_eq!(
         store
