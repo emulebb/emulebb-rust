@@ -12,7 +12,7 @@ use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
 
 const LIBRARY_ROOT_SELECT: &str = "SELECT r.id,p.platform,p.native_path,r.watch_enabled,
     EXISTS(SELECT 1 FROM shared_directory_root_origins o WHERE o.root_id=r.id AND o.origin='implicit'),
-    r.accessible,r.shareable,r.last_scanned_at_ms,length(p.native_path)
+    r.accessible,r.shareable,r.last_scanned_at_ms,length(p.native_path),r.scan_required
     FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx
     JOIN local_paths p ON p.id=r.path_id";
 
@@ -22,6 +22,7 @@ fn library_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::Metadata
         id: row.get(0)?,
         path: crate::native_path::path_from_row(row, 1, 2)?,
         watch_enabled: row.get(3)?,
+        scan_required: row.get(9)?,
         managed: row.get(4)?,
         accessible: row.get(5)?,
         shareable: row.get(6)?,
@@ -553,9 +554,12 @@ impl MetadataStore {
     /// scanned local paths with their live fingerprints; a failed or incomplete
     /// scan must never call this. Only safely matched cache entries are admitted.
     /// Input is consumed within the transaction, without collecting a snapshot.
+    /// The watermark must precede the walk. Newer watcher loss keeps the scan
+    /// required flag set even when this membership transaction succeeds.
     pub fn replace_root_memberships<M>(
         &self,
         root: &Path,
+        watermark: &crate::MetadataRootScanWatermark,
         paths: impl IntoIterator<Item = M>,
     ) -> Result<()>
     where
@@ -586,6 +590,10 @@ impl MetadataStore {
             params![NativePath::platform(), native_root.storage_bytes()],
             |row| row.get(0),
         )?;
+        ensure!(
+            root_id == watermark.root_id,
+            "root was replaced during scan"
+        );
         let now = unix_ms();
         tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS scanned_membership_paths(path_id INTEGER PRIMARY KEY);
@@ -675,10 +683,20 @@ impl MetadataStore {
             elapsed_ms = started.elapsed().as_millis(),
             "root admission"
         );
+        // WHY: clear only losses covered by this walk, atomically with its
+        // memberships. At counter exhaustion keep the flag sticky, so a later
+        // loss can never compare equal to an earlier captured watermark.
         tx.execute(
-            "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_ms = ?2
+            "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_ms = ?2,
+             scan_required=CASE WHEN id=?3 AND watch_loss_revision=?4
+                AND watch_loss_revision<9223372036854775807 THEN 0 ELSE scan_required END
              WHERE id = ?1",
-            params![root_id, now],
+            params![
+                root_id,
+                now,
+                watermark.root_id,
+                watermark.watch_loss_revision
+            ],
         )?;
         tx.commit()?;
         Ok(())

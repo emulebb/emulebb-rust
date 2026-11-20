@@ -15,6 +15,52 @@ fn manifest_fixture() -> Ed2kResumeManifest {
 }
 
 #[test]
+fn reader_departure_before_unwrap_still_requires_mutable_allowance() {
+    let control = Arc::new(ResidentControl::default());
+    let mut current = control.copy_manifest(&manifest_fixture()).unwrap();
+    let reader = current.clone();
+    assert!(Arc::get_mut(&mut current.0).is_none());
+    drop(reader);
+    let allocation = Arc::try_unwrap(current.0).unwrap();
+    assert!(allocation.reservation.bytes < MANIFEST_BYTES);
+    let draft = ResidentManifest::edit_unwrapped(allocation).unwrap();
+    assert_eq!(control.usage.lock().unwrap().bytes, MANIFEST_BYTES);
+    let current = draft.freeze().unwrap();
+    assert_eq!(
+        control.usage.lock().unwrap().bytes,
+        backing_bytes(&current).unwrap()
+    );
+}
+
+#[test]
+fn owned_edit_refusal_returns_intact_pin_after_unwrap_and_can_be_readmitted() {
+    let control = Arc::new(ResidentControl::default());
+    let mut current = control.copy_manifest(&manifest_fixture()).unwrap();
+    let reader = current.clone();
+    assert!(Arc::get_mut(&mut current.0).is_none());
+    drop(reader);
+    let mut held = Vec::new();
+    while let Ok(permit) = control.reserve(current.token.job_id) {
+        held.push(permit);
+    }
+    let before = control.usage.lock().unwrap().bytes;
+    let allocation = Arc::try_unwrap(current.0).unwrap();
+    let (current, error) = ResidentManifest::edit_unwrapped(allocation).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<LocalMutationError>(),
+        Some(LocalMutationError::Busy)
+    ));
+    assert_eq!(current.display_name, "Sample.bin");
+    assert_eq!(control.usage.lock().unwrap().bytes, before);
+    drop(held);
+    let draft = current.try_edit_owned().unwrap();
+    assert_eq!(control.usage.lock().unwrap().bytes, MANIFEST_BYTES);
+    drop(draft);
+    assert_eq!(control.usage.lock().unwrap().bytes, 0);
+    assert_eq!(control.usage.lock().unwrap().jobs, 0);
+}
+
+#[test]
 fn maximum_geometry_reports_concurrent_resident_requirement() {
     let mut manifest = manifest_fixture();
     let job = super::super::Ed2kTransferJob {
@@ -374,6 +420,81 @@ fn rejected_joint_admission_spends_no_credit_and_creates_no_retry_wake() {
     assert_eq!(usage.jobs, 0);
     drop(usage);
     assert_eq!(registry.capacity_revision(), before);
+}
+
+#[tokio::test]
+async fn hydration_waits_for_content_without_holding_a_category_reader() {
+    use super::super::local_mutation::job_read::{JobRead, JobReadResult};
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+        time::Duration,
+    };
+    let root = crate::paths::unique_test_dir("resident-hydration-lock-order");
+    let runtime = super::super::Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        "88".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        super::super::ED2K_PART_SIZE,
+    );
+    drop(runtime.ensure_job(&job).await.unwrap());
+    runtime
+        .manifest_cache
+        .lock()
+        .await
+        .remove(&job.token.job_id);
+    let content = runtime.lock_content(&job.file_hash).await;
+    let (reached, ready) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, resume);
+    let receipt = runtime
+        .local_mutations
+        .submit_job_read(&runtime, JobRead::SelectExecution(job.token))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    release.send(()).unwrap();
+    // The held guard owns two strong mutex references. Two more prove the
+    // hydration worker has entered its content-lock wait, without a sleep race.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .content_locks
+                .lock()
+                .unwrap()
+                .get(&job.file_hash)
+                .is_some_and(|lock| lock.strong_count() >= 4)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut writer = Box::pin(Arc::clone(&runtime.category_assignment_gate).write_owned());
+    let Poll::Ready(writer) = poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx))).await else {
+        panic!("hydration retained category read while waiting for content");
+    };
+    drop(writer);
+    let category = runtime.category_assignment_gate.read().await;
+    drop(content);
+    let JobReadResult::Execution(Some(current)) =
+        tokio::time::timeout(Duration::from_secs(5), receipt)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("missing selected execution");
+    };
+    assert_eq!(current.token, job.token);
+    drop(category);
 }
 
 #[tokio::test]

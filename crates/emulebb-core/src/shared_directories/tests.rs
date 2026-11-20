@@ -63,6 +63,8 @@ async fn watched_child_keeps_its_policy_without_duplicate_hash_planning() {
         if child_first {
             roots.reverse();
         }
+        let mut metadata = MetadataStore::in_memory().unwrap();
+        metadata.replace_shared_directory_roots(&roots).unwrap();
         let retained = consolidate_shared_directory_roots(roots);
         assert_eq!(retained.len(), 2);
         assert_eq!(retained.iter().filter(|root| root.watch_enabled).count(), 1);
@@ -76,16 +78,12 @@ async fn watched_child_keeps_its_policy_without_duplicate_hash_planning() {
                 accessible: root.accessible,
             })
             .collect();
-        let scan = scan_shared_directory_roots(roots, SharedFileIgnorePolicy::default())
+        let scan = scan_shared_directory_roots(roots, SharedFileIgnorePolicy::default(), metadata)
             .await
             .unwrap();
         assert_eq!(scan.files.len(), 1);
         assert_eq!(scan.root_files.len(), 2);
-        assert!(
-            scan.root_files
-                .iter()
-                .all(|(_, members)| members.len() == 1)
-        );
+        assert!(scan.root_files.iter().all(|root| root.files.len() == 1));
     }
     fs::remove_dir_all(parent).unwrap();
 }
@@ -1145,6 +1143,18 @@ async fn root_scan_keeps_successful_membership_separate_from_offline_root() {
     let available = scratch_dir("available-root");
     fs::write(available.join("Sample.bin"), b"sample").unwrap();
     let offline = available.join("missing-root");
+    let mut metadata = MetadataStore::in_memory().unwrap();
+    metadata
+        .replace_shared_directory_roots(&[&available, &offline].map(|path| {
+            MetadataSharedDirectoryRoot {
+                path: path.to_string_lossy().into_owned(),
+                watch_enabled: false,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }
+        }))
+        .unwrap();
     let roots = [&available, &offline]
         .map(|path| SharedDirectoryRoot {
             path: path.to_string_lossy().into_owned(),
@@ -1154,15 +1164,15 @@ async fn root_scan_keeps_successful_membership_separate_from_offline_root() {
             accessible: true,
         })
         .to_vec();
-    let scan = scan_shared_directory_roots(roots, SharedFileIgnorePolicy::default())
+    let scan = scan_shared_directory_roots(roots, SharedFileIgnorePolicy::default(), metadata)
         .await
         .unwrap();
     assert_eq!(scan.root_files.len(), 1);
-    assert_eq!(scan.root_files[0].1.len(), 1);
+    assert_eq!(scan.root_files[0].files.len(), 1);
     assert_eq!(scan.files.len(), 1);
-    assert_eq!(scan.root_files[0].1[0].path, scan.files[0].path);
+    assert_eq!(scan.root_files[0].files[0].path, scan.files[0].path);
     assert_eq!(
-        scan.root_files[0].1[0].source_fingerprint,
+        scan.root_files[0].files[0].source_fingerprint,
         scan.files[0].source_fingerprint
     );
     assert_eq!(scan.inaccessible_roots, vec![offline]);

@@ -304,6 +304,8 @@ CREATE TABLE shared_directory_roots (
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
     monitor_owned INTEGER NOT NULL DEFAULT 0 CHECK(monitor_owned IN (0, 1)),
     watch_enabled INTEGER NOT NULL DEFAULT 0 CHECK(watch_enabled IN (0, 1)),
+    scan_required INTEGER NOT NULL DEFAULT 0 CHECK(scan_required IN (0, 1)),
+    watch_loss_revision INTEGER NOT NULL DEFAULT 0 CHECK(watch_loss_revision >= 0),
     shareable INTEGER NOT NULL DEFAULT 1 CHECK(shareable IN (0, 1)),
     accessible INTEGER NOT NULL DEFAULT 1 CHECK(accessible IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),

@@ -264,14 +264,7 @@ impl ResidentManifest {
     pub(super) fn try_edit_owned(
         self,
     ) -> std::result::Result<ResidentDraft, (Self, anyhow::Error)> {
-        // Reserve before consuming the pin: failed admission returns it intact.
-        let mut this = self;
-        if let Some(allocation) = Arc::get_mut(&mut this.0)
-            && let Err(error) = allocation.reservation.resize(MANIFEST_BYTES)
-        {
-            return Err((this, error));
-        }
-        let allocation = match Arc::try_unwrap(this.0) {
+        let allocation = match Arc::try_unwrap(self.0) {
             Ok(allocation) => allocation,
             Err(allocation) => {
                 let reservation = match allocation.reservation.copy() {
@@ -284,6 +277,18 @@ impl ResidentManifest {
                 }
             }
         };
+        Self::edit_unwrapped(allocation)
+    }
+
+    fn edit_unwrapped(
+        mut allocation: Allocation,
+    ) -> std::result::Result<ResidentDraft, (Self, anyhow::Error)> {
+        // WHY: a reader can disappear before unwrap succeeds. Unique ownership
+        // does not imply mutable credit; restore it at the owned frontier and
+        // return an intact immutable pin if capacity cannot be admitted.
+        if let Err(error) = allocation.reservation.resize(MANIFEST_BYTES) {
+            return Err((Self(Arc::new(allocation)), error));
+        }
         Ok(ResidentDraft(allocation))
     }
 }

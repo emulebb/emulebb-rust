@@ -47,6 +47,7 @@ pub struct MetadataLibraryRoot {
     pub id: i64,
     pub path: std::path::PathBuf,
     pub watch_enabled: bool,
+    pub scan_required: bool,
     pub managed: bool,
     pub accessible: bool,
     pub shareable: bool,

@@ -22,6 +22,40 @@ pub(super) fn load(store: &MetadataStore, query: &Query) -> anyhow::Result<Value
 }
 
 impl PersistenceOwner {
+    /// Admit one fixed-size loss marker into the existing cancellation-safe SQL owner.
+    pub(crate) async fn mark_root_scan_required(&self, id: i64) -> Result<(), PersistenceError> {
+        // Loss markers are drain-owned, like the final Kad capture: stopping
+        // regular admission must not discard an existing producer's final state.
+        let available = {
+            let admission = self
+                .admission
+                .lock()
+                .map_err(|_| PersistenceError::Worker)?;
+            let quota = admission
+                .quota
+                .lock()
+                .map_err(|_| PersistenceError::Worker)?;
+            Arc::clone(&quota.available)
+        };
+        loop {
+            let notified = available.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self
+                .submit_reserved_inner(FIXED_CHARGE, true, || Ok(Command::RootLoss(id)))
+                .await
+            {
+                // WHY: Busy proves no handoff occurred. Use the same admission
+                // backpressure as observations/final Kad, never replay SQL after
+                // an uncertain or failed write and never discard a loss for load.
+                Err(PersistenceError::Busy) => notified.await,
+                Ok(Response::RootLoss) => return Ok(()),
+                Ok(_) => return Err(PersistenceError::Worker),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     pub(crate) async fn read_library_roots(
         &self,
         query: Query,
@@ -58,3 +92,22 @@ pub(super) async fn process(
 
 #[cfg(test)]
 mod tests;
+
+pub(super) async fn process_loss(
+    db: &mpsc::SyncSender<DbRequest>,
+    request: &mut Request,
+) -> Result<Response, PersistenceError> {
+    let Command::RootLoss(id) = std::mem::replace(&mut request.command, Command::KadLoad) else {
+        unreachable!()
+    };
+    let (response, receive) = oneshot::channel();
+    db.send(DbRequest {
+        command: DbCommand::RootLoss(id),
+        response,
+    })
+    .map_err(|_| PersistenceError::Worker)?;
+    match receive.await.map_err(|_| PersistenceError::Worker)?? {
+        DbResponse::RootLoss => Ok(Response::RootLoss),
+        _ => Err(PersistenceError::Worker),
+    }
+}

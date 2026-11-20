@@ -129,8 +129,8 @@ export function installMockApi(requests: RecordedApiRequest[]) {
   let currentSettings = settingsFixture();
   let nextRootId = 3;
   let roots = [
-    { id: "1", path: "C:\\Sample\\Shared", watchEnabled: false, managed: false, shareable: true, accessible: true, lastScannedAt: null },
-    { id: "2", path: longSharedRoot, watchEnabled: false, managed: true, shareable: true, accessible: true, lastScannedAt: null }
+    { id: "1", path: "C:\\Sample\\Shared", watchEnabled: false, managed: false, shareable: true, accessible: true, scanRequired: false, lastScannedAt: null },
+    { id: "2", path: longSharedRoot, watchEnabled: false, managed: true, shareable: true, accessible: true, scanRequired: false, lastScannedAt: null }
   ];
   return async (route: Route): Promise<void> => {
     const request = route.request();
@@ -162,7 +162,7 @@ export function installMockApi(requests: RecordedApiRequest[]) {
     if (request.method() === "POST" && path === "library/roots") {
       const body = request.postDataJSON();
       const root = { id: String(nextRootId++), path: body.path, watchEnabled: body.watchEnabled ?? false,
-        managed: false, shareable: true, accessible: true, lastScannedAt: null };
+        managed: false, shareable: true, accessible: true, scanRequired: false, lastScannedAt: null };
       roots.push(root);
       await route.fulfill({ status: 201, contentType: "application/json",
         headers: { Location: `/api/v1/library/roots/${root.id}` }, body: JSON.stringify({ data: root }) });

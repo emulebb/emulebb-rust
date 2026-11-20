@@ -769,10 +769,32 @@ impl<K: std::hash::Hash + Eq> Drop for ScopedLock<K> {
     }
 }
 pub(super) struct ScopedLockGuard<K: std::hash::Hash + Eq> {
+    held: Arc<HeldScopedLock<K>>,
+}
+struct HeldScopedLock<K: std::hash::Hash + Eq> {
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     _owner: ScopedLock<K>,
 }
-impl<K: std::hash::Hash + Eq> Drop for ScopedLockGuard<K> {
+impl<K: std::hash::Hash + Eq> ScopedLockGuard<K> {
+    fn new(guard: tokio::sync::OwnedMutexGuard<()>, owner: ScopedLock<K>) -> Self {
+        Self {
+            held: Arc::new(HeldScopedLock {
+                guard: Some(guard),
+                _owner: owner,
+            }),
+        }
+    }
+}
+impl<K: std::hash::Hash + Eq> Clone for ScopedLockGuard<K> {
+    fn clone(&self) -> Self {
+        // WHY: a retained SQL owner must keep the exact I/O cut after its caller
+        // disappears, preventing the next writer from reading unpublished state.
+        Self {
+            held: Arc::clone(&self.held),
+        }
+    }
+}
+impl<K: std::hash::Hash + Eq> Drop for HeldScopedLock<K> {
     fn drop(&mut self) {
         drop(self.guard.take());
     }
@@ -780,24 +802,15 @@ impl<K: std::hash::Hash + Eq> Drop for ScopedLockGuard<K> {
 impl<K: std::hash::Hash + Eq> ScopedLock<K> {
     pub(super) async fn lock_owned(self) -> ScopedLockGuard<K> {
         let guard = Arc::clone(&self.lock).lock_owned().await;
-        ScopedLockGuard {
-            guard: Some(guard),
-            _owner: self,
-        }
+        ScopedLockGuard::new(guard, self)
     }
     pub(super) fn try_lock_owned(self) -> Option<ScopedLockGuard<K>> {
         let guard = Arc::clone(&self.lock).try_lock_owned().ok()?;
-        Some(ScopedLockGuard {
-            guard: Some(guard),
-            _owner: self,
-        })
+        Some(ScopedLockGuard::new(guard, self))
     }
     pub(super) fn blocking_lock_owned(self) -> ScopedLockGuard<K> {
         let guard = Arc::clone(&self.lock).blocking_lock_owned();
-        ScopedLockGuard {
-            guard: Some(guard),
-            _owner: self,
-        }
+        ScopedLockGuard::new(guard, self)
     }
 }
 pub(super) fn scoped_lock<K: std::hash::Hash + Eq + Clone>(
@@ -823,6 +836,33 @@ pub(super) fn scoped_lock<K: std::hash::Hash + Eq + Clone>(
 #[cfg(test)]
 mod scoped_lock_tests {
     use super::*;
+    #[tokio::test]
+    async fn retained_guard_blocks_the_next_writer_until_its_last_owner_releases() {
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+        };
+        let registry: LockRegistry<u64> = Arc::default();
+        let caller = scoped_lock(&registry, 1).lock_owned().await;
+        let retained_owner = caller.clone();
+        drop(caller);
+        assert!(scoped_lock(&registry, 1).try_lock_owned().is_none());
+        let unrelated = scoped_lock(&registry, 2).try_lock_owned().unwrap();
+        drop(unrelated);
+        let mut next = Box::pin(scoped_lock(&registry, 1).lock_owned());
+        assert!(
+            poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(registry.lock().unwrap().len(), 1);
+        drop(retained_owner);
+        let next = next.await;
+        assert_eq!(registry.lock().unwrap().len(), 1);
+        drop(next);
+        assert!(registry.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn exact_lock_keys_retire_after_guards_and_cancelled_waiters() {
         let registry: LockRegistry<u64> = Arc::default();

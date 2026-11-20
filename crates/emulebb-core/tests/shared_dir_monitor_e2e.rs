@@ -2,7 +2,7 @@
 //! (auto-pickup / auto-remove; round-12 IO feature).
 //!
 //! This drives the REAL OS file-system watcher (`notify` + the
-//! `notify-debouncer-full` settle window) end to end: it starts the monitor on
+//! bounded consumer settle window) end to end: it starts the monitor on
 //! a temp shared root, writes a new file into the watched directory, and asserts
 //! the file is auto-shared into the catalog after the settle window; renames it
 //! and proves content identity moved without duplication; then removes the file

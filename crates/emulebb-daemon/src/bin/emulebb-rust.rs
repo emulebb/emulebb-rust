@@ -140,7 +140,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(cli.command,Some(CliCommand::Import {operation:ImportCommand::Profile {manifest,hashes_only:true}}) if manifest==PathBuf::from("export.sqlite"))
+            matches!(cli.command,Some(CliCommand::Import {operation:ImportCommand::Profile {manifest,hashes_only:true}}) if manifest.as_os_str()=="export.sqlite")
         );
     }
 
