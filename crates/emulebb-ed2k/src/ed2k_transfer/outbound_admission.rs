@@ -47,6 +47,14 @@ impl Ed2kSourceConnectionAdmission {
 }
 
 impl Ed2kTransferRuntime {
+    /// A probe owns bounded protocol buffers, never a resident manifest. Refuse
+    /// excess probes before opening sockets rather than spawning queued waiters.
+    pub(crate) fn try_admit_source_probe(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.source_probe_slots)
+            .try_acquire_owned()
+            .ok()
+    }
+
     /// Tries to reserve one outbound source-connection slot.
     ///
     /// An admitted result carries the only release authority for the slot. The

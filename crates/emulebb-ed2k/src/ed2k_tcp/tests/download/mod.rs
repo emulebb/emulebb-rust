@@ -7,6 +7,7 @@ mod frame_sending_part;
 mod hashset_fallback;
 mod hashset_startup;
 mod payload_validation;
+mod probe;
 mod queue_callback;
 mod queue_only;
 mod range_malformed;

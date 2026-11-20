@@ -55,12 +55,16 @@ use super::{
 mod browse;
 mod notify;
 mod parts;
+mod probe;
 mod reask_detach;
 mod secure_ident;
 mod startup;
 mod state;
 
 use parts::{DownloadPartPacket, handle_download_part_packet};
+pub use probe::{
+    Ed2kPeerAvailability, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, probe_file_from_peer,
+};
 use reask_detach::incomplete_or_detached_queued_source;
 use startup::{DownloadStartupStep, HASHSET_STALL_UPLOAD_FALLBACK, advance_download_startup};
 pub(in crate::ed2k_tcp) use state::DownloadConnectionState;
