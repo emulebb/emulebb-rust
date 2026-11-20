@@ -4,6 +4,52 @@ use crate::ed2k_tcp::codec::encode_file_desc;
 use crate::ed2k_tcp::decode_answer_sources2_payload;
 
 #[test]
+fn compact_request_status_preserves_verified_bits_and_exact_multiple_eof() {
+    let status = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
+        ED2K_PART_SIZE * 8,
+        [true, false, false, true, false, false, false, true].into_iter(),
+    );
+    assert_eq!(status, [9, 0, 0b1000_1001, 1, 0, 0]);
+    let (decoded, rest) = decode_request_filename_ext_info(&status, ED2K_PART_SIZE * 8).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(decoded.complete_source_count, 0);
+    assert_eq!(
+        decoded.part_status.unwrap(),
+        [true, false, false, true, false, false, false, true, true]
+    );
+}
+
+#[test]
+fn compact_status_does_not_invent_verified_data_when_bits_are_absent() {
+    let status = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
+        ED2K_PART_SIZE * 2,
+        std::iter::empty(),
+    );
+    assert_eq!(status, [3, 0, 0b100, 0, 0]);
+    let short = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
+        ED2K_PART_SIZE + 1,
+        [true].into_iter(),
+    );
+    assert_eq!(short, [2, 0, 1, 0, 0]);
+}
+
+#[test]
+fn compact_request_status_bounds_output_and_consumption_by_file_geometry() {
+    let mut consumed = 0usize;
+    let status = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
+        ED2K_PART_SIZE * 28_258,
+        std::iter::repeat_with(|| {
+            consumed += 1;
+            false
+        }),
+    );
+    assert_eq!(consumed, 28_258);
+    assert_eq!(status.len(), 4 + 28_259usize.div_ceil(8));
+    assert!(status.len() < 4096);
+    assert_eq!(status[status.len() - 3], 0b100);
+}
+
+#[test]
 fn firewall_check_udp_request_roundtrip() {
     let request = FirewallCheckUdpRequest {
         internal_udp_port: 41000,
@@ -591,16 +637,10 @@ fn multipacket_ext2_source_request_matches_peer_source_exchange_version() {
         file_size: Some(ED2K_PART_SIZE + 1),
         aich_root: None,
     };
-    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
-        file_identifier.file_hash,
-        "captured.iso".to_string(),
-        ED2K_PART_SIZE + 1,
-    );
-    let manifest = Ed2kResumeManifest::new(&job);
-
     let sx2 = super::encode_multipacket_ext2_request(
         &file_identifier,
-        &manifest,
+        ED2K_PART_SIZE + 1,
+        [false, false].into_iter(),
         PeerSourceExchangeRequest::V2,
     );
     assert_eq!(sx2[0], OP_EMULEPROT);
@@ -609,7 +649,8 @@ fn multipacket_ext2_source_request_matches_peer_source_exchange_version() {
 
     let sx1 = super::encode_multipacket_ext2_request(
         &file_identifier,
-        &manifest,
+        ED2K_PART_SIZE + 1,
+        [false, false].into_iter(),
         PeerSourceExchangeRequest::V1,
     );
     assert!(sx1[6..].contains(&OP_REQUESTSOURCES));
@@ -617,7 +658,8 @@ fn multipacket_ext2_source_request_matches_peer_source_exchange_version() {
 
     let no_sx = super::encode_multipacket_ext2_request(
         &file_identifier,
-        &manifest,
+        ED2K_PART_SIZE + 1,
+        [false, false].into_iter(),
         PeerSourceExchangeRequest::None,
     );
     assert!(!no_sx[6..].contains(&OP_REQUESTSOURCES));
@@ -735,16 +777,10 @@ fn legacy_multipacket_answer_uses_hash_prefixed_subpackets() {
 #[test]
 fn legacy_multipacket_request_uses_ext_envelope_for_sized_peer() {
     let file_hash = Ed2kHash([0x47; 16]);
-    let (_job_store, job) = crate::ed2k_transfer::test_support::admit_unallocated_job(
-        file_hash,
-        "legacy-download.avi".to_string(),
-        ED2K_PART_SIZE + 1,
-    );
-    let manifest = Ed2kResumeManifest::new(&job);
-
     let packet = encode_multipacket_request(
         &file_hash,
-        &manifest,
+        ED2K_PART_SIZE + 1,
+        [false, false].into_iter(),
         true,
         PeerSourceExchangeRequest::V2,
         true,

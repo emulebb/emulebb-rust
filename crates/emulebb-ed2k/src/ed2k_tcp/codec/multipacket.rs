@@ -1,10 +1,7 @@
 use anyhow::Result;
 use emulebb_kad_proto::Ed2kHash;
 
-use crate::{
-    ed2k_string::Ed2kStringEncoding,
-    ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest},
-};
+use crate::{ed2k_string::Ed2kStringEncoding, ed2k_transfer::ED2K_PART_SIZE};
 
 use super::super::{
     Ed2kFileIdentifier, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_EMULEPROT, OP_FILESTATUS,
@@ -26,14 +23,15 @@ pub(in crate::ed2k_tcp) enum PeerSourceExchangeRequest {
 
 pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_request(
     file_identifier: &Ed2kFileIdentifier,
-    manifest: &Ed2kResumeManifest,
+    file_size: u64,
+    verified_parts: impl Iterator<Item = bool>,
     source_exchange_request: PeerSourceExchangeRequest,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(64);
     file_identifier.encode_into(&mut payload);
     payload.push(OP_REQUESTFILENAME);
-    payload.extend_from_slice(&encode_request_filename_ext_info(manifest));
-    if manifest.file_size > ED2K_PART_SIZE {
+    payload.extend_from_slice(&encode_request_filename_ext_info(file_size, verified_parts));
+    if file_size > ED2K_PART_SIZE {
         payload.push(OP_SETREQFILEID);
     }
     match source_exchange_request {
@@ -49,7 +47,8 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_request(
 
 pub(in crate::ed2k_tcp) fn encode_multipacket_request(
     file_hash: &Ed2kHash,
-    manifest: &Ed2kResumeManifest,
+    file_size: u64,
+    verified_parts: impl Iterator<Item = bool>,
     use_ext_envelope: bool,
     source_exchange_request: PeerSourceExchangeRequest,
     include_aich_request: bool,
@@ -57,11 +56,11 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_request(
     let mut payload = Vec::with_capacity(64);
     payload.extend_from_slice(&file_hash.0);
     if use_ext_envelope {
-        payload.extend_from_slice(&manifest.file_size.to_le_bytes());
+        payload.extend_from_slice(&file_size.to_le_bytes());
     }
     payload.push(OP_REQUESTFILENAME);
-    payload.extend_from_slice(&encode_request_filename_ext_info(manifest));
-    if manifest.file_size > ED2K_PART_SIZE {
+    payload.extend_from_slice(&encode_request_filename_ext_info(file_size, verified_parts));
+    if file_size > ED2K_PART_SIZE {
         payload.push(OP_SETREQFILEID);
     }
     match source_exchange_request {
