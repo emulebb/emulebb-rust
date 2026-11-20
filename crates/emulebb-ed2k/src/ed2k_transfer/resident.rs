@@ -28,6 +28,10 @@ pub(super) struct Reservation {
     bytes: usize,
 }
 impl ResidentControl {
+    pub(super) fn budget_snapshot(&self) -> (usize, usize, usize) {
+        let used = self.usage.lock().map_or(MAX_BYTES, |usage| usage.bytes);
+        (used, MAX_BYTES, MANIFEST_BYTES)
+    }
     #[cfg(test)]
     pub(super) fn used_bytes(&self) -> usize {
         self.usage.lock().unwrap().bytes

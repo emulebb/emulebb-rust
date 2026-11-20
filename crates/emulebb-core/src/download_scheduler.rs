@@ -54,6 +54,15 @@ impl EmulebbCore {
         let (ticks, clock) = watch::channel(());
         let mut interval = tokio::time::interval(RETRY_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut memory = crate::download_admission::MemorySampler::new();
+        self.refresh_download_admission(&mut memory).await;
+        if let Err(error) = self
+            .select_download_page(&mut cursor, &mut workers, &clock, &shutdown)
+            .await
+        {
+            tracing::warn!(%error, "download selection deferred");
+        }
+        interval.tick().await;
         loop {
             tokio::select! {
                 biased;
@@ -70,6 +79,7 @@ impl EmulebbCore {
                 }
                 _ = interval.tick() => {
                     ticks.send_replace(());
+                    self.refresh_download_admission(&mut memory).await;
                     if let Err(error) = self.select_download_page(&mut cursor, &mut workers, &clock, &shutdown).await {
                         tracing::warn!(%error, "download selection deferred");
                     }
@@ -94,6 +104,9 @@ impl EmulebbCore {
         if self.download_attempts.available() == (0, 0) {
             return Ok(());
         }
+        let mut construction_starts = crate::download_admission::construction_starts(
+            self.ed2k_transfers.download_resource_snapshot(),
+        );
         let page = self
             .ed2k_transfers
             .download_jobs_after(*cursor, PAGE_SIZE, true)
@@ -117,6 +130,9 @@ impl EmulebbCore {
                 break;
             }
             let admission = if known_size {
+                if construction_starts == 0 {
+                    continue;
+                }
                 self.download_attempts.try_enter(token, hash)
             } else {
                 self.download_attempts.try_prepare(token, hash)
@@ -128,6 +144,9 @@ impl EmulebbCore {
                     anyhow::bail!("download admission nonce exhausted")
                 }
             };
+            if known_size {
+                construction_starts -= 1;
+            }
             let core = self.clone();
             let clock = clock.clone();
             let shutdown = shutdown.clone();
@@ -140,6 +159,33 @@ impl EmulebbCore {
             });
         }
         Ok(())
+    }
+
+    async fn refresh_download_admission(
+        &self,
+        memory: &mut crate::download_admission::MemorySampler,
+    ) {
+        use crate::download_admission::{AdmissionWindow, next_window};
+        let Some(network) = self.ed2k_network.as_ref() else {
+            self.download_attempts
+                .apply_admission_window(AdmissionWindow {
+                    active: 0,
+                    preparing: 0,
+                    total: 0,
+                });
+            return;
+        };
+        let available = memory.available().await;
+        let native = self.ed2k_transfers.download_resource_snapshot();
+        let (previous, active) = self.download_attempts.admission_counts();
+        let next = next_window(
+            previous,
+            native,
+            available,
+            network.ed2k.max_parallel_download_peers,
+            active,
+        );
+        self.download_attempts.apply_admission_window(next);
     }
 
     async fn prepare_download_metadata(

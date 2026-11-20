@@ -82,6 +82,8 @@ mod reload_index;
 mod requested_block;
 mod resident;
 mod resident_table;
+mod resource_admission;
+pub use resource_admission::DownloadResourceSnapshot;
 mod salvage;
 mod shared_catalog;
 pub use shared_catalog::{CategoryCatalogDecision, CategoryRootMutation, category_copy_matches};

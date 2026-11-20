@@ -9,6 +9,65 @@ fn hash(byte: u8) -> Ed2kHash {
     Ed2kHash::from_bytes([byte; 16])
 }
 
+#[test]
+fn adaptive_window_honors_user_limit_without_initial_baseline_clipping() {
+    let control = Arc::new(DownloadAttemptControl::with_limit(Some(24)));
+    control.apply_admission_window(crate::download_admission::AdmissionWindow {
+        active: 32,
+        preparing: 2,
+        total: 34,
+    });
+    let guards: Vec<_> = (1..=24)
+        .map(|id| control.try_enter(token(id, 1), hash(id as u8)).unwrap())
+        .collect();
+    assert!(matches!(
+        control.try_enter(token(25, 1), hash(25)),
+        Err(AdmissionDenied::Busy)
+    ));
+    control.apply_admission_window(crate::download_admission::AdmissionWindow {
+        active: 0,
+        preparing: 0,
+        total: 0,
+    });
+    assert_eq!(control.available(), (0, 0));
+    assert!(
+        guards
+            .iter()
+            .all(|guard| !guard.cancellation().is_cancelled())
+    );
+    assert_eq!(
+        control.snapshot().len(),
+        24,
+        "pressure drains without cancelling owned work"
+    );
+    drop(guards);
+    assert_eq!(control.admission_counts().1, 0);
+}
+
+#[test]
+fn active_and_preparation_share_adaptive_total_capacity() {
+    let control = Arc::new(DownloadAttemptControl::default());
+    control.apply_admission_window(crate::download_admission::AdmissionWindow {
+        active: 2,
+        preparing: 2,
+        total: 2,
+    });
+    let active = control.try_enter(token(1, 1), hash(1)).unwrap();
+    let preparation = control.try_prepare(token(2, 1), hash(2)).unwrap();
+    assert_eq!(control.available(), (0, 0));
+    assert!(matches!(
+        control.try_enter(token(3, 1), hash(3)),
+        Err(AdmissionDenied::Busy)
+    ));
+    assert!(matches!(
+        control.try_prepare(token(3, 1), hash(3)),
+        Err(AdmissionDenied::Busy)
+    ));
+    drop(active);
+    assert!(control.try_enter(token(3, 1), hash(3)).is_ok());
+    drop(preparation);
+}
+
 #[tokio::test]
 async fn verification_excludes_selection_until_actual_execution_retirement() {
     let control = Arc::new(DownloadAttemptControl::default());
@@ -57,7 +116,7 @@ fn verification_capacity_refusal_does_not_cancel_another_execution() {
 }
 
 #[test]
-fn sixteen_active_and_two_preparations_have_separate_caps_and_share_content_ownership() {
+fn initial_active_and_preparation_windows_share_content_ownership() {
     let control = Arc::new(DownloadAttemptControl::default());
     let active: Vec<_> = (1..=16)
         .map(|id| control.try_enter(token(id, 1), hash(id as u8)).unwrap())
@@ -100,7 +159,7 @@ fn sixteen_active_and_two_preparations_have_separate_caps_and_share_content_owne
 #[test]
 fn admission_precedes_tasks_and_drop_releases_without_an_async_runtime() {
     let control = Arc::new(DownloadAttemptControl::default());
-    let guards: Vec<_> = (1..=MAX_ACTIVE)
+    let guards: Vec<_> = (1..=crate::download_admission::AdmissionWindow::default().active)
         .map(|id| {
             control
                 .try_enter(token(id as i64, 1), hash(id as u8))

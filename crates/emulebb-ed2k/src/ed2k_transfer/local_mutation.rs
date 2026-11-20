@@ -157,6 +157,16 @@ struct State {
 }
 
 impl LocalMutationRegistry {
+    pub(super) fn resource_capacity(&self) -> (usize, usize, usize) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        Self::reap(&mut state);
+        let free = if state.sealed || state.faulted || state.publication_failed {
+            0
+        } else {
+            MAX_UNITS.saturating_sub(state.tasks.len())
+        };
+        (state.capacity.used_bytes(), MAX_BYTES, free)
+    }
     /// Reserve under the same admission mutex, before clones or spawning. A
     /// rejected long operation owns no slot; accepted charges survive until its
     /// actual blocking task is reaped, including cancelled receipt/drain waiters.

@@ -7,8 +7,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-const MAX_ACTIVE: usize = 16;
-const MAX_PREPARING: usize = 2;
+const MAX_VERIFICATIONS: usize = 2;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Active,
@@ -28,6 +27,7 @@ pub(crate) struct DownloadAttemptControl {
 #[derive(Default)]
 struct State {
     ordinary_limit: Option<u32>,
+    window: crate::download_admission::AdmissionWindow,
     nonce: u64,
     entries: HashMap<JobId, Entry>,
     verifications: HashMap<JobId, VerificationEntry>,
@@ -40,8 +40,9 @@ struct VerificationEntry {
 
 impl State {
     fn active_limit(&self) -> usize {
-        self.ordinary_limit
-            .map_or(MAX_ACTIVE, |limit| (limit as usize).min(MAX_ACTIVE))
+        self.ordinary_limit.map_or(self.window.active, |limit| {
+            (limit as usize).min(self.window.active)
+        })
     }
 }
 
@@ -72,6 +73,24 @@ pub(crate) struct DownloadAttemptGuard {
     wake: Arc<tokio::sync::Notify>,
 }
 impl DownloadAttemptControl {
+    pub(crate) fn apply_admission_window(
+        &self,
+        window: crate::download_admission::AdmissionWindow,
+    ) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).window = window;
+    }
+
+    pub(crate) fn admission_counts(&self) -> (crate::download_admission::AdmissionWindow, usize) {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        (
+            state.window,
+            state
+                .entries
+                .values()
+                .filter(|entry| entry.kind == Kind::Active)
+                .count(),
+        )
+    }
     pub(crate) fn with_limit(limit: Option<u32>) -> Self {
         let control = Self::default();
         control.apply_concurrency_limit(limit);
@@ -107,9 +126,14 @@ impl DownloadAttemptControl {
             .values()
             .filter(|entry| entry.kind == Kind::Active)
             .count();
+        let total_free = state.window.total.saturating_sub(state.entries.len());
         (
-            state.active_limit().saturating_sub(active),
-            MAX_PREPARING.saturating_sub(state.entries.len() - active),
+            state.active_limit().saturating_sub(active).min(total_free),
+            state
+                .window
+                .preparing
+                .saturating_sub(state.entries.len() - active)
+                .min(total_free),
         )
     }
     fn enter(
@@ -134,7 +158,7 @@ impl DownloadAttemptControl {
         let limit = if kind == Kind::Active {
             state.active_limit()
         } else {
-            MAX_PREPARING
+            state.window.preparing
         };
         if state
             .entries
@@ -142,6 +166,7 @@ impl DownloadAttemptControl {
             .filter(|entry| entry.kind == kind)
             .count()
             >= limit
+            || state.entries.len() >= state.window.total
             || state.entries.values().any(|entry| entry.hash == hash)
         {
             return Err(AdmissionDenied::Busy);
@@ -270,7 +295,7 @@ impl DownloadAttemptControl {
         if state.verifications.contains_key(&token.job_id) {
             return Err(AdmissionDenied::Duplicate);
         }
-        if state.verifications.len() >= MAX_PREPARING
+        if state.verifications.len() >= MAX_VERIFICATIONS
             || state.verifications.values().any(|entry| entry.hash == hash)
         {
             return Err(AdmissionDenied::Busy);

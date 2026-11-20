@@ -30,6 +30,9 @@ pub(in crate::ed2k_transfer) struct CapacityLease {
     eligible: bool,
 }
 impl CapacityControl {
+    pub(super) fn used_bytes(&self) -> usize {
+        self.state.lock().map_or(MAX_BYTES, |usage| usage.bytes)
+    }
     pub(super) fn reserve(
         self: &Arc<Self>,
         bytes: usize,
