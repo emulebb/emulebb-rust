@@ -180,7 +180,7 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&manifest).unwrap(),
             )
             .unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations

@@ -10,7 +10,7 @@ use super::{
     ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferJob, Ed2kTransferState,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct Ed2kManifestCheckpointState {
     /// Checked cache-publication revision; guards dirty acknowledgments across owned SQL.
     pub(super) revision: u64,
@@ -21,7 +21,43 @@ pub(super) struct Ed2kManifestCheckpointState {
     /// checkpoint persists every listed piece row, so a checkpoint triggered
     /// by one session cannot skip pieces dirtied by another session of the
     /// same file; any full manifest store clears the set.
-    pub(super) dirty_piece_indexes: std::collections::BTreeSet<u32>,
+    pub(super) dirty_piece_indexes: super::dirty_pieces::DirtyPieces,
+}
+
+/// Allocate a missing checkpoint bitmap before changing progress or committing SQL.
+pub(super) fn checkpoint_state<'a>(
+    states: &'a mut super::resident_table::ResidentTable<
+        emulebb_metadata::JobToken,
+        Ed2kManifestCheckpointState,
+    >,
+    residents: &std::sync::Arc<super::resident::ResidentControl>,
+    manifest: &Ed2kResumeManifest,
+    persisted_bytes_written: u64,
+) -> Result<&'a mut Ed2kManifestCheckpointState> {
+    if !states.contains_key(&manifest.token) {
+        let claim = states.claim_insert()?;
+        let dirty = match super::dirty_pieces::DirtyPieces::new(residents, manifest) {
+            Ok(dirty) => dirty,
+            Err(error) => {
+                drop(claim);
+                states.reclaim_empty();
+                return Err(error);
+            }
+        };
+        states.insert_claimed(
+            manifest.token,
+            Ed2kManifestCheckpointState {
+                revision: 0,
+                persisted_bytes_written,
+                last_persisted_at: Instant::now(),
+                dirty_piece_indexes: dirty,
+            },
+            claim,
+        );
+    }
+    Ok(states
+        .get_mut(&manifest.token)
+        .expect("prepared checkpoint is present"))
 }
 
 pub(super) fn manifest_progress_bytes(manifest: &Ed2kResumeManifest) -> u64 {

@@ -16,6 +16,9 @@ const PAGE_SIZE: usize = 32;
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_SELECTION_INTERVAL: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+mod retirement_tests;
+
 /// Only selected jobs own this scalar clock. Completed network rounds may yield
 /// after inactivity; an in-flight payload operation is never timed out by it.
 struct SelectionProgress {
@@ -51,6 +54,15 @@ impl EmulebbCore {
         let (ticks, clock) = watch::channel(());
         let mut interval = tokio::time::interval(RETRY_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut memory = crate::download_admission::MemorySampler::new();
+        self.refresh_download_admission(&mut memory).await;
+        if let Err(error) = self
+            .select_download_page(&mut cursor, &mut workers, &clock, &shutdown)
+            .await
+        {
+            tracing::warn!(%error, "download selection deferred");
+        }
+        interval.tick().await;
         loop {
             tokio::select! {
                 biased;
@@ -67,6 +79,7 @@ impl EmulebbCore {
                 }
                 _ = interval.tick() => {
                     ticks.send_replace(());
+                    self.refresh_download_admission(&mut memory).await;
                     if let Err(error) = self.select_download_page(&mut cursor, &mut workers, &clock, &shutdown).await {
                         tracing::warn!(%error, "download selection deferred");
                     }
@@ -91,6 +104,9 @@ impl EmulebbCore {
         if self.download_attempts.available() == (0, 0) {
             return Ok(());
         }
+        let mut construction_starts = crate::download_admission::construction_starts(
+            self.ed2k_transfers.download_resource_snapshot(),
+        );
         let page = self
             .ed2k_transfers
             .download_jobs_after(*cursor, PAGE_SIZE, true)
@@ -114,6 +130,9 @@ impl EmulebbCore {
                 break;
             }
             let admission = if known_size {
+                if construction_starts == 0 {
+                    continue;
+                }
                 self.download_attempts.try_enter(token, hash)
             } else {
                 self.download_attempts.try_prepare(token, hash)
@@ -125,6 +144,9 @@ impl EmulebbCore {
                     anyhow::bail!("download admission nonce exhausted")
                 }
             };
+            if known_size {
+                construction_starts -= 1;
+            }
             let core = self.clone();
             let clock = clock.clone();
             let shutdown = shutdown.clone();
@@ -137,6 +159,33 @@ impl EmulebbCore {
             });
         }
         Ok(())
+    }
+
+    async fn refresh_download_admission(
+        &self,
+        memory: &mut crate::download_admission::MemorySampler,
+    ) {
+        use crate::download_admission::{AdmissionWindow, next_window};
+        let Some(network) = self.ed2k_network.as_ref() else {
+            self.download_attempts
+                .apply_admission_window(AdmissionWindow {
+                    active: 0,
+                    preparing: 0,
+                    total: 0,
+                });
+            return;
+        };
+        let available = memory.available().await;
+        let native = self.ed2k_transfers.download_resource_snapshot();
+        let (previous, active) = self.download_attempts.admission_counts();
+        let next = next_window(
+            previous,
+            native,
+            available,
+            network.ed2k.max_parallel_download_peers,
+            active,
+        );
+        self.download_attempts.apply_admission_window(next);
     }
 
     async fn prepare_download_metadata(
@@ -182,32 +231,14 @@ impl EmulebbCore {
         mut clock: watch::Receiver<()>,
         shutdown: CancellationToken,
     ) {
-        let transfer = match self.hydrate_selected_download(&mut guard).await {
-            Ok(Some(transfer)) => transfer,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(job_id = %guard.token().job_id, %error, "download hydration deferred");
-                if !matches!(
-                    error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>(),
-                    Some(
-                        emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy
-                            | emulebb_ed2k::ed2k_transfer::LocalMutationError::Closing
-                    )
-                ) {
-                    self.persist_selection_storage_failure(
-                        &guard,
-                        "STORAGE_PREPARATION_FAILED",
-                        &error,
-                        &mut clock,
-                        &shutdown,
-                    )
-                    .await;
-                }
-                return;
-            }
+        let result = self.hydrate_selected_download(&mut guard).await;
+        let Some(transfer) = self
+            .finish_download_hydration(&guard, result, &mut clock, &shutdown)
+            .await
+        else {
+            return;
         };
         let cancel = guard.cancellation();
-        let reask = self.ed2k_reask_handle.lock().unwrap().clone();
         let mut progress =
             SelectionProgress::new(self.ed2k_transfers.downloaded_session_bytes(guard.token()));
         loop {
@@ -266,10 +297,57 @@ impl EmulebbCore {
                 !cancel.is_cancelled() && !shutdown.is_cancelled(),
             );
         }
-        cancel.cancel();
+        self.retire_download_selection(&guard, &mut clock, &shutdown)
+            .await;
+    }
+
+    /// Every unsuccessful hydration can already own native storage/cache state.
+    /// Keep attempt ownership until the same retirement as a network worker ends.
+    async fn finish_download_hydration(
+        &self,
+        guard: &DownloadAttemptGuard,
+        result: Result<Option<Transfer>>,
+        clock: &mut watch::Receiver<()>,
+        shutdown: &CancellationToken,
+    ) -> Option<Transfer> {
+        match result {
+            Ok(Some(transfer)) => return Some(transfer),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(job_id = %guard.token().job_id, %error, "download hydration deferred");
+                if !matches!(
+                    error.downcast_ref::<emulebb_ed2k::ed2k_transfer::LocalMutationError>(),
+                    Some(
+                        emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy
+                            | emulebb_ed2k::ed2k_transfer::LocalMutationError::Closing
+                    )
+                ) {
+                    self.persist_selection_storage_failure(
+                        guard,
+                        "STORAGE_PREPARATION_FAILED",
+                        &error,
+                        clock,
+                        shutdown,
+                    )
+                    .await;
+                }
+            }
+        }
+        self.retire_download_selection(guard, clock, shutdown).await;
+        None
+    }
+
+    async fn retire_download_selection(
+        &self,
+        guard: &DownloadAttemptGuard,
+        clock: &mut watch::Receiver<()>,
+        shutdown: &CancellationToken,
+    ) {
+        guard.cancellation().cancel();
         // All attempt producers have returned. Retire UDP state before freeing
         // the slot; already emitted callbacks carry the old token and fail the
         // canceled ownership check. On disconnect the UDP loop is already gone.
+        let reask = self.ed2k_reask_handle.lock().unwrap().clone();
         if let Some(reask) = reask
             && let Err(error) = reask.retire_execution(guard.token()).await
         {
@@ -282,15 +360,15 @@ impl EmulebbCore {
         {
             tracing::error!(job_id = %guard.token().job_id, %error, "download selection release failed");
             self.persist_selection_storage_failure(
-                &guard,
+                guard,
                 "STORAGE_CHECKPOINT_FAILED",
                 &error,
-                &mut clock,
-                &shutdown,
+                clock,
+                shutdown,
             )
             .await;
         }
-        self.release_download_source_file(guard.token(), &transfer.hash)
+        self.release_download_source_file(guard.token(), &guard.hash().to_string())
             .await;
     }
 

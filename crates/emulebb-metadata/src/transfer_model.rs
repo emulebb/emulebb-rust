@@ -91,6 +91,19 @@ pub struct MetadataTransferAichIdentity {
     pub generation: u64,
 }
 
+/// Small canonical state needed when publishing a transfer's shared entry.
+/// Progress geometry remains owned by the exact execution's I/O fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataDownloadJobPublication {
+    pub identity: MetadataTransferAichIdentity,
+    pub sharing_enabled: bool,
+    pub display_name: String,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
     pub token: JobToken,

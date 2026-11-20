@@ -147,7 +147,8 @@ impl Ed2kTransferRuntime {
         // re-requests only the missing blocks, mirroring eMule leaving the bad
         // blocks in the gap list while the good blocks were `FillGap`-ed.
         piece.state = Ed2kTransferState::Missing;
-        self.store_manifest_unlocked(&manifest).await?;
+        self.store_manifest_unlocked(&manifest, _guard.clone())
+            .await?;
 
         Ok(Some(PartSalvageOutcome {
             recovered_ranges: recovery.recovered_ranges,
@@ -331,10 +332,9 @@ impl Ed2kTransferRuntime {
 
         rebuild_verified_ranges(&mut manifest);
         super::mark_final_rehash_pending(&mut manifest);
-        if verified {
-            self.upsert_verified_catalog_entry(&manifest).await;
-        }
-        self.store_manifest_unlocked(&manifest).await?;
+        self.store_manifest_unlocked(&manifest, _guard.clone())
+            .await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
         Ok(outcome)
     }
 

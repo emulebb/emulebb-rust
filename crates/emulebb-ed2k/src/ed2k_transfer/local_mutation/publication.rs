@@ -23,11 +23,7 @@ pub(super) struct ContentPublication {
     watch: Option<([u8; 16], (u64, u64))>,
     stale_watch: std::cell::Cell<bool>,
     metadata: emulebb_metadata::MetadataStore,
-    cache: Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<emulebb_metadata::JobId, transfer::ResidentManifest>,
-        >,
-    >,
+    cache: Arc<tokio::sync::Mutex<transfer::resident_table::ResidentCache>>,
     catalog: transfer::Ed2kSharedCatalog,
     epoch: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,

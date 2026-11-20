@@ -124,7 +124,7 @@ pub struct SharedEligibility {
     publication_failed: Arc<AtomicBool>,
     sealed: AtomicBool,
     stripes: Arc<std::sync::Mutex<ShareStripes>>,
-    manifests: Arc<tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, super::ResidentManifest>>>,
+    manifests: Arc<tokio::sync::Mutex<super::resident_table::ResidentCache>>,
     read_slot: Arc<tokio::sync::Mutex<Option<EligibilityTask>>>,
     local_mutations: Arc<super::local_mutation::LocalMutationRegistry>,
 }
@@ -145,9 +145,7 @@ impl SharedEligibility {
         root_dirty: Arc<AtomicBool>,
         publication_failed: Arc<AtomicBool>,
         stripes: Arc<std::sync::Mutex<ShareStripes>>,
-        manifests: Arc<
-            tokio::sync::Mutex<HashMap<emulebb_metadata::JobId, super::ResidentManifest>>,
-        >,
+        manifests: Arc<tokio::sync::Mutex<super::resident_table::ResidentCache>>,
         local_mutations: Arc<super::local_mutation::LocalMutationRegistry>,
     ) -> Self {
         Self {
@@ -1248,6 +1246,7 @@ mod indexed_catalog_tests {
 
     #[tokio::test]
     async fn eligibility_reads_are_bounded_and_single_slot() {
+        let mutations = Arc::new(super::super::local_mutation::LocalMutationRegistry::default());
         let maximum_workspace = 2 * 200 * std::mem::size_of::<[u8; 16]>()
             + 2 * 200 * std::mem::size_of::<(u8, u64)>()
             + 2 * 200
@@ -1263,8 +1262,11 @@ mod indexed_catalog_tests {
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
-            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::resident_table::ResidentCache::new(Arc::clone(&mutations.residents))
+                    .unwrap(),
+            )),
+            mutations,
         );
         assert!(provider.try_batch(&[[0; 16]; 201]).await.is_err());
         let first = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
@@ -1278,14 +1280,18 @@ mod indexed_catalog_tests {
 
     #[tokio::test]
     async fn eligibility_drain_seals_before_waiting_for_the_inflight_batch() {
+        let mutations = Arc::new(super::super::local_mutation::LocalMutationRegistry::default());
         let provider = Arc::new(SharedEligibility::new(
             emulebb_metadata::MetadataStore::in_memory().unwrap(),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
-            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::resident_table::ResidentCache::new(Arc::clone(&mutations.residents))
+                    .unwrap(),
+            )),
+            mutations,
         ));
         let batch = provider.try_batch(&[[1; 16]]).await.unwrap().unwrap();
         let draining = {
@@ -1304,6 +1310,7 @@ mod indexed_catalog_tests {
 
     #[tokio::test]
     async fn packet_admission_rejects_an_epoch_changed_before_admission() {
+        let mutations = Arc::new(super::super::local_mutation::LocalMutationRegistry::default());
         let epoch = Arc::new(AtomicU64::new(0));
         let provider = Arc::new(SharedEligibility::new(
             emulebb_metadata::MetadataStore::in_memory().unwrap(),
@@ -1311,8 +1318,11 @@ mod indexed_catalog_tests {
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
-            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::resident_table::ResidentCache::new(Arc::clone(&mutations.residents))
+                    .unwrap(),
+            )),
+            mutations,
         ));
         let mut catalog = IndexedSharedCatalog::default();
         catalog.set_eligibility(Arc::clone(&provider));
@@ -1329,14 +1339,18 @@ mod indexed_catalog_tests {
 
     #[test]
     fn share_stripes_detect_inflight_and_completed_mutations_without_wrap() {
+        let mutations = Arc::new(super::super::local_mutation::LocalMutationRegistry::default());
         let provider = SharedEligibility::new(
             emulebb_metadata::MetadataStore::in_memory().unwrap(),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(std::sync::Mutex::new(ShareStripes::default())),
-            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            Arc::new(super::super::local_mutation::LocalMutationRegistry::default()),
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::resident_table::ResidentCache::new(Arc::clone(&mutations.residents))
+                    .unwrap(),
+            )),
+            mutations,
         );
         let hash = [1; 16];
         let snapshot = provider.stripe_snapshot(&[hash]).unwrap();

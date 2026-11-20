@@ -915,7 +915,9 @@ mod tests {
                 .delete_category(category.id, Path::new("incoming"))
                 .unwrap()
         );
-        let stored = store.upsert_transfer_manifest_reconciled(&stale).unwrap();
+        let stored = store
+            .upsert_transfer_manifest_reconciled(&stale, Ok)
+            .unwrap();
         assert_eq!(stored.category_id, None);
         assert_eq!(
             store

@@ -1,10 +1,6 @@
 //! Manifest store, cache, and checkpoint helpers for the ED2K transfer runtime.
 
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
@@ -12,10 +8,8 @@ use emulebb_metadata::{JobId, JobToken};
 use tokio::io::AsyncWriteExt;
 
 use super::manifest::manifest_progress_bytes;
-use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata};
 use super::{
-    ED2K_EMBLOCK_SIZE, Ed2kManifestCheckpointState, Ed2kResumeManifest, Ed2kTransferJob,
-    Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
+    ED2K_EMBLOCK_SIZE, Ed2kResumeManifest, Ed2kTransferJob, Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
@@ -63,7 +57,7 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .get(&token)
-            .and_then(|state| state.dirty_piece_indexes.first().copied())
+            .and_then(|state| state.dirty_piece_indexes.first())
         else {
             return Ok(false);
         };
@@ -117,6 +111,7 @@ impl Ed2kTransferRuntime {
     pub(super) async fn load_manifest_or_rebuild_unlocked(
         &self,
         job: &Ed2kTransferJob,
+        io: &ScopedLockGuard<JobId>,
     ) -> Result<super::ResidentManifest> {
         let cached = self
             .manifest_cache
@@ -147,7 +142,7 @@ impl Ed2kTransferRuntime {
             // Admission creates the job before payload geometry. Initialize only
             // this exact row; an absent job is never recreated by a callback.
             manifest.pieces = Ed2kResumeManifest::new(job).pieces;
-            self.store_manifest_unlocked(&manifest).await?;
+            self.store_manifest_unlocked(&manifest, io.clone()).await?;
             return self.load_manifest_unlocked(job.token).await;
         }
         Ok(manifest)
@@ -344,6 +339,7 @@ impl Ed2kTransferRuntime {
             };
             let resident_write = self.local_mutations.residents.reserve(token.job_id)?;
             let mut cache = Arc::clone(&self.manifest_cache).lock_owned().await;
+            let cache_claim = cache.claim_insert()?;
             let mut manifest = cache
                 .get(&token.job_id)
                 .filter(|value| value.token == token)
@@ -358,7 +354,8 @@ impl Ed2kTransferRuntime {
                 let mut map = corroboration
                     .lock()
                     .expect("aich corroboration mutex poisoned");
-                metadata.publish_download_job_state(token, |identity, _| {
+                metadata.publish_download_job_state(token, |state| {
+                    let identity = state.identity;
                     manifest.write_with(resident_write, |manifest| {
                         manifest.category_id = category_id;
                         super::aich_trust::merge_persisted_identity(manifest, &identity)
@@ -368,7 +365,7 @@ impl Ed2kTransferRuntime {
                     {
                         map.remove(&token);
                     }
-                    cache.insert(token.job_id, manifest.clone());
+                    cache.insert_claimed(token.job_id, manifest.clone(), cache_claim);
                     let mut changed = false;
                     catalog.update_by_hash(&parsed_hash, |entry| {
                         if entry.aich_root != manifest.aich_root {
@@ -409,33 +406,6 @@ impl Ed2kTransferRuntime {
         Ok(probe(&manifest))
     }
 
-    pub(super) async fn store_manifest_unlocked(
-        &self,
-        manifest: &Ed2kResumeManifest,
-    ) -> Result<()> {
-        let row = manifest_to_metadata(manifest)?;
-        let transfer_dir = self.transfer_dir(manifest.token.job_id)?;
-        tokio::fs::create_dir_all(&transfer_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to create ED2K transfer directory {}",
-                    transfer_dir.display()
-                )
-            })?;
-        // The upsert commits a SQLite transaction (a WAL fsync under
-        // `synchronous = FULL`): run it on the blocking pool so the fsync
-        // never parks an async worker thread.
-        let metadata = self.metadata.clone();
-        let stored =
-            tokio::task::spawn_blocking(move || metadata.upsert_transfer_manifest_reconciled(&row))
-                .await
-                .context("ED2K manifest upsert task panicked")??;
-        let manifest = manifest_from_metadata(stored)?;
-        self.mark_manifest_persisted_unlocked(&manifest).await?;
-        Ok(())
-    }
-
     /// Publish a single progress delta and its dirty bookkeeping without an
     /// await between them. Readers retain their earlier charged backing.
     pub(super) async fn publish_piece_progress_unlocked(
@@ -468,14 +438,13 @@ impl Ed2kTransferRuntime {
         let changed = target != piece;
         let progress = manifest_progress_bytes(current);
         let mut states = self.manifest_checkpoint_state.lock().await;
-        let state = states
-            .entry(token)
-            .or_insert_with(|| Ed2kManifestCheckpointState {
-                revision: 0,
-                persisted_bytes_written: progress,
-                last_persisted_at: Instant::now(),
-                dirty_piece_indexes: Default::default(),
-            });
+        let state = super::manifest::checkpoint_state(
+            &mut states,
+            &self.local_mutations.residents,
+            current,
+            progress,
+        )?;
+        state.dirty_piece_indexes.validate(piece.piece_index)?;
         let revision = state
             .revision
             .checked_add(1)
@@ -487,7 +456,7 @@ impl Ed2kTransferRuntime {
             })?;
         }
         state.revision = revision;
-        state.dirty_piece_indexes.insert(piece.piece_index);
+        state.dirty_piece_indexes.insert(piece.piece_index)?;
         Ok(current.clone())
     }
 
@@ -521,7 +490,7 @@ impl Ed2kTransferRuntime {
                 let dirty = checkpoints
                     .get(&token)
                     .map(|state| &state.dirty_piece_indexes);
-                let Some(piece) = dirty.and_then(|set| set.first()).copied() else {
+                let Some(piece) = dirty.and_then(|set| set.first()) else {
                     return Ok(());
                 };
                 self.local_mutations
@@ -555,6 +524,7 @@ impl Ed2kTransferRuntime {
     /// Record a cache-only progress append so the next batched checkpoint
     /// persists this piece's row even if the checkpoint is triggered by a
     /// block landing in a different piece.
+    #[cfg(test)]
     pub(super) async fn note_dirty_piece_unlocked(
         &self,
         manifest: &Ed2kResumeManifest,
@@ -562,19 +532,18 @@ impl Ed2kTransferRuntime {
     ) -> Result<()> {
         let current_progress = manifest_progress_bytes(manifest);
         let mut states = self.manifest_checkpoint_state.lock().await;
-        let state = states
-            .entry(manifest.token)
-            .or_insert_with(|| Ed2kManifestCheckpointState {
-                revision: 0,
-                persisted_bytes_written: current_progress,
-                last_persisted_at: Instant::now(),
-                dirty_piece_indexes: std::collections::BTreeSet::new(),
-            });
+        let state = super::manifest::checkpoint_state(
+            &mut states,
+            &self.local_mutations.residents,
+            manifest,
+            current_progress,
+        )?;
+        state.dirty_piece_indexes.validate(piece_index)?;
         state.revision = state
             .revision
             .checked_add(1)
             .context("download progress revision exhausted")?;
-        state.dirty_piece_indexes.insert(piece_index);
+        state.dirty_piece_indexes.insert(piece_index)?;
         Ok(())
     }
 
@@ -587,10 +556,8 @@ impl Ed2kTransferRuntime {
         piece_index: u32,
     ) -> Result<super::ResidentManifest> {
         let _content = self.lock_content(&manifest.file_hash).await;
-        let current = self.cache_manifest_with_content(manifest).await?;
-        self.note_dirty_piece_unlocked(&current, piece_index)
-            .await?;
-        Ok(current)
+        self.cache_manifest_with_content(manifest, Some(piece_index))
+            .await
     }
 
     /// Publish only while category writers are fenced; an older progress clone
@@ -600,13 +567,14 @@ impl Ed2kTransferRuntime {
         manifest: &Ed2kResumeManifest,
     ) -> Result<super::ResidentManifest> {
         let _content = self.lock_content(&manifest.file_hash).await;
-        self.cache_manifest_with_content(manifest).await
+        self.cache_manifest_with_content(manifest, None).await
     }
 
     /// Caller retains the content fence through any compound publication.
     async fn cache_manifest_with_content(
         &self,
         manifest: &Ed2kResumeManifest,
+        dirty_piece: Option<u32>,
     ) -> Result<super::ResidentManifest> {
         let token = manifest.token;
         let _fence = self.category_assignment_gate.read().await;
@@ -619,8 +587,9 @@ impl Ed2kTransferRuntime {
             "stale execution cannot publish a manifest"
         );
         let mut cache = self.manifest_cache.lock().await;
-        let mut current = self.local_mutations.residents.copy_manifest(manifest)?;
-        let current_value = current.try_mut()?;
+        let cache_claim = cache.claim_insert()?;
+        let permit = self.local_mutations.residents.reserve(token.job_id)?;
+        let mut current_value = manifest.clone();
         // Explicit verification can publish a stopped job's current generation.
         // Network callbacks retain the earlier generation and remain fenced.
         current_value.intent = job.intent;
@@ -630,6 +599,15 @@ impl Ed2kTransferRuntime {
             job.expected_size_bytes == Some(current_value.file_size),
             super::LocalMutationError::Unknown
         );
+        if let Some(persisted) = cache
+            .get(&token.job_id)
+            .filter(|value| value.token == token)
+        {
+            current_value.upload_priority = persisted.upload_priority.clone();
+            current_value.auto_upload_priority = persisted.auto_upload_priority;
+            current_value.comment = persisted.comment.clone();
+            current_value.rating = persisted.rating;
+        }
         if let Some(persisted) = cache
             .get(&token.job_id)
             .filter(|value| value.token == token)
@@ -643,62 +621,48 @@ impl Ed2kTransferRuntime {
             current_value.completed = true;
             current_value.final_rehash_pending = false;
         }
-        cache.insert(token.job_id, current.clone());
-        Ok(current)
-    }
-
-    pub(super) async fn mark_manifest_persisted_unlocked(
-        &self,
-        manifest: &Ed2kResumeManifest,
-    ) -> Result<super::ResidentManifest> {
-        let current = self.cache_manifest_unlocked(manifest).await?;
-        // Stop may win after cache publication. Its short content fence also
-        // covers this acknowledgment, preventing late bookkeeping resurrection.
-        let _content = self.lock_content(&manifest.file_hash).await;
-        anyhow::ensure!(
-            self.manifest_cache
-                .lock()
-                .await
-                .get(&current.token.job_id)
-                .is_some_and(|cached| cached.token == current.token),
-            "stale execution cannot acknowledge persisted progress"
-        );
-        let mut states = self.manifest_checkpoint_state.lock().await;
-        let revision = states
-            .get(&current.token)
-            .map_or(0, |state| state.revision)
-            .checked_add(1)
-            .context("download progress revision exhausted")?;
-        states.insert(
-            current.token,
-            Ed2kManifestCheckpointState {
-                revision,
-                persisted_bytes_written: manifest_progress_bytes(&current),
-                last_persisted_at: Instant::now(),
-                dirty_piece_indexes: std::collections::BTreeSet::new(),
-            },
-        );
+        let current = permit.publish(current_value)?;
+        if let Some(index) = dirty_piece {
+            // WHY: validate the live execution before admitting bookkeeping.
+            // A late stopped callback must recreate neither cache nor dirty state.
+            // Complete fallible preparation before publishing either half.
+            let mut states = self.manifest_checkpoint_state.lock().await;
+            let state = super::manifest::checkpoint_state(
+                &mut states,
+                &self.local_mutations.residents,
+                &current,
+                manifest_progress_bytes(&current),
+            )?;
+            state.dirty_piece_indexes.validate(index)?;
+            let revision = state
+                .revision
+                .checked_add(1)
+                .context("download progress revision exhausted")?;
+            state.dirty_piece_indexes.insert(index)?;
+            state.revision = revision;
+            cache.insert_claimed(token.job_id, current.clone(), cache_claim);
+            return Ok(current);
+        }
+        cache.insert_claimed(token.job_id, current.clone(), cache_claim);
         Ok(current)
     }
 
     pub(super) async fn should_checkpoint_manifest_unlocked(
         &self,
         manifest: &Ed2kResumeManifest,
-    ) -> bool {
+    ) -> Result<bool> {
         let current_progress = manifest_progress_bytes(manifest);
         let mut states = self.manifest_checkpoint_state.lock().await;
-        let state = states
-            .entry(manifest.token)
-            .or_insert_with(|| Ed2kManifestCheckpointState {
-                revision: 0,
-                persisted_bytes_written: current_progress,
-                last_persisted_at: Instant::now(),
-                dirty_piece_indexes: std::collections::BTreeSet::new(),
-            });
+        let state = super::manifest::checkpoint_state(
+            &mut states,
+            &self.local_mutations.residents,
+            manifest,
+            current_progress,
+        )?;
         let dirty_bytes = current_progress.saturating_sub(state.persisted_bytes_written);
-        dirty_bytes >= ED2K_RESUME_CHECKPOINT_BYTES
+        Ok(dirty_bytes >= ED2K_RESUME_CHECKPOINT_BYTES
             || (dirty_bytes != 0
-                && state.last_persisted_at.elapsed() >= ED2K_RESUME_CHECKPOINT_INTERVAL)
+                && state.last_persisted_at.elapsed() >= ED2K_RESUME_CHECKPOINT_INTERVAL))
     }
 
     pub(super) fn transfer_dir(&self, job_id: JobId) -> Result<PathBuf> {
@@ -776,6 +740,9 @@ struct HeldScopedLock<K: std::hash::Hash + Eq> {
     _owner: ScopedLock<K>,
 }
 impl<K: std::hash::Hash + Eq> ScopedLockGuard<K> {
+    pub(super) fn key(&self) -> &K {
+        &self.held._owner.key
+    }
     fn new(guard: tokio::sync::OwnedMutexGuard<()>, owner: ScopedLock<K>) -> Self {
         Self {
             held: Arc::new(HeldScopedLock {

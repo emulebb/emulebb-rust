@@ -45,7 +45,7 @@ impl rusqlite::types::FromSql for JobId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobToken {
     pub job_id: JobId,
     pub generation: u64,

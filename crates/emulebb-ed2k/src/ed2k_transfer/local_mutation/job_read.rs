@@ -234,12 +234,13 @@ impl LocalMutationRegistry {
                         // SQL snapshot must never replace that live authority.
                         return Ok(JobReadResult::Execution(Some(current.clone())));
                     }
+                    let cache_claim = cache.claim_insert()?;
                     metadata
                         .publish_observed_download_execution(
                             token,
                             observed.as_ref().expect("selection observation"),
                             || {
-                                cache.insert(token.job_id, manifest.clone());
+                                cache.insert_claimed(token.job_id, manifest.clone(), cache_claim);
                                 Ok(JobReadResult::Execution(Some(manifest)))
                             },
                         )

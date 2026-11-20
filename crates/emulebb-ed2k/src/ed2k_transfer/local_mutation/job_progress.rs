@@ -2,7 +2,7 @@
 use super::*;
 use crate::ed2k_transfer as transfer;
 use emulebb_metadata::JobId;
-use std::{collections::BTreeSet, time::Instant};
+use std::time::Instant;
 
 const CHECKPOINT_WORKSPACE: usize = 4 * 1024 * 1024;
 
@@ -11,7 +11,7 @@ impl LocalMutationRegistry {
         &self,
         runtime: &transfer::Ed2kTransferRuntime,
         manifest: &transfer::Ed2kResumeManifest,
-        dirty: Option<&BTreeSet<u32>>,
+        dirty: Option<&transfer::dirty_pieces::DirtyPieces>,
         current_piece: u32,
         guard: transfer::store::ScopedLockGuard<JobId>,
     ) -> Result<oneshot::Receiver<Result<()>>> {
@@ -76,6 +76,7 @@ impl LocalMutationRegistry {
         let locks = Arc::clone(&runtime.content_locks);
         let cache = Arc::clone(&runtime.manifest_cache);
         let checkpoints = Arc::clone(&runtime.manifest_checkpoint_state);
+        let residents = Arc::clone(&self.residents);
         let (sender, receipt) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
@@ -112,6 +113,10 @@ impl LocalMutationRegistry {
                             "checkpoint cache no longer matches selected progress"
                         );
                     }
+                    // WHY: checkpoint acknowledgment cannot discover a bitmap
+                    // allocation/capacity failure after its progress commits.
+                    let mut states = checkpoints.blocking_lock();
+                    transfer::manifest::checkpoint_state(&mut states, &residents, current, 0)?;
                 }
                 ensure!(
                     metadata.checkpoint_download_progress(token, &pieces)?,
@@ -129,14 +134,9 @@ impl LocalMutationRegistry {
                     .filter(|m| m.token == token)
                     .ok_or_else(|| anyhow!("checkpoint cache disappeared before publication"))?;
                 let mut checkpoints = checkpoints.blocking_lock();
-                let checkpoint = checkpoints.entry(token).or_insert_with(|| {
-                    transfer::Ed2kManifestCheckpointState {
-                        revision: 0,
-                        persisted_bytes_written: 0,
-                        last_persisted_at: Instant::now(),
-                        dirty_piece_indexes: BTreeSet::new(),
-                    }
-                });
+                let checkpoint = checkpoints.get_mut(&token).ok_or_else(|| {
+                    anyhow!("checkpoint bookkeeping disappeared before publication")
+                })?;
                 checkpoint.revision = checkpoint
                     .revision
                     .checked_add(1)
@@ -215,7 +215,7 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&manifest).unwrap(),
             )
             .unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -339,7 +339,7 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&captured).unwrap(),
             )
             .unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -390,7 +390,7 @@ mod tests {
         live.pieces[0].bytes_written = 12;
         live.comment = "newer live metadata".into();
         runtime.note_dirty_piece_unlocked(&live, 0).await.unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -478,7 +478,7 @@ mod tests {
             .unwrap();
         live.pieces[0].bytes_written = 8;
         runtime.note_dirty_piece_unlocked(&live, 0).await.unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -507,7 +507,7 @@ mod tests {
             .unwrap();
         live.pieces[1].bytes_written = 12;
         runtime.note_dirty_piece_unlocked(&live, 1).await.unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -519,8 +519,11 @@ mod tests {
         receipt.await.unwrap().unwrap();
         assert_eq!(runtime.manifest_cache.lock().await[&job.token.job_id], live);
         assert_eq!(
-            runtime.manifest_checkpoint_state.lock().await[&job.token].dirty_piece_indexes,
-            BTreeSet::from([1])
+            runtime.manifest_checkpoint_state.lock().await[&job.token]
+                .dirty_piece_indexes
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![1]
         );
         let durable = metadata
             .download_job_manifest(job.token.job_id)

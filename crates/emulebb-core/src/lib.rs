@@ -124,6 +124,7 @@ mod diagnostic_protocol_fixture;
 mod direct_download_runtime;
 mod discovery_fetch;
 mod disk_guard;
+mod download_admission;
 mod download_attempts;
 mod download_controls;
 mod library_policy;

@@ -138,7 +138,10 @@ async fn rejected_recovery_proofs_never_attempt_raw_payload_reads_or_change_stat
     before.pieces[0].ich_corrupted = true;
     {
         let _guard = runtime.lock_manifest(file_hash).await;
-        runtime.store_manifest_unlocked(&before).await.unwrap();
+        runtime
+            .store_manifest_unlocked(&before, _guard.clone())
+            .await
+            .unwrap();
     }
     let attribution = format!("{:?}", runtime.corruption_blackbox.lock().unwrap());
     let mut sharer = AichRecoveryHashSet::new(data.len() as u64);

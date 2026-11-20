@@ -910,7 +910,8 @@ impl Ed2kTransferRuntime {
         manifest.delivery_ownership = ownership;
         manifest.delivered_path = Some(attempt.target_path.clone());
         manifest.source_fingerprint = Some(fingerprint.clone());
-        self.store_manifest_unlocked(&manifest).await
+        self.store_manifest_unlocked(&manifest, _manifest_guard.clone())
+            .await
     }
 
     pub(super) async fn discard_delivery_attempt_for_deletion_unlocked(
