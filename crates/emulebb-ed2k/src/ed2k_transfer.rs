@@ -328,7 +328,7 @@ pub struct Ed2kTransferRuntime {
     /// destructive deletion. Unlike the manifest IO lock this may be held
     /// across slow filesystem work without delaying unrelated manifest reads.
     lifecycle_locks: Arc<StdMutex<HashMap<JobId, std::sync::Weak<Mutex<()>>>>>,
-    manifest_cache: Arc<Mutex<HashMap<JobId, ResidentManifest>>>,
+    manifest_cache: Arc<Mutex<resident_table::ResidentCache>>,
     manifest_checkpoint_state:
         Arc<Mutex<resident_table::ResidentTable<JobToken, Ed2kManifestCheckpointState>>>,
     /// Process-local download block reservations. Durable manifests describe
@@ -786,9 +786,11 @@ impl Ed2kTransferRuntime {
         let category_root_epoch = Arc::new(AtomicU64::new(0));
         let category_root_dirty = Arc::new(AtomicBool::new(false));
         let share_publication_failed = Arc::new(AtomicBool::new(false));
-        let manifest_cache = Arc::new(Mutex::new(HashMap::new()));
         let stripes = Arc::new(std::sync::Mutex::new(catalog::ShareStripes::default()));
         let local_mutations = Arc::new(local_mutation::LocalMutationRegistry::default());
+        let manifest_cache = Arc::new(Mutex::new(resident_table::ResidentCache::new(Arc::clone(
+            &local_mutations.residents,
+        ))?));
         let checkpoint_state = Arc::new(Mutex::new(resident_table::ResidentTable::new(
             Arc::clone(&local_mutations.residents),
         )?));

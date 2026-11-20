@@ -166,3 +166,176 @@ async fn checkpoint_table_growth_refusal_precedes_progress_sql_and_publication()
     );
     assert_eq!(old.pieces[0].bytes_written, 0);
 }
+
+#[tokio::test]
+async fn cache_growth_refusal_precedes_sql_with_checkpoint_space_already_reserved() {
+    let root = crate::paths::unique_test_dir("resident-cache-preadmission");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = admit_download_job(
+        &runtime,
+        "66".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        ED2K_PART_SIZE,
+    );
+    let old = runtime.ensure_job(&job).await.unwrap();
+    {
+        let mut states = runtime.manifest_checkpoint_state.lock().await;
+        drop(states.claim_insert().unwrap());
+    }
+    assert_eq!(runtime.manifest_cache.lock().await.entries.capacity(), 1);
+    let before = runtime
+        .metadata
+        .download_job_manifest(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    let revision = runtime.manifest_checkpoint_state.lock().await[&job.token].revision;
+    let control = &runtime.local_mutations.residents;
+    let free = super::super::resident::MANIFEST_BYTES + size_of::<u64>();
+    let held = control
+        .reserve_bytes(128 * 1024 * 1024 - control.used_bytes() - free)
+        .unwrap();
+    let io = runtime.lock_manifest(job.token).await;
+    let mut proposal = (*old).clone();
+    proposal.pieces[0].bytes_written = 32;
+    let error = runtime
+        .store_manifest_unlocked(&proposal, io.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<LocalMutationError>(),
+        Some(LocalMutationError::Busy)
+    ));
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job_manifest(job.token.job_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        &*runtime.manifest_cache.lock().await[&job.token.job_id],
+        &*old
+    );
+    assert_eq!(
+        runtime.manifest_checkpoint_state.lock().await[&job.token].revision,
+        revision
+    );
+    assert_eq!(runtime.manifest_cache.lock().await.entries.capacity(), 1);
+    drop(held);
+    runtime
+        .store_manifest_unlocked(&proposal, io)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.manifest_cache.lock().await[&job.token.job_id].pieces[0].bytes_written,
+        32
+    );
+    assert_eq!(old.pieces[0].bytes_written, 0);
+}
+
+#[tokio::test]
+async fn selected_hydration_refuses_cache_growth_without_activating_private_backing() {
+    use super::super::local_mutation::job_read::{JobRead, JobReadResult};
+    let root = crate::paths::unique_test_dir("resident-cache-hydration-credit");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = admit_download_job(
+        &runtime,
+        "44".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        ED2K_PART_SIZE,
+    );
+    drop(runtime.ensure_job(&job).await.unwrap());
+    runtime
+        .manifest_cache
+        .lock()
+        .await
+        .remove(&job.token.job_id);
+    let before = runtime
+        .metadata
+        .download_job_manifest(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    let (reached, ready) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(reached, resume);
+    let receipt = runtime
+        .local_mutations
+        .submit_job_read(&runtime, JobRead::SelectExecution(job.token))
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let control = &runtime.local_mutations.residents;
+    let held = control
+        .reserve_bytes(128 * 1024 * 1024 - control.used_bytes())
+        .unwrap();
+    release.send(()).unwrap();
+    let error = match tokio::time::timeout(std::time::Duration::from_secs(10), receipt)
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        Ok(JobReadResult::Execution(_)) => panic!("unadmitted cache activation"),
+        Ok(_) => panic!("unexpected hydration result"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<LocalMutationError>(),
+        Some(LocalMutationError::Busy)
+    ));
+    assert!(runtime.manifest_cache.lock().await.is_empty());
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job_manifest(job.token.job_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    drop(held);
+    assert_eq!(runtime.ensure_job(&job).await.unwrap().token, job.token);
+}
+
+#[tokio::test]
+async fn cache_eviction_frees_entry_storage_but_keeps_reader_backing_charged() {
+    let root = crate::paths::unique_test_dir("resident-cache-reader-lifetime");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = admit_download_job(
+        &runtime,
+        "33".repeat(16).parse().unwrap(),
+        "Sample.bin".into(),
+        ED2K_PART_SIZE,
+    );
+    let old = runtime.ensure_job(&job).await.unwrap();
+    let control = Arc::clone(&runtime.local_mutations.residents);
+    let before = control.used_bytes();
+    let mut cache = runtime.manifest_cache.lock().await;
+    let before_table = cache.charged_bytes();
+    cache.remove(&job.token.job_id);
+    let freed = before_table - cache.charged_bytes();
+    assert!(freed > 0);
+    assert_eq!(control.used_bytes(), before - freed);
+    drop(cache);
+    let current = runtime.ensure_job(&job).await.unwrap();
+    assert_eq!(current.token, old.token);
+    let both = control.used_bytes();
+    drop(old);
+    assert!(control.used_bytes() < both);
+    runtime
+        .manifest_cache
+        .lock()
+        .await
+        .remove(&job.token.job_id);
+    runtime
+        .manifest_checkpoint_state
+        .lock()
+        .await
+        .remove(&job.token);
+    drop(current);
+    drop(runtime);
+    assert_eq!(control.used_bytes(), 0);
+}

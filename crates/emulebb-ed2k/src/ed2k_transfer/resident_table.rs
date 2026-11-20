@@ -12,6 +12,8 @@ use std::{
     },
 };
 
+pub(super) type ResidentCache = ResidentTable<emulebb_metadata::JobId, super::ResidentManifest>;
+
 #[derive(Debug)]
 struct Claims {
     pending: AtomicUsize,
@@ -75,6 +77,10 @@ impl<K: Ord, V> ResidentTable<K, V> {
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    pub(super) fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.iter().map(|(_, value)| value)
     }
 
     /// Reserve peak old+new storage before moving entries. Installation and
@@ -159,6 +165,18 @@ impl<K: Ord, V> ResidentTable<K, V> {
     #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Fixture construction still admits its table backing before insertion.
+    #[cfg(test)]
+    pub(super) fn insert_fixture(&mut self, key: K, value: V) -> Option<V> {
+        let claim = self.claim_insert().expect("fixture table capacity");
+        self.insert_claimed(key, value, claim)
     }
 }
 

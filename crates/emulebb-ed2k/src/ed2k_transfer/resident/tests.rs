@@ -586,6 +586,7 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
     assert_eq!(states[&token].persisted_bytes_written, 96);
     assert!(states[&token].dirty_piece_indexes.is_empty());
     drop(states);
+    let cache_bytes = runtime.manifest_cache.lock().await.charged_bytes();
     assert_eq!(
         runtime
             .local_mutations
@@ -598,6 +599,7 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
             + backing_bytes(&current).unwrap()
             + size_of::<u64>()
             + table_bytes
+            + cache_bytes
     );
     drop(old);
     drop(reader_during_sql);
@@ -609,7 +611,7 @@ async fn cancelled_store_retains_io_until_publication_before_the_next_writer_sna
             .lock()
             .unwrap()
             .bytes,
-        backing_bytes(&current).unwrap() + size_of::<u64>() + table_bytes
+        backing_bytes(&current).unwrap() + size_of::<u64>() + table_bytes + cache_bytes
     );
 }
 

@@ -215,7 +215,7 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&manifest).unwrap(),
             )
             .unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -339,7 +339,7 @@ mod tests {
                 &transfer::transfer_sql::manifest_to_metadata(&captured).unwrap(),
             )
             .unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -390,7 +390,7 @@ mod tests {
         live.pieces[0].bytes_written = 12;
         live.comment = "newer live metadata".into();
         runtime.note_dirty_piece_unlocked(&live, 0).await.unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -478,7 +478,7 @@ mod tests {
             .unwrap();
         live.pieces[0].bytes_written = 8;
         runtime.note_dirty_piece_unlocked(&live, 0).await.unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations
@@ -507,7 +507,7 @@ mod tests {
             .unwrap();
         live.pieces[1].bytes_written = 12;
         runtime.note_dirty_piece_unlocked(&live, 1).await.unwrap();
-        runtime.manifest_cache.lock().await.insert(
+        runtime.manifest_cache.lock().await.insert_fixture(
             job.token.job_id,
             runtime
                 .local_mutations

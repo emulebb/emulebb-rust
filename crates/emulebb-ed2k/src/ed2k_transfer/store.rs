@@ -339,6 +339,7 @@ impl Ed2kTransferRuntime {
             };
             let resident_write = self.local_mutations.residents.reserve(token.job_id)?;
             let mut cache = Arc::clone(&self.manifest_cache).lock_owned().await;
+            let cache_claim = cache.claim_insert()?;
             let mut manifest = cache
                 .get(&token.job_id)
                 .filter(|value| value.token == token)
@@ -364,7 +365,7 @@ impl Ed2kTransferRuntime {
                     {
                         map.remove(&token);
                     }
-                    cache.insert(token.job_id, manifest.clone());
+                    cache.insert_claimed(token.job_id, manifest.clone(), cache_claim);
                     let mut changed = false;
                     catalog.update_by_hash(&parsed_hash, |entry| {
                         if entry.aich_root != manifest.aich_root {
@@ -586,6 +587,7 @@ impl Ed2kTransferRuntime {
             "stale execution cannot publish a manifest"
         );
         let mut cache = self.manifest_cache.lock().await;
+        let cache_claim = cache.claim_insert()?;
         let permit = self.local_mutations.residents.reserve(token.job_id)?;
         let mut current_value = manifest.clone();
         // Explicit verification can publish a stopped job's current generation.
@@ -638,10 +640,10 @@ impl Ed2kTransferRuntime {
                 .context("download progress revision exhausted")?;
             state.dirty_piece_indexes.insert(index)?;
             state.revision = revision;
-            cache.insert(token.job_id, current.clone());
+            cache.insert_claimed(token.job_id, current.clone(), cache_claim);
             return Ok(current);
         }
-        cache.insert(token.job_id, current.clone());
+        cache.insert_claimed(token.job_id, current.clone(), cache_claim);
         Ok(current)
     }
 

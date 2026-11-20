@@ -2,7 +2,7 @@
 use super::{Ed2kTransferRuntime, LocalMutationError, ResidentManifest, resident::Reservation};
 use anyhow::{Result, ensure};
 use emulebb_metadata::{JobId, JobToken};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard};
 
 mod download_patch;
@@ -19,7 +19,7 @@ pub struct CategoryCacheFence {
 /// committing SQL. That owner publishes synchronously before its reply, even
 /// when the requesting client disconnects. Dropping an unsubmitted plan is safe.
 pub struct CategoryCacheMutation {
-    cache: Arc<Mutex<HashMap<JobId, ResidentManifest>>>,
+    cache: Arc<Mutex<super::resident_table::ResidentCache>>,
     category_id: Option<i64>,
     entries: Vec<(JobToken, Reservation)>,
     // Keep new hydration/category admission fenced until all entries publish.
