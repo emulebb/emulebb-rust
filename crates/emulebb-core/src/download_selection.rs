@@ -56,6 +56,9 @@ impl EmulebbCore {
         {
             return Ok(None);
         }
+        if !guard.promote() {
+            return Ok(None);
+        }
         let hash = job.file_hash.parse()?;
         let temp = self.download_temp_selection(&job).await?;
         let token = job.token;

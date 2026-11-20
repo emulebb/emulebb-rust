@@ -382,6 +382,34 @@ impl Drop for DownloadVerificationGuard {
     }
 }
 impl DownloadAttemptGuard {
+    /// Promote the same ownership record before resident/storage admission.
+    /// Refusal leaves preparation owned; it never drops/recreates the guard.
+    pub(crate) fn promote(&self) -> bool {
+        let mut state = self.control.state.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(entry) = state.entries.get(&self.token.job_id).filter(|entry| {
+            entry.nonce == self.nonce && entry.token == self.token && !entry.cancel.is_cancelled()
+        }) else {
+            return false;
+        };
+        if entry.kind == Kind::Active {
+            return true;
+        }
+        let active = state
+            .entries
+            .values()
+            .filter(|entry| entry.kind == Kind::Active)
+            .count();
+        if active >= state.active_limit() || state.entries.len() > state.window.total {
+            return false;
+        }
+        state
+            .entries
+            .get_mut(&self.token.job_id)
+            .expect("owned preparation")
+            .kind = Kind::Active;
+        true
+    }
+
     pub(crate) fn token(&self) -> JobToken {
         self.token
     }

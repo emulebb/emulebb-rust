@@ -1523,6 +1523,7 @@ impl EmulebbCore {
                 let egress_route = network.egress_route;
                 let outcome = run_ed2k_direct_downloads(
                     DirectDownloadOptions {
+                        prepared: None,
                         job_token,
                         bind_ip: network.bind_ip,
                         hello_identity,

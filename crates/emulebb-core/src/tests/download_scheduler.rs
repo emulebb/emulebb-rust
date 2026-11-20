@@ -1,6 +1,141 @@
 use super::*;
 
 #[tokio::test]
+async fn prepared_execution_reuses_a_full_connection_budget_and_deduplicates_the_peer() {
+    let (runtime, secure, hash_hex, name, size, token) =
+        completed_ed2k_transfer_runtime("prepared-core-budget").await;
+    runtime.apply_download_coordinator_config(
+        emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig {
+            max_connections: 1,
+            max_connections_per_window: 0,
+            ..Default::default()
+        },
+    );
+    let permit = match runtime.try_admit_source_connection() {
+        Ed2kSourceConnectionAdmission::Admitted { permit, .. } => permit,
+        _ => panic!("initial admission refused"),
+    };
+    let hash: Ed2kHash = hash_hex.parse().unwrap();
+    let source = direct_test_source(hash, Ipv4Addr::new(192, 0, 2, 1), 41001);
+    let mut options = direct_download_options(
+        token,
+        Arc::clone(&runtime),
+        secure,
+        hash_hex,
+        name,
+        size,
+        vec![source.clone(), source.clone()],
+    );
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = Arc::clone(&ran);
+    options.prepared = Some(crate::ed2k_direct_download_types::PreparedDirectDownload {
+        source,
+        download: Box::pin(async move {
+            let _permit = permit;
+            observed.store(true, std::sync::atomic::Ordering::Release);
+            Ok(Ed2kPeerDownloadReport::single(
+                token,
+                hash,
+                Ed2kPeerDownloadOutcome::AcceptedButIncomplete,
+            ))
+        }),
+    });
+    let outcome = run_ed2k_direct_downloads(options, |_, _, _, _, _, _, _, _, _| async {
+        panic!("prepared peer must not be dialed again")
+    })
+    .await
+    .unwrap();
+    assert!(ran.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(outcome.accepted_incomplete_peers, 1);
+    assert_eq!(runtime.download_resource_snapshot().connections, 0);
+}
+
+#[tokio::test]
+async fn prepared_worker_panic_drains_other_workers_and_their_permits() {
+    let (runtime, secure, hash_hex, name, size, token) =
+        completed_ed2k_transfer_runtime("prepared-core-panic").await;
+    runtime.apply_download_coordinator_config(
+        emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig {
+            max_connections: 2,
+            max_connections_per_window: 0,
+            ..Default::default()
+        },
+    );
+    let permit = match runtime.try_admit_source_connection() {
+        Ed2kSourceConnectionAdmission::Admitted { permit, .. } => permit,
+        _ => panic!("initial admission refused"),
+    };
+    let hash: Ed2kHash = hash_hex.parse().unwrap();
+    let source = direct_test_source(hash, Ipv4Addr::new(192, 0, 2, 1), 41001);
+    let other = direct_test_source(hash, Ipv4Addr::new(192, 0, 2, 2), 41002);
+    let mut options = direct_download_options(
+        token,
+        Arc::clone(&runtime),
+        secure,
+        hash_hex,
+        name,
+        size,
+        vec![other],
+    );
+    options.max_parallel_download_peers = 2;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let normal_started = Arc::clone(&started);
+    options.prepared = Some(crate::ed2k_direct_download_types::PreparedDirectDownload {
+        source,
+        download: Box::pin(async move {
+            let _permit = permit;
+            started.notified().await;
+            panic!("synthetic prepared worker failure")
+        }),
+    });
+    let result = run_ed2k_direct_downloads(options, move |_, _, _, _, _, _, _, _, _| {
+        let started = Arc::clone(&normal_started);
+        async move {
+            started.notify_one();
+            std::future::pending::<Result<Ed2kPeerDownloadReport>>().await
+        }
+    })
+    .await;
+    assert!(result.is_err());
+    assert_eq!(runtime.download_resource_snapshot().connections, 0);
+}
+
+#[tokio::test]
+async fn prepared_content_mismatch_refuses_before_execution_and_drops_its_permit() {
+    let (runtime, secure, hash_hex, name, size, token) =
+        completed_ed2k_transfer_runtime("prepared-core-content").await;
+    let permit = match runtime.try_admit_source_connection() {
+        Ed2kSourceConnectionAdmission::Admitted { permit, .. } => permit,
+        _ => panic!("initial admission refused"),
+    };
+    let source = direct_test_source(Ed2kHash([0x59; 16]), Ipv4Addr::new(192, 0, 2, 1), 41001);
+    let mut options = direct_download_options(
+        token,
+        Arc::clone(&runtime),
+        secure,
+        hash_hex,
+        name,
+        size,
+        Vec::new(),
+    );
+    options.prepared = Some(crate::ed2k_direct_download_types::PreparedDirectDownload {
+        source,
+        download: Box::pin(async move {
+            let _permit = permit;
+            panic!("mismatched prepared content must not execute")
+        }),
+    });
+    assert!(
+        run_ed2k_direct_downloads(options, |_, _, _, _, _, _, _, _, _| async {
+            panic!("mismatched content must not dial")
+        })
+        .await
+        .is_err()
+    );
+    assert_eq!(runtime.download_resource_snapshot().connections, 0);
+}
+
+#[tokio::test]
 async fn direct_download_scheduler_releases_all_slots_on_worker_panic() {
     // A panicking download worker must not leak the connection-budget slots
     // held by the other in-flight workers: the error path drains and releases

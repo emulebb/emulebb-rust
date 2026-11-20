@@ -10,6 +10,52 @@ fn hash(byte: u8) -> Ed2kHash {
 }
 
 #[test]
+fn promotion_keeps_one_guard_and_waits_for_ordinary_capacity() {
+    let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));
+    let active = control.try_enter(token(1, 1), hash(1)).unwrap();
+    let prepared = control.try_prepare(token(2, 1), hash(2)).unwrap();
+    let nonce = prepared.nonce;
+    assert!(!prepared.promote());
+    assert_eq!(control.snapshot().len(), 1);
+    assert!(matches!(
+        control.try_enter(token(2, 1), hash(2)),
+        Err(AdmissionDenied::Duplicate)
+    ));
+    drop(active);
+    assert!(prepared.promote());
+    assert_eq!(prepared.nonce, nonce);
+    assert!(control.owns(token(2, 1)));
+    assert_eq!(control.snapshot(), [(token(2, 1), false)]);
+    control.apply_concurrency_limit(Some(0));
+    assert!(
+        prepared.promote(),
+        "already-owned executions drain after a lower limit"
+    );
+    assert!(control.cancel(token(2, 1).job_id));
+    assert!(!prepared.promote(), "cancellation must never be revived");
+    assert!(prepared.cancellation().is_cancelled());
+    drop(prepared);
+    assert!(control.snapshot().is_empty());
+}
+
+#[test]
+fn preparation_cannot_promote_while_the_shared_cohort_must_drain() {
+    let control = Arc::new(DownloadAttemptControl::default());
+    let first = control.try_prepare(token(1, 1), hash(1)).unwrap();
+    let second = control.try_prepare(token(2, 1), hash(2)).unwrap();
+    control.apply_admission_window(crate::download_admission::AdmissionWindow {
+        active: 1,
+        preparing: 0,
+        total: 1,
+    });
+    assert!(!first.promote());
+    assert!(!first.cancellation().is_cancelled());
+    drop(second);
+    assert!(first.promote());
+    assert_eq!(control.available(), (0, 0));
+}
+
+#[test]
 fn adaptive_window_honors_user_limit_without_initial_baseline_clipping() {
     let control = Arc::new(DownloadAttemptControl::with_limit(Some(24)));
     control.apply_admission_window(crate::download_admission::AdmissionWindow {
