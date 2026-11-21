@@ -41,6 +41,23 @@ impl SelectionProgress {
     }
 }
 
+/// Ready owners still consume the existing preparation allowance until promotion.
+struct ReadyDownload {
+    guard: DownloadAttemptGuard,
+    source: crate::download_preparation::DownloadPreparation,
+    remaining_bytes: u64,
+}
+impl ReadyDownload {
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        use crate::download_preparation::DownloadPreparation;
+        match &self.source {
+            DownloadPreparation::Direct(source) => Some(source.admission_deadline),
+            DownloadPreparation::Callback(source) => Some(source.admission_deadline),
+            DownloadPreparation::Finalization | DownloadPreparation::Waiting => None,
+        }
+    }
+}
+
 impl EmulebbCore {
     pub(crate) fn start_download_scheduler(&self) {
         let core = self.clone();
@@ -50,20 +67,35 @@ impl EmulebbCore {
 
     async fn run_download_scheduler(self, shutdown: CancellationToken) {
         let mut workers = JoinSet::new();
+        let mut preparations = JoinSet::new();
+        let mut ready = Vec::new();
         let mut cursor = None;
+        let mut last_admitted = None;
         let (ticks, clock) = watch::channel(());
         let mut interval = tokio::time::interval(RETRY_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut memory = crate::download_admission::MemorySampler::new();
         self.refresh_download_admission(&mut memory).await;
         if let Err(error) = self
-            .select_download_page(&mut cursor, &mut workers, &clock, &shutdown)
+            .select_download_page(&mut cursor, &mut preparations, &shutdown)
             .await
         {
             tracing::warn!(%error, "download selection deferred");
         }
         interval.tick().await;
         loop {
+            // Collect every preparation which has already settled before ranking.
+            while let Some(result) = preparations.try_join_next() {
+                collect_ready(&mut ready, result);
+            }
+            self.admit_ready_downloads(
+                &mut ready,
+                &mut last_admitted,
+                &mut workers,
+                &clock,
+                &shutdown,
+            )
+            .await;
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,
@@ -72,21 +104,30 @@ impl EmulebbCore {
                         tracing::error!(%error, "selected download worker failed");
                     }
                 }
-                () = self.download_attempts.changed.notified(), if workers.is_empty() => {
-                    if let Err(error) = self.select_download_page(&mut cursor, &mut workers, &clock, &shutdown).await {
+                result = preparations.join_next(), if !preparations.is_empty() => {
+                    if let Some(result) = result { collect_ready(&mut ready, result); }
+                }
+                () = self.download_attempts.changed.notified(), if workers.is_empty() && preparations.is_empty() => {
+                    if let Err(error) = self.select_download_page(&mut cursor, &mut preparations, &shutdown).await {
                         tracing::warn!(%error, "download selection deferred");
                     }
                 }
                 _ = interval.tick() => {
                     ticks.send_replace(());
                     self.refresh_download_admission(&mut memory).await;
-                    if let Err(error) = self.select_download_page(&mut cursor, &mut workers, &clock, &shutdown).await {
+                    if let Err(error) = self.select_download_page(&mut cursor, &mut preparations, &shutdown).await {
                         tracing::warn!(%error, "download selection deferred");
                     }
                 }
             }
         }
         self.download_attempts.cancel_all();
+        while let Some(result) = preparations.join_next().await {
+            collect_ready(&mut ready, result);
+        }
+        for entry in ready {
+            self.discard_ready_download(entry).await;
+        }
         while let Some(result) = workers.join_next().await {
             if let Err(error) = result {
                 tracing::warn!(%error, "selected download worker failed during shutdown");
@@ -94,14 +135,82 @@ impl EmulebbCore {
         }
     }
 
-    async fn select_download_page(
+    async fn discard_ready_download(&self, ready: ReadyDownload) {
+        let token = ready.guard.token();
+        let hash = ready.guard.hash().to_string();
+        match ready.source {
+            crate::download_preparation::DownloadPreparation::Callback(source) => {
+                source.cancel_and_settle().await
+            }
+            source => drop(source),
+        }
+        self.release_download_source_file(token, &hash).await;
+        // The guard remains owned until its actual prepared producer settles.
+    }
+
+    async fn admit_ready_downloads(
         &self,
-        cursor: &mut Option<JobId>,
+        ready: &mut Vec<ReadyDownload>,
+        last_admitted: &mut Option<JobId>,
         workers: &mut JoinSet<()>,
         clock: &watch::Receiver<()>,
         shutdown: &CancellationToken,
+    ) {
+        let mut index = 0;
+        while index < ready.len() {
+            if shutdown.is_cancelled()
+                || ready[index].guard.cancellation().is_cancelled()
+                || ready[index]
+                    .deadline()
+                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+            {
+                self.discard_ready_download(ready.swap_remove(index)).await;
+            } else {
+                index += 1;
+            }
+        }
+        while !ready.is_empty() && !shutdown.is_cancelled() {
+            if crate::download_admission::hydration_starts(
+                self.ed2k_transfers.download_resource_snapshot(),
+            ) == 0
+            {
+                break;
+            }
+            let index = ready
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| {
+                    let id = entry.guard.token().job_id;
+                    (
+                        entry.remaining_bytes,
+                        last_admitted.is_some_and(|last| id <= last),
+                        id,
+                    )
+                })
+                .expect("nonempty ready cohort")
+                .0;
+            if !ready[index].guard.promote() {
+                break;
+            }
+            let ready = ready.swap_remove(index);
+            *last_admitted = Some(ready.guard.token().job_id);
+            let core = self.clone();
+            let clock = clock.clone();
+            let shutdown = shutdown.clone();
+            workers.spawn(async move {
+                core.run_selected_download(ready.guard, ready.source, clock, shutdown)
+                    .await;
+            });
+        }
+    }
+
+    async fn select_download_page(
+        &self,
+        cursor: &mut Option<JobId>,
+        workers: &mut JoinSet<Option<ReadyDownload>>,
+        shutdown: &CancellationToken,
     ) -> Result<()> {
-        if self.download_attempts.available() == (0, 0) {
+        if self.download_attempts.available().1 == 0 {
             return Ok(());
         }
         let page = self
@@ -116,7 +225,8 @@ impl EmulebbCore {
                 Ok((
                     job.token,
                     job.file_hash.parse()?,
-                    job.expected_size_bytes.is_some(),
+                    job.expected_size_bytes
+                        .map(|size| size.saturating_sub(job.checkpointed_bytes)),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -124,7 +234,7 @@ impl EmulebbCore {
             *cursor = None;
         }
         drop(page);
-        for (token, hash, known_size) in candidates {
+        for (token, hash, remaining_bytes) in candidates {
             if shutdown.is_cancelled() {
                 break;
             }
@@ -141,13 +251,22 @@ impl EmulebbCore {
                 }
             };
             let core = self.clone();
-            let clock = clock.clone();
             let shutdown = shutdown.clone();
             workers.spawn(async move {
-                if known_size {
-                    core.run_selected_download(guard, clock, shutdown).await;
-                } else if let Err(error) = core.prepare_download_metadata(guard, shutdown).await {
-                    tracing::warn!(job_id = %token.job_id, %error, "download metadata preparation deferred");
+                if let Some(remaining_bytes) = remaining_bytes {
+                    match core.prepare_download_sources(&guard, &shutdown).await {
+                        Ok(crate::download_preparation::DownloadPreparation::Waiting) => None,
+                        Ok(source) => Some(ReadyDownload { guard, source, remaining_bytes }),
+                        Err(error) => {
+                            tracing::warn!(job_id = %token.job_id, %error, "download source preparation deferred");
+                            None
+                        }
+                    }
+                } else {
+                    if let Err(error) = core.prepare_download_metadata(guard, shutdown).await {
+                        tracing::warn!(job_id = %token.job_id, %error, "download metadata preparation deferred");
+                    }
+                    None
                 }
             });
         }
@@ -221,23 +340,20 @@ impl EmulebbCore {
     async fn run_selected_download(
         &self,
         mut guard: DownloadAttemptGuard,
+        source: crate::download_preparation::DownloadPreparation,
         mut clock: watch::Receiver<()>,
         shutdown: CancellationToken,
     ) {
         use crate::download_preparation::DownloadPreparation;
         let mut callback = None;
-        let mut prepared = match self.prepare_download_sources(&guard, &shutdown).await {
-            Ok(DownloadPreparation::Direct(source)) => Some(source),
-            Ok(DownloadPreparation::Callback(source)) => {
+        let mut prepared = match source {
+            DownloadPreparation::Direct(source) => Some(source),
+            DownloadPreparation::Callback(source) => {
                 callback = Some(source);
                 None
             }
-            Ok(DownloadPreparation::Finalization) => None,
-            Ok(DownloadPreparation::Waiting) => return,
-            Err(error) => {
-                tracing::warn!(job_id = %guard.token().job_id, %error, "download source preparation deferred");
-                return;
-            }
+            DownloadPreparation::Finalization => None,
+            DownloadPreparation::Waiting => return,
         };
         let endpoint = prepared
             .as_ref()
@@ -659,5 +775,16 @@ mod tests {
                 .storage_failure
                 .is_none()
         );
+    }
+}
+
+fn collect_ready(
+    ready: &mut Vec<ReadyDownload>,
+    result: std::result::Result<Option<ReadyDownload>, tokio::task::JoinError>,
+) {
+    match result {
+        Ok(Some(entry)) => ready.push(entry),
+        Ok(None) => {}
+        Err(error) => tracing::error!(%error, "download preparation worker failed"),
     }
 }
