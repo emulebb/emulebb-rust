@@ -615,6 +615,22 @@ impl Ed2kTransferRuntime {
             .await
     }
 
+    /// Active management pages share the waiting-page budget and retained
+    /// backing, but use stable lifetime IDs rather than mutable scheduler rank.
+    pub async fn active_upload_page(
+        &self,
+        after: Option<uuid::Uuid>,
+        limit: usize,
+        count_total: bool,
+    ) -> anyhow::Result<super::RetainedRead<super::Ed2kUploadQueuePage>> {
+        self.local_mutations
+            .retain_read(1024 * 1024, || async {
+                let queue = self.upload_queue.lock().await;
+                Ok(queue.active_page(after, limit, count_total, Instant::now())?)
+            })
+            .await
+    }
+
     /// Return one management entry without materializing the full upload queue.
     pub async fn upload_client_snapshot(
         &self,
