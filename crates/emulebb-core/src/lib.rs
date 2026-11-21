@@ -328,8 +328,9 @@ use download_task_supervisor::DownloadTaskSupervisor;
 pub use emulebb_ed2k::NatStatusSnapshot;
 pub use emulebb_ed2k::normalize_ed2k_file_name;
 pub use rest_model::{
-    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadCreate,
-    DownloadCreateSource, DownloadFileNameObservation, DownloadSource, DownloadSourceMetrics,
+    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadConcurrency,
+    DownloadConcurrencyMode, DownloadCreate, DownloadCreateSource, DownloadFileNameObservation,
+    DownloadResidentMemory, DownloadResources, DownloadSource, DownloadSourceMetrics,
     DownloadUpdate, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus,
     IpFilterStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
     Search, SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate,

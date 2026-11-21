@@ -84,6 +84,14 @@ pub(crate) struct DisplacementOwner {
     pub draining: bool,
 }
 
+pub(crate) struct AttemptStats {
+    pub active: usize,
+    pub preparing: usize,
+    pub configured_limit: Option<u32>,
+    pub target: usize,
+    pub selected: Vec<JobId>,
+}
+
 /// This guard owns only scalar controls. Drop needs neither an async runtime,
 /// Core state nor the task set that is currently executing the attempt.
 pub(crate) struct DownloadAttemptGuard {
@@ -94,6 +102,24 @@ pub(crate) struct DownloadAttemptGuard {
     wake: Arc<tokio::sync::Notify>,
 }
 impl DownloadAttemptControl {
+    /// Coarse observation only; draining owners continue to consume capacity.
+    pub(crate) fn resource_stats(&self) -> AttemptStats {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let active = state
+            .entries
+            .values()
+            .filter(|entry| entry.kind == Kind::Active)
+            .count();
+        let mut selected: Vec<_> = state.entries.keys().copied().collect();
+        selected.extend(state.verifications.keys().copied());
+        AttemptStats {
+            active,
+            preparing: state.entries.len() - active,
+            configured_limit: state.ordinary_limit,
+            target: state.active_limit(),
+            selected,
+        }
+    }
     pub(crate) fn apply_admission_window(
         &self,
         window: crate::download_admission::AdmissionWindow,

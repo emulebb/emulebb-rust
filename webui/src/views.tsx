@@ -26,6 +26,7 @@ import {
   SettingsSnapshot,
   DownloadDetail,
   DownloadSummary,
+  Stats,
   CursorPage,
   Friend,
   IpFilterStatus,
@@ -99,7 +100,7 @@ async function createDownloadWithChoice<T>(create: (redownload: boolean) => Prom
 
 export function Overview(props: {
   snapshot: Snapshot | null;
-  stats: Record<string, unknown>;
+  stats: Partial<Stats>;
   transfers: DownloadSummary[];
   servers: ServerItem[];
   uploads: Upload[];
@@ -109,6 +110,7 @@ export function Overview(props: {
   kad: KadStatus;
 }) {
   const connectedServers = props.servers.filter((item) => item.connected).length;
+  const resources = props.stats.downloadResources;
   const reload = props.libraryScan?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? props.snapshot?.status?.sharedStartupCache?.reloadProgress ?? {};
   const startupStages = startupStageRows(props.snapshot, props.libraryScan, props.kad, connectedServers);
   return (
@@ -122,9 +124,24 @@ export function Overview(props: {
         value={formatRate(numberField(props.stats, "uploadRateBytesPerSec") ?? kibToBytes(numberField(props.stats, "uploadSpeedKiBps")))}
       />
       <Metric label="Transfers" value={props.snapshot?.downloads ? `${props.snapshot.downloads.unfinished} unfinished / ${props.snapshot.downloads.completed} completed` : "n/a"} />
+      <Metric label="Download work" value={resources ? `${resources.active} active / ${resources.preparing} preparing / ${resources.waiting} waiting` : "n/a"} />
       <Metric label="Uploads" value={`${props.uploads.length}/${props.uploadQueue.length}`} />
       <Metric label="Shared" value={String(props.snapshot?.status?.runtimeDiagnostics?.sharedFileCount ?? "n/a")} />
       <Metric label="Kad" value={props.kad.connected ? "Connected" : "Idle"} />
+
+      {resources && <section class="panel card wide">
+        <h2>Download resources</h2>
+        <div class="kv">
+          <span>Concurrency</span>
+          <strong>{resources.concurrency.mode === "automatic" ? "Automatic" : `Configured limit ${resources.concurrency.configuredLimit}`}</strong>
+          <span>Current target</span><strong>{resources.concurrency.target}</strong>
+          <span>Active above target</span><strong>{resources.concurrency.burstActive}</strong>
+          <span>Resident download cache</span>
+          <strong>{formatBytes(resources.residentMemory.usedBytes)} / {formatBytes(resources.residentMemory.limitBytes)}</strong>
+          <span>Soft cache target</span><strong>{formatBytes(resources.residentMemory.softTargetBytes)}</strong>
+        </div>
+        <p class="muted">Counts are live observations. Existing work drains when capacity falls. The cache budget is separate from total daemon memory.</p>
+      </section>}
 
       <section class="panel card wide">
         <h2>Startup & Indexing</h2>

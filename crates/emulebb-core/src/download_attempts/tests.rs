@@ -10,6 +10,40 @@ fn hash(byte: u8) -> Ed2kHash {
 }
 
 #[test]
+fn resource_observation_preserves_draining_owners_and_separates_preparation() {
+    let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));
+    let active = control.try_enter(token(1, 1), hash(1)).unwrap();
+    let preparing = control.try_prepare(token(2, 1), hash(2)).unwrap();
+    let stats = control.resource_stats();
+    assert_eq!(
+        (
+            stats.active,
+            stats.preparing,
+            stats.target,
+            stats.configured_limit
+        ),
+        (1, 1, 1, Some(1))
+    );
+    assert_eq!(stats.selected.len(), 2);
+    assert!(stats.selected.contains(&token(1, 1).job_id));
+    assert!(stats.selected.contains(&token(2, 1).job_id));
+    control.cancel_all();
+    control.apply_admission_window(crate::download_admission::AdmissionWindow {
+        active: 0,
+        burst: 0,
+        preparing: 0,
+        total: 0,
+    });
+    let stats = control.resource_stats();
+    assert_eq!((stats.active, stats.preparing, stats.target), (1, 1, 0));
+    drop(preparing);
+    drop(active);
+    let stats = control.resource_stats();
+    assert_eq!((stats.active, stats.preparing), (0, 0));
+    assert!(stats.selected.is_empty());
+}
+
+#[test]
 fn displacement_keeps_capacity_owned_and_protects_fresh_readiness() {
     let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));
     let prepared = control.try_prepare(token(1, 1), hash(1)).unwrap();

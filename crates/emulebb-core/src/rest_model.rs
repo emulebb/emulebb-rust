@@ -208,9 +208,44 @@ pub struct IndexingStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferStats {
-    pub active: usize,
+    pub resources: DownloadResources,
     pub completed: usize,
     pub total: usize,
+}
+
+/// Approximate runtime observations, not admission authority or total daemon RAM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadResources {
+    pub active: usize,
+    pub preparing: usize,
+    pub waiting: u64,
+    pub concurrency: DownloadConcurrency,
+    pub resident_memory: DownloadResidentMemory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadConcurrency {
+    pub mode: DownloadConcurrencyMode,
+    pub configured_limit: Option<u32>,
+    pub target: usize,
+    pub burst_active: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DownloadConcurrencyMode {
+    Automatic,
+    Fixed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadResidentMemory {
+    pub used_bytes: usize,
+    pub soft_target_bytes: usize,
+    pub limit_bytes: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

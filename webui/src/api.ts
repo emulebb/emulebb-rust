@@ -48,12 +48,25 @@ export type AppInfo = {
   [key: string]: unknown;
 };
 
+export type DownloadResources = {
+  active: number;
+  preparing: number;
+  waiting: number;
+  concurrency: {
+    mode: "automatic" | "fixed";
+    configuredLimit: number | null;
+    target: number;
+    burstActive: number;
+  };
+  residentMemory: { usedBytes: number; softTargetBytes: number; limitBytes: number };
+};
+
 export type Stats = {
   downloadRateBytesPerSec?: number;
   uploadRateBytesPerSec?: number;
   downloadSpeedKiBps?: number;
   uploadSpeedKiBps?: number;
-  activeDownloads?: number;
+  downloadResources: DownloadResources;
   activeUploads?: number;
   waitingUploads?: number;
   totalTransfers?: number;

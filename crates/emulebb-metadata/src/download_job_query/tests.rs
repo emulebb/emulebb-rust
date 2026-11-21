@@ -126,23 +126,24 @@ fn dashboard_counters_track_intent_delete_admission_removal_and_rollback() {
     let c = add(&store, 83, None, 8);
     complete(&store, &c);
     let check = |total, active, completed| {
-        let expected = crate::MetadataTransferCounts {
-            total,
-            active,
-            completed,
-        };
+        assert_eq!(store.waiting_download_count(&[]).unwrap(), active);
+        let expected = crate::MetadataTransferCounts { total, completed };
         assert_eq!(store.transfer_counts().unwrap(), expected);
         // Independent row-scan oracle for the existing public membership rules.
         let conn = store.connection().unwrap();
-        let actual = conn.query_row(
-            "SELECT count(*),coalesce(sum(terminal_completed_at_s IS NULL AND intent='started'),0),coalesce(sum(terminal_completed_at_s IS NOT NULL),0)
+        let actual = conn
+            .query_row(
+                "SELECT count(*),coalesce(sum(terminal_completed_at_s IS NOT NULL),0)
              FROM download_jobs WHERE removed_at_s IS NULL AND delete_requested_at_s IS NULL",
-            [], |row| Ok(crate::MetadataTransferCounts {
-                total: crate::sql_value::unsigned(row, 0)?,
-                active: crate::sql_value::unsigned(row, 1)?,
-                completed: crate::sql_value::unsigned(row, 2)?,
-            }),
-        ).unwrap();
+                [],
+                |row| {
+                    Ok(crate::MetadataTransferCounts {
+                        total: crate::sql_value::unsigned(row, 0)?,
+                        completed: crate::sql_value::unsigned(row, 1)?,
+                    })
+                },
+            )
+            .unwrap();
         assert_eq!(actual, expected);
     };
     let update = |id: JobId, set: &str| {
@@ -652,7 +653,6 @@ fn mixed_100k_keysets_use_exact_indexes_and_summary_never_scans_jobs() {
             store.transfer_counts().unwrap(),
             crate::MetadataTransferCounts {
                 total: (unfinished + completed) as usize,
-                active: 0,
                 completed: completed as usize,
             }
         );

@@ -66,11 +66,45 @@ impl EmulebbCore {
         &self,
     ) -> Result<emulebb_ed2k::ed2k_transfer::RetainedRead<TransferStats>> {
         self.persistence_owner.check_coherent_state()?;
+        let mut attempts = self.download_attempts.resource_stats();
+        attempts.selected.extend(
+            self.ed2k_transfers
+                .verifying_downloads()
+                .await
+                .into_iter()
+                .map(|token| token.job_id),
+        );
+        attempts.selected.sort_unstable();
+        attempts.selected.dedup();
+        let waiting = *self
+            .ed2k_transfers
+            .waiting_download_count(attempts.selected)
+            .await?;
         let counts = self.ed2k_transfers.transfer_counts().await?;
+        let native = self.ed2k_transfers.download_resource_snapshot();
         self.persistence_owner.check_coherent_state()?;
         counts.try_project(4096, |counts| {
             Ok(TransferStats {
-                active: counts.active,
+                resources: DownloadResources {
+                    active: attempts.active,
+                    preparing: attempts.preparing,
+                    waiting,
+                    concurrency: DownloadConcurrency {
+                        mode: if attempts.configured_limit.is_some() {
+                            DownloadConcurrencyMode::Fixed
+                        } else {
+                            DownloadConcurrencyMode::Automatic
+                        },
+                        configured_limit: attempts.configured_limit,
+                        target: attempts.target,
+                        burst_active: attempts.active.saturating_sub(attempts.target),
+                    },
+                    resident_memory: DownloadResidentMemory {
+                        used_bytes: native.resident_bytes,
+                        soft_target_bytes: crate::download_admission::SOFT_RESIDENT_BYTES,
+                        limit_bytes: native.resident_limit,
+                    },
+                },
                 completed: counts.completed,
                 total: counts.total,
             })
