@@ -76,6 +76,14 @@ fn endgame_policy(file_size: u64, present_bytes: u64, aggregate_rate: u64) -> En
     }
 }
 
+pub(super) fn download_is_in_endgame(
+    file_size: u64,
+    present_bytes: u64,
+    aggregate_rate: u64,
+) -> bool {
+    endgame_policy(file_size, present_bytes, aggregate_rate).endgame
+}
+
 fn may_steal_lease(
     policy: EndgamePolicy,
     owner: &BlockLeaseOwner,

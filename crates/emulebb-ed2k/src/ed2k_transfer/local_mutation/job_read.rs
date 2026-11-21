@@ -12,6 +12,10 @@ pub(in crate::ed2k_transfer) enum JobRead {
     VerifiedParts(emulebb_metadata::JobToken),
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
+    Scheduling(
+        Arc<transfer::Ed2kTransferRuntime>,
+        emulebb_metadata::JobToken,
+    ),
     TransferCounts,
     Execution(emulebb_metadata::JobToken),
     SelectExecution(emulebb_metadata::JobToken),
@@ -46,6 +50,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     VerifiedParts(Option<RetainedRead<emulebb_metadata::MetadataDownloadVerifiedParts>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
+    Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
@@ -79,6 +84,7 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
+            JobRead::Scheduling(..) => transfer::download_scheduling::WORK_BYTES,
             JobRead::VerifiedParts(_)
             | JobRead::SourceScarcity(_)
             | JobRead::LiveSourceScarcity(..) => 128 * 1024,
@@ -162,6 +168,9 @@ impl LocalMutationRegistry {
                 JobRead::Query(query) => metadata.download_job_page(query).map(|value| {
                     JobReadResult::Query(RetainedRead::new(value, capacity.take_result()))
                 }),
+                JobRead::Scheduling(runtime, token) => runtime
+                    .read_download_scheduling_state(token)
+                    .map(JobReadResult::Scheduling),
                 JobRead::Counts => metadata.download_job_counts().map(|value| {
                     JobReadResult::Counts(RetainedRead::new(value, capacity.take_result()))
                 }),
@@ -353,6 +362,22 @@ impl LocalMutationRegistry {
     }
 }
 impl transfer::Ed2kTransferRuntime {
+    /// Classify only an already cached/current execution. The shared worker
+    /// owns its temporary frequency buffers; cancellation cannot release that
+    /// credit before the worker and its resident read loan actually finish.
+    pub async fn download_scheduling_state(
+        self: &Arc<Self>,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<Option<transfer::DownloadSchedulingState>> {
+        let JobReadResult::Scheduling(state) = self
+            .read_job_metadata(JobRead::Scheduling(Arc::clone(self), token))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(state)
+    }
+
     /// Caller must release job/content guards before retrying Busy. No read
     /// waits for registry capacity while a writer could need its held guard.
     pub(in crate::ed2k_transfer) async fn read_job_metadata(

@@ -159,11 +159,19 @@ impl Ed2kTransferRuntime {
     /// per-block; resets on restart). Surfaced in the REST transfer so in-flight
     /// progress is visible even before whole parts verify.
     pub fn downloaded_session_bytes(&self, token: JobToken) -> u64 {
+        self.download_payload_observation(token).0
+    }
+
+    pub(super) fn download_payload_observation(&self, token: JobToken) -> (u64, Option<Instant>) {
         self.download_activity
             .lock()
             .ok()
-            .and_then(|activity| activity.get(&token).map(|entry| entry.session_bytes))
-            .unwrap_or(0)
+            .and_then(|activity| {
+                activity
+                    .get(&token)
+                    .map(|entry| (entry.session_bytes, Some(entry.last_seen_at)))
+            })
+            .unwrap_or((0, None))
     }
 
     /// Record live payload from a specific peer for the per-source registry.
@@ -561,13 +569,43 @@ impl Ed2kTransferRuntime {
         part_total: u32,
         now: Instant,
     ) -> Vec<u32> {
+        self.source_frequencies_with_budget(token, part_total, now, None)
+            .expect("unrestricted source frequency read")
+    }
+
+    pub(super) fn source_frequencies_with_budget(
+        &self,
+        token: JobToken,
+        part_total: u32,
+        now: Instant,
+        budget: Option<usize>,
+    ) -> Option<Vec<u32>> {
+        let base = (part_total as usize)
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_add((part_total as usize).div_ceil(8));
+        if budget.is_some_and(|limit| base > limit) {
+            return None;
+        }
         let mut counts = vec![0u32; part_total as usize];
         let Ok(sources) = self.download_sources.lock() else {
-            return counts;
+            return budget.is_none().then_some(counts);
         };
         let Some(peers) = sources.get(&token) else {
-            return counts;
+            return Some(counts);
         };
+        if let Some(limit) = budget {
+            let live = peers
+                .values()
+                .filter(|peer| {
+                    !is_activity_stale(peer.last_seen_at, now) && peer.part_bitmap.is_some()
+                })
+                .count();
+            // A filtered collect may reserve up to twice its final pointer count.
+            let refs = live.saturating_mul(2 * std::mem::size_of::<&Ed2kSourceActivity>());
+            if base.saturating_add(refs) > limit {
+                return None;
+            }
+        }
         // WHY: sorting borrowed references and reusing one part bitset avoids
         // allocating a complete bitmap for every identity or scanning peers
         // quadratically while suppressing duplicate endpoint votes.
@@ -592,7 +630,7 @@ impl Ed2kTransferRuntime {
                 }
             }
         }
-        counts
+        Some(counts)
     }
 
     /// Number of parts available from at least one live source.
