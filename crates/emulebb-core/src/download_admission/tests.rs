@@ -14,6 +14,17 @@ fn resources() -> DownloadResourceSnapshot {
 }
 
 #[test]
+fn prepared_hydration_does_not_require_a_second_connection_slot() {
+    let mut native = resources();
+    native.connection_limit = 1;
+    native.connections = 1;
+    assert_eq!(construction_starts(native), 0);
+    assert!(hydration_starts(native) > 0);
+    native.free_work_units = 0;
+    assert_eq!(hydration_starts(native), 0);
+}
+
+#[test]
 fn growth_is_gradual_and_can_exceed_initial_baseline() {
     let native = resources();
     let mut window = AdmissionWindow::default();

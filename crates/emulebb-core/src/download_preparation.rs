@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct PreparedDownloadSource {
     pub source: Ed2kFoundSource,
     pub peer: Box<Ed2kPreparedPeer>,
+    pub admission_deadline: tokio::time::Instant,
 }
 
 pub(crate) enum DownloadPreparation {
@@ -151,6 +152,10 @@ impl EmulebbCore {
                                 return Ok(DownloadPreparation::Direct(PreparedDownloadSource {
                                     source: source.clone(),
                                     peer,
+                                    admission_deadline: tokio::time::Instant::now()
+                                        + Duration::from_secs(
+                                            network.ed2k.connect_timeout_secs.max(10),
+                                        ),
                                 }));
                             }
                             self.hold_no_needed_parts_sources(

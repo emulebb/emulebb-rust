@@ -60,6 +60,15 @@ impl Default for AdmissionWindow {
 pub(crate) fn construction_starts(native: DownloadResourceSnapshot) -> usize {
     let connection_free =
         native.connection_limit == 0 || native.connections < native.connection_limit;
+    if connection_free {
+        hydration_starts(native)
+    } else {
+        0
+    }
+}
+
+/// A prepared socket already owns its connection; local hydration needs no new one.
+pub(crate) fn hydration_starts(native: DownloadResourceSnapshot) -> usize {
     let transient_free =
         native.transient_bytes < native.transient_limit && native.free_work_units > 0;
     let headroom = native.construction_bytes.saturating_mul(4);
@@ -67,7 +76,7 @@ pub(crate) fn construction_starts(native: DownloadResourceSnapshot) -> usize {
         .resident_limit
         .saturating_sub(native.resident_bytes)
         .saturating_sub(headroom);
-    if connection_free && transient_free {
+    if transient_free {
         free / native.construction_bytes.max(1)
     } else {
         0

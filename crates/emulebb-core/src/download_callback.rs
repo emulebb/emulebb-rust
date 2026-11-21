@@ -52,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 /// Core owns admission; the listener owns the socket until its settlement receipt.
 pub(crate) struct PreparedCallbackSource {
     preparation: Ed2kCallbackPreparation,
+    pub admission_deadline: tokio::time::Instant,
 }
 impl PreparedCallbackSource {
     pub(crate) async fn cancel_and_settle(mut self) {
@@ -127,6 +128,7 @@ impl EmulebbCore {
                 .max(network.ed2k.connect_timeout_secs.max(10)),
         )
         .min(emulebb_ed2k::ed2k_transfer::ED2K_CALLBACK_TICKET_MAX_LIFETIME);
+        let admission_deadline = tokio::time::Instant::now() + window;
         let mut preparation = self
             .ed2k_transfers
             .prepare_callback_download(target.download_for_source(source), window)?;
@@ -204,7 +206,10 @@ impl EmulebbCore {
         dispatch_cancel.cancel();
         while findsource_tasks.join_next().await.is_some() {}
         if matches!(result, Ok(true)) {
-            return Ok(Some(PreparedCallbackSource { preparation }));
+            return Ok(Some(PreparedCallbackSource {
+                preparation,
+                admission_deadline,
+            }));
         }
         if !skipped {
             preparation.cancel();

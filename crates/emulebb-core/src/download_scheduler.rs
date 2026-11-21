@@ -239,36 +239,16 @@ impl EmulebbCore {
                 return;
             }
         };
-        if crate::download_admission::construction_starts(
-            self.ed2k_transfers.download_resource_snapshot(),
-        ) == 0
-            || !guard.promote()
-        {
-            if let Some(ready) = prepared.take() {
-                self.release_direct_download_source_leases(
-                    guard.token(),
-                    &[crate::source_endpoint_key(&ready.source)],
-                )
-                .await;
-            }
-            if let Some(ready) = callback.take() {
-                ready.cancel_and_settle().await;
-            }
-            return;
-        }
-        let previous = guard.token();
-        let mut result = self.hydrate_selected_download(&mut guard).await;
-        if let Some(ready) = prepared.as_ref() {
-            let mut state = self.state.lock().await;
-            let endpoint = crate::source_endpoint_key(&ready.source);
-            if state.active_download_peer_endpoints.get(&endpoint) == Some(&previous) {
-                state
-                    .active_download_peer_endpoints
-                    .insert(endpoint, guard.token());
-            } else {
-                result = Ok(None);
-            }
-        }
+        let endpoint = prepared
+            .as_ref()
+            .map(|ready| crate::source_endpoint_key(&ready.source));
+        let deadline = prepared
+            .as_ref()
+            .map(|ready| ready.admission_deadline)
+            .or_else(|| callback.as_ref().map(|ready| ready.admission_deadline));
+        let result = self
+            .wait_for_download_hydration(&mut guard, endpoint, deadline, &mut clock, &shutdown)
+            .await;
         if !matches!(result, Ok(Some(_))) {
             drop(prepared.take());
             if let Some(ready) = callback.take() {
@@ -382,6 +362,89 @@ impl EmulebbCore {
         drop(prepared.take());
         self.retire_download_selection(&guard, &mut clock, &shutdown)
             .await;
+    }
+
+    /// Keep one bounded ready owner while only refused local work is retried.
+    async fn wait_for_download_hydration(
+        &self,
+        guard: &mut DownloadAttemptGuard,
+        endpoint: Option<(std::net::Ipv4Addr, u16)>,
+        deadline: Option<tokio::time::Instant>,
+        clock: &mut watch::Receiver<()>,
+        shutdown: &CancellationToken,
+    ) -> Result<Option<Transfer>> {
+        let cancel = guard.cancellation();
+        let mut selected = None;
+        loop {
+            if cancel.is_cancelled()
+                || shutdown.is_cancelled()
+                || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+            {
+                return Ok(None);
+            }
+            if selected.is_none()
+                && crate::download_admission::hydration_starts(
+                    self.ed2k_transfers.download_resource_snapshot(),
+                ) > 0
+                && guard.promote()
+            {
+                let previous = guard.token();
+                match self.begin_selected_download(guard).await {
+                    Ok(Some(plan)) => {
+                        if let Some(endpoint) = endpoint {
+                            let mut state = self.state.lock().await;
+                            if state.active_download_peer_endpoints.get(&endpoint)
+                                != Some(&previous)
+                            {
+                                return Ok(None);
+                            }
+                            state
+                                .active_download_peer_endpoints
+                                .insert(endpoint, guard.token());
+                        }
+                        selected = Some(plan);
+                    }
+                    Ok(None) => return Ok(None),
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref(),
+                            Some(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy)
+                        ) =>
+                    {
+                        tracing::debug!(job_id = %guard.token().job_id, generation = guard.token().generation, phase = "begin", %error, "download hydration awaiting local capacity");
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if let Some(plan) = selected.as_ref() {
+                match self.finish_selected_download(guard, plan).await {
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref(),
+                            Some(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy)
+                        ) =>
+                    {
+                        tracing::debug!(job_id = %guard.token().job_id, generation = guard.token().generation, phase = "finish", %error, "download hydration awaiting local capacity");
+                    }
+                    result => return result,
+                }
+            }
+            // No Native read loan, category lock or mutation workspace crosses
+            // this wait. The caller retains its ready socket and source lease.
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(None),
+                () = shutdown.cancelled() => return Ok(None),
+                () = async {
+                    if let Some(deadline) = deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => return Ok(None),
+                tick = clock.changed() => { if tick.is_err() { return Ok(None); } },
+            }
+        }
     }
 
     /// Every unsuccessful hydration can already own native storage/cache state.

@@ -510,6 +510,8 @@ pub struct EmulebbCore {
     #[cfg(test)]
     category_probe_gate: TestWorkerGate,
     #[cfg(test)]
+    download_hydration_busy: Arc<AtomicBool>,
+    #[cfg(test)]
     category_probe_waiting: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     shared_root_change: Arc<shared_dir_monitor::RootChangeSignal>,
     category_probe_sender: Arc<
@@ -754,6 +756,8 @@ impl EmulebbCore {
             shared_implicit_sql_gate: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             category_probe_gate: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            download_hydration_busy: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             category_probe_waiting: Arc::new(std::sync::Mutex::new(None)),
             shared_root_change: Arc::default(),
