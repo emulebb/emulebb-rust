@@ -5,6 +5,12 @@ use crate::{EmulebbCore, Transfer, download_attempts::DownloadAttemptGuard};
 use anyhow::{Context, Result};
 use emulebb_metadata::DownloadIntent;
 
+/// Scalar execution authority retained across local hydration capacity waits.
+pub(crate) struct SelectedDownload {
+    job: emulebb_ed2k::ed2k_transfer::Ed2kTransferJob,
+    created_at: i64,
+}
+
 impl EmulebbCore {
     /// Reserve a live slot before storage/hydration. A stale stopped/faulted
     /// token cannot be implicitly restarted during the asynchronous handoff.
@@ -31,12 +37,22 @@ impl EmulebbCore {
             .map(|transfer| (guard, transfer)))
     }
 
-    /// The scheduler reserves this slot before spawning its worker. Selection
-    /// may wait for native ownership without creating unbounded pending tasks.
+    #[cfg(test)]
     pub(crate) async fn hydrate_selected_download(
         &self,
         guard: &mut DownloadAttemptGuard,
     ) -> Result<Option<Transfer>> {
+        let Some(selected) = self.begin_selected_download(guard).await? else {
+            return Ok(None);
+        };
+        self.finish_selected_download(guard, &selected).await
+    }
+
+    /// Begin/rebind once; later local capacity retries retain this execution.
+    pub(crate) async fn begin_selected_download(
+        &self,
+        guard: &mut DownloadAttemptGuard,
+    ) -> Result<Option<SelectedDownload>> {
         let _category_guard = self.category_mutation_gate.lock().await;
         self.persistence_owner.check_coherent_state()?;
         let Some(job) = self
@@ -84,8 +100,29 @@ impl EmulebbCore {
                 .context("selected job lost its expected size")?,
         );
         drop(started);
-        drop(_category_guard);
-        let manifest = self.ed2k_transfers.ensure_job(&selected).await?;
+        Ok(Some(SelectedDownload {
+            job: selected,
+            created_at,
+        }))
+    }
+
+    /// Finish the captured execution without reallocating its generation.
+    pub(crate) async fn finish_selected_download(
+        &self,
+        guard: &DownloadAttemptGuard,
+        selected: &SelectedDownload,
+    ) -> Result<Option<Transfer>> {
+        if guard.cancellation().is_cancelled() || guard.token() != selected.job.token {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        if self
+            .download_hydration_busy
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy.into());
+        }
+        let manifest = self.ed2k_transfers.ensure_job(&selected.job).await?;
         let mut transfer = self.transfer_from_manifest(&manifest, "downloading")?;
         let category = manifest.category_id;
         drop(manifest);
@@ -102,7 +139,7 @@ impl EmulebbCore {
             transfer.category_name = category
                 .and_then(|id| state.categories.get(&id))
                 .map(|category| category.name.clone());
-            transfer.added_at = Some(created_at);
+            transfer.added_at = Some(selected.created_at);
             state
                 .transfers
                 .insert(transfer.hash.clone(), transfer.clone());

@@ -188,8 +188,8 @@ impl Ed2kDownloadBlockLease {
 
 impl Ed2kTransferRuntime {
     /// Reserve the next missing, currently-unleased eMule block for a peer.
-    /// `preferred_piece` keeps a productive source in its current part when
-    /// possible; the normal rarest/preview/completion picker chooses otherwise.
+    /// `preferred_piece` keeps productive work together among equally scarce
+    /// parts; it cannot bypass an observed rarer opportunity.
     pub(crate) async fn lease_next_download_block(
         &self,
         job: JobToken,
@@ -218,32 +218,13 @@ impl Ed2kTransferRuntime {
         );
         let takeover_eligible = eligible.clone();
 
-        if let Some(piece_index) = preferred_piece
-            && eligible
-                .get(usize::try_from(piece_index).unwrap_or(usize::MAX))
-                .copied()
-                .unwrap_or(false)
-            && let Some(lease) = self.try_lease_block_in_piece(
-                &manifest,
-                job,
-                piece_index,
-                LeaseRequest {
-                    peer_addr,
-                    peer_rate_bytes_per_sec,
-                    policy,
-                    allow_takeover: false,
-                },
-            )
-        {
-            return Ok(Some(lease));
-        }
-
         while let Some(piece_index) = super::download_pick::pick_next_missing_part(
             &manifest.pieces,
             manifest.file_size,
             manifest.piece_size,
             Some(&eligible),
             &frequencies,
+            preferred_piece,
         ) {
             if let Some(lease) = self.try_lease_block_in_piece(
                 &manifest,
@@ -276,6 +257,7 @@ impl Ed2kTransferRuntime {
             manifest.piece_size,
             Some(&eligible),
             &frequencies,
+            preferred_piece,
         ) {
             if let Some(lease) = self.try_lease_block_in_piece(
                 &manifest,
@@ -458,6 +440,58 @@ impl Ed2kTransferRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn block_reservations_apply_scarcity_before_preferred_part_affinity() {
+        let root = crate::paths::unique_test_dir("block-lease-scarcity-order");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let job = super::super::test_support::admit_download_job(
+            &runtime,
+            emulebb_kad_proto::Ed2kHash::from_bytes([0x63; 16]),
+            "Sample.bin".into(),
+            super::super::ED2K_PART_SIZE * 3,
+        );
+        drop(runtime.ensure_job(&job).await.unwrap());
+        let peer = "127.0.0.1:4662".parse().unwrap();
+        let other = "127.0.0.2:4662".parse().unwrap();
+        assert!(runtime.note_download_source_part_bitmap(
+            job.token,
+            peer,
+            Some([1; 16]),
+            None,
+            vec![true; 3]
+        ));
+        assert!(runtime.note_download_source_part_bitmap(
+            job.token,
+            other,
+            Some([2; 16]),
+            None,
+            vec![true, false, true]
+        ));
+        let lease = runtime
+            .lease_next_download_block(job.token, peer, Some(&[true; 3]), Some(0), 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.piece_index(), 1);
+        assert_eq!(lease.start(), super::super::ED2K_PART_SIZE);
+        drop(lease);
+        assert!(runtime.note_download_source_part_bitmap(
+            job.token,
+            other,
+            Some([2; 16]),
+            None,
+            vec![false; 3]
+        ));
+        let lease = runtime
+            .lease_next_download_block(job.token, peer, Some(&[true; 3]), Some(2), 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.piece_index(), 2);
+        drop(lease);
+        assert_eq!(runtime.active_download_block_lease_count(job.token), 0);
+    }
 
     fn owner(now: Instant, age: Duration, rate: u32, transferred_bytes: u64) -> BlockLeaseOwner {
         BlockLeaseOwner {

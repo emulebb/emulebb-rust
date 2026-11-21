@@ -223,6 +223,18 @@ impl ListenerTestRuntime {
         &mut self,
         connection_count: usize,
     ) -> tokio::task::JoinHandle<()> {
+        let sessions = self.spawn_listener_results(connection_count);
+        tokio::spawn(async move {
+            for result in sessions.await.unwrap() {
+                result.unwrap();
+            }
+        })
+    }
+
+    pub(super) fn spawn_listener_results(
+        &mut self,
+        connection_count: usize,
+    ) -> tokio::task::JoinHandle<Vec<anyhow::Result<()>>> {
         let listener = self.listener.take().expect("listener already spawned");
         let dht = self.dht.clone();
         let transfer_runtime = Arc::clone(&self.transfer_runtime);
@@ -255,9 +267,11 @@ impl ListenerTestRuntime {
                 }));
             }
 
+            let mut results = Vec::with_capacity(connection_count);
             for session in sessions {
-                session.await.unwrap().unwrap();
+                results.push(session.await.unwrap());
             }
+            results
         })
     }
 

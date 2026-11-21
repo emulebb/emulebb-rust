@@ -1,6 +1,8 @@
 use super::*;
 use crate::{DownloadCreate, DownloadCreateSource};
+use emulebb_index::FileIndex;
 use emulebb_metadata::{DownloadIntent, JobToken};
+use std::{net::Ipv4Addr, sync::atomic::Ordering};
 
 async fn prepared() -> (EmulebbCore, DownloadAttemptGuard, JobToken) {
     let core =
@@ -157,4 +159,135 @@ async fn successful_hydration_keeps_native_execution_and_attempt_owned() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn local_hydration_busy_keeps_one_execution_and_lease_until_retry_or_cancellation() {
+    for action in 0..4 {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let (_, created) = core
+            .create_download(DownloadCreate {
+                source: DownloadCreateSource::Content {
+                    hash: "95959595959595959595959595959595".into(),
+                    name: "Sample.bin".into(),
+                    size_bytes: Some(16),
+                },
+                category: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                redownload: false,
+            })
+            .await
+            .unwrap();
+        let id = created.id;
+        drop(created);
+        let job = core.ed2k_transfers.download_job(id).await.unwrap().unwrap();
+        let original = job.token;
+        let mut guard = core
+            .download_attempts
+            .try_prepare(original, job.file_hash.parse().unwrap())
+            .unwrap();
+        drop(job);
+        let endpoint = (Ipv4Addr::LOCALHOST, 41010);
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .insert(endpoint, original);
+        let baseline = core
+            .ed2k_transfers
+            .download_resource_snapshot()
+            .resident_bytes;
+        core.download_hydration_busy.store(true, Ordering::Release);
+        let cancel = guard.cancellation();
+        let shutdown = CancellationToken::new();
+        let (ticks, mut clock) = tokio::sync::watch::channel(());
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(if action == 3 { 1 } else { 5 });
+        let hydration = core.wait_for_download_hydration(
+            &mut guard,
+            Some(endpoint),
+            Some(deadline),
+            &mut clock,
+            &shutdown,
+        );
+        let release = async {
+            while core.download_hydration_busy.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+            let current = core.ed2k_transfers.download_job(id).await.unwrap().unwrap();
+            assert_eq!(current.token.generation, original.generation + 1);
+            assert!(
+                current
+                    .storage
+                    .as_ref()
+                    .is_some_and(|storage| storage.identity.is_none() && !storage.path.exists())
+            );
+            assert!(current.storage_failure.is_none());
+            assert_eq!(
+                core.state
+                    .lock()
+                    .await
+                    .active_download_peer_endpoints
+                    .get(&endpoint),
+                Some(&current.token)
+            );
+            assert!(
+                core.category_mutation_gate.try_lock().is_ok(),
+                "capacity waits must not hold the category gate"
+            );
+            let token = current.token;
+            drop(current);
+            assert_eq!(
+                core.ed2k_transfers
+                    .download_resource_snapshot()
+                    .resident_bytes,
+                baseline,
+                "Busy was injected before manifest/storage hydration"
+            );
+
+            match action {
+                0 => {
+                    ticks.send_replace(());
+                }
+                1 => cancel.cancel(),
+                2 => shutdown.cancel(),
+                _ => {}
+            }
+            token
+        };
+        let (result, selected_token) = tokio::time::timeout(Duration::from_secs(6), async {
+            tokio::join!(hydration, release)
+        })
+        .await
+        .unwrap();
+        let result = result.unwrap();
+        assert_eq!(result.is_some(), action == 0);
+        assert_eq!(
+            guard.token(),
+            selected_token,
+            "local retries cannot begin another generation"
+        );
+        let current = core.ed2k_transfers.download_job(id).await.unwrap().unwrap();
+        assert_eq!(current.token, selected_token);
+        assert!(current.storage_failure.is_none());
+        if action == 0 {
+            assert!(
+                current
+                    .storage
+                    .as_ref()
+                    .is_some_and(|storage| storage.identity.is_some() && storage.path.exists())
+            );
+        }
+        drop(current);
+        core.retire_download_selection(&guard, &mut clock, &shutdown)
+            .await;
+        assert!(
+            !core
+                .state
+                .lock()
+                .await
+                .active_download_peer_endpoints
+                .contains_key(&endpoint)
+        );
+    }
 }
