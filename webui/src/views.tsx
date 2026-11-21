@@ -2,6 +2,7 @@ import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { SearchObservations } from "./searchObservations";
 import { FileTags, LibraryTags } from "./libraryTags";
+import { LibraryLocations } from "./libraryLocations";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
@@ -62,7 +63,6 @@ import {
   firewallLabel,
   formatBytes,
   formatDurationMs,
-  formatKiBRate,
   formatPercent,
   formatProgress,
   formatRate,
@@ -125,7 +125,7 @@ export function Overview(props: {
       />
       <Metric label="Transfers" value={props.snapshot?.downloads ? `${props.snapshot.downloads.unfinished} unfinished / ${props.snapshot.downloads.completed} completed` : "n/a"} />
       <Metric label="Download work" value={resources ? `${resources.active} active / ${resources.preparing} preparing / ${resources.waiting} waiting` : "n/a"} />
-      <Metric label="Uploads" value={`${props.uploads.length}/${props.uploadQueue.length}`} />
+      <Metric label="Uploads" value={`${props.stats.activeUploads ?? "unknown"}/${props.stats.waitingUploads ?? "unknown"}`} />
       <Metric label="Shared" value={String(props.snapshot?.status?.runtimeDiagnostics?.sharedFileCount ?? "n/a")} />
       <Metric label="Kad" value={props.kad.connected ? "Connected" : "Idle"} />
 
@@ -869,8 +869,8 @@ export function SharingView(props: {
       <Metric label="Roots on page" value={String(roots.length)} />
       <Metric label="Shared Files" value={String(sharedFileCount ?? "n/a")} />
       <Metric label="Shared Bytes" value="n/a" />
-      <Metric label="Active Uploads" value={String(props.uploads.length)} />
-      <Metric label="Waiting Uploads" value={String(props.uploadQueue.length)} />
+      <Metric label="Active Uploads" value={String(props.stats.activeUploads ?? "unknown")} />
+      <Metric label="Waiting Uploads" value={String(props.stats.waitingUploads ?? "unknown")} />
       <Metric label="Hashing" value={String(props.directories?.hashingCount ?? 0)} />
       <Metric label="Reload" value={reload.phase ?? "idle"} />
       <Metric label="Hashed" value={`${reload.hashedCount ?? 0}/${reload.plannedHashCount ?? 0}`} />
@@ -1197,6 +1197,8 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
   const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([]);
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
+  const searchError = searchDraft.trim() && [...searchDraft.trim()].length < 3
+    ? "Enter at least 3 characters to search filenames." : "";
   const [priorityFilter, setPriorityFilter] = useState("");
   const [pageSize, setPageSize] = useState(100);
   const [loadGeneration, setLoadGeneration] = useState(0);
@@ -1297,15 +1299,17 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
         </div>
         <form class="shared-files-toolbar" onSubmit={(event) => {
           event.preventDefault();
+          if (searchError) return;
           setSearch(searchDraft.trim());
           resetPaging();
         }}>
           <label class="shared-files-search">
-            Search name, path, or hash
+            Search filename
             <div class="copy-row">
               <input class="form-control" value={searchDraft} onInput={(event) => setSearchDraft(event.currentTarget.value)} />
-              <button class="btn" type="submit"><Search size={15} />Search</button>
+              <button class="btn" type="submit" disabled={Boolean(searchError)}><Search size={15} />Search</button>
             </div>
+            {searchError && <span class="field-error">{searchError}</span>}
           </label>
           <label>
             Priority
@@ -1425,6 +1429,7 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
         <h3>Comments</h3>
         <JsonPanel value={comments} />
       </section>
+      {selected && <LibraryLocations key={selected.hash} client={props.client} hash={selected.hash} refreshGeneration={props.refreshGeneration} />}
     </section>
   );
 }
@@ -1460,38 +1465,45 @@ type UploadRow = {
   item: Upload;
 };
 
-export function UploadsView(props: { uploads: Upload[]; refreshGeneration: number; client: RestClient; run: RunFunction }) {
-  const [queueCursor, setQueueCursor] = useState<string | null>(null);
-  const [queuePage, setQueuePage] = useState<CursorPage<Upload> | null>(null);
-  const [queueLoading, setQueueLoading] = useState(false);
-  const [queueError, setQueueError] = useState("");
+function useUploadPage(client: RestClient, refreshGeneration: number, resource: "uploads" | "upload-queue") {
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [page, setPage] = useState<CursorPage<Upload> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   useEffect(() => {
     let current = true;
-    setQueueLoading(true);
-    setQueueError("");
+    setLoading(true);
+    setError("");
     const query = new URLSearchParams({ limit: "100", countTotal: "true" });
-    if (queueCursor) query.set("cursor", queueCursor);
-    void props.client.getPage<Upload>(`upload-queue?${query}`).then((page) => {
-      if (current) setQueuePage(page);
+    if (cursor) query.set("cursor", cursor);
+    void client.getPage<Upload>(`${resource}?${query}`).then((page) => {
+      if (current) setPage(page);
     }).catch((error) => {
       if (!current) return;
-      if (error instanceof RestError && error.status === 409 && queueCursor) {
-        setQueuePage(null);
-        setQueueCursor(null);
-      } else setQueueError(errorMessage(error));
-    }).finally(() => { if (current) setQueueLoading(false); });
+      if (error instanceof RestError && error.status === 409 && cursor) {
+        setPage(null);
+        setCursor(null);
+      } else setError(errorMessage(error));
+    }).finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
-  }, [props.client, props.refreshGeneration, queueCursor]);
-  const uploadQueue = queuePage?.data ?? [];
+  }, [client, refreshGeneration, cursor, resource]);
+  return { cursor, page, loading, error, change: (value: string | null) => { setPage(null); setCursor(value); } };
+}
+
+export function UploadsView(props: { refreshGeneration: number; client: RestClient; run: RunFunction }) {
+  const active = useUploadPage(props.client, props.refreshGeneration, "uploads");
+  const queue = useUploadPage(props.client, props.refreshGeneration, "upload-queue");
+  const uploads = active.page?.data ?? [];
+  const uploadQueue = queue.page?.data ?? [];
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState("rank");
   const [selectedKey, setSelectedKey] = useState("");
   const rows = useMemo(
     () => [
-      ...props.uploads.map((item) => ({ key: uploadRowKey("active", item), lane: "active" as const, item })),
+      ...uploads.map((item) => ({ key: uploadRowKey("active", item), lane: "active" as const, item })),
       ...uploadQueue.map((item) => ({ key: uploadRowKey("queue", item), lane: "queue" as const, item }))
     ],
-    [uploadQueue, props.uploads]
+    [uploadQueue, uploads]
   );
   const visibleRows = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -1518,7 +1530,7 @@ export function UploadsView(props: { uploads: Upload[]; refreshGeneration: numbe
       if (current) setDetailError(errorMessage(error));
     });
     return () => { current = false; };
-  }, [selected?.key, props.client]);
+  }, [selected?.key, props.client, props.refreshGeneration]);
   const lowIdCount = rows.filter((row) => row.item.lowId).length;
   const friendSlotCount = rows.filter((row) => row.item.friendSlot).length;
   const topFile = topRequestedFile(rows);
@@ -1526,12 +1538,12 @@ export function UploadsView(props: { uploads: Upload[]; refreshGeneration: numbe
   return (
     <section class="view-stack">
       <section class="view-grid">
-        <Metric label="Active Slots" value={String(props.uploads.length)} />
-        <Metric label="Waiting" value={queuePage?.meta.total == null ? "unknown" : String(queuePage.meta.total)} />
-        <Metric label="Friend Slots" value={String(friendSlotCount)} />
-        <Metric label="LowID Peers" value={String(lowIdCount)} />
-        <Metric label="Top File" value={topFile.name} />
-        <Metric label="Top Requests" value={String(topFile.count)} />
+        <Metric label="Active Slots" value={active.page?.meta.total == null ? "unknown" : String(active.page.meta.total)} />
+        <Metric label="Waiting" value={queue.page?.meta.total == null ? "unknown" : String(queue.page.meta.total)} />
+        <Metric label="Friend Slots (page)" value={String(friendSlotCount)} />
+        <Metric label="LowID Peers (page)" value={String(lowIdCount)} />
+        <Metric label="Top File (page)" value={topFile.name} />
+        <Metric label="Top Requests (page)" value={String(topFile.count)} />
       </section>
       <section class="panel card">
         <div class="section-title">
@@ -1542,7 +1554,6 @@ export function UploadsView(props: { uploads: Upload[]; refreshGeneration: numbe
           <input class="form-control" value={filter} placeholder="Filter visible clients, files, hashes, software or state" onInput={(event) => setFilter(event.currentTarget.value)} />
           <select class="form-select" value={sort} onInput={(event) => setSort(event.currentTarget.value)}>
             <option value="rank">Rank</option>
-            <option value="score">Score</option>
             <option value="rate">Rate</option>
             <option value="uploaded">Uploaded</option>
             <option value="wait">Wait</option>
@@ -1551,11 +1562,19 @@ export function UploadsView(props: { uploads: Upload[]; refreshGeneration: numbe
         </div>
       </section>
       <UploadTable title="Active Uploads" rows={activeRows} basePath="uploads" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
+      {active.error && <p class="notice alert alert-danger">Active uploads: {active.error}</p>}
+      <div aria-label="Active upload pages">
+        <CursorControls cursor={active.cursor} nextCursor={active.page?.meta.nextCursor ?? null}
+          loading={active.loading} change={active.change} />
+      </div>
+      <p class="hint">{active.loading ? "Loading active uploads…" : `${uploads.length} active clients on this page`}</p>
       <UploadTable title="Upload Queue" rows={queueRows} basePath="upload-queue" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
-      {queueError && <p class="notice alert alert-danger">Upload queue: {queueError}</p>}
-      <CursorControls cursor={queueCursor} nextCursor={queuePage?.meta.nextCursor ?? null}
-        loading={queueLoading} change={(cursor) => { setQueuePage(null); setQueueCursor(cursor); }} />
-      <p class="hint">{queueLoading ? "Loading queue…" : `${uploadQueue.length} waiting clients on this page`}</p>
+      {queue.error && <p class="notice alert alert-danger">Upload queue: {queue.error}</p>}
+      <div aria-label="Waiting upload pages">
+        <CursorControls cursor={queue.cursor} nextCursor={queue.page?.meta.nextCursor ?? null}
+          loading={queue.loading} change={queue.change} />
+      </div>
+      <p class="hint">{queue.loading ? "Loading queue…" : `${uploadQueue.length} waiting clients on this page`}</p>
       {detailError && <p class="notice alert alert-danger">Upload details: {detailError}</p>}
       <UploadPeerInspector row={selected && detail?.key === selected.key
         ? { ...selected, item: { ...selected.item, scoreBreakdown: detail.item.scoreBreakdown } } : selected} />
@@ -1585,7 +1604,6 @@ function UploadTable(props: {
               <th>Client</th>
               <th>State</th>
               <th>Rank</th>
-              <th>Score</th>
               <th>File</th>
               <th>Parts</th>
               <th>Rate</th>
@@ -1602,16 +1620,15 @@ function UploadTable(props: {
                 <tr key={row.key} class={props.selectedKey === row.key ? "selected-row" : ""} onClick={() => props.onSelect(row.key)}>
                   <td>
                     <button type="button" class="link-button" onClick={() => props.onSelect(row.key)}>
-                      {upload.userName ?? clientId}
+                      {uploadEndpoint(upload)}
                     </button>
                   </td>
                   <td><StatusPill value={uploadState(upload)} /></td>
                   <td>{upload.queueRank ?? ""}</td>
-                  <td>{upload.score ?? ""}</td>
                   <td>{upload.requestedFileName ?? ""}</td>
-                  <td>{upload.requestedPartsProgressText ?? ""}</td>
-                  <td>{formatKiBRate(upload.uploadSpeedKiBps)}</td>
-                  <td>{formatBytes(upload.uploadedBytes ?? upload.queueSessionUploaded)}</td>
+                  <td>{uploadParts(upload)}</td>
+                  <td>{formatRate(upload.uploadRateBytesPerSec)}</td>
+                  <td>{formatBytes(upload.sessionUploadedBytes)}</td>
                   <td>
                     <div class="row-actions">
                       <Action title="Release slot" icon={<Play size={15} />} onClick={() => void props.run(() => props.client.post(`${props.basePath}/${encoded}/operations/release-slot`), "Upload slot released")} />
@@ -1625,7 +1642,7 @@ function UploadTable(props: {
                 </tr>
               );
             })}
-            {props.rows.length === 0 && <EmptyRow colSpan={9} text="No clients." />}
+            {props.rows.length === 0 && <EmptyRow colSpan={8} text="No clients." />}
           </tbody>
         </table>
       </TableScroll>
@@ -1642,31 +1659,31 @@ function UploadPeerInspector(props: { row?: UploadRow }) {
     <section class="panel card">
       <div class="section-title">
         <h2>Peer Slot Inspector</h2>
-        <span>{upload.userName ?? upload.id ?? "Selected peer"}</span>
+        <span>{uploadEndpoint(upload)}</span>
       </div>
       <div class="upload-inspector">
         <div class="kv compact">
           <span>Lane</span><strong>{props.row.lane === "active" ? "active upload" : "waiting queue"}</strong>
           <span>State</span><strong>{uploadState(upload)}</strong>
           <span>Queue rank</span><strong>{upload.queueRank ?? ""}</strong>
-          <span>Score</span><strong>{upload.score ?? ""}</strong>
-          <span>Wait time</span><strong>{formatDurationMs(upload.waitTimeMs)}</strong>
-          <span>Rate</span><strong>{formatKiBRate(upload.uploadSpeedKiBps)}</strong>
-          <span>Uploaded</span><strong>{formatBytes(upload.uploadedBytes)}</strong>
-          <span>Session uploaded</span><strong>{formatBytes(upload.queueSessionUploaded)}</strong>
+          <span>Score</span><strong>{upload.scoreBreakdown?.score ?? ""}</strong>
+          <span>Wait time</span><strong>{formatDurationMs(upload.waitTimeSeconds * 1000)}</strong>
+          <span>Rate</span><strong>{formatRate(upload.uploadRateBytesPerSec)}</strong>
+          <span>Uploaded</span><strong>{formatBytes(upload.sessionUploadedBytes)}</strong>
+          <span>Upload duration</span><strong>{upload.uploadDurationSeconds == null ? "unknown" : formatDurationMs(upload.uploadDurationSeconds * 1000)}</strong>
         </div>
         <div class="kv compact">
           <span>User hash</span><strong>{upload.userHash ?? ""}</strong>
-          <span>Client</span><strong>{[upload.clientSoftware, upload.clientMod].filter(Boolean).join(" ")}</strong>
-          <span>Endpoint</span><strong>{upload.port ? `${upload.address ?? ""}:${upload.port}` : upload.address ?? ""}</strong>
-          <span>LowID</span><strong>{yesNo(upload.lowId)}</strong>
+          <span>Client</span><strong>{upload.clientSoftware ?? "unknown"}</strong>
+          <span>Endpoint</span><strong>{uploadEndpoint(upload)}</strong>
+          <span>LowID</span><strong>{upload.lowId == null ? "unknown" : yesNo(upload.lowId)}</strong>
           <span>Friend slot</span><strong>{yesNo(upload.friendSlot)}</strong>
         </div>
         <div class="kv compact">
           <span>Requested file</span><strong>{upload.requestedFileName ?? ""}</strong>
           <span>File hash</span><strong>{upload.requestedFileHash ?? ""}</strong>
           <span>File size</span><strong>{formatBytes(upload.requestedFileSizeBytes)}</strong>
-          <span>Requested parts</span><strong>{upload.requestedPartsProgressText ?? ""}</strong>
+          <span>Requested parts</span><strong>{uploadParts(upload)}</strong>
         </div>
         <ScoreBreakdown value={upload.scoreBreakdown} />
       </div>
@@ -1674,7 +1691,7 @@ function UploadPeerInspector(props: { row?: UploadRow }) {
   );
 }
 
-function ScoreBreakdown(props: { value?: Record<string, unknown> | null }) {
+function ScoreBreakdown(props: { value?: Upload["scoreBreakdown"] }) {
   const entries = Object.entries(props.value ?? {});
   return (
     <div class="score-box">
@@ -1700,38 +1717,33 @@ function uploadRowKey(lane: UploadLane, upload: Upload): string {
 }
 
 function uploadState(upload: Upload): string {
-  return upload.uploadState ?? (upload.uploading ? "uploading" : upload.waitingQueue ? "queued" : "unknown");
+  return upload.uploadState;
 }
 
 function uploadSearchText(row: UploadRow): string {
   const upload = row.item;
   return [
     row.lane,
-    upload.userName,
     upload.userHash,
     upload.id,
     upload.clientSoftware,
-    upload.clientMod,
     upload.address,
     uploadState(upload),
     upload.requestedFileName,
     upload.requestedFileHash,
-    upload.requestedPartsProgressText
+    uploadParts(upload)
   ].map((value) => String(value ?? "").toLowerCase()).join(" ");
 }
 
 function compareUploadRows(left: UploadRow, right: UploadRow, sort: string): number {
-  if (sort === "score") {
-    return (right.item.score ?? -1) - (left.item.score ?? -1);
-  }
   if (sort === "rate") {
-    return (right.item.uploadSpeedKiBps ?? -1) - (left.item.uploadSpeedKiBps ?? -1);
+    return right.item.uploadRateBytesPerSec - left.item.uploadRateBytesPerSec;
   }
   if (sort === "uploaded") {
-    return (right.item.uploadedBytes ?? right.item.queueSessionUploaded ?? -1) - (left.item.uploadedBytes ?? left.item.queueSessionUploaded ?? -1);
+    return right.item.sessionUploadedBytes - left.item.sessionUploadedBytes;
   }
   if (sort === "wait") {
-    return (right.item.waitTimeMs ?? -1) - (left.item.waitTimeMs ?? -1);
+    return right.item.waitTimeSeconds - left.item.waitTimeSeconds;
   }
   if (sort === "file") {
     return String(left.item.requestedFileName ?? "").localeCompare(String(right.item.requestedFileName ?? ""));
@@ -1762,6 +1774,15 @@ function formatScoreValue(value: unknown): string {
     return value;
   }
   return JSON.stringify(value ?? "");
+}
+
+function uploadEndpoint(upload: Upload): string {
+  return `${upload.address.includes(":") ? `[${upload.address}]` : upload.address}:${upload.port}`;
+}
+
+function uploadParts(upload: Upload): string {
+  return upload.filePartsAvailable == null || upload.filePartsTotal == null
+    ? "unknown" : `${upload.filePartsAvailable}/${upload.filePartsTotal}`;
 }
 
 type NetworkEndpointRow = {
@@ -1878,7 +1899,7 @@ export function NetworkHealthView(props: {
       <section class="view-grid">
         <Metric label="Kad Nodes" value={String(nodes.length)} />
         <Metric label="Servers" value={`${props.servers.filter((server) => server.connected).length}/${props.servers.length}`} />
-        <Metric label="Peer Endpoints" value={String(sources.length + props.uploads.length + props.uploadQueue.length)} />
+        <Metric label="Peer Endpoints (page)" value={String(sources.length + props.uploads.length + props.uploadQueue.length)} />
         <Metric label="DNS Pending" value={String(unresolved)} />
         <Metric label="DNS Failed" value={String(dnsFailed)} />
         <Metric label="Bind Policy" value={bindPolicy.label} />
@@ -2424,7 +2445,7 @@ function peerEndpointRow(kind: string, key: string, peer: DownloadSource | Uploa
     ip: address,
     host: "",
     dnsStatus: "not-exposed",
-    state: stringField(peer, "state") || stringField(peer, "uploadState") || (boolField(peer, "uploading") ? "uploading" : boolField(peer, "waitingQueue") ? "queued" : "active"),
+    state: stringField(peer, "uploadState") || stringField(peer, "downloadState") || "unknown",
     detail: detail || stringField(peer, "userName") || stringField(peer, "clientSoftware"),
     lastSeen: "",
     bindPolicy: bindPolicy.label

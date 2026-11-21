@@ -63,10 +63,6 @@ pub(crate) fn snapshot_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(100)
 }
 
-pub(crate) fn bounded<T>(items: Vec<T>, limit: usize) -> Vec<T> {
-    items.into_iter().take(limit).collect()
-}
-
 pub(crate) fn api_error(
     status: StatusCode,
     code: &'static str,

@@ -1,6 +1,6 @@
 //! One current-schema compatibility domain for the complete profile database.
 //!
-//! `known_files` owns accepted content identity and its preferred index label;
+//! `known_files` owns accepted content identity and its first client-accepted label;
 //! observations retain their own claims. `download_jobs` owns download geometry and
 //! presentation, while `verified_local_content` owns verified local evidence.
 //! Paths identify native byte sequences; sort/search keys are derived projections.
@@ -8,7 +8,7 @@
 //! Download history deliberately survives removal of content, paths, and download_jobs.
 //!
 //! Hashes are fixed-width BLOBs. Sizes and counters use nonnegative signed SQLite
-//! integers; writes reject out-of-range sizes and saturate lifetime counters.
+//! integers; writes reject out-of-range sizes and counters.
 //! Full-range unsigned wire/search values use eight big-endian bytes, preserving
 //! numeric ordering under SQLite BLOB comparison. Nullable values mean absent;
 //! timestamp columns declare Unix seconds (`_s`) or milliseconds (`_ms`) explicitly.
@@ -16,7 +16,7 @@
 //! rejected: this module contains no migration or legacy interpretation.
 
 pub const SCHEMA_ID: &str = "emulebb.metadata";
-pub const SCHEMA_VERSION: i64 = 108;
+pub const SCHEMA_VERSION: i64 = 109;
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 
 #[cfg(test)]

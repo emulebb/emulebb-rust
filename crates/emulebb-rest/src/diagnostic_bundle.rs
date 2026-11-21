@@ -33,7 +33,7 @@ const MAX_SEARCH_SNAPSHOTS: usize = 64;
 const MAX_SEARCH_RESULTS_PER_SNAPSHOT: usize = 128;
 const MAX_SEARCH_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const MAX_DOWNLOAD_SNAPSHOTS: usize = 200;
-const MAX_UPLOAD_SNAPSHOTS: usize = 512;
+const MAX_UPLOAD_SNAPSHOTS: usize = 200;
 const MAX_UPLOAD_QUEUE_SNAPSHOTS: usize = 200;
 
 const ARTIFACT_FAMILIES: &[ArtifactFamilySpec] = &[ArtifactFamilySpec {
@@ -183,7 +183,10 @@ async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Va
         .await?;
     let counts = state.core.download_counts().await?;
     let download_count = usize::try_from(counts.unfinished.saturating_add(counts.completed))?;
-    let uploads = state.core.uploads().await;
+    let uploads = state
+        .core
+        .active_upload_page(None, MAX_UPLOAD_SNAPSHOTS, true)
+        .await?;
     let upload_queue = state
         .core
         .upload_queue_page(None, MAX_UPLOAD_QUEUE_SNAPSHOTS, true)
@@ -204,8 +207,8 @@ async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Va
         "searches": searches,
         "downloads": bounded_prefix_collection(&downloads.downloads,download_count,MAX_DOWNLOAD_SNAPSHOTS,|download|json!(download)),
         "uploads": bounded_prefix_collection(
-            &uploads,
-            uploads.len(),
+            &uploads.uploads,
+            uploads.total.unwrap_or(uploads.uploads.len()),
             MAX_UPLOAD_SNAPSHOTS,
             |upload| json!(upload),
         ),

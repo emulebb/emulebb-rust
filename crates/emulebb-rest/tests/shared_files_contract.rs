@@ -153,12 +153,12 @@ async fn shared_files_use_canonical_route_and_envelope() {
 }
 
 #[tokio::test]
-async fn shared_files_support_path_cursor_search_and_publication_status() {
+async fn shared_files_page_filename_search_and_publication_status() {
     let runtime_dir = unique_test_dir("shared-files-query");
     let transfer_root = runtime_dir.join("transfers");
     let library_dir = runtime_dir.join("library");
     std::fs::create_dir_all(&library_dir).unwrap();
-    let alpha_path = library_dir.join("Alpha Sample.bin");
+    let alpha_path = library_dir.join("Alpha Sample ÄBC.bin");
     let zeta_path = library_dir.join("Zeta Sample.bin");
     std::fs::write(&alpha_path, b"alpha shared payload").unwrap();
     std::fs::write(&zeta_path, b"zeta shared payload").unwrap();
@@ -194,8 +194,6 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     let first = get_json(&app, "/api/v1/shared-files?limit=1").await;
     assert_eq!(first["data"]["total"], 2);
     assert_eq!(first["data"]["limit"], 1);
-    assert!(first["data"].get("offset").is_none());
-    assert!(first["data"].get("nextAfterHash").is_none());
     assert_eq!(first["data"]["items"][0]["hash"], alpha.hash);
     assert_eq!(
         first["data"]["items"][0]["publication"]["ed2k"]["state"],
@@ -211,14 +209,15 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     assert_eq!(second["data"]["items"][0]["hash"], zeta.hash);
     assert!(second["data"]["nextCursor"].is_null());
 
-    for query in [
-        "q=alpha".to_string(),
-        "q=alpha%20sample".to_string(),
-        format!("q={}", &alpha.hash[..12]),
-    ] {
+    for query in ["q=ALPHA", "q=pha%20sam", "q=%C3%A4bc"] {
         let searched = get_json(&app, &format!("/api/v1/shared-files?{query}")).await;
         assert_eq!(searched["data"]["total"], 1);
         assert_eq!(searched["data"]["items"][0]["hash"], alpha.hash);
+    }
+    for query in ["q=library".to_string(), format!("q={}", &alpha.hash[..12])] {
+        let searched = get_json(&app, &format!("/api/v1/shared-files?{query}")).await;
+        assert_eq!(searched["data"]["total"], 0);
+        assert!(searched["data"]["items"].as_array().unwrap().is_empty());
     }
 
     let filtered = get_json(&app, "/api/v1/shared-files?priority=normal").await;
@@ -226,6 +225,108 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     assert_eq!(
         filtered["data"]["items"][0]["publication"]["kadSource"]["state"],
         "unavailable"
+    );
+}
+
+#[tokio::test]
+async fn library_location_pages_preserve_cached_paths_when_sharing_is_disabled() {
+    let runtime_dir = unique_test_dir("library-location-pages");
+    let library = runtime_dir.join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    let core = Arc::new(
+        EmulebbCore::new(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            runtime_dir.join("transfers"),
+        )
+        .unwrap(),
+    );
+    core.create_library_root(&library.display().to_string(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut hash = String::new();
+    let mut paths = Vec::new();
+    for n in 1..=3 {
+        let path = library.join(format!("Copy-{n}.bin"));
+        std::fs::write(&path, b"sample identical content").unwrap();
+        let shared = core
+            .share_local_file(LocalShareCreate {
+                path: path.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        if hash.is_empty() {
+            hash = shared.hash;
+        } else {
+            assert_eq!(hash, shared.hash);
+        }
+        paths.push(path);
+    }
+    let policy = core
+        .set_library_sharing(&emulebb_core::LibrarySharingRequest {
+            enabled: false,
+            hashes: vec![hash.clone()],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        &policy.value()[0].outcome,
+        Ok(emulebb_core::LibraryFileChange::Changed)
+    ));
+    drop(policy);
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let base = format!("/api/v1/library/files/{hash}/locations?limit=1");
+    let first = get_json(&app, &base).await;
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+    assert!(
+        first["data"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Copy-1.bin")
+    );
+    assert_eq!(first["data"][0]["present"], true);
+    assert_eq!(first["meta"]["hasMore"], true);
+    let cursor = utf8_percent_encode(
+        first["meta"]["nextCursor"].as_str().unwrap(),
+        NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let second = get_json(&app, &format!("{base}&cursor={cursor}")).await;
+    assert!(
+        second["data"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Copy-2.bin")
+    );
+    let cursor = utf8_percent_encode(
+        second["meta"]["nextCursor"].as_str().unwrap(),
+        NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let third = get_json(&app, &format!("{base}&cursor={cursor}")).await;
+    assert!(
+        third["data"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Copy-3.bin")
+    );
+    assert_eq!(third["meta"]["hasMore"], false);
+    assert!(third["meta"]["nextCursor"].is_null());
+    for path in paths {
+        std::fs::remove_file(path).unwrap();
+    }
+    let cached = get_json(&app, &base).await;
+    assert_eq!(
+        cached["data"], first["data"],
+        "reading cached evidence must not inspect the deleted file"
     );
 }
 

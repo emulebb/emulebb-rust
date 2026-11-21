@@ -35,7 +35,6 @@ mod server_tests;
 // Re-exported at the crate root so the sibling modules can reach the shared
 // dto types and the upload list helper via `crate::...` paths.
 pub(crate) use dto::*;
-pub(crate) use handlers::without_score_breakdown;
 
 #[derive(Debug, Clone)]
 pub struct RestServerSettings {

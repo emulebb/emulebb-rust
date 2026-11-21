@@ -403,29 +403,6 @@ export function App({ appearance }: { appearance: Appearance }) {
   }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (authState !== "authenticated" || tab !== "uploads") {
-      return;
-    }
-    let cancelled = false;
-    const loadUploads = async () => {
-      try {
-        const nextUploads = await client.get<Page<Upload>>("uploads");
-        if (!cancelled) {
-          setUploads(nextUploads.items ?? []);
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(errorMessage(caught));
-        }
-      }
-    };
-    void loadUploads();
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, refreshGeneration, authState]);
-
-  useEffect(() => {
     if (authState !== "authenticated" || !["settings", "network"].includes(tab)) {
       return;
     }
@@ -971,7 +948,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 refreshGeneration={manualRefreshGeneration}
               />
             )}
-            {tab === "uploads" && <UploadsView uploads={uploads} refreshGeneration={refreshGeneration} client={client} run={run} />}
+            {tab === "uploads" && <UploadsView refreshGeneration={refreshGeneration} client={client} run={run} />}
             {tab === "network" && (
               <NetworkHealthView
                 servers={servers}

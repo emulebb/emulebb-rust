@@ -483,6 +483,9 @@ impl MetadataStore {
                 first_seen_at_ms, last_seen_at_ms, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5, ?5)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
+                 display_name = CASE
+                    WHEN EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id)
+                    THEN known_files.display_name ELSE excluded.display_name END,
                  size_bytes = excluded.size_bytes,
                  aich_root = coalesce(excluded.aich_root, known_files.aich_root),
                  aich_root_origin = CASE
@@ -1126,6 +1129,18 @@ mod tests {
             comment: String::new(),
             rating: 0,
         };
+        store
+            .upsert_indexed_file(
+                &crate::MetadataIndexedFile {
+                    ed2k_hash: content.file_hash.clone(),
+                    name: "Remote.bin".into(),
+                    size_bytes: content.file_size,
+                    content_type: String::new(),
+                    availability_score: 0,
+                },
+                crate::MetadataIndexedFileOrigin::PassiveCache,
+            )
+            .unwrap();
         store.upsert_verified_local_content(&content).unwrap();
         content.path = second_path.clone();
         content.display_name = "Second.bin".to_string();

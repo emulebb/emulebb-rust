@@ -21,7 +21,7 @@
 //! absolute totals seed. Without the gate an in-flight background flush could
 //! re-commit pre-wipe deltas after the wipe.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
@@ -56,6 +56,7 @@ pub(super) struct ParkedCreditLedger {
     /// File hash -> upload-accounting deltas not yet in SQLite.
     files: ParkedFileDeltas,
     pub(super) file_statistics: HashMap<[u8; 16], super::file_accounting::Ed2kFileUploadStatistics>,
+    pub(super) statistics_dirty: HashSet<[u8; 16]>,
     last_flush_started: Instant,
     background_flush_pending: bool,
 }
@@ -66,6 +67,7 @@ impl ParkedCreditLedger {
             peers: HashMap::new(),
             files: HashMap::new(),
             file_statistics: HashMap::new(),
+            statistics_dirty: HashSet::new(),
             last_flush_started: Instant::now(),
             background_flush_pending: false,
         }
@@ -78,10 +80,42 @@ impl ParkedCreditLedger {
     /// Move every parked delta out for a flush, resetting the interval clock.
     fn drain(&mut self) -> (ParkedPeerDeltas, ParkedFileDeltas) {
         self.last_flush_started = Instant::now();
+        // Publication must recompute durable + parked after this drain settles,
+        // including restoration on failure. The flush gate excludes publishers.
+        for hash in self.files.keys() {
+            if let Ok(hash) = hash.parse::<Ed2kHash>() {
+                self.statistics_dirty.insert(hash.0);
+            }
+        }
         (
             std::mem::take(&mut self.peers),
             std::mem::take(&mut self.files),
         )
+    }
+
+    pub(super) fn file_capture(
+        &self,
+        hash: [u8; 16],
+    ) -> emulebb_metadata::MetadataFileUploadCapture {
+        let session = self.file_statistics.get(&hash).copied().unwrap_or_default();
+        let pending = self
+            .files
+            .get(&hex::encode(hash))
+            .copied()
+            .unwrap_or_default();
+        emulebb_metadata::MetadataFileUploadCapture {
+            file_hash: hash,
+            session_uploaded_bytes: session.session_uploaded_bytes,
+            session_upload_requests: session.session_upload_requests,
+            session_accepted_uploads: session.session_accepted_uploads,
+            pending: emulebb_metadata::MetadataFileUploadTotals {
+                uploaded_bytes: pending.uploaded_bytes,
+                upload_requests: pending.upload_requests,
+                accepted_sessions: pending.accepted_sessions,
+                last_requested_at_s: pending.last_requested_at_s,
+                last_uploaded_at_s: pending.last_uploaded_at_s,
+            },
+        }
     }
 
     /// Merge a failed flush's deltas back so they are retried, never lost.
@@ -145,9 +179,9 @@ fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) -> anyho
 /// The runtime pieces a flush needs, cloneable into blocking-pool tasks.
 #[derive(Clone)]
 pub(super) struct ParkedCreditFlushParts {
-    ledger: std::sync::Arc<Mutex<ParkedCreditLedger>>,
-    flush_gate: std::sync::Arc<Mutex<()>>,
-    metadata: MetadataStore,
+    pub(super) ledger: std::sync::Arc<Mutex<ParkedCreditLedger>>,
+    pub(super) flush_gate: std::sync::Arc<Mutex<()>>,
+    pub(super) metadata: MetadataStore,
 }
 
 /// One scheduled or executing background checkpoint. Dropping queued work or
@@ -200,6 +234,7 @@ fn park_file_upload_request(
             stats.lifetime.upload_requests = stats.lifetime.upload_requests.saturating_add(1);
             stats.lifetime.last_requested_at_s = stats.lifetime.last_requested_at_s.max(Some(at_s));
         }
+        ledger.statistics_dirty.insert(hash.0);
         let slot = ledger.files.entry(key).or_default();
         slot.upload_requests = slot.upload_requests.saturating_add(1);
         slot.last_requested_at_s = slot.last_requested_at_s.max(Some(at_s));
@@ -319,6 +354,7 @@ impl Ed2kTransferRuntime {
                 .entry(file_hash.0)
                 .or_default()
                 .note_bytes(delta, at);
+            ledger.statistics_dirty.insert(file_hash.0);
             ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
         };
         self.try_publish_file_accounting(file_hash);
@@ -339,6 +375,7 @@ impl Ed2kTransferRuntime {
                 .entry(file_hash.0)
                 .or_default()
                 .note_accept();
+            ledger.statistics_dirty.insert(file_hash.0);
             ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
         };
         if flush_due {

@@ -1237,58 +1237,41 @@ pub struct TransferComment {
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
     pub id: String,
-    pub user_name: String,
     pub user_hash: Option<String>,
-    pub client_software: String,
-    pub client_mod: String,
+    pub client_software: Option<String>,
     pub upload_state: String,
-    pub upload_speed_ki_bps: f64,
-    pub uploaded_bytes: u64,
-    pub queue_session_uploaded: u64,
-    pub payload_buffered: u64,
-    pub wait_time_ms: u64,
-    pub wait_started_tick: u64,
-    pub score: u64,
+    pub upload_rate_bytes_per_sec: u64,
+    pub session_uploaded_bytes: u64,
+    pub wait_time_seconds: u64,
+    pub upload_duration_seconds: Option<u64>,
     pub address: String,
     pub port: u16,
-    pub server_ip: String,
-    pub server_port: u16,
-    pub low_id: bool,
+    pub low_id: Option<bool>,
     pub friend_slot: bool,
-    pub uploading: bool,
-    pub waiting_queue: bool,
-    pub requested_file_hash: Option<String>,
+    pub connected: bool,
+    pub requested_file_hash: String,
     pub requested_file_name: Option<String>,
     pub requested_file_size_bytes: Option<u64>,
-    pub requested_parts_obtained: u32,
-    pub requested_parts_total: u32,
-    pub requested_parts_progress_text: String,
+    pub file_parts_available: Option<u32>,
+    pub file_parts_total: Option<u32>,
     /// Per-client upload score diagnostics, fetched through detail resources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_breakdown: Option<UploadScoreBreakdown>,
-    // Internal-only: queue position is not in the `Upload` contract (it belongs
-    // to source JSON); waiting position is conveyed via score/waitTimeMs.
-    #[serde(skip_serializing)]
-    pub queue_rank: Option<u16>,
+    pub queue_rank: Option<usize>,
 }
 
 /// Upload-score modifier breakdown (eMuleBB `UploadScoreBreakdown` shape).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadScoreBreakdown {
-    pub availability: String,
-    pub base_score: u32,
-    pub effective_score: u32,
-    pub core_score: f64,
-    pub effective_score_float: f64,
+    pub score: f64,
     pub credit_ratio: f64,
-    pub file_priority: i64,
+    pub file_priority_score: f64,
     pub low_ratio_applied: bool,
     pub low_ratio_bonus: u32,
     pub low_id_penalty_applied: bool,
     pub low_id_divisor: u32,
     pub old_client_penalty_applied: bool,
-    pub cooldown_remaining_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

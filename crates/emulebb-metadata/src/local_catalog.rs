@@ -10,6 +10,21 @@ use rusqlite::{Row, params};
 
 const CATALOG_COUNT_SQL: &str = "SELECT count(*) FROM temp.session_library_catalog";
 
+/// Normalize a filename substring without interpreting wildcard or query syntax.
+/// Count Unicode characters before lowercasing, which can expand a character.
+pub fn normalize_library_search(query: Option<&str>) -> Result<Option<String>> {
+    query
+        .map(|query| {
+            let query = query.trim();
+            anyhow::ensure!(
+                query.chars().count() >= 3,
+                "q must contain at least 3 characters"
+            );
+            Ok(query.to_lowercase())
+        })
+        .transpose()
+}
+
 /// Ordered complete-share eligibility and optional partial offers from one SQL snapshot.
 pub type MetadataVerifiedShareBatch = Vec<(bool, Option<MetadataPartialOffer>)>;
 
@@ -217,12 +232,7 @@ impl MetadataStore {
         &self,
         query: &MetadataSharedFileQuery,
     ) -> Result<MetadataSharedFilePage> {
-        let search = query
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase);
+        let search = normalize_library_search(query.search.as_deref())?;
         let priority = query
             .priority
             .as_deref()
@@ -241,8 +251,7 @@ impl MetadataStore {
             CROSS JOIN local_paths ON local_paths.id = cache.path_id
             CROSS JOIN known_files ON known_files.id = cache.known_file_id
             CROSS JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
-            WHERE (?3 IS NULL OR instr(local_paths.file_name_search_key, ?3) > 0
-                  OR instr(cache.sort_key, ?3) > 0 OR instr(lower(hex(cache.ed2k_hash)), ?3) > 0)
+            WHERE (?3 IS NULL OR instr(local_paths.file_name_search_key, ?3) > 0)
               AND (?4 IS NULL OR verified_local_content.upload_priority = ?4)";
         let started = std::time::Instant::now();
         tracing::debug!(phase = "connectionWait", "catalog read");

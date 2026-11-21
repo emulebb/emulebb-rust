@@ -1,4 +1,4 @@
-//! Compact job reads use the same retained registry; no history worker hydration.
+//! Retained metadata reads, with execution hydration admitted explicitly.
 use super::read_result::RetainedRead;
 use super::*;
 use crate::ed2k_transfer as transfer;
@@ -15,6 +15,10 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Counts,
     Waiting(Vec<JobId>),
     UploadFile([u8; 16]),
+    LibraryStatistics([u8; 16]),
+    LibraryQuery(emulebb_metadata::LibraryFileQuery),
+    LibraryFile([u8; 16]),
+    LibraryLocations([u8; 16], i64, usize),
     Scheduling(
         Arc<transfer::Ed2kTransferRuntime>,
         emulebb_metadata::JobToken,
@@ -56,6 +60,10 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Waiting(RetainedRead<u64>),
     UploadFile(Option<RetainedRead<emulebb_metadata::MetadataUploadFileSummary>>),
+    LibraryStatistics(Option<RetainedRead<emulebb_metadata::MetadataFileUploadStatistics>>),
+    LibraryQuery(RetainedRead<emulebb_metadata::MetadataLibraryFilePage>),
+    LibraryFile(Option<RetainedRead<emulebb_metadata::MetadataLibraryFile>>),
+    LibraryLocations(Option<RetainedRead<emulebb_metadata::MetadataLibraryLocationPage>>),
     Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
@@ -91,6 +99,29 @@ impl LocalMutationRegistry {
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
             JobRead::UploadFile(_) => 256 * 1024,
+            JobRead::LibraryStatistics(_) => 64 * 1024,
+            JobRead::LibraryFile(_) => 2 * 1024 * 1024,
+            JobRead::LibraryQuery(ref query) => {
+                ensure!(
+                    (1..=200).contains(&query.limit)
+                        && query.root_id.is_none_or(|id| id > 0)
+                        && query.tag.as_ref().is_none_or(|name| name.capacity() <= 64
+                            && emulebb_metadata::valid_category_name(name))
+                        && query
+                            .search
+                            .as_ref()
+                            .is_none_or(|value| value.capacity() <= 65_536),
+                    "invalid library query"
+                );
+                2 * 1024 * 1024
+            }
+            JobRead::LibraryLocations(_, after, limit) => {
+                ensure!(
+                    after >= 0 && (1..=200).contains(&limit),
+                    "invalid library location page"
+                );
+                emulebb_metadata::LIBRARY_READ_MAX_BYTES
+            }
             JobRead::Waiting(ref ids) => ids
                 .capacity()
                 .checked_mul(std::mem::size_of::<JobId>())
@@ -160,6 +191,7 @@ impl LocalMutationRegistry {
                 (Self::reserve_unit(&mut state, charge, false, false)?, None)
             };
         let metadata = runtime.metadata.clone();
+        let accounting = runtime.parked_credit_flush_parts();
         let cache = Arc::clone(&runtime.manifest_cache);
         let content_locks = Arc::clone(&runtime.content_locks);
         let categories = Arc::clone(&runtime.category_assignment_gate);
@@ -194,6 +226,47 @@ impl LocalMutationRegistry {
                         value.map(|value| RetainedRead::new(value, capacity.take_result())),
                     )
                 }),
+                JobRead::LibraryStatistics(hash) => {
+                    accounting.publish_file_statistics()?;
+                    metadata
+                        .file_upload_statistics(&hex::encode(hash))
+                        .map(|value| {
+                            JobReadResult::LibraryStatistics(
+                                value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                            )
+                        })
+                }
+                JobRead::LibraryQuery(query) => {
+                    accounting.publish_file_statistics()?;
+                    metadata
+                        .library_file_page(&query, emulebb_metadata::LIBRARY_READ_MAX_BYTES)
+                        .map(|page| {
+                            JobReadResult::LibraryQuery(RetainedRead::new(
+                                page,
+                                capacity.take_result(),
+                            ))
+                        })
+                }
+                JobRead::LibraryFile(hash) => {
+                    accounting.publish_file_statistics()?;
+                    metadata.library_file(&hash).map(|file| {
+                        JobReadResult::LibraryFile(
+                            file.map(|file| RetainedRead::new(file, capacity.take_result())),
+                        )
+                    })
+                }
+                JobRead::LibraryLocations(hash, after, limit) => metadata
+                    .library_locations(
+                        &hex::encode(hash),
+                        after,
+                        limit,
+                        emulebb_metadata::LIBRARY_READ_MAX_BYTES,
+                    )
+                    .map(|value| {
+                        JobReadResult::LibraryLocations(
+                            value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                        )
+                    }),
                 JobRead::TransferCounts => metadata.transfer_counts().map(|value| {
                     JobReadResult::TransferCounts(RetainedRead::new(value, capacity.take_result()))
                 }),
@@ -382,6 +455,66 @@ impl LocalMutationRegistry {
     }
 }
 impl transfer::Ed2kTransferRuntime {
+    /// One retained library summary without a file probe or execution hydration.
+    pub async fn library_file(
+        &self,
+        hash: &str,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataLibraryFile>>> {
+        let hash: emulebb_kad_proto::Ed2kHash = hash.parse()?;
+        let JobReadResult::LibraryFile(file) =
+            self.read_job_metadata(JobRead::LibraryFile(hash.0)).await?
+        else {
+            unreachable!()
+        };
+        Ok(file)
+    }
+    /// A thin library page, with current captured statistics, through the same
+    /// admitted owner as other reads. Includes work headroom for name folding.
+    pub async fn library_file_page(
+        &self,
+        query: emulebb_metadata::LibraryFileQuery,
+    ) -> Result<RetainedRead<emulebb_metadata::MetadataLibraryFilePage>> {
+        let JobReadResult::LibraryQuery(page) =
+            self.read_job_metadata(JobRead::LibraryQuery(query)).await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+    /// Publish captured counters without checkpointing durable credit, then read
+    /// one scalar snapshot through the admitted owner. No execution is hydrated.
+    pub async fn library_file_statistics(
+        &self,
+        hash: &str,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataFileUploadStatistics>>> {
+        let hash: emulebb_kad_proto::Ed2kHash = hash.parse()?;
+        let JobReadResult::LibraryStatistics(stats) = self
+            .read_job_metadata(JobRead::LibraryStatistics(hash.0))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(stats)
+    }
+
+    /// Read a bounded cached copy window through the admitted metadata owner.
+    /// The result retains its allowance; no file or execution is opened.
+    pub async fn library_locations(
+        &self,
+        hash: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataLibraryLocationPage>>> {
+        let hash: emulebb_kad_proto::Ed2kHash = hash.parse()?;
+        let JobReadResult::LibraryLocations(page) = self
+            .read_job_metadata(JobRead::LibraryLocations(hash.0, after, limit))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+
     /// Cached upload captions through the existing bounded metadata worker.
     /// Retained results own their temporary allowance; no manifest is hydrated.
     pub async fn upload_file_summary(

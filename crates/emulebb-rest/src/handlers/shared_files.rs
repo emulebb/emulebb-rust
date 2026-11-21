@@ -84,6 +84,8 @@ fn decode_shared_file_cursor(cursor: &str) -> Result<SharedFileListCursor, Strin
 }
 
 fn validate_shared_file_query(query: &SharedFilesQuery) -> Result<(), String> {
+    emulebb_metadata::normalize_library_search(query.q.as_deref())
+        .map_err(|error| error.to_string())?;
     validate_optional_token(
         "priority",
         query.priority.as_deref(),

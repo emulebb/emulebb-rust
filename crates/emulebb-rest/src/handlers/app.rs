@@ -22,7 +22,6 @@ use crate::diagnostic_bundle::{
     MAX_DIAGNOSTIC_BUNDLE_BYTES, MIN_DIAGNOSTIC_BUNDLE_BYTES, capture as capture_bundle,
 };
 use crate::handlers::{logs::recent_log_values, prelude::*};
-use crate::without_score_breakdown;
 
 pub(crate) async fn app(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(app_info_response(state.core.app_info()))
@@ -281,9 +280,20 @@ pub(crate) async fn snapshot(
         Ok(downloads) => downloads,
         Err(error) => return super::persistence::persistence_error(error),
     };
+    // WHY: unrelated persistence work must finish before retaining both upload
+    // pages, so their response allowances do not compete with metadata workspaces.
+    let servers = server_responses(state.core.servers().await);
     let upload_queue = match state
         .core
         .upload_queue_page(None, limit.min(200), false)
+        .await
+    {
+        Ok(page) => page,
+        Err(error) => return super::persistence::persistence_error(error),
+    };
+    let uploads = match state
+        .core
+        .active_upload_page(None, limit.min(200), false)
         .await
     {
         Ok(page) => page,
@@ -294,9 +304,9 @@ pub(crate) async fn snapshot(
         "status": status,
         "downloads": &*downloads,
         "sharedFiles": shared_files,
-        "uploads": bounded(without_score_breakdown(state.core.uploads().await), limit),
+        "uploads": &uploads.uploads,
         "uploadQueue": &upload_queue.uploads,
-        "servers": server_responses(state.core.servers().await),
+        "servers": servers,
         "kad": kad,
         "network": network_response(network.as_ref(), &state.core.vpn_guard_status()),
         "logs": recent_log_values(limit)

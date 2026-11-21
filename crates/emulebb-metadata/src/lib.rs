@@ -33,6 +33,10 @@ pub use download_job_query::{
 };
 mod download_browse_store;
 mod download_job_store;
+mod file_upload_statistics;
+pub use file_upload_statistics::{
+    FILE_UPLOAD_CAPTURE_BATCH, MetadataFileUploadCapture, MetadataFileUploadStatistics,
+};
 mod download_patch_store;
 pub use download_browse_store::{
     MetadataDownloadDetail, MetadataDownloadPart, MetadataDownloadPartPage,
@@ -66,13 +70,20 @@ mod kad_publish_store;
 mod kad_routing_store;
 mod library_policy_store;
 mod library_projection;
+mod library_query;
+pub use library_query::{
+    LibraryFileQuery, LibraryFileSort, LibraryFileView, MetadataLibraryCursorExpired,
+    MetadataLibraryFile, MetadataLibraryFilePage,
+};
 mod library_read_store;
 pub use library_policy_store::{LibraryTagError, MetadataLibraryTag, MetadataLibraryTagPage};
 pub use library_read_store::{
     LIBRARY_READ_MAX_BYTES, MetadataLibraryLocation, MetadataLibraryLocationPage,
 };
 mod local_catalog;
-pub use local_catalog::{MetadataPartialOffer, MetadataVerifiedShareBatch};
+pub use local_catalog::{
+    MetadataPartialOffer, MetadataVerifiedShareBatch, normalize_library_search,
+};
 mod upload_read_store;
 pub use upload_read_store::MetadataUploadFileSummary;
 mod local_file_store;

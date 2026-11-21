@@ -50,6 +50,7 @@ pub use completed_verification::CompletedOutputVerification;
 mod corruption_blackbox;
 mod credit_ledger;
 mod file_accounting;
+mod file_statistics_publication;
 pub use file_accounting::Ed2kFileUploadStatistics;
 mod deliver;
 mod delivery_tombstone;
@@ -166,9 +167,11 @@ pub(crate) use upload_queue::{
     Ed2kUploadPendingPromotion, Ed2kUploadQueueConfig, Ed2kUploadRangeAdmission,
     Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, Ed2kUploadWorkGuard,
 };
+pub use upload_queue::{
+    Ed2kUploadClientIdentity, Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot,
+};
 pub use upload_queue::{Ed2kUploadQueueCapacitySnapshot, Ed2kUploadThrottleReservation};
 pub use upload_queue::{Ed2kUploadQueuePage, Ed2kUploadQueuePageError};
-pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot};
 
 /// Outcome of a global connection-budget acquisition attempt, carrying the
 /// occupancy + binding cap so the caller can emit the `conn_budget`

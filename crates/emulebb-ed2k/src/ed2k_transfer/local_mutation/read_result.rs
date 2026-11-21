@@ -58,17 +58,28 @@ impl<T> RetainedRead<T> {
     where
         T: serde::Serialize,
     {
+        let encoded = self.serialize_json_ref(&self.value)?;
+        drop(self);
+        Ok(encoded)
+    }
+
+    /// Encode borrowed response framing while retaining this input charge.
+    /// The caller still owns the input; only the exact encoded backing receives
+    /// another allowance. Newly allocated projection data needs its own charge.
+    pub fn serialize_json_ref<U: serde::Serialize>(
+        &self,
+        value: &U,
+    ) -> anyhow::Result<RetainedRead<Box<[u8]>>> {
         let mut length = EncodedLength(0);
-        serde_json::to_writer(&mut length, &self.value)?;
+        serde_json::to_writer(&mut length, value)?;
         // WHY: escaped text can expand sixfold. Reserve the simultaneous output
         // before allocating it; reusing only the input lease undercounts backing.
         let output_lease = self.lease.reserve_result(length.0)?;
         let mut encoded = vec![0u8; length.0].into_boxed_slice();
         let mut remaining = encoded.as_mut();
         // A stateful serializer cannot grow this fixed slice beyond admission.
-        serde_json::to_writer(&mut remaining, &self.value)?;
+        serde_json::to_writer(&mut remaining, value)?;
         anyhow::ensure!(remaining.is_empty(), "read encoding length changed");
-        drop(self);
         Ok(RetainedRead::new(encoded, output_lease))
     }
 }

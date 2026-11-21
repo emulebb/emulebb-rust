@@ -12,6 +12,96 @@ fn request(hash: u8, size: Option<u64>) -> DownloadJobRequest {
 }
 
 #[test]
+fn first_accepted_name_is_atomic_and_survives_final_job_removal() {
+    let mut store = MetadataStore::in_memory().unwrap();
+    let mut wanted = request(0x61, None);
+    let mut observation = crate::MetadataIndexedFile {
+        ed2k_hash: wanted.file_hash.clone(),
+        name: "Remote.bin".into(),
+        size_bytes: 32,
+        content_type: String::new(),
+        availability_score: 0,
+    };
+    store
+        .upsert_indexed_file(&observation, crate::MetadataIndexedFileOrigin::PassiveCache)
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_acceptance AFTER INSERT ON download_jobs
+         BEGIN SELECT RAISE(ABORT,'injected acceptance failure'); END;",
+        )
+        .unwrap();
+    assert!(store.admit_download_job(&wanted).is_err());
+    assert_eq!(
+        store
+            .find_indexed_file_by_hash(&wanted.file_hash)
+            .unwrap()
+            .unwrap()
+            .name,
+        "Remote.bin"
+    );
+    assert_eq!(
+        store.library_sharing_enabled(&wanted.file_hash).unwrap(),
+        None
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TRIGGER refuse_acceptance")
+        .unwrap();
+
+    let first = store.admit_download_job(&wanted).unwrap().job;
+    let accepted_name = wanted.display_name.clone();
+    observation.name = "Later-Local.bin".into();
+    store
+        .upsert_indexed_file(&observation, crate::MetadataIndexedFileOrigin::LocalShare)
+        .unwrap();
+    assert_eq!(
+        store
+            .find_indexed_file_by_hash(&wanted.file_hash)
+            .unwrap()
+            .unwrap()
+            .name,
+        accepted_name
+    );
+    store.remove_download_job(first.token.job_id).unwrap();
+    let cleanup = store
+        .removed_download_cleanup_snapshot(first.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .finalize_transfer_retirement(first.token.job_id)
+            .unwrap()
+    );
+    assert!(store.finalize_removed_download_job(cleanup.token).unwrap());
+    store
+        .connection()
+        .unwrap()
+        .execute("DELETE FROM known_file_origins", [])
+        .unwrap();
+    wanted.display_name = "Another-Attempt.bin".into();
+    let second = store.admit_download_job(&wanted).unwrap().job;
+    assert_eq!(second.display_name, wanted.display_name);
+    assert_eq!(
+        store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT k.display_name FROM known_files k JOIN library_files l ON l.known_file_id=k.id
+                 WHERE k.ed2k_hash=?1",
+                [decode_fixed_hex(&wanted.file_hash, 16, "ED2K hash").unwrap()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            ,
+        accepted_name
+    );
+}
+
+#[test]
 fn ending_selection_preserves_started_intent_backing_and_manual_faults() {
     let store = MetadataStore::in_memory().unwrap();
     let first = store

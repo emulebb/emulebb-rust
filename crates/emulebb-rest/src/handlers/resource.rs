@@ -26,20 +26,36 @@ struct PageMeta {
     total: Option<usize>,
 }
 pub(super) fn item<T: Serialize>(status: StatusCode, data: T) -> Response {
-    (
-        status,
-        Json(Success {
-            data,
-            meta: PageMeta {
-                api_version: "v1",
-                next_cursor: None,
-                has_more: None,
-                settings_revision: None,
-                total: None,
-            },
-        }),
-    )
-        .into_response()
+    (status, Json(item_document(data))).into_response()
+}
+
+pub(super) fn item_document<T: Serialize>(data: T) -> Success<T> {
+    Success {
+        data,
+        meta: PageMeta {
+            api_version: "v1",
+            next_cursor: None,
+            has_more: None,
+            settings_revision: None,
+            total: None,
+        },
+    }
+}
+
+/// Borrow the admitted rows for framing. Only exact wire backing needs another
+/// allowance; the input remains charged until the handler drops its owner.
+pub(super) fn retained_json<T, U: Serialize>(
+    owner: &emulebb_core::RetainedRead<T>,
+    document: &U,
+) -> Response {
+    match owner.serialize_json_ref(document) {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            axum::body::Body::from(axum::body::Bytes::from_owner(bytes)),
+        )
+            .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
+    }
 }
 pub(super) fn settings_item<T: Serialize>(
     data: T,
