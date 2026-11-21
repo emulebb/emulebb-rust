@@ -11,7 +11,7 @@ use crate::{
         encode_multipacket_ext2_request, encode_multipacket_request, encode_request_filename,
         encode_request_sources2, encode_set_req_file_id, encode_start_upload_req,
     },
-    ed2k_transfer::{ED2K_PART_SIZE, Ed2kTransferRuntime, ResidentManifest},
+    ed2k_transfer::{ED2K_PART_SIZE, Ed2kTransferRuntime, Ed2kTransferState, ResidentManifest},
 };
 
 use super::state::DownloadSessionState;
@@ -70,7 +70,11 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
             let source_exchange_request = source_exchange_request_for_peer(session_state);
             let multipacket_ext2 = encode_multipacket_ext2_request(
                 request_file_identifier,
-                manifest,
+                manifest.file_size,
+                manifest
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.state == Ed2kTransferState::Verified),
                 source_exchange_request,
             );
             transport
@@ -90,7 +94,11 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
             let request_aich = session_state.remote_supports_aich;
             let multipacket = encode_multipacket_request(
                 file_hash,
-                manifest,
+                manifest.file_size,
+                manifest
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.state == Ed2kTransferState::Verified),
                 session_state.remote_supports_ext_multipacket,
                 source_exchange_request,
                 request_aich,
@@ -108,7 +116,14 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
                 source_exchange_request != PeerSourceExchangeRequest::None;
             session_state.aich_file_hash_requested = request_aich;
         } else {
-            let request_filename = encode_request_filename(file_hash, manifest);
+            let request_filename = encode_request_filename(
+                file_hash,
+                manifest.file_size,
+                manifest
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.state == Ed2kTransferState::Verified),
+            );
             transport
                 .write_all_diagnostic(
                     "native_download",
@@ -139,10 +154,12 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
     // omission): only request sources from an SX2-capable peer via
     // OP_REQUESTSOURCES2. We never send the legacy SX1 OP_REQUESTSOURCES, so a
     // peer that advertised only SX1 is not asked for sources.
+    // WHY: metadata-only preparation deliberately omits SX2. The actual sent
+    // flag, not file-identifier capability, prevents a duplicate embedded or
+    // standalone request while still allowing SX2 after prepared admission.
     if send_initial_requests
         && session_state.hello_complete
         && !session_state.source_request_sent
-        && !session_state.remote_supports_file_identifiers
         && session_state.source_exchange_allowed
         && session_state.remote_supports_source_exchange2
     {

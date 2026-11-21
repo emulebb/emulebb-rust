@@ -1,6 +1,64 @@
 use super::*;
 use transfer::{Ed2kTransferRuntime, test_support::admit_download_job};
 
+#[tokio::test]
+async fn waiting_preparation_status_retains_transient_charge_without_resident_hydration() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+    let job = runtime
+        .metadata
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: "5c".repeat(16),
+            display_name: "Sample.bin".into(),
+            expected_size_bytes: Some(0x4000000000),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            piece_size: transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    let baseline = runtime.download_resource_snapshot().resident_bytes;
+    let parts = runtime
+        .download_verified_parts(job.token)
+        .await
+        .unwrap()
+        .unwrap();
+    reap_workers(&runtime.local_mutations).await;
+    assert_eq!(parts.file_size_bytes, 0x4000000000);
+    assert_eq!(
+        parts.verified_parts.len(),
+        (0x4000000000u64).div_ceil(transfer::ED2K_PART_SIZE) as usize
+    );
+    assert!(parts.verified_parts.iter().all(|verified| !verified));
+    assert_eq!(
+        runtime.download_resource_snapshot().resident_bytes,
+        baseline
+    );
+    assert_eq!(
+        runtime.download_resource_snapshot().transient_bytes,
+        128 * 1024
+    );
+    assert!(
+        runtime
+            .manifest_cache
+            .lock()
+            .await
+            .get(&job.token.job_id)
+            .is_none()
+    );
+    drop(parts);
+    assert_eq!(runtime.download_resource_snapshot().transient_bytes, 0);
+    assert!(
+        runtime
+            .download_job(job.token.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .storage
+            .is_none()
+    );
+}
+
 async fn reap_workers(registry: &LocalMutationRegistry) {
     loop {
         let result =

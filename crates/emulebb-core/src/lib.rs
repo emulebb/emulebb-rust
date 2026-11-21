@@ -148,6 +148,7 @@ pub use emulebb_metadata::{
     MetadataContentConflict, MetadataLocalContentChoiceRequired,
 };
 mod download_maintenance;
+mod download_preparation;
 mod download_scheduler;
 mod download_selection;
 pub use download_controls::{
@@ -1042,6 +1043,7 @@ impl EmulebbCore {
         transfer: &Transfer,
         job_token: emulebb_metadata::JobToken,
         cancel: &CancellationToken,
+        mut prepared: Option<download_preparation::PreparedDownloadSource>,
     ) -> Result<Option<&'static str>> {
         // Already cancelled before any work started (delete/pause raced the
         // queue): do nothing, don't touch state, don't retry.
@@ -1077,15 +1079,19 @@ impl EmulebbCore {
             .parse()
             .with_context(|| format!("invalid ED2K transfer hash {}", transfer.hash))?;
         let transfer = transfer.clone();
-        let mut sources = self
-            .acquire_ed2k_sources(
+        let mut sources = if let Some(ready) = prepared.as_ref() {
+            vec![ready.source.clone()]
+        } else {
+            self.acquire_ed2k_sources(
                 network,
-                &transfer,
+                &ed2k_source_batch::DownloadSourceTarget::from(&transfer),
                 file_hash,
                 transfer.size_bytes,
                 should_refresh_ed2k_server_sources(0),
+                true,
             )
-            .await?;
+            .await?
+        };
         if !network.ip_filter.is_empty() {
             sources.retain(|source| !network.ip_filter.is_filtered(source.ip));
         }
@@ -1099,8 +1105,11 @@ impl EmulebbCore {
                 transfer.size_bytes,
             )));
         }
-        self.register_download_source_candidates(&transfer, &sources)
-            .await;
+        self.register_download_source_candidates(
+            &ed2k_source_batch::DownloadSourceTarget::from(&transfer),
+            &sources,
+        )
+        .await;
         let hello_identity = self.ed2k_hello_identity(network);
         // Direct peer connect stays conservative (~15s); the LowID callback wait
         // gets eMule's full reach (ClientList.cpp:1059 SEC2MS(45)) so a firewalled
@@ -1467,16 +1476,24 @@ impl EmulebbCore {
                 }
             }
 
-            let candidate_direct_sources =
+            let mut candidate_direct_sources =
                 direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
+            if let Some(ready) = prepared.as_ref() {
+                candidate_direct_sources.retain(|source| {
+                    source_endpoint_key(source) != source_endpoint_key(&ready.source)
+                });
+            }
             had_direct_sources |= !candidate_direct_sources.is_empty();
-            let (direct_sources, deferred_count, deferred_retry_delay) = self
+            let (mut direct_sources, deferred_count, deferred_retry_delay) = self
                 .acquire_direct_download_source_leases(
                     job_token,
                     &transfer.hash,
                     &candidate_direct_sources,
                 )
                 .await;
+            if let Some(ready) = prepared.as_ref() {
+                direct_sources.insert(0, ready.source.clone());
+            }
             let acquired_direct_source_count = direct_sources.len();
             deferred_active_direct_sources |= deferred_count != 0;
             for source in &direct_sources {
@@ -1521,8 +1538,30 @@ impl EmulebbCore {
                 // source can detach onto the reask loop (None when reask is off).
                 let reask_register = self.ed2k_reask_handle.lock().unwrap().clone();
                 let egress_route = network.egress_route;
+                let prepared_execution = prepared.take().map(|ready| {
+                    let alternate_files = a4af_alternates
+                        .get(&source_endpoint_key(&ready.source))
+                        .cloned()
+                        .unwrap_or_default();
+                    let options = emulebb_ed2k::ed2k_tcp::Ed2kPreparedDownloadOptions {
+                        job_token,
+                        timeout,
+                        current_source_count: source_exchange_source_count,
+                        upload_context: upload_context.clone(),
+                        established_context: established_context.clone(),
+                        reask_register: reask_register.clone(),
+                    };
+                    ed2k_direct_download_types::PreparedDirectDownload {
+                        source: ready.source,
+                        download: Box::pin(async move {
+                            ready.peer.remember_availability(job_token).await?;
+                            ready.peer.download_files(options, alternate_files).await
+                        }),
+                    }
+                });
                 let outcome = run_ed2k_direct_downloads(
                     DirectDownloadOptions {
+                        prepared: prepared_execution,
                         job_token,
                         bind_ip: network.bind_ip,
                         hello_identity,
@@ -1762,18 +1801,22 @@ impl EmulebbCore {
                 match self
                     .acquire_ed2k_sources(
                         network,
-                        &transfer,
+                        &ed2k_source_batch::DownloadSourceTarget::from(&transfer),
                         file_hash,
                         transfer.size_bytes,
                         should_refresh_ed2k_server_sources(source_requery_round),
+                        true,
                     )
                     .await
                 {
                     Ok(refreshed_sources) => {
                         let refreshed_source_count = refreshed_sources.len();
                         let previous_source_count = sources.len();
-                        self.register_download_source_candidates(&transfer, &refreshed_sources)
-                            .await;
+                        self.register_download_source_candidates(
+                            &ed2k_source_batch::DownloadSourceTarget::from(&transfer),
+                            &refreshed_sources,
+                        )
+                        .await;
                         merge_download_sources(&mut sources, refreshed_sources);
                         let added_source_count =
                             sources.len().saturating_sub(previous_source_count);
@@ -2030,7 +2073,7 @@ impl EmulebbCore {
         file_hash: &str,
         sources: &[Ed2kFoundSource],
     ) -> usize {
-        if !self.download_attempts.owns(token) {
+        if !self.download_attempts.owns_observation(token) {
             return 0;
         }
         let swap_targets = {
@@ -2150,11 +2193,11 @@ impl EmulebbCore {
 
     async fn register_download_source_candidates(
         &self,
-        transfer: &Transfer,
+        transfer: &ed2k_source_batch::DownloadSourceTarget,
         sources: &[Ed2kFoundSource],
     ) -> (usize, usize) {
         let mut state = self.state.lock().await;
-        let needed_parts = transfer.parts_total.saturating_sub(transfer.parts_obtained);
+        let needed_parts = transfer.needed_parts;
         let now = Instant::now();
         let source_count_before = state
             .download_source_registry
@@ -2301,7 +2344,7 @@ impl EmulebbCore {
         file_hash: &str,
         sources: &[Ed2kFoundSource],
     ) -> usize {
-        if !self.download_attempts.owns(token) {
+        if !self.download_attempts.owns_observation(token) {
             return 0;
         }
         let reask_handle = self.ed2k_reask_handle.lock().unwrap().clone();
@@ -2416,10 +2459,11 @@ impl EmulebbCore {
     async fn acquire_ed2k_sources(
         &self,
         network: &Ed2kNetworkConfig,
-        transfer: &Transfer,
+        transfer: &ed2k_source_batch::DownloadSourceTarget,
         file_hash: Ed2kHash,
         file_size: u64,
         allow_server_source_refresh: bool,
+        include_remembered: bool,
     ) -> Result<Vec<Ed2kFoundSource>> {
         let cancel = CancellationToken::new();
         let config = self.effective_ed2k_config(&network.ed2k).await?;
@@ -2477,11 +2521,8 @@ impl EmulebbCore {
                                     source_count_after,
                                 );
                                 if result_hash != file_hash {
-                                    self.remember_ed2k_sources(
-                                        batch_transfer.job_token(),
-                                        &results,
-                                    )
-                                    .await?;
+                                    self.remember_ed2k_sources(batch_transfer.token, &results)
+                                        .await?;
                                 }
                             }
                             if result_hash == file_hash {
@@ -2576,7 +2617,7 @@ impl EmulebbCore {
                                     );
                                     if result_hash != file_hash {
                                         self.remember_ed2k_sources(
-                                            batch_transfer.job_token(),
+                                            batch_transfer.token,
                                             &result.sources,
                                         )
                                         .await?;
@@ -2624,8 +2665,10 @@ impl EmulebbCore {
         // MFC keeps sources attached to the part file across later source
         // searches, so fresh non-empty lookups must not hide older direct
         // endpoints that remain valid candidates for the same file.
-        self.merge_remembered_ed2k_sources(transfer.job_token(), file_hash, &mut sources)
-            .await?;
+        if include_remembered {
+            self.merge_remembered_ed2k_sources(transfer.token, file_hash, &mut sources)
+                .await?;
+        }
         // Self-source exclusion (eMule `CDownloadQueue::CheckAndAddSource`): never
         // treat our own client as a download source. A server or Kad lookup can
         // reflect our own (ip, tcp_port) or user-hash back to us, which would
@@ -2664,7 +2707,7 @@ impl EmulebbCore {
             !acquire_ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
         });
         for source in &sources {
-            self.remember_ed2k_sources(transfer.job_token(), std::slice::from_ref(source))
+            self.remember_ed2k_sources(transfer.token, std::slice::from_ref(source))
                 .await?;
         }
         Ok(sources)

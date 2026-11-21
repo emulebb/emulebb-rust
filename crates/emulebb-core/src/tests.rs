@@ -129,6 +129,7 @@ fn ed2k_link_parser_enriches_duplicate_source_metadata() {
 
 mod category_persistence;
 mod core_config;
+mod download_preparation;
 mod download_scheduler;
 mod download_source_policy;
 mod kad_protocol;
@@ -843,6 +844,7 @@ fn direct_download_options(
     sources: Vec<Ed2kFoundSource>,
 ) -> DirectDownloadOptions {
     DirectDownloadOptions {
+        prepared: None,
         job_token,
         bind_ip: Ipv4Addr::new(192, 0, 2, 10),
         hello_identity: Ed2kHelloIdentity {

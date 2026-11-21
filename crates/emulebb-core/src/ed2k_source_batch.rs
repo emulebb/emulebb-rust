@@ -8,6 +8,25 @@ use emulebb_kad_proto::Ed2kHash;
 
 use crate::{CoreState, Transfer};
 
+/// Discovery needs scalar job authority, not a hydrated execution or UI row.
+#[derive(Clone, Debug)]
+pub(crate) struct DownloadSourceTarget {
+    pub token: emulebb_metadata::JobToken,
+    pub hash: String,
+    pub size_bytes: u64,
+    pub needed_parts: u32,
+}
+impl From<&Transfer> for DownloadSourceTarget {
+    fn from(transfer: &Transfer) -> Self {
+        Self {
+            token: transfer.job_token(),
+            hash: transfer.hash.clone(),
+            size_bytes: transfer.size_bytes,
+            needed_parts: transfer.parts_total.saturating_sub(transfer.parts_obtained),
+        }
+    }
+}
+
 pub(crate) const ED2K_SERVER_UDP_SOURCE_BATCH_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 pub(crate) const ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 pub(crate) const ED2K_CONNECTED_SERVER_SOURCE_FRAME_INTERVAL: Duration =
@@ -19,18 +38,18 @@ const ED2K_KAD_SOURCE_REASK_MAX_MULTIPLIER: u8 = 7;
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedEd2kUdpSourceBatch {
     pub targets: Vec<Ed2kUdpSourceBatchTarget>,
-    pub transfers: HashMap<Ed2kHash, Transfer>,
+    pub transfers: HashMap<Ed2kHash, DownloadSourceTarget>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedConnectedServerSourceBatch {
     pub targets: Vec<Ed2kServerSourceBatchTarget>,
-    pub transfers: HashMap<Ed2kHash, Transfer>,
+    pub transfers: HashMap<Ed2kHash, DownloadSourceTarget>,
 }
 
 pub(crate) fn claim_ed2k_udp_source_batch(
     state: &mut CoreState,
-    current_transfer: &Transfer,
+    current_transfer: &DownloadSourceTarget,
     current_file_hash: Ed2kHash,
     current_source_count: usize,
     udp_source_cap: usize,
@@ -64,7 +83,11 @@ pub(crate) fn claim_ed2k_udp_source_batch(
         let source_count = state
             .download_source_registry
             .candidate_count_for_file(now, &transfer.hash);
-        candidates.push((file_hash, transfer.clone(), source_count));
+        candidates.push((
+            file_hash,
+            DownloadSourceTarget::from(transfer),
+            source_count,
+        ));
     }
 
     for (file_hash, transfer, source_count) in candidates {
@@ -89,7 +112,7 @@ pub(crate) fn claim_ed2k_udp_source_batch(
 
 pub(crate) fn claim_connected_server_source_batch(
     state: &mut CoreState,
-    current_transfer: &Transfer,
+    current_transfer: &DownloadSourceTarget,
     current_file_hash: Ed2kHash,
     now: Instant,
 ) -> ClaimedConnectedServerSourceBatch {
@@ -122,7 +145,7 @@ pub(crate) fn claim_connected_server_source_batch(
         let Ok(file_hash) = transfer.hash.parse::<Ed2kHash>() else {
             continue;
         };
-        candidates.push((file_hash, transfer.clone()));
+        candidates.push((file_hash, DownloadSourceTarget::from(transfer)));
     }
 
     let mut targets = Vec::new();
@@ -219,6 +242,25 @@ mod tests {
     use crate::{CoreState, download_source_registry::DownloadSourceRegistry};
 
     #[test]
+    fn waiting_job_can_claim_discovery_without_a_hydrated_transfer() {
+        let hash = Ed2kHash::from_bytes([0x93; 16]);
+        let mut state = core_state_with_transfers([]);
+        let target = DownloadSourceTarget {
+            token: emulebb_metadata::JobToken {
+                job_id: emulebb_metadata::JobId::new(41).unwrap(),
+                generation: 7,
+            },
+            hash: hash.to_string(),
+            size_bytes: 4096,
+            needed_parts: 1,
+        };
+        let batch = claim_connected_server_source_batch(&mut state, &target, hash, Instant::now());
+        assert_eq!(batch.targets.len(), 1);
+        assert_eq!(batch.transfers[&hash].token, target.token);
+        assert!(state.transfers.is_empty());
+    }
+
+    #[test]
     fn claim_batches_current_and_other_active_scarce_transfers_once() {
         let now = Instant::now();
         let current_hash = Ed2kHash::from_bytes([0x11; 16]);
@@ -227,13 +269,27 @@ mod tests {
         let other = transfer(other_hash, "queued", 2048);
         let mut state = core_state_with_transfers([current.clone(), other.clone()]);
 
-        let claimed = claim_ed2k_udp_source_batch(&mut state, &current, current_hash, 1, 2, now);
+        let claimed = claim_ed2k_udp_source_batch(
+            &mut state,
+            &DownloadSourceTarget::from(&current),
+            current_hash,
+            1,
+            2,
+            now,
+        );
 
         assert_eq!(claimed.targets.len(), 2);
         assert!(claimed.transfers.contains_key(&current_hash));
         assert!(claimed.transfers.contains_key(&other_hash));
 
-        let repeated = claim_ed2k_udp_source_batch(&mut state, &current, current_hash, 1, 2, now);
+        let repeated = claim_ed2k_udp_source_batch(
+            &mut state,
+            &DownloadSourceTarget::from(&current),
+            current_hash,
+            1,
+            2,
+            now,
+        );
         assert!(repeated.targets.is_empty());
     }
 
@@ -248,7 +304,14 @@ mod tests {
         let insufficient = transfer(insufficient_hash, "insufficient", 2048);
         let mut state = core_state_with_transfers([current.clone(), completed, insufficient]);
 
-        let claimed = claim_ed2k_udp_source_batch(&mut state, &current, current_hash, 3, 2, now);
+        let claimed = claim_ed2k_udp_source_batch(
+            &mut state,
+            &DownloadSourceTarget::from(&current),
+            current_hash,
+            3,
+            2,
+            now,
+        );
 
         assert!(claimed.targets.is_empty());
     }
@@ -262,14 +325,19 @@ mod tests {
         let other = transfer(other_hash, "queued", 2048);
         let mut state = core_state_with_transfers([current.clone(), other.clone()]);
 
-        let first = claim_connected_server_source_batch(&mut state, &current, current_hash, now);
+        let first = claim_connected_server_source_batch(
+            &mut state,
+            &DownloadSourceTarget::from(&current),
+            current_hash,
+            now,
+        );
         assert_eq!(first.targets.len(), 2);
         assert!(first.transfers.contains_key(&current_hash));
         assert!(first.transfers.contains_key(&other_hash));
 
         let frame_blocked = claim_connected_server_source_batch(
             &mut state,
-            &current,
+            &DownloadSourceTarget::from(&current),
             current_hash,
             now + Duration::from_secs(5),
         );
@@ -277,7 +345,7 @@ mod tests {
 
         let per_file_blocked = claim_connected_server_source_batch(
             &mut state,
-            &current,
+            &DownloadSourceTarget::from(&current),
             current_hash,
             now + ED2K_CONNECTED_SERVER_SOURCE_FRAME_INTERVAL + Duration::from_secs(1),
         );
@@ -285,7 +353,7 @@ mod tests {
 
         let refreshed = claim_connected_server_source_batch(
             &mut state,
-            &current,
+            &DownloadSourceTarget::from(&current),
             current_hash,
             now + ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN + Duration::from_secs(1),
         );
@@ -308,7 +376,12 @@ mod tests {
         }
         let mut state = core_state_with_transfers(transfers);
 
-        let claimed = claim_connected_server_source_batch(&mut state, &current, current_hash, now);
+        let claimed = claim_connected_server_source_batch(
+            &mut state,
+            &DownloadSourceTarget::from(&current),
+            current_hash,
+            now,
+        );
 
         assert_eq!(
             claimed.targets.len(),

@@ -892,14 +892,16 @@ impl CallbackTicketStore {
             .find_map(|ticket| ticket.downloads.first().cloned()))
     }
 
-    fn acknowledge_session_current(
+    fn acknowledge_session_download(
         &mut self,
         token: &CallbackSessionToken,
+        completed: &Ed2kCallbackDownload,
         now: Instant,
     ) -> Result<(), Ed2kCallbackClaimError> {
-        let Some(current) = self.session_current(token, now)? else {
-            return Ok(());
-        };
+        self.reap(now);
+        if !self.session_token_is_current(token) {
+            return Err(Ed2kCallbackClaimError::StaleClaim);
+        }
         for ticket in self.tickets.iter_mut().filter(|ticket| {
             matches!(
                 ticket.state,
@@ -907,9 +909,13 @@ impl CallbackTicketStore {
                     if generation == token.generation
             )
         }) {
-            ticket
-                .downloads
-                .retain(|download| download.file_hash != current.file_hash);
+            // WHY: ticket refresh can replace the same hash during peer I/O.
+            // Only the captured execution was served, never a replacement or
+            // whichever unrelated file became the queue head in the meantime.
+            ticket.downloads.retain(|download| {
+                download.file_hash != completed.file_hash
+                    || download.job_token != completed.job_token
+            });
         }
         Ok(())
     }
@@ -1105,9 +1111,12 @@ impl Ed2kCallbackSessionClaim {
             .session_current(token, Instant::now())
     }
 
-    /// Consume the current file after one successful protocol outcome. The
-    /// same hash is removed from every selected ticket before advancing A4AF.
-    pub(crate) fn acknowledge_current(&mut self) -> Result<(), Ed2kCallbackClaimError> {
+    /// Consume only the execution captured before peer I/O. Duplicate copies of
+    /// that execution are removed across this session's selected tickets.
+    pub(crate) fn acknowledge_download(
+        &mut self,
+        completed: &Ed2kCallbackDownload,
+    ) -> Result<(), Ed2kCallbackClaimError> {
         let token = self
             .token
             .as_ref()
@@ -1115,7 +1124,7 @@ impl Ed2kCallbackSessionClaim {
         self.store
             .lock()
             .unwrap()
-            .acknowledge_session_current(token, Instant::now())
+            .acknowledge_session_download(token, completed, Instant::now())
     }
 
     /// Finish session ownership explicitly. Dropping the guard provides the
@@ -1959,7 +1968,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(claim.current().unwrap(), Some(download(&metadata, 1)));
-        claim.acknowledge_current().unwrap();
+        claim.acknowledge_download(&download(&metadata, 1)).unwrap();
         assert_eq!(claim.current().unwrap(), Some(download(&metadata, 2)));
         drop(claim);
 
@@ -2011,9 +2020,87 @@ mod tests {
             .claim_session(hello(None, 999, [0x44; 16]), now)
             .unwrap()
             .unwrap();
-        store.acknowledge_session_current(&token, now).unwrap();
+        store
+            .acknowledge_session_download(&token, &download(&metadata, 1), now)
+            .unwrap();
         store.finish_session(&token, now).unwrap();
         assert!(store.tickets.is_empty());
+    }
+
+    #[test]
+    fn callback_acknowledgment_preserves_a_replacement_execution() {
+        for replace_job_id in [false, true] {
+            let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
+            let now = Instant::now();
+            let server = "192.0.2.10:4661".parse().unwrap();
+            let request = server_request(&metadata, server, 17, 1);
+            let mut store = CallbackTicketStore::default();
+            store.reserve(request.clone(), now).unwrap();
+            let owner = store
+                .claim_session(hello(Some(server), 17, [0x55; 16]), now)
+                .unwrap()
+                .unwrap();
+            let captured = store.session_current(&owner, now).unwrap().unwrap();
+            let mut replacement = request;
+            if replace_job_id {
+                replacement.download.job_token.job_id = emulebb_metadata::JobId::new(99).unwrap();
+            } else {
+                replacement.download.job_token.generation += 1;
+            }
+            let expected = replacement.download.clone();
+            assert!(matches!(
+                store.reserve(replacement, now).unwrap(),
+                Ed2kCallbackReservation::Joined { .. }
+            ));
+            store
+                .acknowledge_session_download(&owner, &captured, now)
+                .unwrap();
+            assert_eq!(
+                store.session_current(&owner, now).unwrap(),
+                Some(expected.clone())
+            );
+            store.finish_session(&owner, now).unwrap();
+            assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
+            assert_eq!(store.tickets[0].downloads, [expected]);
+        }
+    }
+
+    #[test]
+    fn callback_acknowledgment_deduplicates_only_the_captured_execution_across_routes() {
+        let metadata = emulebb_metadata::MetadataStore::in_memory().unwrap();
+        let now = Instant::now();
+        let mut first = server_request(&metadata, "192.0.2.10:4661".parse().unwrap(), 17, 1);
+        let mut second = server_request(&metadata, "192.0.2.20:4661".parse().unwrap(), 23, 1);
+        first.peer.expected_user_hash = Some([0x44; 16]);
+        second.peer.expected_user_hash = Some([0x44; 16]);
+        second.download.job_token.generation += 1;
+        let expected = second.download.clone();
+        let mut store = CallbackTicketStore::default();
+        store.reserve(first, now).unwrap();
+        store.reserve(second, now).unwrap();
+        let owner = store
+            .claim_session(hello(None, 999, [0x44; 16]), now)
+            .unwrap()
+            .unwrap();
+        let captured = store.session_current(&owner, now).unwrap().unwrap();
+        store
+            .acknowledge_session_download(&owner, &captured, now)
+            .unwrap();
+        assert_eq!(
+            store.session_current(&owner, now).unwrap(),
+            Some(expected.clone())
+        );
+        store
+            .acknowledge_session_download(&owner, &captured, now)
+            .unwrap();
+        assert_eq!(
+            store.session_current(&owner, now).unwrap(),
+            Some(expected.clone())
+        );
+        store.finish_session(&owner, now).unwrap();
+        assert_eq!(store.tickets.len(), 1);
+        assert_eq!(store.tickets[0].downloads, [expected]);
+        assert_eq!(store.tickets[0].state, CallbackTicketState::NeedsDispatch);
     }
 
     #[test]
@@ -2027,7 +2114,9 @@ mod tests {
             .reserve(server_request(&metadata, server, 17, 1), now)
             .unwrap();
         let token = store.claim_session(observed, now).unwrap().unwrap();
-        store.acknowledge_session_current(&token, now).unwrap();
+        store
+            .acknowledge_session_download(&token, &download(&metadata, 1), now)
+            .unwrap();
 
         assert!(matches!(
             store.reserve(server_request(&metadata, server, 17, 2), now),
@@ -2113,7 +2202,9 @@ mod tests {
             .reserve(server_request(&metadata, server, 17, 2), now)
             .unwrap();
         let owner = store.claim_session(observed, now).unwrap().unwrap();
-        store.acknowledge_session_current(&owner, now).unwrap();
+        store
+            .acknowledge_session_download(&owner, &download(&metadata, 1), now)
+            .unwrap();
         store.finish_session(&owner, now).unwrap();
 
         let failed = dispatch_permit(
@@ -2166,7 +2257,9 @@ mod tests {
             store.session_current(&owner, now),
             Ok(Some(download(&metadata, 1)))
         );
-        store.acknowledge_session_current(&owner, now).unwrap();
+        store
+            .acknowledge_session_download(&owner, &download(&metadata, 1), now)
+            .unwrap();
         assert_eq!(
             store.session_current(&owner, now),
             Ok(Some(download(&metadata, 2)))
@@ -2359,7 +2452,9 @@ mod tests {
                 .unwrap(),
         );
         let owner = store.claim_session(observed, now).unwrap().unwrap();
-        store.acknowledge_session_current(&owner, now).unwrap();
+        store
+            .acknowledge_session_download(&owner, &download(&metadata, 1), now)
+            .unwrap();
         store.finish_session(&owner, now).unwrap();
 
         assert_eq!(
@@ -2389,7 +2484,7 @@ mod tests {
             Ok(Ed2kCallbackReservation::Joined { .. })
         ));
         store
-            .acknowledge_session_current(&owner, after_original_expiry)
+            .acknowledge_session_download(&owner, &download(&metadata, 1), after_original_expiry)
             .unwrap();
         store.finish_session(&owner, after_original_expiry).unwrap();
 

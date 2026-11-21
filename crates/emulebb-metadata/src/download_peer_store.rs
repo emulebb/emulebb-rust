@@ -3,8 +3,18 @@ use crate::{JobToken, MetadataStore, MetadataTransferFileNameObservation, Metada
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, TransactionBehavior, params};
 
+mod availability;
+pub use availability::{MetadataDownloadAvailabilityQuery, MetadataDownloadSourceAvailability};
+
 #[derive(Debug, Clone)]
 pub enum MetadataDownloadPeerDelta {
+    Availability {
+        source: MetadataTransferSource,
+        session_id: [u8; 16],
+        file_size_bytes: u64,
+        available_parts: Vec<bool>,
+        observed_at_s: i64,
+    },
     Source {
         source: MetadataTransferSource,
         description_only: bool,
@@ -283,6 +293,26 @@ impl MetadataDownloadPeerDelta {
     /// not a claim about SQLite's separate connection/page cache.
     pub fn payload_bytes(&self) -> Result<usize> {
         Ok(match self {
+            Self::Availability {
+                source,
+                file_size_bytes,
+                available_parts,
+                observed_at_s,
+                ..
+            } => {
+                ensure!(
+                    *file_size_bytes > 0
+                        && *file_size_bytes <= i64::MAX as u64
+                        && (1..=65534).contains(&available_parts.len())
+                        && *observed_at_s >= 0,
+                    "invalid peer availability geometry or time"
+                );
+                ensure!(
+                    source.user_hash.is_some(),
+                    "availability requires observed peer identity"
+                );
+                source_bytes(source)? + available_parts.capacity() + 128
+            }
             Self::Source { source, .. } => source_bytes(source)?,
             Self::ObserveName {
                 observation: value,
@@ -388,6 +418,21 @@ impl MetadataStore {
         ensure!(current, "stale download peer callback");
         let mut name = None;
         let changed = match delta {
+            MetadataDownloadPeerDelta::Availability {
+                source,
+                session_id,
+                file_size_bytes,
+                available_parts,
+                observed_at_s,
+            } => availability::store(
+                &tx,
+                token,
+                source,
+                *session_id,
+                *file_size_bytes,
+                available_parts,
+                *observed_at_s,
+            )?,
             MetadataDownloadPeerDelta::Source {
                 source,
                 description_only,

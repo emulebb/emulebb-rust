@@ -104,7 +104,7 @@ fn comment_pages_continue_at_the_byte_boundary_without_losing_rows() {
     assert!(!last.has_more);
 }
 
-fn job(store: &MetadataStore) -> crate::DownloadJobRecord {
+pub(super) fn job(store: &MetadataStore) -> crate::DownloadJobRecord {
     store
         .admit_download_job(&crate::DownloadJobRequest {
             file_hash: "45".repeat(16),
@@ -117,7 +117,7 @@ fn job(store: &MetadataStore) -> crate::DownloadJobRecord {
         .unwrap()
         .job
 }
-fn source(last: u8, comment: String) -> MetadataTransferSource {
+pub(super) fn source(last: u8, comment: String) -> MetadataTransferSource {
     MetadataTransferSource {
         ip: format!("192.0.2.{last}"),
         tcp_port: 4662,

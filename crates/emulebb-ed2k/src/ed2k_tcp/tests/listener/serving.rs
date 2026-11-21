@@ -1,4 +1,5 @@
 use super::*;
+use crate::ed2k_transfer::Ed2kTransferState;
 
 #[test]
 fn upload_part_packets_split_large_uncompressed_ranges() {
@@ -204,7 +205,14 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
 
     let manifest = transfer_runtime.manifest(job.token).await.unwrap();
     stream
-        .write_all(&super::encode_request_filename(&file_hash, &manifest))
+        .write_all(&super::encode_request_filename(
+            &file_hash,
+            manifest.file_size,
+            manifest
+                .pieces
+                .iter()
+                .map(|piece| piece.state == Ed2kTransferState::Verified),
+        ))
         .await
         .unwrap();
     let request_filename_answer =

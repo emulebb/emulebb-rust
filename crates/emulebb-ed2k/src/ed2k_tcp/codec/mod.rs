@@ -6,7 +6,7 @@ use flate2::read::ZlibDecoder;
 
 use crate::{
     ed2k_string::Ed2kStringEncoding,
-    ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState, ed2k_part_count},
+    ed2k_transfer::{ED2K_PART_SIZE, ed2k_part_count},
 };
 
 mod aich;
@@ -394,9 +394,14 @@ pub(super) fn encode_start_upload_req(file_hash: &Ed2kHash) -> Vec<u8> {
 /// ([`crate::ed2k_transfer::ed2k_part_count`]) is one more than the data-part
 /// count at an exact PARTSIZE multiple; that trailing EOF slice is always
 /// complete, so it is marked `true`.
-pub(super) fn encode_request_filename_ext_info(manifest: &Ed2kResumeManifest) -> Vec<u8> {
-    let ed2k_part_count = ed2k_part_count(manifest.file_size);
-    let data_part_count = manifest.pieces.len();
+/// Only geometry and verified bits are needed: probes can use compact database
+/// status without constructing or pinning a resident execution manifest.
+pub(super) fn encode_request_filename_ext_info(
+    file_size: u64,
+    mut verified_parts: impl Iterator<Item = bool>,
+) -> Vec<u8> {
+    let ed2k_part_count = ed2k_part_count(file_size);
+    let data_part_count = file_size.div_ceil(ED2K_PART_SIZE);
     let bitfield_len = usize::from(ed2k_part_count).div_ceil(8);
     let mut payload = Vec::with_capacity(2 + bitfield_len + 2);
     payload.extend_from_slice(&ed2k_part_count.to_le_bytes());
@@ -404,8 +409,7 @@ pub(super) fn encode_request_filename_ext_info(manifest: &Ed2kResumeManifest) ->
     for index in 0..usize::from(ed2k_part_count) {
         // Data parts follow their verified state; the trailing exact-multiple
         // EOF slice (index >= data_part_count) is always complete.
-        let complete =
-            index >= data_part_count || manifest.pieces[index].state == Ed2kTransferState::Verified;
+        let complete = index as u64 >= data_part_count || verified_parts.next().unwrap_or(false);
         if complete {
             current_byte |= 1 << (index % 8);
         }
@@ -479,9 +483,10 @@ pub(super) fn decode_request_filename_ext_info(
 
 pub(super) fn encode_request_filename(
     file_hash: &Ed2kHash,
-    manifest: &Ed2kResumeManifest,
+    file_size: u64,
+    verified_parts: impl Iterator<Item = bool>,
 ) -> Vec<u8> {
-    let ext_info = encode_request_filename_ext_info(manifest);
+    let ext_info = encode_request_filename_ext_info(file_size, verified_parts);
     let mut payload = Vec::with_capacity(16 + ext_info.len());
     payload.extend_from_slice(&file_hash.0);
     payload.extend_from_slice(&ext_info);
