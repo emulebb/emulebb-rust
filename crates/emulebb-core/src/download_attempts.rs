@@ -44,6 +44,16 @@ impl State {
             (limit as usize).min(self.window.active)
         })
     }
+
+    fn rare_active_limit(&self) -> usize {
+        let extra = self
+            .ordinary_limit
+            .map_or(self.window.burst, |limit| (limit as usize).div_ceil(4))
+            .min(self.window.burst);
+        self.active_limit()
+            .saturating_add(extra)
+            .min(self.window.total)
+    }
 }
 
 /// At most two operator rechecks exclude scheduler selection, including while
@@ -413,6 +423,12 @@ impl DownloadAttemptGuard {
     /// Promote the same ownership record before resident/storage admission.
     /// Refusal leaves preparation owned; it never drops/recreates the guard.
     pub(crate) fn promote(&self) -> bool {
+        self.promote_ready(false)
+    }
+
+    /// Rarity only relaxes the ordinary count ceiling. The same owner and
+    /// cohort accounting remain in force; Native admission still owns bytes.
+    pub(crate) fn promote_ready(&self, rare: bool) -> bool {
         let mut state = self.control.state.lock().unwrap_or_else(|p| p.into_inner());
         let Some(entry) = state.entries.get(&self.token.job_id).filter(|entry| {
             entry.nonce == self.nonce && entry.token == self.token && !entry.cancel.is_cancelled()
@@ -427,7 +443,12 @@ impl DownloadAttemptGuard {
             .values()
             .filter(|entry| entry.kind == Kind::Active)
             .count();
-        if active >= state.active_limit() || state.entries.len() > state.window.total {
+        let limit = if rare {
+            state.rare_active_limit()
+        } else {
+            state.active_limit()
+        };
+        if active >= limit || state.entries.len() > state.window.total {
             return false;
         }
         state

@@ -14,6 +14,32 @@ fn resources() -> DownloadResourceSnapshot {
 }
 
 #[test]
+fn burst_ceiling_uses_available_resources_and_closes_under_pressure() {
+    let mut native = resources();
+    let open = next_window(
+        AdmissionWindow::default(),
+        native,
+        Some(8 * 1024 * 1024 * 1024),
+        1,
+        16,
+    );
+    assert_eq!(open.burst, open.active.div_ceil(4));
+    native.resident_bytes = SOFT_RESIDENT_BYTES + 1;
+    let resident = next_window(open, native, Some(8 * 1024 * 1024 * 1024), 1, 16);
+    assert_eq!(resident.burst, 0);
+    native.resident_bytes = 0;
+    native.free_work_units = 0;
+    let busy = next_window(open, native, Some(8 * 1024 * 1024 * 1024), 1, 16);
+    assert_eq!(busy.burst, 0);
+    native.free_work_units = 4;
+    let host = next_window(open, native, Some(0), 1, 16);
+    assert_eq!((host.active, host.burst, host.total), (0, 0, 0));
+    native.connection_limit = 2;
+    let connections = next_window(open, native, Some(u64::MAX), 1, 16);
+    assert!(connections.burst <= 2);
+}
+
+#[test]
 fn prepared_hydration_does_not_require_a_second_connection_slot() {
     let mut native = resources();
     native.connection_limit = 1;
@@ -56,6 +82,7 @@ fn host_pressure_closes_then_gradually_recovers_admission() {
     let unknown = next_window(
         AdmissionWindow {
             active: 100,
+            burst: 25,
             preparing: 2,
             total: 102,
         },

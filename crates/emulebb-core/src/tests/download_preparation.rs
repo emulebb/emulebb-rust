@@ -412,32 +412,41 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
         seeds.push(seed);
     }
     let (download, _) = local_preparation_core(&root.join("download"), [0x66; 16], Some(1));
-    let (_, blocker) = download
-        .create_download(DownloadCreate {
-            source: DownloadCreateSource::Content {
-                hash: "67676767676767676767676767676767".into(),
-                name: "Active.bin".into(),
-                size_bytes: Some(16),
-            },
-            category: None,
-            intent: emulebb_metadata::DownloadIntent::Started,
-            redownload: false,
-        })
-        .await
-        .unwrap();
-    let blocker_id = blocker.id;
-    drop(blocker);
-    let header = download
-        .ed2k_transfers
-        .download_job(blocker_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let active = download
-        .download_attempts
-        .try_enter(header.token, header.file_hash.parse().unwrap())
-        .unwrap();
-    drop(header);
+    // Occupy the full 1 + ceil(1/4) ceiling before preparing the ready cohort.
+    // Lowering a limit retains existing owners, as it does during real drains.
+    download.download_attempts.apply_concurrency_limit(Some(2));
+    let mut active = Vec::new();
+    for byte in [0x67, 0x68] {
+        let (_, blocker) = download
+            .create_download(DownloadCreate {
+                source: DownloadCreateSource::Content {
+                    hash: Ed2kHash::from_bytes([byte; 16]).to_string(),
+                    name: "Active.bin".into(),
+                    size_bytes: Some(16),
+                },
+                category: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                redownload: false,
+            })
+            .await
+            .unwrap();
+        let blocker_id = blocker.id;
+        drop(blocker);
+        let header = download
+            .ed2k_transfers
+            .download_job(blocker_id)
+            .await
+            .unwrap()
+            .unwrap();
+        active.push(
+            download
+                .download_attempts
+                .try_enter(header.token, header.file_hash.parse().unwrap())
+                .unwrap(),
+        );
+        drop(header);
+    }
+    download.download_attempts.apply_concurrency_limit(Some(1));
     let mut ids = Vec::new();
     for (hash, size, port, user_hash) in &files {
         let (_, created) = download
@@ -528,7 +537,7 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
     download
         .download_hydration_busy
         .store(true, Ordering::Release);
-    drop(active);
+    drop(active.pop());
     tokio::time::timeout(Duration::from_secs(10), async {
         while download.download_hydration_busy.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
@@ -559,7 +568,13 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
         started.token.generation,
         ids[expected_first].1.generation + 1
     );
+    assert_eq!(
+        download.download_attempts.admission_counts().1,
+        2,
+        "the ready rare file starts in the burst slot while the ordinary owner remains"
+    );
     drop((waiting, started));
+    drop(active);
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if download.share(&files[0].0).await.is_some()

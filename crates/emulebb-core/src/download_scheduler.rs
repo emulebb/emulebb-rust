@@ -229,7 +229,7 @@ impl EmulebbCore {
                 })
                 .expect("nonempty ready cohort")
                 .0;
-            if !ready[index].guard.promote() {
+            if !ready[index].guard.promote_ready(ready[index].rare) {
                 break;
             }
             let ready = ready.swap_remove(index);
@@ -322,6 +322,7 @@ impl EmulebbCore {
             self.download_attempts
                 .apply_admission_window(AdmissionWindow {
                     active: 0,
+                    burst: 0,
                     preparing: 0,
                     total: 0,
                 });
