@@ -372,7 +372,20 @@ async fn known_size_waiting_preparation_never_hydrates_without_a_useful_source()
 
 #[tokio::test]
 async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining_work() {
-    let root = unique_runtime_dir("core-ready-admission-order");
+    assert_ready_admission_order(false).await;
+}
+
+#[tokio::test]
+async fn ready_admission_prefers_unique_reporter_part_over_smaller_remaining_work() {
+    assert_ready_admission_order(true).await;
+}
+
+async fn assert_ready_admission_order(prefer_rare: bool) {
+    let root = unique_runtime_dir(if prefer_rare {
+        "core-ready-rare-order"
+    } else {
+        "core-ready-admission-order"
+    });
     let mut seeds = Vec::new();
     let mut files = Vec::new();
     for (index, size) in [(0u8, 4096), (1u8, 2048)] {
@@ -468,6 +481,27 @@ async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining
             .await
             .unwrap();
         ids.push((id, token));
+        if prefer_rare && *size == 2048 {
+            // The smaller file has a second independently observed reporter.
+            // Discovery hints alone must not change the scarcity decision.
+            download
+                .ed2k_transfers
+                .remember_source_availability(
+                    token,
+                    Ed2kSourceHint {
+                        ip: "192.0.2.254".into(),
+                        tcp_port: 4662,
+                        user_hash: Some("79".repeat(16)),
+                        connect_options: None,
+                        file_comment: String::new(),
+                        file_rating: 0,
+                    },
+                    *size,
+                    vec![true],
+                )
+                .await
+                .unwrap();
+        }
     }
     download.connect_ed2k().await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -504,25 +538,30 @@ async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining
     })
     .await
     .unwrap();
-    let large = download
+    let expected_first = usize::from(!prefer_rare);
+    let waiting = download
         .ed2k_transfers
-        .download_job(ids[0].0)
+        .download_job(ids[1 - expected_first].0)
         .await
         .unwrap()
         .unwrap();
-    let small = download
+    let started = download
         .ed2k_transfers
-        .download_job(ids[1].0)
+        .download_job(ids[expected_first].0)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        large.token, ids[0].1,
-        "creation order must not displace smaller ready work"
+        waiting.token,
+        ids[1 - expected_first].1,
+        "ready ordering must honor reporter scarcity before remaining bytes"
     );
-    assert!(large.storage.is_none());
-    assert_eq!(small.token.generation, ids[1].1.generation + 1);
-    drop((large, small));
+    assert!(waiting.storage.is_none());
+    assert_eq!(
+        started.token.generation,
+        ids[expected_first].1.generation + 1
+    );
+    drop((waiting, started));
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if download.share(&files[0].0).await.is_some()

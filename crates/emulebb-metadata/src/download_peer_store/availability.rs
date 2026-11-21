@@ -15,6 +15,16 @@ pub struct MetadataDownloadAvailabilityQuery {
     pub limit: usize,
 }
 
+/// A selected reporter's current opportunity, not a persistent priority score.
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataDownloadScarcityQuery {
+    pub token: JobToken,
+    pub session_id: [u8; 16],
+    pub observed_since_s: i64,
+    pub observed_until_s: i64,
+    pub user_hash: [u8; 16],
+}
+
 #[derive(Debug)]
 pub struct MetadataDownloadSourceAvailability {
     pub source_id: i64,
@@ -101,6 +111,85 @@ const PAGE_SQL: &str = "SELECT a.source_id,s.ip,s.tcp_port,a.observed_user_hash,
     ORDER BY a.source_id LIMIT ?7";
 
 impl MetadataStore {
+    /// Does this reporter offer a missing part no other freshly observed
+    /// identity offers? Stream all observations in one SQLite snapshot with
+    /// two protocol-bounded bitsets; repeated endpoints never add votes.
+    pub fn download_job_has_rare_source_part(
+        &self,
+        query: MetadataDownloadScarcityQuery,
+    ) -> Result<bool> {
+        ensure!(
+            query.observed_since_s >= 0 && query.observed_until_s >= query.observed_since_s,
+            "invalid scarcity observation interval"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let mut offered = Vec::new();
+        let mut others = Vec::new();
+        let mut part_count = 0;
+        {
+            let mut stmt = tx.prepare_cached(PAGE_SQL)?;
+            let mut rows = stmt.query(params![
+                query.token.job_id,
+                0,
+                i64::try_from(query.token.generation)?,
+                query.session_id.as_slice(),
+                query.observed_since_s,
+                query.observed_until_s,
+                -1
+            ])?;
+            while let Some(row) = rows.next()? {
+                let count = crate::sql_value::unsigned::<usize>(row, 5)?;
+                let bits = row.get_ref(6)?.as_blob()?;
+                ensure!(
+                    (1..=65534).contains(&count) && bits.len() == count.div_ceil(8),
+                    "invalid observed part status"
+                );
+                if part_count == 0 {
+                    part_count = count;
+                    offered.resize(bits.len(), 0u8);
+                    others.resize(bits.len(), 0u8);
+                }
+                ensure!(count == part_count, "inconsistent observed geometry");
+                let identity = row.get_ref(3)?.as_blob()?;
+                ensure!(identity.len() == 16, "invalid observed identity");
+                let target = if identity == query.user_hash {
+                    &mut offered
+                } else {
+                    &mut others
+                };
+                for (target, bits) in target.iter_mut().zip(bits) {
+                    *target |= bits;
+                }
+            }
+        }
+        if part_count == 0 {
+            return Ok(false);
+        }
+        for (offered, others) in offered.iter_mut().zip(others) {
+            *offered &= !others;
+        }
+        {
+            let mut stmt = tx.prepare_cached(
+                "SELECT piece_index FROM download_job_pieces
+                WHERE job_id=?1 AND state='Verified' ORDER BY piece_index",
+            )?;
+            let mut rows = stmt.query([query.token.job_id])?;
+            while let Some(row) = rows.next()? {
+                let index = crate::sql_value::unsigned::<usize>(row, 0)?;
+                ensure!(index < part_count, "verified part outside job geometry");
+                offered[index / 8] &= !(1 << (index % 8));
+            }
+        }
+        // WHY: status padding is not a data part and cannot establish rarity.
+        if !part_count.is_multiple_of(8) {
+            *offered.last_mut().expect("nonempty part geometry") &= (1 << (part_count % 8)) - 1;
+        }
+        let rare = offered.iter().any(|byte| *byte != 0);
+        tx.commit()?;
+        Ok(rare)
+    }
+
     /// Byte-bounded keyset page over observed peers, independent of hint count.
     pub fn download_job_source_availability(
         &self,

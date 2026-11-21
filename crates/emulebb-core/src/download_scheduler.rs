@@ -46,6 +46,7 @@ struct ReadyDownload {
     guard: DownloadAttemptGuard,
     source: crate::download_preparation::DownloadPreparation,
     remaining_bytes: u64,
+    rare: bool,
 }
 impl ReadyDownload {
     fn deadline(&self) -> Option<tokio::time::Instant> {
@@ -161,6 +162,27 @@ impl EmulebbCore {
         clock: &watch::Receiver<()>,
         shutdown: &CancellationToken,
     ) {
+        // Re-evaluate current proof rather than retaining a score across waits.
+        // Missing/stale proof is ordinary work, never evidence of rarity.
+        for entry in ready.iter_mut() {
+            entry.rare = false;
+            if let crate::download_preparation::DownloadPreparation::Direct(source) = &entry.source
+            {
+                match self
+                    .ed2k_transfers
+                    .download_source_has_rare_part(
+                        entry.guard.token(),
+                        source.peer.availability().user_hash,
+                    )
+                    .await
+                {
+                    Ok(rare) => entry.rare = rare,
+                    Err(error) => {
+                        tracing::debug!(job_id = %entry.guard.token().job_id, %error, "ready scarcity observation unavailable")
+                    }
+                }
+            }
+        }
         let mut index = 0;
         while index < ready.len() {
             if shutdown.is_cancelled()
@@ -187,6 +209,7 @@ impl EmulebbCore {
                 .min_by_key(|(_, entry)| {
                     let id = entry.guard.token().job_id;
                     (
+                        !entry.rare,
                         entry.remaining_bytes,
                         last_admitted.is_some_and(|last| id <= last),
                         id,
@@ -261,7 +284,7 @@ impl EmulebbCore {
                 if let Some(remaining_bytes) = remaining_bytes {
                     match core.prepare_download_sources(&guard, &shutdown).await {
                         Ok(crate::download_preparation::DownloadPreparation::Waiting) => None,
-                        Ok(source) => Some(ReadyDownload { guard, source, remaining_bytes }),
+                        Ok(source) => Some(ReadyDownload { guard, source, remaining_bytes, rare: false }),
                         Err(error) => {
                             tracing::warn!(job_id = %token.job_id, %error, "download source preparation deferred");
                             None

@@ -17,6 +17,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
     SourceAvailability(emulebb_metadata::MetadataDownloadAvailabilityQuery),
+    SourceScarcity(emulebb_metadata::MetadataDownloadScarcityQuery),
     Comments(emulebb_metadata::JobToken, i64, usize),
     Source(
         emulebb_metadata::JobToken,
@@ -43,6 +44,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
     SourceAvailability(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceAvailability>>),
+    SourceScarcity(bool),
     Comments(RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>),
     Source(RetainedRead<Option<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
@@ -71,7 +73,7 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
-            JobRead::VerifiedParts(_) => 128 * 1024,
+            JobRead::VerifiedParts(_) | JobRead::SourceScarcity(_) => 128 * 1024,
             JobRead::Parts(_, _, limit) => {
                 ensure!((1..=256).contains(&limit), "invalid part page size");
                 32 * 1024
@@ -292,6 +294,9 @@ impl LocalMutationRegistry {
                     .map(|value| {
                         JobReadResult::Page(RetainedRead::new(value, capacity.take_result()))
                     }),
+                JobRead::SourceScarcity(query) => metadata
+                    .download_job_has_rare_source_part(query)
+                    .map(JobReadResult::SourceScarcity),
                 JobRead::SourceAvailability(query) => metadata
                     .download_job_source_availability(query)
                     .map(|value| {
@@ -390,6 +395,30 @@ impl transfer::Ed2kTransferRuntime {
             unreachable!()
         };
         Ok(page)
+    }
+
+    /// Current-session observed rarity, computed off the async executor without
+    /// hydrating a manifest or retaining an unbounded peer-identity set.
+    pub async fn download_source_has_rare_part(
+        &self,
+        token: emulebb_metadata::JobToken,
+        user_hash: [u8; 16],
+    ) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp().max(0);
+        let query = emulebb_metadata::MetadataDownloadScarcityQuery {
+            token,
+            session_id: self.source_discovery_session,
+            observed_since_s: now.saturating_sub(30),
+            observed_until_s: now,
+            user_hash,
+        };
+        let JobReadResult::SourceScarcity(rare) = self
+            .read_job_metadata(JobRead::SourceScarcity(query))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(rare)
     }
 
     /// Current runtime/session observations only. Caller supplies an explicit

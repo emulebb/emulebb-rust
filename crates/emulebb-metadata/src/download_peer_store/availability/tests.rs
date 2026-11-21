@@ -24,6 +24,144 @@ fn query(token: JobToken) -> MetadataDownloadAvailabilityQuery {
 }
 
 #[test]
+fn scarcity_counts_reporters_not_endpoints_and_excludes_verified_or_stale_parts() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = job(&store);
+    let q = MetadataDownloadScarcityQuery {
+        token: job.token,
+        session_id: [1; 16],
+        observed_since_s: 0,
+        observed_until_s: 20,
+        user_hash: [0x12; 16],
+    };
+    assert!(!store.download_job_has_rare_source_part(q).unwrap());
+    store
+        .apply_download_peer_delta(job.token, &delta(1))
+        .unwrap();
+    store
+        .apply_download_peer_delta(job.token, &delta(2))
+        .unwrap();
+    assert!(
+        store.download_job_has_rare_source_part(q).unwrap(),
+        "two endpoints are one reporter"
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_job_source_availability SET part_status=x'80' WHERE job_id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(
+        !store.download_job_has_rare_source_part(q).unwrap(),
+        "padding is not payload"
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_job_source_availability SET part_status=x'01' WHERE job_id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    let mut other = delta(3);
+    let MetadataDownloadPeerDelta::Availability {
+        source,
+        available_parts,
+        ..
+    } = &mut other
+    else {
+        unreachable!()
+    };
+    source.user_hash = Some("34".repeat(16));
+    available_parts[0] = false;
+    store.apply_download_peer_delta(job.token, &other).unwrap();
+    assert!(store.download_job_has_rare_source_part(q).unwrap());
+    let MetadataDownloadPeerDelta::Availability {
+        available_parts, ..
+    } = &mut other
+    else {
+        unreachable!()
+    };
+    available_parts[0] = true;
+    store.apply_download_peer_delta(job.token, &other).unwrap();
+    assert!(!store.download_job_has_rare_source_part(q).unwrap());
+    assert!(
+        !store
+            .download_job_has_rare_source_part(MetadataDownloadScarcityQuery {
+                user_hash: [0x56; 16],
+                ..q
+            })
+            .unwrap()
+    );
+    assert!(
+        !store
+            .download_job_has_rare_source_part(MetadataDownloadScarcityQuery {
+                session_id: [2; 16],
+                ..q
+            })
+            .unwrap()
+    );
+    assert!(
+        !store
+            .download_job_has_rare_source_part(MetadataDownloadScarcityQuery {
+                observed_since_s: 11,
+                ..q
+            })
+            .unwrap()
+    );
+    assert!(
+        !store
+            .download_job_has_rare_source_part(MetadataDownloadScarcityQuery {
+                token: JobToken {
+                    generation: job.token.generation + 1,
+                    ..job.token
+                },
+                ..q
+            })
+            .unwrap()
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM download_job_sources WHERE job_id=?1 AND ip='192.0.2.3'",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(store.download_job_has_rare_source_part(q).unwrap());
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO download_job_pieces
+        (job_id,piece_index,state,prefix_bytes,present_bytes,ich_corrupted,updated_at_s)
+        VALUES(?1,0,'Verified',16,16,0,0)",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(!store.download_job_has_rare_source_part(q).unwrap());
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM download_job_pieces WHERE job_id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET intent='stopped' WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(!store.download_job_has_rare_source_part(q).unwrap());
+}
+
+#[test]
 fn observations_fence_session_time_generation_intent_and_identity() {
     let store = MetadataStore::in_memory().unwrap();
     let job = job(&store);
@@ -287,4 +425,33 @@ fn byte_bounded_pages_preserve_all_large_bitmaps_across_cursor_pages() {
         q.after_source_id = page.last().unwrap().source_id;
     }
     assert_eq!(total, 256);
+    let q = MetadataDownloadScarcityQuery {
+        token: job.token,
+        session_id: [1; 16],
+        observed_since_s: 0,
+        observed_until_s: 20,
+        user_hash: [0x12; 16],
+    };
+    assert!(store.download_job_has_rare_source_part(q).unwrap());
+    let mut last_reporter = delta(1);
+    let MetadataDownloadPeerDelta::Availability {
+        source,
+        file_size_bytes,
+        available_parts,
+        ..
+    } = &mut last_reporter
+    else {
+        unreachable!()
+    };
+    source.tcp_port = 256;
+    source.user_hash = Some("34".repeat(16));
+    *file_size_bytes = 65534 * 16;
+    *available_parts = vec![true; 65534];
+    store
+        .apply_download_peer_delta(job.token, &last_reporter)
+        .unwrap();
+    assert!(
+        !store.download_job_has_rare_source_part(q).unwrap(),
+        "the competing reporter beyond one byte-bounded page still counts"
+    );
 }
