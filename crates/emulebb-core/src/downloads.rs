@@ -6,10 +6,13 @@ use emulebb_metadata::{DownloadIntent, DownloadJobQuery, DownloadJobRecord, JobI
 use serde::Serialize;
 
 mod browse;
+mod waiting;
 pub use browse::{
     DownloadDelivery, DownloadDeliveryOwnership, DownloadDeliveryState, DownloadDetail,
     DownloadFailure, DownloadPart, DownloadPartPage,
 };
+pub use waiting::DownloadWaitingReason;
+pub(crate) use waiting::WaitingObservation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -37,6 +40,7 @@ pub struct DownloadSummary {
     #[serde(serialize_with = "serialize_intent")]
     pub intent: DownloadIntent,
     pub state: DownloadState,
+    pub waiting_reason: Option<DownloadWaitingReason>,
     pub category: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -67,8 +71,10 @@ pub(crate) fn summary_from_job(
     category: Option<&str>,
     running: &[(JobToken, bool)],
     verifying: &[JobToken],
+    waiting: &WaitingObservation,
 ) -> DownloadSummary {
     let state = observed_state(&job, running, verifying);
+    let waiting_reason = (state == DownloadState::Queued).then(|| waiting.reason(job.token));
     let progress = job.progress();
     DownloadSummary {
         id: job.token.job_id,
@@ -78,6 +84,7 @@ pub(crate) fn summary_from_job(
         progress,
         intent: job.intent,
         state,
+        waiting_reason,
         category: category.map(str::to_owned),
         created_at: job.created_at_s,
         updated_at: job.updated_at_s,
@@ -148,7 +155,10 @@ impl EmulebbCore {
         let mut verifying = self.ed2k_transfers.verifying_downloads().await;
         verifying.extend(self.download_attempts.verifications());
         let running = self.download_attempts.snapshot();
+        let transport_available = self.download_transport_available();
         let state = self.state.lock().await;
+        let waiting =
+            WaitingObservation::capture(transport_available, &state, &self.download_attempts);
         self.persistence_owner.check_coherent_state()?;
         let mut bytes = 4096usize
             .checked_add(
@@ -189,7 +199,9 @@ impl EmulebbCore {
                     .category_id
                     .and_then(|id| state.categories.get(&id))
                     .map(|value| value.name.as_str());
-                downloads.push(summary_from_job(job, category, &running, &verifying));
+                downloads.push(summary_from_job(
+                    job, category, &running, &verifying, &waiting,
+                ));
             }
             Ok(DownloadPage {
                 downloads,

@@ -9,6 +9,19 @@ afterEach(() => { vi.restoreAllMocks(); });
 const run = async (operation: () => Promise<unknown>) => { await operation(); };
 
 describe("canonical view mappings", () => {
+  it("shows runtime download work separately from retained history and total process memory", () => {
+    render(<Overview snapshot={{ downloads: { unfinished: 1000, completed: 99000 } }} stats={{ downloadResources: {
+      active: 17, preparing: 2, waiting: 981,
+      concurrency: { mode: "fixed", configuredLimit: 16, target: 16, burstActive: 1 },
+      residentMemory: { usedBytes: 33554432, softTargetBytes: 67108864, limitBytes: 134217728 }
+    } }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]} sharedFiles={[]} libraryScan={null} kad={{}} />);
+    expect(screen.getByText("17 active / 2 preparing / 981 waiting")).toBeVisible();
+    expect(screen.getByText("1000 unfinished / 99000 completed")).toBeVisible();
+    expect(screen.getByText("Configured limit 16")).toBeVisible();
+    expect(screen.getByText("Active above target").nextElementSibling).toHaveTextContent("1");
+    expect(screen.getByText(/separate from total daemon memory/)).toBeVisible();
+  });
+
   it("opts a new root into watching without replacing other root choices", async () => {
     const client = new RestClient();
     const post = vi.spyOn(client, "post").mockResolvedValue({});

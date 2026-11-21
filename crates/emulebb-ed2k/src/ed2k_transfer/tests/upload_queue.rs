@@ -52,6 +52,21 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
     assert_eq!(first_status, Ed2kUploadSessionStatus::Granted);
     assert_eq!(second_status, Ed2kUploadSessionStatus::Granted);
     assert_eq!(third_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let all = runtime.upload_queue_snapshot().await;
+    let active = runtime.active_upload_snapshot().await;
+    assert_eq!(all.len(), 3);
+    assert_eq!(active.len(), 2);
+    assert!(active.iter().all(
+        |entry| entry.phase != Ed2kUploadSessionPhaseSnapshot::Waiting
+            && entry.queue_rank.is_none()
+    ));
+    assert_eq!(
+        active.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        all.iter()
+            .filter(|entry| entry.phase != Ed2kUploadSessionPhaseSnapshot::Waiting)
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

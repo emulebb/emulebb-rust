@@ -49,7 +49,10 @@ async fn dashboard_counts_wait_for_sql_without_blocking_network_status_or_using_
     release_send.send(()).unwrap();
     holding.await.unwrap();
     let counts = reading.await.unwrap().unwrap();
-    assert_eq!((counts.total, counts.active, counts.completed), (2, 1, 0));
+    assert_eq!(
+        (counts.total, counts.resources.waiting, counts.completed),
+        (2, 1, 0)
+    );
 }
 
 #[test]

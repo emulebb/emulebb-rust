@@ -584,6 +584,15 @@ impl Ed2kTransferRuntime {
         self.upload_queue.lock().await.snapshot(Instant::now())
     }
 
+    /// Select only active sessions before cloning management data. Waiting
+    /// clients do not incur rank calculations or copy their requester bitmaps.
+    pub async fn active_upload_snapshot(&self) -> Vec<Ed2kUploadQueueSnapshotEntry> {
+        self.upload_queue
+            .lock()
+            .await
+            .active_snapshot(Instant::now())
+    }
+
     /// Return one management entry without materializing the full upload queue.
     pub async fn upload_client_snapshot(
         &self,

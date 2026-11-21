@@ -211,7 +211,6 @@ pub struct MetadataTransferMediaMetadata {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataTransferCounts {
-    pub active: usize,
     pub completed: usize,
     pub total: usize,
 }

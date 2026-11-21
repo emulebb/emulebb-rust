@@ -2344,15 +2344,14 @@ fn manifest_from_row(
 
 pub(crate) const TRANSFER_COUNTS_SQL: &str = "SELECT
     unfinished-delete_requested_unfinished+completed-delete_requested_completed,
-    started, completed-delete_requested_completed
+    completed-delete_requested_completed
     FROM download_job_counts WHERE id=1";
 
 fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<MetadataTransferCounts> {
     conn.query_row(TRANSFER_COUNTS_SQL, [], |row| {
         Ok(MetadataTransferCounts {
             total: crate::sql_value::unsigned::<usize>(row, 0)?,
-            active: crate::sql_value::unsigned::<usize>(row, 1)?,
-            completed: crate::sql_value::unsigned::<usize>(row, 2)?,
+            completed: crate::sql_value::unsigned::<usize>(row, 1)?,
         })
     })
     .map_err(Into::into)

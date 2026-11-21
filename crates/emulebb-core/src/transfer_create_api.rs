@@ -178,6 +178,7 @@ impl EmulebbCore {
                 runtime: Arc::clone(&self.ed2k_transfers),
                 attempts: Arc::clone(&self.download_attempts),
                 events: Arc::clone(&self.download_events),
+                transport_available: self.download_transport_available(),
             })
             .await
     }

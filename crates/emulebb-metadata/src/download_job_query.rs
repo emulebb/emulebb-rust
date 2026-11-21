@@ -86,6 +86,40 @@ fn page_sql(query: &DownloadJobQuery) -> String {
 }
 
 impl MetadataStore {
+    /// Count queued work without scanning retained jobs. Exclusions are the
+    /// sorted, unique runtime attempt/verification cohort, including draining owners.
+    /// One SQLite read transaction keeps the summary and exact lookups coherent.
+    pub fn waiting_download_count(&self, selected: &[JobId]) -> Result<u64> {
+        ensure!(
+            selected.windows(2).all(|pair| pair[0] < pair[1]),
+            "selected download IDs must be sorted and unique"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let mut waiting: u64 = tx.query_row(
+            "SELECT awaiting_execution FROM download_job_counts WHERE id=1",
+            [],
+            |row| crate::sql_value::unsigned(row, 0),
+        )?;
+        let mut stmt = tx.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM download_jobs WHERE id=?1
+             AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL
+             AND delete_requested_at_s IS NULL AND intent='started'
+             AND storage_failure_code IS NULL AND expected_size_bytes IS NOT NULL
+             AND NOT(completed AND NOT final_rehash_pending))",
+        )?;
+        // WHY: eligibility can change while an execution drains. Subtract only
+        // owners that still belong to the counter, rather than the cohort size.
+        for id in selected {
+            if stmt.query_row([id], |row| row.get::<_, bool>(0))? {
+                waiting = waiting
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow::anyhow!("incoherent waiting download count"))?;
+            }
+        }
+        Ok(waiting)
+    }
+
     /// One coherent, byte-bounded read. Subsequent requests are live pages:
     /// inserts above the boundary wait for a fresh traversal; removal, category,
     /// or completion changes may add/remove matches below it. IDs never repeat.

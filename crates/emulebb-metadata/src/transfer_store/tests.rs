@@ -2326,7 +2326,6 @@ fn destructive_deletion_intent_is_idempotent_and_required_for_finalization() {
     assert_eq!(
         store.transfer_counts().unwrap(),
         MetadataTransferCounts {
-            active: 1,
             completed: 0,
             total: 1,
         }

@@ -2,6 +2,7 @@
 use super::read_result::RetainedRead;
 use super::*;
 use crate::ed2k_transfer as transfer;
+use anyhow::Context;
 use emulebb_metadata::{DownloadJobRecord, JobId};
 
 #[derive(Clone)]
@@ -12,6 +13,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     VerifiedParts(emulebb_metadata::JobToken),
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
+    Waiting(Vec<JobId>),
     Scheduling(
         Arc<transfer::Ed2kTransferRuntime>,
         emulebb_metadata::JobToken,
@@ -51,6 +53,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     VerifiedParts(Option<RetainedRead<emulebb_metadata::MetadataDownloadVerifiedParts>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
+    Waiting(RetainedRead<u64>),
     Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
@@ -85,6 +88,11 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
+            JobRead::Waiting(ref ids) => ids
+                .capacity()
+                .checked_mul(std::mem::size_of::<JobId>())
+                .and_then(|bytes| bytes.checked_add(4096))
+                .context("waiting download request size overflow")?,
             JobRead::Scheduling(..) => transfer::download_scheduling::WORK_BYTES,
             JobRead::VerifiedParts(_)
             | JobRead::SourceScarcity(_)
@@ -174,6 +182,9 @@ impl LocalMutationRegistry {
                     .map(JobReadResult::Scheduling),
                 JobRead::Counts => metadata.download_job_counts().map(|value| {
                     JobReadResult::Counts(RetainedRead::new(value, capacity.take_result()))
+                }),
+                JobRead::Waiting(ids) => metadata.waiting_download_count(&ids).map(|value| {
+                    JobReadResult::Waiting(RetainedRead::new(value, capacity.take_result()))
                 }),
                 JobRead::TransferCounts => metadata.transfer_counts().map(|value| {
                     JobReadResult::TransferCounts(RetainedRead::new(value, capacity.take_result()))
@@ -443,6 +454,17 @@ impl transfer::Ed2kTransferRuntime {
             unreachable!()
         };
         Ok(counts)
+    }
+
+    /// Fixed-size waiting count with sorted unique IDs from the runtime cohort.
+    /// The request backing shares the existing byte-accounted metadata worker.
+    pub async fn waiting_download_count(&self, selected: Vec<JobId>) -> Result<RetainedRead<u64>> {
+        let JobReadResult::Waiting(count) =
+            self.read_job_metadata(JobRead::Waiting(selected)).await?
+        else {
+            unreachable!()
+        };
+        Ok(count)
     }
 
     pub async fn download_source_endpoints_after(

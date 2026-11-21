@@ -525,7 +525,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     if (method === "POST" && path === `searches/2/results/13/download`) {
       record();
       downloadRows = [{ id: "2", hash: resultHash.toLowerCase(), name: "Linux Guide.pdf", state: "downloading",
-        sizeBytes: 1_048_576, progress: 4096 / 1_048_576, intent: "started", category: null, createdAt: 1, updatedAt: 1, completedAt: null }];
+        sizeBytes: 1_048_576, progress: 4096 / 1_048_576, intent: "started", waitingReason: null, category: null, createdAt: 1, updatedAt: 1, completedAt: null }];
       state.downloads = { unfinished: 1, completed: 0 };
       await fulfill(downloadRows[0]);
       return;

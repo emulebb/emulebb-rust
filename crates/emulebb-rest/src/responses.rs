@@ -78,7 +78,7 @@ pub(crate) fn stats_response(
         "uploadSpeedKiBps": upload_policy.upload_rate_bytes_per_sec as f64 / 1024.0,
         "sessionDownloadedBytes": throughput.session_downloaded_bytes,
         "sessionUploadedBytes": throughput.session_uploaded_bytes,
-        "activeDownloads": transfers.active,
+        "downloadResources": transfers.resources,
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
         "uploadBaseSlots": upload_policy.base_slots,

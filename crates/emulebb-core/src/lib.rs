@@ -161,7 +161,7 @@ use download_attempts::DownloadAttemptControl;
 pub use downloads::{
     DownloadCommentPage, DownloadCounts, DownloadDelivery, DownloadDeliveryOwnership,
     DownloadDeliveryState, DownloadDetail, DownloadFailure, DownloadPage, DownloadPart,
-    DownloadPartPage, DownloadSourcePage, DownloadState, DownloadSummary,
+    DownloadPartPage, DownloadSourcePage, DownloadState, DownloadSummary, DownloadWaitingReason,
 };
 mod download_source_registry;
 mod download_task_supervisor;
@@ -328,8 +328,9 @@ use download_task_supervisor::DownloadTaskSupervisor;
 pub use emulebb_ed2k::NatStatusSnapshot;
 pub use emulebb_ed2k::normalize_ed2k_file_name;
 pub use rest_model::{
-    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadCreate,
-    DownloadCreateSource, DownloadFileNameObservation, DownloadSource, DownloadSourceMetrics,
+    AppInfo, AppLifecycle, Category, CategoryCreate, CategoryUpdate, DownloadConcurrency,
+    DownloadConcurrencyMode, DownloadCreate, DownloadCreateSource, DownloadFileNameObservation,
+    DownloadResidentMemory, DownloadResources, DownloadSource, DownloadSourceMetrics,
     DownloadUpdate, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus,
     IpFilterStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
     Search, SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate,
@@ -798,33 +799,6 @@ impl EmulebbCore {
 
     pub fn new_in_memory(version: impl Into<String>, index: FileIndex) -> Result<Self> {
         Self::new(version, index, unique_runtime_dir("emulebb-core-transfers"))
-    }
-
-    async fn uploads_by_queue_state(&self, waiting_queue: bool) -> Vec<Upload> {
-        let snapshots = self
-            .ed2k_transfers
-            .upload_queue_snapshot()
-            .await
-            .into_iter()
-            .filter(|entry| {
-                matches!(entry.phase, Ed2kUploadSessionPhaseSnapshot::Waiting) == waiting_queue
-            })
-            .collect::<Vec<_>>();
-        let mut uploads = Vec::with_capacity(snapshots.len());
-        for entry in snapshots {
-            let manifest = match self.ed2k_transfers.serving_view(&entry.file_hash).await {
-                Ok(manifest) => Some(manifest),
-                Err(error) => {
-                    tracing::warn!(
-                        hash = %entry.file_hash,
-                        "failed to hydrate ED2K manifest for upload snapshot: {error}"
-                    );
-                    None
-                }
-            };
-            uploads.push(upload_from_snapshot(entry, manifest.as_ref()));
-        }
-        uploads
     }
 
     async fn upload_client_for_control(&self, client_id: &str) -> Option<Upload> {
