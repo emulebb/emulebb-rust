@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { RestClient, type Upload } from "../../src/api";
+import { RestClient, RestError, type Upload } from "../../src/api";
 import { Overview, ServersView, SharingView, UploadsView } from "../../src/views";
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -9,6 +9,23 @@ afterEach(() => { vi.restoreAllMocks(); });
 const run = async (operation: () => Promise<unknown>) => { await operation(); };
 
 describe("canonical view mappings", () => {
+  it("refreshes an expired queue cursor and keeps only the current page", async () => {
+    const client = new RestClient();
+    vi.spyOn(client, "get").mockResolvedValue({ id: "detail-peer" });
+    const pages = vi.spyOn(client, "getPage")
+      .mockResolvedValueOnce({ data: [{ id: "first-waiter", userName: "First Waiting", waitingQueue: true, queueRank: 1 }], meta: { apiVersion: "v1", nextCursor: "next-one", hasMore: true, total: 3 } })
+      .mockRejectedValueOnce(new RestError("upload queue cursor expired", 409, "CONFLICT"))
+      .mockResolvedValueOnce({ data: [{ id: "final-waiter", userName: "Final Waiting", waitingQueue: true, queueRank: 1 }], meta: { apiVersion: "v1", nextCursor: null, hasMore: false, total: 2 } });
+    render(<UploadsView uploads={[]} refreshGeneration={0} client={client} run={run} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Final Waiting" })).toBeInTheDocument());
+    expect(pages).toHaveBeenCalledTimes(3);
+    expect(pages.mock.calls[1][0]).toContain("cursor=next-one");
+    expect(pages.mock.calls[2][0]).toBe(pages.mock.calls[0][0]);
+    expect(screen.queryByRole("button", { name: "First Waiting" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+  });
   it("shows runtime download work separately from retained history and total process memory", () => {
     render(<Overview snapshot={{ downloads: { unfinished: 1000, completed: 99000 } }} stats={{ downloadResources: {
       active: 17, preparing: 2, waiting: 981,
@@ -67,11 +84,12 @@ describe("canonical view mappings", () => {
 
   it("keeps a pending detail request across recreated snapshots and leaves live list fields current", async () => {
     const client = new RestClient();
+    vi.spyOn(client, "getPage").mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     let resolve!: (value: Upload) => void;
     const get = vi.spyOn(client, "get").mockReturnValue(new Promise<Upload>((done) => { resolve = done; }));
-    const { rerender } = render(<UploadsView uploads={[{ id: "sample-peer", userName: "Original Peer" }]} uploadQueue={[]} client={client} run={run} />);
+    const { rerender } = render(<UploadsView uploads={[{ id: "sample-peer", userName: "Original Peer" }]} refreshGeneration={0} client={client} run={run} />);
     await waitFor(() => expect(get).toHaveBeenCalledWith("uploads/sample-peer"));
-    rerender(<UploadsView uploads={[{ id: "sample-peer", userName: "Refreshed Peer" }]} uploadQueue={[]} client={client} run={run} />);
+    rerender(<UploadsView uploads={[{ id: "sample-peer", userName: "Refreshed Peer" }]} refreshGeneration={0} client={client} run={run} />);
     resolve({ id: "sample-peer", userName: "Older Detail Name", scoreBreakdown: { baseScore: 123 } });
     await waitFor(() => expect(screen.getByText("baseScore").parentElement).toHaveTextContent("123"));
     expect(get).toHaveBeenCalledOnce();
@@ -83,12 +101,13 @@ describe("canonical view mappings", () => {
 
   it("ignores detail responses for a previously selected peer", async () => {
     const client = new RestClient();
+    vi.spyOn(client, "getPage").mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     let first!: (value: Upload) => void;
     let second!: (value: Upload) => void;
     vi.spyOn(client, "get").mockReturnValueOnce(new Promise<Upload>((done) => { first = done; }))
       .mockReturnValueOnce(new Promise<Upload>((done) => { second = done; }));
     render(<UploadsView uploads={[{ id: "first", userName: "First Peer" }, { id: "second", userName: "Second Peer" }]}
-      uploadQueue={[]} client={client} run={run} />);
+      refreshGeneration={0} client={client} run={run} />);
     fireEvent.click(screen.getByRole("button", { name: "Second Peer" }));
     second({ id: "second", scoreBreakdown: { baseScore: 200 } });
     first({ id: "first", scoreBreakdown: { baseScore: 999 } });

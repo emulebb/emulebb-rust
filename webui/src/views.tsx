@@ -1460,16 +1460,38 @@ type UploadRow = {
   item: Upload;
 };
 
-export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; client: RestClient; run: RunFunction }) {
+export function UploadsView(props: { uploads: Upload[]; refreshGeneration: number; client: RestClient; run: RunFunction }) {
+  const [queueCursor, setQueueCursor] = useState<string | null>(null);
+  const [queuePage, setQueuePage] = useState<CursorPage<Upload> | null>(null);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueError, setQueueError] = useState("");
+  useEffect(() => {
+    let current = true;
+    setQueueLoading(true);
+    setQueueError("");
+    const query = new URLSearchParams({ limit: "100", countTotal: "true" });
+    if (queueCursor) query.set("cursor", queueCursor);
+    void props.client.getPage<Upload>(`upload-queue?${query}`).then((page) => {
+      if (current) setQueuePage(page);
+    }).catch((error) => {
+      if (!current) return;
+      if (error instanceof RestError && error.status === 409 && queueCursor) {
+        setQueuePage(null);
+        setQueueCursor(null);
+      } else setQueueError(errorMessage(error));
+    }).finally(() => { if (current) setQueueLoading(false); });
+    return () => { current = false; };
+  }, [props.client, props.refreshGeneration, queueCursor]);
+  const uploadQueue = queuePage?.data ?? [];
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState("rank");
   const [selectedKey, setSelectedKey] = useState("");
   const rows = useMemo(
     () => [
       ...props.uploads.map((item) => ({ key: uploadRowKey("active", item), lane: "active" as const, item })),
-      ...props.uploadQueue.map((item) => ({ key: uploadRowKey("queue", item), lane: "queue" as const, item }))
+      ...uploadQueue.map((item) => ({ key: uploadRowKey("queue", item), lane: "queue" as const, item }))
     ],
-    [props.uploadQueue, props.uploads]
+    [uploadQueue, props.uploads]
   );
   const visibleRows = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -1505,7 +1527,7 @@ export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; c
     <section class="view-stack">
       <section class="view-grid">
         <Metric label="Active Slots" value={String(props.uploads.length)} />
-        <Metric label="Waiting" value={String(props.uploadQueue.length)} />
+        <Metric label="Waiting" value={queuePage?.meta.total == null ? "unknown" : String(queuePage.meta.total)} />
         <Metric label="Friend Slots" value={String(friendSlotCount)} />
         <Metric label="LowID Peers" value={String(lowIdCount)} />
         <Metric label="Top File" value={topFile.name} />
@@ -1517,7 +1539,7 @@ export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; c
           <span>{visibleRows.length} clients</span>
         </div>
         <div class="form-row">
-          <input class="form-control" value={filter} placeholder="Filter client, file, hash, software, state" onInput={(event) => setFilter(event.currentTarget.value)} />
+          <input class="form-control" value={filter} placeholder="Filter visible clients, files, hashes, software or state" onInput={(event) => setFilter(event.currentTarget.value)} />
           <select class="form-select" value={sort} onInput={(event) => setSort(event.currentTarget.value)}>
             <option value="rank">Rank</option>
             <option value="score">Score</option>
@@ -1530,6 +1552,10 @@ export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; c
       </section>
       <UploadTable title="Active Uploads" rows={activeRows} basePath="uploads" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
       <UploadTable title="Upload Queue" rows={queueRows} basePath="upload-queue" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
+      {queueError && <p class="notice alert alert-danger">Upload queue: {queueError}</p>}
+      <CursorControls cursor={queueCursor} nextCursor={queuePage?.meta.nextCursor ?? null}
+        loading={queueLoading} change={(cursor) => { setQueuePage(null); setQueueCursor(cursor); }} />
+      <p class="hint">{queueLoading ? "Loading queue…" : `${uploadQueue.length} waiting clients on this page`}</p>
       {detailError && <p class="notice alert alert-danger">Upload details: {detailError}</p>}
       <UploadPeerInspector row={selected && detail?.key === selected.key
         ? { ...selected, item: { ...selected.item, scoreBreakdown: detail.item.scoreBreakdown } } : selected} />

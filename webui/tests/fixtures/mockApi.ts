@@ -159,6 +159,13 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       }) });
       return;
     }
+    if (request.method() === "GET" && path === "upload-queue") {
+      const waiting = mockSnapshotFixture().uploadQueue;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: waiting, meta: { apiVersion: "v1", nextCursor: null, hasMore: false, total: waiting.length }
+      }) });
+      return;
+    }
     if (request.method() === "POST" && path === "library/roots") {
       const body = request.postDataJSON();
       const root = { id: String(nextRootId++), path: body.path, watchEnabled: body.watchEnabled ?? false,
@@ -493,8 +500,6 @@ function dataFor(method: string, path: string): unknown {
       return { items: snapshot.uploads };
     case "uploads/active-upload-peer":
       return { ...snapshot.uploads[0], scoreBreakdown: uploadScore(100) };
-    case "upload-queue":
-      return { items: snapshot.uploadQueue };
     case "upload-queue/waiting-upload-peer":
       return { ...snapshot.uploadQueue[0], scoreBreakdown: uploadScore(50) };
     case "app":

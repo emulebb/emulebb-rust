@@ -34,7 +34,7 @@ const MAX_SEARCH_RESULTS_PER_SNAPSHOT: usize = 128;
 const MAX_SEARCH_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const MAX_DOWNLOAD_SNAPSHOTS: usize = 200;
 const MAX_UPLOAD_SNAPSHOTS: usize = 512;
-const MAX_UPLOAD_QUEUE_SNAPSHOTS: usize = 512;
+const MAX_UPLOAD_QUEUE_SNAPSHOTS: usize = 200;
 
 const ARTIFACT_FAMILIES: &[ArtifactFamilySpec] = &[ArtifactFamilySpec {
     family: "unifiedEvents",
@@ -184,7 +184,10 @@ async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Va
     let counts = state.core.download_counts().await?;
     let download_count = usize::try_from(counts.unfinished.saturating_add(counts.completed))?;
     let uploads = state.core.uploads().await;
-    let upload_queue = state.core.upload_queue().await;
+    let upload_queue = state
+        .core
+        .upload_queue_page(None, MAX_UPLOAD_QUEUE_SNAPSHOTS, true)
+        .await?;
     Ok(json!({
         "servers": bounded_prefix_collection(
             &servers,
@@ -207,8 +210,8 @@ async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Va
             |upload| json!(upload),
         ),
         "uploadQueue": bounded_prefix_collection(
-            &upload_queue,
-            upload_queue.len(),
+            &upload_queue.uploads,
+            upload_queue.total.unwrap_or(upload_queue.uploads.len()),
             MAX_UPLOAD_QUEUE_SNAPSHOTS,
             |upload| json!(upload),
         ),

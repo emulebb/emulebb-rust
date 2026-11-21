@@ -81,19 +81,9 @@ pub(crate) struct SharedFilesQuery {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct UploadQueueQuery {
-    pub(crate) offset: Option<usize>,
     pub(crate) limit: Option<usize>,
-    #[serde(default)]
-    pub(crate) include_score_breakdown: Option<bool>,
-}
-
-impl UploadQueueQuery {
-    pub(crate) fn page(&self) -> PageQuery {
-        PageQuery {
-            offset: self.offset,
-            limit: self.limit,
-        }
-    }
+    pub(crate) cursor: Option<String>,
+    pub(crate) count_total: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

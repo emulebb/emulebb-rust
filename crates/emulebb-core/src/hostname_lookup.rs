@@ -235,18 +235,7 @@ impl EmulebbCore {
                     .map(|contact| contact.ip),
             );
         }
-        ips.extend(
-            self.uploads()
-                .await
-                .into_iter()
-                .filter_map(|upload| upload.address.parse::<Ipv4Addr>().ok()),
-        );
-        ips.extend(
-            self.upload_queue()
-                .await
-                .into_iter()
-                .filter_map(|upload| upload.address.parse::<Ipv4Addr>().ok()),
-        );
+        ips.extend(self.ed2k_transfers.upload_peer_ipv4_addresses().await);
         ips.sort_unstable();
         ips.dedup();
         ips

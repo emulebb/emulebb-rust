@@ -9,6 +9,36 @@ const TEXT_BYTES: usize = 65_536;
 const INPUT_CHARGE: usize = TEXT_BYTES + 4096;
 const ENCODED_BYTES: usize = 6 * TEXT_BYTES + 2;
 
+#[tokio::test]
+async fn cancelled_async_projection_drops_backing_before_both_allowances() {
+    #[derive(Debug)]
+    struct Probe(Arc<CapacityControl>, Arc<AtomicUsize>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            assert_eq!(self.0.usage().bytes, 384);
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let capacity = Arc::new(CapacityControl::default());
+    let drops = Arc::new(AtomicUsize::new(0));
+    let input = RetainedRead::new(
+        Probe(Arc::clone(&capacity), Arc::clone(&drops)),
+        capacity.reserve(128, false, false).unwrap(),
+    );
+    let (reached, ready) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(input.try_project_async(256, |value| async move {
+        reached.send(()).unwrap();
+        std::future::pending::<()>().await;
+        Ok(value)
+    }));
+    ready.await.unwrap();
+    assert_eq!(capacity.usage().bytes, 384);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(capacity.usage().bytes, 0);
+}
+
 #[derive(Clone, Copy)]
 enum Mode {
     Same,

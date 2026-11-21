@@ -1,29 +1,24 @@
 //! REST `Upload` view builders.
 //!
 //! Pure helpers that build the REST `Upload` / `UploadPolicyMetrics` response
-//! structs from the lower-layer upload-queue snapshot entries + capacity
-//! snapshot + file serving view, plus the small upload-state/part-count helpers
-//! they rely on. Moved verbatim out of `lib.rs` during the maintainability
-//! restructuring; they carry no behavior beyond what they had inline.
+//! structs from queue snapshots, capacity and cached scalar file metadata.
 //! Re-exported `pub(crate)` from the crate root so the `EmulebbCore` impl
 //! reaches them by their bare names.
 
 use emulebb_ed2k::ed2k_transfer::{
-    Ed2kFileServingView, Ed2kUploadQueueCapacitySnapshot, Ed2kUploadQueueSnapshotEntry,
-    Ed2kUploadSessionPhaseSnapshot,
+    Ed2kUploadQueueCapacitySnapshot, Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot,
 };
 
 use crate::{Upload, UploadPolicyMetrics, UploadScoreBreakdown};
+use emulebb_metadata::MetadataUploadFileSummary;
 
 pub(crate) fn upload_from_snapshot(
     entry: Ed2kUploadQueueSnapshotEntry,
-    view: Option<&Ed2kFileServingView>,
+    view: Option<&MetadataUploadFileSummary>,
 ) -> Upload {
     let user_hash = entry.user_hash.map(hex::encode);
-    let requested_parts_total = view
-        .map(|view| view.file_size.div_ceil(view.piece_size) as u32)
-        .unwrap_or_default();
-    let requested_parts_obtained = view.map(upload_obtained_part_count).unwrap_or_default();
+    let requested_parts_total = view.map(|view| view.parts_total).unwrap_or_default();
+    let requested_parts_obtained = view.map(|view| view.parts_obtained).unwrap_or_default();
     let requested_parts_progress_text = if requested_parts_total == 0 {
         String::new()
     } else {
@@ -64,7 +59,6 @@ pub(crate) fn upload_from_snapshot(
         user_hash,
         client_software: entry
             .client_software
-            .clone()
             .unwrap_or_else(|| "unknown".to_string()),
         client_mod: String::new(),
         upload_state,
@@ -119,48 +113,6 @@ fn upload_state_name(phase: Ed2kUploadSessionPhaseSnapshot) -> &'static str {
     }
 }
 
-fn upload_obtained_part_count(view: &Ed2kFileServingView) -> u32 {
-    if view.completed {
-        return view.file_size.div_ceil(view.piece_size) as u32;
-    }
-    (0..view.file_size.div_ceil(view.piece_size))
-        .filter(|index| {
-            let start = index.saturating_mul(view.piece_size);
-            let end = start.saturating_add(view.piece_size).min(view.file_size);
-            view.verified_ranges
-                .iter()
-                .any(|range| range.start <= start && range.end >= end)
-        })
-        .count() as u32
-}
-
 fn is_low_id_client_id(client_id: u32) -> bool {
     client_id != 0 && client_id < 0x0100_0000
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferJob};
-
-    #[test]
-    fn upload_parts_count_only_verified_ranges() {
-        let mut download = Ed2kResumeManifest::new(&Ed2kTransferJob {
-            token: emulebb_metadata::JobToken {
-                job_id: emulebb_metadata::JobId::new(1).unwrap(),
-                generation: 0,
-            },
-            file_hash: "11".repeat(16),
-            display_name: "file.bin".into(),
-            file_size: 12,
-            piece_size: 8,
-        });
-        download.pieces[0].bytes_written = 8;
-        let mut view = Ed2kFileServingView::from(&download);
-        assert_eq!(upload_obtained_part_count(&view), 0);
-        view.verified_ranges = vec![Ed2kSharedRange { start: 8, end: 12 }];
-        assert_eq!(upload_obtained_part_count(&view), 1);
-        view.completed = true;
-        assert_eq!(upload_obtained_part_count(&view), 2);
-    }
 }

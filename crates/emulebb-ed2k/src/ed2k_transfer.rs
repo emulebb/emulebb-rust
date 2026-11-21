@@ -167,6 +167,7 @@ pub(crate) use upload_queue::{
     Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, Ed2kUploadWorkGuard,
 };
 pub use upload_queue::{Ed2kUploadQueueCapacitySnapshot, Ed2kUploadThrottleReservation};
+pub use upload_queue::{Ed2kUploadQueuePage, Ed2kUploadQueuePageError};
 pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot};
 
 /// Outcome of a global connection-budget acquisition attempt, carrying the

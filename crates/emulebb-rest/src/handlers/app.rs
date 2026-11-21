@@ -281,13 +281,21 @@ pub(crate) async fn snapshot(
         Ok(downloads) => downloads,
         Err(error) => return super::persistence::persistence_error(error),
     };
+    let upload_queue = match state
+        .core
+        .upload_queue_page(None, limit.min(200), false)
+        .await
+    {
+        Ok(page) => page,
+        Err(error) => return super::persistence::persistence_error(error),
+    };
     api_ok(json!({
         "app": app_info_response(state.core.app_info()),
         "status": status,
         "downloads": &*downloads,
         "sharedFiles": shared_files,
         "uploads": bounded(without_score_breakdown(state.core.uploads().await), limit),
-        "uploadQueue": bounded(without_score_breakdown(state.core.upload_queue().await), limit),
+        "uploadQueue": &upload_queue.uploads,
         "servers": server_responses(state.core.servers().await),
         "kad": kad,
         "network": network_response(network.as_ref(), &state.core.vpn_guard_status()),

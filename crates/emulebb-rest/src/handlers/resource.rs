@@ -8,7 +8,7 @@ use axum::{
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct Success<T> {
+pub(super) struct Success<T> {
     data: T,
     meta: PageMeta,
 }
@@ -22,6 +22,8 @@ struct PageMeta {
     has_more: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     settings_revision: Option<emulebb_settings::product::SettingsRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
 }
 pub(super) fn item<T: Serialize>(status: StatusCode, data: T) -> Response {
     (
@@ -33,6 +35,7 @@ pub(super) fn item<T: Serialize>(status: StatusCode, data: T) -> Response {
                 next_cursor: None,
                 has_more: None,
                 settings_revision: None,
+                total: None,
             },
         }),
     )
@@ -51,6 +54,7 @@ pub(super) fn settings_item<T: Serialize>(
                 next_cursor: None,
                 has_more: None,
                 settings_revision: Some(revision),
+                total: None,
             },
         }),
     )
@@ -66,6 +70,7 @@ pub(super) fn page<T: Serialize>(data: T, next_cursor: Option<String>, has_more:
                 next_cursor: Some(next_cursor),
                 has_more: Some(has_more),
                 settings_revision: None,
+                total: None,
             },
         }),
     )
@@ -73,6 +78,24 @@ pub(super) fn page<T: Serialize>(data: T, next_cursor: Option<String>, has_more:
 }
 pub(super) fn invalid(message: impl Into<String>) -> Response {
     api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message).into_response()
+}
+
+pub(super) fn page_document<T: Serialize>(
+    data: T,
+    next_cursor: Option<String>,
+    has_more: bool,
+    total: Option<usize>,
+) -> Success<T> {
+    Success {
+        data,
+        meta: PageMeta {
+            api_version: "v1",
+            next_cursor: Some(next_cursor),
+            has_more: Some(has_more),
+            settings_revision: None,
+            total,
+        },
+    }
 }
 pub(super) fn identity(value: &str) -> Result<i64, Box<Response>> {
     value

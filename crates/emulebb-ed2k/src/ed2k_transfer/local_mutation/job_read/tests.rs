@@ -2,6 +2,54 @@ use super::*;
 use transfer::{Ed2kTransferRuntime, test_support::admit_download_job};
 
 #[tokio::test]
+async fn upload_caption_retains_read_charge_without_storage_or_resident_hydration() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+    let job = runtime
+        .metadata
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: "6c".repeat(16),
+            display_name: "Sample.bin".into(),
+            expected_size_bytes: Some(0x4000000000),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Stopped,
+            piece_size: transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    let baseline = runtime.download_resource_snapshot().resident_bytes;
+    let summary = runtime
+        .upload_file_summary(&job.file_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    reap_workers(&runtime.local_mutations).await;
+    assert_eq!(summary.display_name, "Sample.bin");
+    assert_eq!(summary.file_size, 0x4000000000);
+    assert_eq!(summary.parts_obtained, 0);
+    assert_eq!(
+        runtime.download_resource_snapshot().resident_bytes,
+        baseline
+    );
+    assert_eq!(
+        runtime.download_resource_snapshot().transient_bytes,
+        256 * 1024
+    );
+    assert!(runtime.manifest_cache.lock().await.is_empty());
+    assert!(
+        runtime
+            .metadata
+            .download_job(job.token.job_id)
+            .unwrap()
+            .unwrap()
+            .storage
+            .is_none()
+    );
+    drop(summary);
+    assert_eq!(runtime.download_resource_snapshot().transient_bytes, 0);
+}
+
+#[tokio::test]
 async fn waiting_preparation_status_retains_transient_charge_without_resident_hydration() {
     let root = tempfile::tempdir().unwrap();
     let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();

@@ -712,6 +712,17 @@ impl EmulebbCore {
     }
 }
 
+fn collect_ready(
+    ready: &mut Vec<ReadyDownload>,
+    result: std::result::Result<Option<ReadyDownload>, tokio::task::JoinError>,
+) {
+    match result {
+        Ok(Some(entry)) => ready.push(entry),
+        Ok(None) => {}
+        Err(error) => tracing::error!(%error, "download preparation worker failed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,16 +816,5 @@ mod tests {
                 .storage_failure
                 .is_none()
         );
-    }
-}
-
-fn collect_ready(
-    ready: &mut Vec<ReadyDownload>,
-    result: std::result::Result<Option<ReadyDownload>, tokio::task::JoinError>,
-) {
-    match result {
-        Ok(Some(entry)) => ready.push(entry),
-        Ok(None) => {}
-        Err(error) => tracing::error!(%error, "download preparation worker failed"),
     }
 }
