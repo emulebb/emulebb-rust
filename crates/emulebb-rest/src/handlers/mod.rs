@@ -81,5 +81,5 @@ pub(crate) use shared_files::{
 };
 pub(crate) use uploads::{
     upload, upload_add_friend, upload_ban, upload_queue, upload_queue_client, upload_release_slot,
-    upload_remove, upload_remove_friend, upload_unban, uploads, without_score_breakdown,
+    upload_remove, upload_remove_friend, upload_unban, uploads,
 };

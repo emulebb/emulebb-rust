@@ -594,7 +594,6 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("POST", "/api/v1/library/ignores")
         | ("GET", "/api/v1/library/scan")
         | ("POST", "/api/v1/library/scan")
-        | ("GET", "/api/v1/uploads")
         | ("GET", "/api/v1/upload-queue")
         | ("POST", "/api/v1/downloads")
         | ("POST", "/api/v1/logs/operations/clear")
@@ -607,6 +606,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/searches") => Some(SEARCH_PAGE),
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
         ("GET", "/api/v1/shared-files") => Some(SHARED_FILES),
+        ("GET", "/api/v1/uploads") => Some(UPLOAD_QUEUE),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
         ("POST", "/api/v1/library/files/sharing") => Some(NONE),
         ("GET", "/api/v1/library/tags") => Some(LIBRARY_TAGS),

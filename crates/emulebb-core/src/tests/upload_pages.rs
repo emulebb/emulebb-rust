@@ -17,7 +17,7 @@ async fn empty_upload_page_keeps_its_charge_through_owned_json_without_hydration
         core.ed2k_transfers
             .download_resource_snapshot()
             .transient_bytes,
-        crate::UPLOAD_QUEUE_PAGE_BYTES
+        crate::UPLOAD_PAGE_BYTES
     );
     assert_eq!(
         core.ed2k_transfers
@@ -25,9 +25,19 @@ async fn empty_upload_page_keeps_its_charge_through_owned_json_without_hydration
             .resident_bytes,
         resident_before
     );
-    let encoded = page.try_project(crate::UPLOAD_QUEUE_PAGE_BYTES + 4096, |page| {
-        Ok(serde_json::json!({"data":page.uploads,"meta":{"hasMore":page.has_more,"total":page.total}}))
-    }).unwrap().serialize_json().unwrap();
+    let encoded = page
+        .serialize_json_ref(&serde_json::json!({
+            "data": &page.uploads,
+            "meta":{"hasMore":page.has_more,"total":page.total}
+        }))
+        .unwrap();
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .transient_bytes,
+        crate::UPLOAD_PAGE_BYTES + encoded.len()
+    );
+    drop(page);
     assert_eq!(
         core.ed2k_transfers
             .download_resource_snapshot()

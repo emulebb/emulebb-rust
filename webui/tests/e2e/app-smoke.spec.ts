@@ -85,8 +85,8 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.getByRole("heading", { name: "Shared Folders" })).toBeVisible();
   await expect(page).toHaveURL(/\/sharing$/);
   await expect(page.locator("section.metric", { hasText: "Shared Files" }).locator("strong")).toHaveText("1");
-  await expect(page.locator("section.metric", { hasText: "Active Uploads" }).locator("strong")).toHaveText("1");
-  await expect(page.locator("section.metric", { hasText: "Waiting Uploads" }).locator("strong")).toHaveText("1");
+  await expect(page.locator("section.metric", { hasText: "Active Uploads" }).locator("strong")).toHaveText("2");
+  await expect(page.locator("section.metric", { hasText: "Waiting Uploads" }).locator("strong")).toHaveText("3");
   await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared", exact: true })).toBeVisible();
   await expect(page.getByRole("cell", { name: longSharedRoot, exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Recursive Coverage" })).toHaveCount(0);

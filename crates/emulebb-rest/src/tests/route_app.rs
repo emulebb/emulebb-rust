@@ -584,7 +584,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert_eq!(bundle["limits"]["searchSnapshots"], 64);
     assert_eq!(bundle["limits"]["searchResultsPerSnapshot"], 128);
     assert_eq!(bundle["limits"]["downloadSnapshots"], 200);
-    assert_eq!(bundle["limits"]["uploadSnapshots"], 512);
+    assert_eq!(bundle["limits"]["uploadSnapshots"], 200);
     assert_eq!(bundle["limits"]["uploadQueueSnapshots"], 200);
     assert!(serde_json::to_string(&bundle).unwrap().contains("secret"));
 }
@@ -663,8 +663,9 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let value: Value = serde_json::from_slice(&body).unwrap();
     let data = &value["data"];
     assert_eq!(data["app"]["name"], "eMuleBB");
@@ -753,35 +754,49 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        let rows = if path.ends_with("upload-queue") {
-            &value["data"]
-        } else {
-            &value["data"]["items"]
-        };
-        assert_eq!(rows.as_array().unwrap().len(), 0);
-        if path.ends_with("upload-queue") {
-            assert!(value["meta"].get("total").is_none());
-            assert_eq!(value["meta"]["hasMore"], false);
-        }
+        assert_eq!(value["data"].as_array().unwrap().len(), 0);
+        assert!(value["meta"].get("total").is_none());
+        assert_eq!(value["meta"]["hasMore"], false);
+        assert!(value["meta"]["nextCursor"].is_null());
     }
 
-    let paged_queue = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/upload-queue?limit=1&countTotal=true")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(paged_queue.status(), StatusCode::OK);
-    let body = to_bytes(paged_queue.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["meta"]["total"], 0);
-    assert_eq!(value["meta"]["hasMore"], false);
-    assert!(value["meta"]["nextCursor"].is_null());
+    for collection in ["uploads", "upload-queue"] {
+        let cursor = hex::encode(format!("{collection}|12345678-1234-4234-8234-123456789abc"));
+        let other = if collection == "uploads" {
+            "upload-queue"
+        } else {
+            "uploads"
+        };
+        let foreign = hex::encode(format!("{other}|12345678-1234-4234-8234-123456789abc"));
+        for (query, expected) in [
+            ("limit=1&countTotal=true".to_owned(), StatusCode::OK),
+            ("limit=0".to_owned(), StatusCode::BAD_REQUEST),
+            ("limit=201".to_owned(), StatusCode::BAD_REQUEST),
+            (format!("cursor={foreign}"), StatusCode::BAD_REQUEST),
+            (format!("cursor={cursor}"), StatusCode::CONFLICT),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/{collection}?{query}"))
+                        .header("X-API-Key", "secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(status, expected, "{}", String::from_utf8_lossy(&body));
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            if expected == StatusCode::OK {
+                assert_eq!(value["meta"]["total"], 0);
+                assert_eq!(value["meta"]["hasMore"], false);
+                assert!(value["meta"]["nextCursor"].is_null());
+            }
+        }
+    }
 
     for (path, expected_message) in [
         (

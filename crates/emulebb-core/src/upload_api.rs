@@ -1,9 +1,9 @@
 use super::*;
 
 /// Owned response allowance, including conservative JSON escaping headroom.
-pub const UPLOAD_QUEUE_PAGE_BYTES: usize = 2 * 1024 * 1024;
+pub const UPLOAD_PAGE_BYTES: usize = 2 * 1024 * 1024;
 
-pub struct UploadQueuePage {
+pub struct UploadPage {
     pub uploads: Vec<Upload>,
     pub next_after: Option<uuid::Uuid>,
     pub has_more: bool,
@@ -18,12 +18,34 @@ impl EmulebbCore {
         after: Option<uuid::Uuid>,
         limit: usize,
         count_total: bool,
-    ) -> Result<emulebb_ed2k::ed2k_transfer::RetainedRead<UploadQueuePage>> {
+    ) -> Result<emulebb_ed2k::ed2k_transfer::RetainedRead<UploadPage>> {
         let page = self
             .ed2k_transfers
             .upload_queue_page(after, limit, count_total)
             .await?;
-        page.try_project_async(UPLOAD_QUEUE_PAGE_BYTES, |page| async move {
+        self.project_upload_page(page).await
+    }
+
+    pub async fn active_upload_page(
+        &self,
+        after: Option<uuid::Uuid>,
+        limit: usize,
+        count_total: bool,
+    ) -> Result<emulebb_ed2k::ed2k_transfer::RetainedRead<UploadPage>> {
+        let page = self
+            .ed2k_transfers
+            .active_upload_page(after, limit, count_total)
+            .await?;
+        self.project_upload_page(page).await
+    }
+
+    async fn project_upload_page(
+        &self,
+        page: emulebb_ed2k::ed2k_transfer::RetainedRead<
+            emulebb_ed2k::ed2k_transfer::Ed2kUploadQueuePage,
+        >,
+    ) -> Result<emulebb_ed2k::ed2k_transfer::RetainedRead<UploadPage>> {
+        page.try_project_async(UPLOAD_PAGE_BYTES, |page| async move {
             let mut uploads = Vec::with_capacity(page.entries.len());
             let mut bytes = uploads.capacity() * std::mem::size_of::<Upload>();
             let mut has_more = page.has_more;
@@ -32,14 +54,15 @@ impl EmulebbCore {
                 let summary = self
                     .ed2k_transfers
                     .upload_file_summary(&entry.file_hash)
-                    .await?;
+                    .await
+                    .map_err(upload_read_error)?;
                 // Sevenfold text headroom covers simultaneous owned strings and
                 // worst-case JSON escaping; scalar fields fit the fixed allowance.
                 let text = entry.client_software.as_ref().map_or(0, String::len)
                     + summary.as_deref().map_or(0, |file| file.display_name.len())
                     + 256;
                 let row_bytes = text.saturating_mul(7).saturating_add(4096);
-                if bytes.saturating_add(row_bytes) > UPLOAD_QUEUE_PAGE_BYTES {
+                if bytes.saturating_add(row_bytes) > UPLOAD_PAGE_BYTES {
                     anyhow::ensure!(!uploads.is_empty(), LocalMutationError::TooLarge);
                     has_more = true;
                     break;
@@ -50,7 +73,7 @@ impl EmulebbCore {
                 upload.score_breakdown = None;
                 uploads.push(upload);
             }
-            Ok(UploadQueuePage {
+            Ok(UploadPage {
                 uploads,
                 next_after: if has_more { last } else { None },
                 has_more,
@@ -58,26 +81,6 @@ impl EmulebbCore {
             })
         })
         .await
-    }
-
-    pub async fn uploads(&self) -> Vec<Upload> {
-        let snapshots = self.ed2k_transfers.active_upload_snapshot().await;
-        let mut uploads = Vec::with_capacity(snapshots.len());
-        for entry in snapshots {
-            let summary = match self
-                .ed2k_transfers
-                .upload_file_summary(&entry.file_hash)
-                .await
-            {
-                Ok(summary) => summary,
-                Err(error) => {
-                    tracing::warn!(hash = %entry.file_hash, "failed to read cached file metadata for upload snapshot: {error}");
-                    None
-                }
-            };
-            uploads.push(upload_from_snapshot(entry, summary.as_deref()));
-        }
-        uploads
     }
 
     pub async fn upload_policy_metrics(&self) -> UploadPolicyMetrics {
@@ -106,38 +109,48 @@ impl EmulebbCore {
         }
     }
 
-    pub async fn upload(&self, client_id: &str, waiting_queue: bool) -> Option<Upload> {
-        let entry = self
+    pub async fn upload(
+        &self,
+        client_id: &str,
+        waiting_queue: bool,
+    ) -> Result<Option<emulebb_ed2k::ed2k_transfer::RetainedRead<Upload>>> {
+        let Some(entry) = self
             .ed2k_transfers
             .upload_client_snapshot(client_id, waiting_queue)
-            .await?;
-        let view = match self
-            .ed2k_transfers
-            .upload_file_summary(&entry.file_hash)
-            .await
-        {
-            Ok(view) => view,
-            Err(error) => {
-                tracing::warn!(
-                    hash = %entry.file_hash,
-                    "failed to read cached file metadata for upload snapshot: {error}"
-                );
-                None
-            }
+            .await?
+        else {
+            return Ok(None);
         };
-        Some(upload_from_snapshot(entry, view.as_deref()))
+        entry
+            .try_project_async(UPLOAD_PAGE_BYTES, |entry| async move {
+                let view = self
+                    .ed2k_transfers
+                    .upload_file_summary(&entry.file_hash)
+                    .await
+                    .map_err(upload_read_error)?;
+                let text = entry.client_software.as_ref().map_or(0, String::len)
+                    + view.as_deref().map_or(0, |file| file.display_name.len())
+                    + 256;
+                anyhow::ensure!(
+                    text.saturating_mul(7).saturating_add(4096) <= UPLOAD_PAGE_BYTES,
+                    LocalMutationError::TooLarge
+                );
+                Ok(upload_from_snapshot(entry, view.as_deref()))
+            })
+            .await
+            .map(Some)
     }
 
     pub async fn add_upload_client_friend(&self, client_id: &str) -> Result<Option<Friend>> {
         let Some(upload) = self.upload_client_for_control(client_id).await else {
             return Ok(None);
         };
-        let Some(user_hash) = upload.user_hash.as_deref() else {
+        let Some(user_hash) = upload.user_hash else {
             anyhow::bail!("upload client does not expose a userHash");
         };
         self.add_friend(FriendCreate {
-            user_hash: user_hash.to_string(),
-            name: Some(upload.user_name),
+            user_hash: hex::encode(user_hash),
+            name: Some(std::net::SocketAddr::new(upload.ip, upload.tcp_port).to_string()),
         })
         .await
         .map(Some)
@@ -147,10 +160,10 @@ impl EmulebbCore {
         let Some(upload) = self.upload_client_for_control(client_id).await else {
             return Ok(None);
         };
-        let Some(user_hash) = upload.user_hash.as_deref() else {
+        let Some(user_hash) = upload.user_hash else {
             return Ok(None);
         };
-        self.delete_friend(user_hash).await
+        self.delete_friend(&hex::encode(user_hash)).await
     }
 
     /// Re-read the configured `ipfilter.dat` and swap it into the live shared
@@ -183,8 +196,11 @@ impl EmulebbCore {
         // add, mirroring eMule's `CUpDownClient::Ban` (UploadClient.cpp:1042 ->
         // CClientList::AddBannedClient).
         self.ed2k_transfers.ban_client(
-            parse_ban_ip(&upload.address),
-            parse_ban_hash(upload.user_hash.as_deref()),
+            match upload.ip {
+                std::net::IpAddr::V4(ip) => Some(ip),
+                _ => None,
+            },
+            upload.user_hash,
         );
         Ok(Some(true))
     }
@@ -193,10 +209,14 @@ impl EmulebbCore {
         let Some(upload) = self.upload_client_for_control(client_id).await else {
             return Ok(None);
         };
-        let hash = parse_ban_hash(upload.user_hash.as_deref());
-        self.ed2k_transfers
-            .ban_store()
-            .unban(parse_ban_ip(&upload.address), hash.as_ref());
+        let hash = upload.user_hash;
+        self.ed2k_transfers.ban_store().unban(
+            match upload.ip {
+                std::net::IpAddr::V4(ip) => Some(ip),
+                _ => None,
+            },
+            hash.as_ref(),
+        );
         Ok(Some(false))
     }
 
@@ -222,7 +242,10 @@ impl EmulebbCore {
     }
 
     pub async fn release_upload_slot(&self, client_id: &str) -> Result<Option<()>> {
-        if self.upload(client_id, false).await.is_some() {
+        let Some(identity) = self.upload_client_for_control(client_id).await else {
+            return Ok(None);
+        };
+        if identity.phase != emulebb_ed2k::ed2k_transfer::Ed2kUploadSessionPhaseSnapshot::Waiting {
             if self
                 .ed2k_transfers
                 .release_upload_client(client_id, false)
@@ -232,9 +255,16 @@ impl EmulebbCore {
             }
             return Ok(None);
         }
-        if self.upload(client_id, true).await.is_some() {
-            anyhow::bail!("client does not currently hold an upload slot");
-        }
-        Ok(None)
+        anyhow::bail!("client does not currently hold an upload slot")
     }
+}
+
+fn upload_read_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<LocalMutationError>().is_some()
+        || error.downcast_ref::<PersistenceError>().is_some()
+    {
+        return error;
+    }
+    tracing::warn!(%error,"upload caption read failed");
+    PersistenceError::Storage("upload caption read failed".into()).into()
 }

@@ -1,3 +1,4 @@
+import type { Upload } from "../../src/api";
 import { settingsFixture, settingsSurfaceFixture, applySettingsFixture } from "./settings";
 import type { Route } from "@playwright/test";
 
@@ -14,6 +15,15 @@ const sharedFileHash = "ffeeddccbbaa99887766554433221100";
 const secondSharedFileHash = "0123456789abcdeffedcba9876543210";
 const longSharedRoot =
   "\\\\?\\F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
+
+export function uploadFixture(overrides: Partial<Upload> = {}): Upload {
+  return { id: "12345678-1234-4234-8234-123456789abc", userHash: null,
+    clientSoftware: "Sample Client", uploadState: "uploading", uploadRateBytesPerSec: 8192,
+    sessionUploadedBytes: 4096, waitTimeSeconds: 12, uploadDurationSeconds: 3,
+    address: "192.0.2.10", port: 4662, lowId: null, friendSlot: false, connected: true,
+    requestedFileHash: sharedFileHash, requestedFileName: "Shared Sample.bin", requestedFileSizeBytes: 4096,
+    filePartsAvailable: 1, filePartsTotal: 1, queueRank: null, ...overrides };
+}
 
 const snapshot = {
   app: { version: "0.1.0-beta.2" },
@@ -61,6 +71,8 @@ const snapshot = {
       }
     },
     stats: {
+      activeUploads: 2,
+      waitingUploads: 3,
       downloadSpeedKiBps: 2,
       uploadSpeedKiBps: 1
     },
@@ -76,24 +88,10 @@ const snapshot = {
   searches: [],
   servers: [{ endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, auxiliaryPorts: [4662, 4663] }],
   kad: { enabled: true, connected: true, firewalled: false },
-  uploads: [
-    {
-      id: "12345678-1234-4234-8234-123456789abc",
-      userName: "Active Upload Peer",
-      uploadState: "uploading",
-      uploading: true,
-      requestedFileName: "Shared Sample.bin"
-    }
-  ],
-  uploadQueue: [
-    {
-      id: "12345678-1234-4234-8234-123456789abd",
-      userName: "Waiting Upload Peer",
-      uploadState: "queued",
-      waitingQueue: true,
-      requestedFileName: "Shared Sample.bin"
-    }
-  ],
+  uploads: [uploadFixture()],
+  uploadQueue: [uploadFixture({ id: "12345678-1234-4234-8234-123456789abd", address: "192.0.2.11",
+    uploadState: "queued", uploadRateBytesPerSec: 0, sessionUploadedBytes: 0,
+    uploadDurationSeconds: null, connected: false, queueRank: 1 })],
   sharedFiles: [{
     hash: sharedFileHash,
     name: "Shared Sample.bin",
@@ -167,8 +165,8 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       }) });
       return;
     }
-    if (request.method() === "GET" && path === "upload-queue") {
-      const waiting = mockSnapshotFixture().uploadQueue;
+    if (request.method() === "GET" && (path === "upload-queue" || path === "uploads")) {
+      const waiting = path === "uploads" ? snapshot.uploads : snapshot.uploadQueue;
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
         data: waiting, meta: { apiVersion: "v1", nextCursor: null, hasMore: false, total: waiting.length }
       }) });
@@ -504,11 +502,9 @@ function dataFor(method: string, path: string): unknown {
       };
     case "settings/surface":
       return settingsSurfaceFixture;
-    case "uploads":
-      return { items: snapshot.uploads };
-    case "uploads/active-upload-peer":
+    case "uploads/12345678-1234-4234-8234-123456789abc":
       return { ...snapshot.uploads[0], scoreBreakdown: uploadScore(100) };
-    case "upload-queue/waiting-upload-peer":
+    case "upload-queue/12345678-1234-4234-8234-123456789abd":
       return { ...snapshot.uploadQueue[0], scoreBreakdown: uploadScore(50) };
     case "app":
       return {
@@ -528,8 +524,7 @@ function dataFor(method: string, path: string): unknown {
   }
 }
 
-function uploadScore(baseScore: number) {
-  return { availability: 'available', baseScore, effectiveScore: baseScore * 2, coreScore: baseScore,
-    effectiveScoreFloat: baseScore * 2, creditRatio: 2, filePriority: 1, lowRatioApplied: false,
-    lowRatioBonus: 0, lowIdPenaltyApplied: false, lowIdDivisor: 1, oldClientPenaltyApplied: false, cooldownRemainingMs: 0 };
+export function uploadScore(score: number) {
+  return { score, creditRatio: 2, filePriorityScore: 1, lowRatioApplied: false,
+    lowRatioBonus: 0, lowIdPenaltyApplied: false, lowIdDivisor: 1, oldClientPenaltyApplied: false };
 }

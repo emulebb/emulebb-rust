@@ -80,7 +80,7 @@ pub(crate) struct SharedFilesQuery {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct UploadQueueQuery {
+pub(crate) struct UploadPageQuery {
     pub(crate) limit: Option<usize>,
     pub(crate) cursor: Option<String>,
     pub(crate) count_total: Option<bool>,

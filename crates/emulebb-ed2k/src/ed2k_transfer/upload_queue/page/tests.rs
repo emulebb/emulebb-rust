@@ -188,6 +188,7 @@ fn management_details_match_live_rank_without_copying_bits_or_expiring_state() {
     for row in expected.entries {
         let detail = queue
             .client_snapshot(&row.id.to_string(), true, now)
+            .unwrap()
             .unwrap();
         assert_eq!(detail.management_rank, row.management_rank);
         assert!(detail.requester_part_status.is_none());
@@ -207,6 +208,7 @@ fn management_details_match_live_rank_without_copying_bits_or_expiring_state() {
                 true,
                 now + queue.config.waiting_timeout + Duration::from_secs(1)
             )
+            .unwrap()
             .is_none()
     );
     assert_eq!(queue.sessions.len(), old_len);
@@ -235,6 +237,7 @@ fn management_rank_is_not_limited_by_the_wire_rank_field() {
     }
     let last = queue
         .client_snapshot(&uuid::Uuid::from_u128(65_536).to_string(), true, now)
+        .unwrap()
         .unwrap();
     assert_eq!(last.management_rank, Some(65_536));
     assert_eq!(last.queue_rank, Some(u16::MAX));

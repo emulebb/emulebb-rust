@@ -584,15 +584,6 @@ impl Ed2kTransferRuntime {
         self.upload_queue.lock().await.snapshot(Instant::now())
     }
 
-    /// Select only active sessions before cloning management data. Waiting
-    /// clients do not incur rank calculations or copy their requester bitmaps.
-    pub async fn active_upload_snapshot(&self) -> Vec<Ed2kUploadQueueSnapshotEntry> {
-        self.upload_queue
-            .lock()
-            .await
-            .active_snapshot(Instant::now())
-    }
-
     /// Scalar candidates for the existing background hostname lookup owner.
     /// Avoid constructing upload rows or file captions for address enrichment.
     pub async fn upload_peer_ipv4_addresses(&self) -> Vec<std::net::Ipv4Addr> {
@@ -636,11 +627,37 @@ impl Ed2kTransferRuntime {
         &self,
         client_id: &str,
         waiting_queue: bool,
-    ) -> Option<Ed2kUploadQueueSnapshotEntry> {
+    ) -> anyhow::Result<Option<super::RetainedRead<Ed2kUploadQueueSnapshotEntry>>> {
+        let result = self
+            .local_mutations
+            .retain_read(1024 * 1024, || async {
+                Ok(self.upload_queue.lock().await.client_snapshot(
+                    client_id,
+                    waiting_queue,
+                    Instant::now(),
+                )?)
+            })
+            .await?;
+        if result.is_none() {
+            return Ok(None);
+        }
+        result
+            .try_project(
+                512 * 1024,
+                |entry| Ok(entry.expect("selected upload entry")),
+            )
+            .map(Some)
+    }
+
+    /// Controls need only fixed scalar identity, not file captions or read bodies.
+    pub async fn upload_client_identity(
+        &self,
+        client_id: &str,
+    ) -> Option<super::Ed2kUploadClientIdentity> {
         self.upload_queue
             .lock()
             .await
-            .client_snapshot(client_id, waiting_queue, Instant::now())
+            .client_identity(client_id, Instant::now())
     }
 
     pub(crate) fn record_peer_credit_totals(
