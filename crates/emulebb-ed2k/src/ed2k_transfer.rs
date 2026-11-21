@@ -101,6 +101,10 @@ mod upload_queue;
 
 pub(crate) use block_lease::Ed2kDownloadBlockLease;
 pub use callback::Ed2kCallbackDispatchGuard;
+mod callback_preparation;
+pub use callback_preparation::{
+    Ed2kCallbackPreparation, Ed2kCallbackPreparationId, Ed2kCallbackPreparationOutcome,
+};
 pub use catalog::{
     Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange, IndexedSharedCatalog,
     SharedFileMutation,
@@ -314,6 +318,7 @@ pub struct Ed2kTransferRuntime {
     shared_catalog_hydration_pending: AtomicBool,
     servable_shared_hash_cache: Arc<StdMutex<ServableSharedHashCache>>,
     callback_tickets: Arc<StdMutex<callback::CallbackTicketStore>>,
+    callback_preparations: Arc<callback_preparation::CallbackPreparations>,
     /// Exact job I/O locks. Generations of one job drain before physical reuse;
     /// a removed job's slow cleanup never locks a newer same-content job.
     manifest_locks: Arc<StdMutex<HashMap<JobId, std::sync::Weak<Mutex<()>>>>>,
@@ -842,6 +847,7 @@ impl Ed2kTransferRuntime {
             shared_catalog_hydration_pending: AtomicBool::new(hydration_pending),
             servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_tickets: Arc::new(StdMutex::new(callback::CallbackTicketStore::default())),
+            callback_preparations: Arc::new(callback_preparation::CallbackPreparations::default()),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
             content_locks: Arc::new(StdMutex::new(HashMap::new())),
             job_storage: Arc::new(StdMutex::new(HashMap::new())),

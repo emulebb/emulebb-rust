@@ -405,8 +405,8 @@ impl DownloadAttemptGuard {
         let preparing = state.entries.len() - active;
         state.entries.get(&self.token.job_id).is_some_and(|entry| {
             entry.nonce == self.nonce && entry.token == self.token && !entry.cancel.is_cancelled()
-        }) && state.entries.len() <= state.active_limit()
-            && state.entries.len() <= state.window.total
+        }) && state.entries.len() <= state.window.total
+            && preparing <= state.window.preparing
             && preparing <= construction_starts
     }
 

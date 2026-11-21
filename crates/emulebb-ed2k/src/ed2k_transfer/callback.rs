@@ -915,6 +915,7 @@ impl CallbackTicketStore {
             ticket.downloads.retain(|download| {
                 download.file_hash != completed.file_hash
                     || download.job_token != completed.job_token
+                    || download.preparation_id != completed.preparation_id
             });
         }
         Ok(())
@@ -1323,6 +1324,7 @@ mod tests {
             .unwrap()
             .job;
         Ed2kCallbackDownload {
+            preparation_id: None,
             job_token: job.token,
             file_hash: hash,
             display_name: name,

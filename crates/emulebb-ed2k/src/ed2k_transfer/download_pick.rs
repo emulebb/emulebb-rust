@@ -1,76 +1,36 @@
-//! Part selection for ED2K downloads.
+//! Select useful missing parts by observed scarcity, then finish started work.
 //!
-//! Mirrors the master `CPartFile::GetNextRequestedBlock` chunk-selection intent
-//! within the per-transfer-task model used here (there is no shared cross-file
-//! scheduler, so the rarity input is the per-transfer live source part-frequency
-//! already tracked in `download_activity`, not a global queue). The selection
-//! ranks the locally-missing parts the connected peer actually holds by:
-//!
-//!  - Criterion 1 (rarity): rarest-first via the per-source availability
-//!    frequency, so very rare parts are fetched first to spread the file.
-//!  - Criterion 2 (preview): the first and last part(s) rank high so a partial
-//!    file can be previewed/verified early.
-//!  - Criterion 4 (completion): a part already partly written ranks above an
-//!    untouched part of equal rarity (priority inversion), so in-flight parts
-//!    finish before new ones start. This also covers the endgame tail where the
-//!    remaining missing parts are all near completion.
-//!
-//! The peer-availability gate is the master `sender->IsPartAvailable(i)` filter
-//! (Criterion entry condition): a part the peer lacks is never claimed against
-//! that peer, which avoids soliciting an `OP_OUTOFPARTREQS` rejection.
+//! Frequencies come from the shared live-source tracker. Unknown frequency does
+//! not establish rarity. A preferred in-flight part participates in the same
+//! ordering rather than bypassing a rarer opportunity.
 
 use super::model::{Ed2kPieceState, Ed2kTransferState};
 
-/// Lower rank wins. The base spacing keeps rarity dominant while leaving room
-/// for the preview boost and the completion bonus to reorder ties.
-const RARITY_WEIGHT: u32 = 1_000;
-/// Preview parts (first / last) get a large negative offset so they outrank
-/// common parts but still defer to a genuinely rarer part.
-const PREVIEW_BONUS: u32 = 500;
-/// Completion bonus span: a fully-started part shaves up to this much off its
-/// rank, giving near-complete parts priority over untouched ones of equal
-/// rarity (master Criterion 4, `100 - critCompletion`).
-const COMPLETION_BONUS: u32 = 100;
+type PartRank = (u32, bool, u64);
 
-/// Compute the selection rank for one missing part. Lower is better.
-fn part_rank(piece: &Ed2kPieceState, frequency: u32, expected_len: u64, is_preview: bool) -> u32 {
-    // Criterion 1: rarity dominates.
-    let mut rank = frequency.saturating_mul(RARITY_WEIGHT);
-
-    // Criterion 2: first / last part(s) for preview.
-    if is_preview {
-        rank = rank.saturating_sub(PREVIEW_BONUS);
-    }
-
-    // Criterion 4: completion priority-inversion. `bytes_written` is the present
-    // prefix (or salvage-present prefix); a higher completion ratio lowers rank.
-    if expected_len > 0 {
-        let completion = (u128::from(piece.bytes_written) * u128::from(COMPLETION_BONUS)
-            / u128::from(expected_len)) as u32;
-        rank = rank.saturating_sub(completion.min(COMPLETION_BONUS));
-    }
-
-    rank
+/// Lower rank wins: measured scarcity, started work, then bytes to finish it.
+fn part_rank(
+    piece: &Ed2kPieceState,
+    frequency: u32,
+    expected_len: u64,
+    preferred: bool,
+) -> PartRank {
+    let measured = if frequency == 0 { u32::MAX } else { frequency };
+    let started = piece.bytes_written > 0 || preferred;
+    (
+        measured,
+        !started,
+        if started {
+            expected_len.saturating_sub(piece.bytes_written)
+        } else {
+            0
+        },
+    )
 }
 
-/// A part is a preview candidate if it is the first part, the last part, or the
-/// second-to-last part when the final part is small (master Criterion 2).
-fn is_preview_part(part_index: usize, part_total: usize) -> bool {
-    if part_total == 0 {
-        return false;
-    }
-    part_index == 0 || part_index == part_total - 1
-}
-
-/// Pick the next missing part index to claim against a peer.
-///
-/// `peer_bitmap` is the connected peer's advertised per-part availability. When
-/// `Some`, only parts the peer holds are considered (master
-/// `sender->IsPartAvailable`). When `None` (status not yet learned), every
-/// missing part is eligible, matching the legacy behaviour. `frequency` is the
-/// per-part live-source availability count (rarity input); a missing index is
-/// treated as frequency 0 (rarest). Returns `None` when the peer holds none of
-/// our missing parts, which the caller treats like an out-of-parts peer.
+/// Pick only data the peer can serve. Without a status bitmap, missing parts
+/// remain eligible but receive no inferred rarity. Verified and empty protocol
+/// slices never become payload requests. Equal ranks retain stable part order.
 #[must_use]
 pub(super) fn pick_next_missing_part(
     pieces: &[Ed2kPieceState],
@@ -78,34 +38,29 @@ pub(super) fn pick_next_missing_part(
     piece_size: u64,
     peer_bitmap: Option<&[bool]>,
     frequency: &[u32],
+    preferred_piece: Option<u32>,
 ) -> Option<u32> {
-    let part_total = pieces.len();
-    let mut best: Option<(u32, u32)> = None; // (rank, piece_index)
+    let mut best: Option<(PartRank, u32)> = None;
     for (position, piece) in pieces.iter().enumerate() {
-        // Network ownership is process-local, so a missing piece remains
-        // eligible and its block bitmap decides which ranges are still needed.
         if piece.state == Ed2kTransferState::Verified {
             continue;
         }
-        if let Some(bitmap) = peer_bitmap {
-            // A peer with no status frame yet is handled by the `None` branch;
-            // here a shorter/longer bitmap is tolerated by treating an absent
-            // slot as "not available".
-            if !bitmap.get(position).copied().unwrap_or(false) {
-                continue;
-            }
+        if peer_bitmap.is_some_and(|bitmap| !bitmap.get(position).copied().unwrap_or(false)) {
+            continue;
         }
         let expected_len = super::manifest::expected_piece_length(
             file_size,
             piece_size,
             u64::from(piece.piece_index),
         );
-        let freq = frequency.get(position).copied().unwrap_or(0);
+        if expected_len == 0 {
+            continue;
+        }
         let rank = part_rank(
             piece,
-            freq,
+            frequency.get(position).copied().unwrap_or(0),
             expected_len,
-            is_preview_part(position, part_total),
+            preferred_piece == Some(piece.piece_index),
         );
         match best {
             Some((best_rank, _)) if best_rank <= rank => {}
@@ -149,15 +104,109 @@ mod tests {
             missing_piece(3, 0),
         ];
         let file_size = ED2K_PART_SIZE * 4;
-        // Part 2 is the rarest (only one source). Preview boosts parts 0 and 3,
-        // but rarity dominates, so part 2 still wins.
+        // Part 2 is the only part with one observed source.
         let frequency = [5, 5, 1, 5];
-        let pick = pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency);
+        let pick =
+            pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency, None);
         assert_eq!(pick, Some(2));
     }
 
     #[test]
-    fn prefers_preview_part_on_equal_rarity() {
+    fn measured_availability_precedes_unknown_frequency() {
+        let pieces = vec![missing_piece(0, ED2K_PART_SIZE - 1), missing_piece(1, 0)];
+        for frequency in [&[0, 3][..], &[0, 1][..]] {
+            assert_eq!(
+                pick_next_missing_part(
+                    &pieces,
+                    ED2K_PART_SIZE * 2,
+                    ED2K_PART_SIZE,
+                    None,
+                    frequency,
+                    Some(0)
+                ),
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
+    fn preferred_part_only_wins_among_equally_scarce_work() {
+        let pieces = vec![
+            missing_piece(0, 0),
+            missing_piece(1, 0),
+            missing_piece(2, 0),
+        ];
+        assert_eq!(
+            pick_next_missing_part(
+                &pieces,
+                ED2K_PART_SIZE * 3,
+                ED2K_PART_SIZE,
+                None,
+                &[3, 1, 3],
+                Some(2)
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            pick_next_missing_part(
+                &pieces,
+                ED2K_PART_SIZE * 3,
+                ED2K_PART_SIZE,
+                None,
+                &[3; 3],
+                Some(2)
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn rare_unstarted_part_precedes_common_nearly_complete_work() {
+        let pieces = vec![missing_piece(0, ED2K_PART_SIZE - 1), missing_piece(1, 0)];
+        assert_eq!(
+            pick_next_missing_part(
+                &pieces,
+                ED2K_PART_SIZE * 2,
+                ED2K_PART_SIZE,
+                None,
+                &[2, 1],
+                Some(0)
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn empty_protocol_slice_is_never_payload_work() {
+        let pieces = vec![missing_piece(0, 0), missing_piece(1, 0)];
+        assert_eq!(
+            pick_next_missing_part(&pieces, ED2K_PART_SIZE, ED2K_PART_SIZE, None, &[], Some(1)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn untouched_short_tail_does_not_reorder_equally_scarce_parts() {
+        let pieces = vec![
+            missing_piece(0, 0),
+            missing_piece(1, 0),
+            missing_piece(2, 0),
+        ];
+        assert_eq!(
+            pick_next_missing_part(
+                &pieces,
+                ED2K_PART_SIZE * 2 + 16,
+                ED2K_PART_SIZE,
+                None,
+                &[1; 3],
+                None
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn equal_rank_uses_stable_part_order() {
         let pieces = vec![
             missing_piece(0, 0),
             missing_piece(1, 0),
@@ -166,13 +215,14 @@ mod tests {
         ];
         let file_size = ED2K_PART_SIZE * 4;
         let frequency = [3, 3, 3, 3];
-        // All equally rare -> first part (preview) wins over interior parts.
-        let pick = pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency);
+        // Equal work retains stable order.
+        let pick =
+            pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency, None);
         assert_eq!(pick, Some(0));
     }
 
     #[test]
-    fn completion_inverts_priority_on_equal_rarity_and_preview() {
+    fn finishes_started_interior_part_before_equally_scarce_untouched_parts() {
         let pieces = vec![
             missing_piece(0, 0),
             missing_piece(1, ED2K_PART_SIZE - 1),
@@ -180,11 +230,9 @@ mod tests {
             missing_piece(3, 0),
         ];
         let file_size = ED2K_PART_SIZE * 4;
-        // Interior parts 1 and 2 are equally rare and non-preview (parts 0 and 3
-        // are the preview parts); part 1 is nearly complete, so the completion
-        // bonus selects it. Parts 0/3 are made common so preview never wins.
-        let frequency = [50, 3, 3, 50];
-        let pick = pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency);
+        let frequency = [3, 3, 3, 3];
+        let pick =
+            pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency, None);
         assert_eq!(pick, Some(1));
     }
 
@@ -200,8 +248,14 @@ mod tests {
         // Part 0 is rarest but the peer does not have it; pick the rarest the
         // peer actually holds (part 1 is rarer than part 2).
         let peer = [false, true, true];
-        let pick =
-            pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, Some(&peer), &frequency);
+        let pick = pick_next_missing_part(
+            &pieces,
+            file_size,
+            ED2K_PART_SIZE,
+            Some(&peer),
+            &frequency,
+            None,
+        );
         assert_eq!(pick, Some(1));
     }
 
@@ -211,8 +265,14 @@ mod tests {
         let file_size = ED2K_PART_SIZE * 2;
         let frequency = [5, 5];
         let peer = [true, false];
-        let pick =
-            pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, Some(&peer), &frequency);
+        let pick = pick_next_missing_part(
+            &pieces,
+            file_size,
+            ED2K_PART_SIZE,
+            Some(&peer),
+            &frequency,
+            None,
+        );
         assert_eq!(pick, None);
     }
 
@@ -221,7 +281,8 @@ mod tests {
         let pieces = vec![verified_piece(0), missing_piece(1, 0)];
         let file_size = ED2K_PART_SIZE * 2;
         let frequency = [1, 9];
-        let pick = pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency);
+        let pick =
+            pick_next_missing_part(&pieces, file_size, ED2K_PART_SIZE, None, &frequency, None);
         assert_eq!(pick, Some(1));
     }
 }

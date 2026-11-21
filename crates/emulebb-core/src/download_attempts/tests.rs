@@ -15,7 +15,10 @@ fn promotion_keeps_one_guard_and_waits_for_ordinary_capacity() {
     let active = control.try_enter(token(1, 1), hash(1)).unwrap();
     let prepared = control.try_prepare(token(2, 1), hash(2)).unwrap();
     let nonce = prepared.nonce;
-    assert!(!prepared.preparation_has_headroom(2));
+    assert!(
+        prepared.preparation_has_headroom(2),
+        "preparation is independent of ordinary payload admission"
+    );
     assert!(control.owns_observation(token(2, 1)));
     assert!(
         !control.owns(token(2, 1)),

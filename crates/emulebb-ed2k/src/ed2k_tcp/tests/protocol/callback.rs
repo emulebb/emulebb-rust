@@ -1,6 +1,235 @@
 use super::*;
 use crate::ed2k_tcp::{reply_with_firewall_udp, send_kad_firewall_tcp_ack};
 
+#[tokio::test]
+async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early_hydration() {
+    use crate::ed2k_transfer::Ed2kCallbackPreparationOutcome;
+    for decision in 0..3 {
+        let mut runtime = ListenerTestRuntime::new(
+            "callback-core-decision",
+            listener_hello_identity(),
+            [0x76; 16],
+            0x12345678,
+        )
+        .await;
+        let payload = vec![0x63; 16];
+        let hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime.transfer_runtime,
+            hash,
+            "Prepared.bin".into(),
+            payload.len() as u64,
+        );
+        let source = Ed2kSourceHint {
+            ip: test_bind_ip().to_string(),
+            tcp_port: 46671,
+            user_hash: Some(hex::encode([0x77; 16])),
+            connect_options: None,
+            file_comment: String::new(),
+            file_rating: 0,
+        };
+        let mut owner = runtime
+            .transfer_runtime
+            .prepare_callback_download(
+                Ed2kCallbackDownload {
+                    preparation_id: None,
+                    job_token: job.token,
+                    file_hash: hash,
+                    display_name: "Prepared.bin".into(),
+                    file_size: payload.len() as u64,
+                    source,
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let server_ip = Ipv4Addr::new(203, 0, 113, 22);
+        let server = SocketAddr::from((server_ip, 4661));
+        let reservation = runtime
+            .transfer_runtime
+            .reserve_callback_ticket(
+                Ed2kCallbackTicketRequest::server(
+                    server,
+                    0x4321,
+                    Some([0x77; 16]),
+                    46671,
+                    owner.download().clone(),
+                    Duration::from_secs(5),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let Ed2kCallbackReservation::Dispatch(permit) = reservation else {
+            panic!("missing dispatch ownership");
+        };
+        runtime
+            .transfer_runtime
+            .mark_callback_ticket_dispatched(permit)
+            .await;
+        let baseline = runtime
+            .transfer_runtime
+            .download_resource_snapshot()
+            .resident_bytes;
+        let listener = runtime.spawn_listener_results(1);
+        let addr = runtime.peer_addr;
+        let (quiet_tx, quiet_rx) = tokio::sync::oneshot::channel();
+        let peer_payload = payload.clone();
+        let peer = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(&encode_hello_request(Ed2kHelloIdentity {
+                    user_hash: [0x77; 16],
+                    client_id: 0x4321,
+                    tcp_port: 46671,
+                    udp_port: 46672,
+                    server_ip: u32::from_le_bytes(server_ip.octets()),
+                    server_port: 4661,
+                    connect_options: emule_connect_options(false),
+                    direct_udp_callback: false,
+                }))
+                .await
+                .unwrap();
+            let request = read_until_opcode(&mut stream, OP_EMULEPROT, OP_MULTIPACKET_EXT2).await;
+            assert!(request.windows(16).any(|bytes| bytes == hash.0));
+            stream
+                .write_all(&encode_startup_multipacket_ext2_answer(
+                    &hash,
+                    16,
+                    "Prepared.bin",
+                    false,
+                ))
+                .await
+                .unwrap();
+            let mut before_admission = [0];
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(30),
+                    stream.read(&mut before_admission)
+                )
+                .await
+                .is_err(),
+                "listener must wait for Core before queue/hashset/payload work"
+            );
+            quiet_tx.send(()).unwrap();
+            if decision == 0 {
+                let mut start = read_packet(&mut stream).await;
+                if start[5] == OP_REQUESTSOURCES2 {
+                    assert_eq!(start, encode_request_sources2(&hash));
+                    start = read_packet(&mut stream).await;
+                }
+                assert_eq!(start[5], OP_STARTUPLOADREQ);
+                stream.write_all(&encode_accept_upload_req()).await.unwrap();
+                let request = read_packet(&mut stream).await;
+                assert_eq!(request[5], OP_REQUESTPARTS);
+                let (requested, ranges) =
+                    decode_request_parts_payload(&request[6..], false).unwrap();
+                assert_eq!(requested, hash);
+                for (start, end) in ranges {
+                    stream
+                        .write_all(
+                            &encode_sending_part(
+                                &hash,
+                                start,
+                                end,
+                                &peer_payload[start as usize..end as usize],
+                                false,
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                let mut bytes = [0; 256];
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !matches!(stream.read(&mut bytes).await, Ok(0) | Err(_)) {}
+                })
+                .await
+                .unwrap();
+            } else {
+                let mut byte = [0];
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+        });
+        assert!(matches!(
+            owner.availability().await.unwrap(),
+            Ed2kCallbackPreparationOutcome::Available(_)
+        ));
+        quiet_rx.await.unwrap();
+        assert_eq!(
+            runtime
+                .transfer_runtime
+                .download_resource_snapshot()
+                .resident_bytes,
+            baseline
+        );
+        let record = runtime
+            .transfer_runtime
+            .download_job(job.token.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            record
+                .storage
+                .as_ref()
+                .is_none_or(|storage| !storage.path.exists())
+        );
+        drop(record);
+        if decision == 0 {
+            let selected = runtime
+                .transfer_runtime
+                .begin_download_job_execution(job.token, None)
+                .await
+                .unwrap();
+            let token = selected.as_ref().unwrap().token;
+            drop(selected);
+            let execution =
+                crate::ed2k_transfer::new_transfer_job(token, hash, "Prepared.bin".into(), 16);
+            drop(
+                runtime
+                    .transfer_runtime
+                    .ensure_job(&execution)
+                    .await
+                    .unwrap(),
+            );
+            owner.start(token).unwrap();
+            assert_eq!(
+                owner.completed().await.unwrap(),
+                Ed2kPeerDownloadOutcome::Completed
+            );
+            assert_eq!(
+                runtime
+                    .transfer_runtime
+                    .manifest(token)
+                    .await
+                    .unwrap()
+                    .pieces[0]
+                    .bytes_written,
+                16
+            );
+        } else if decision == 1 {
+            owner.skip().unwrap();
+            assert_eq!(
+                owner.completed().await.unwrap(),
+                Ed2kPeerDownloadOutcome::NoNeededParts
+            );
+        } else {
+            owner.cancel();
+            assert!(owner.completed().await.is_err());
+        }
+        peer.await.unwrap();
+        let results = listener.await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is_ok(), decision != 2);
+    }
+}
+
 fn callback_request(
     peer_addr: SocketAddr,
     expected_user_hash: Option<[u8; 16]>,
@@ -215,6 +444,7 @@ async fn inbound_callback_claim_is_scoped_to_the_server_route() {
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    preparation_id: None,
                     job_token: ticket_hash_job.token,
                     file_hash: ticket_hash,
                     display_name: "ticketed.bin".to_string(),
@@ -246,6 +476,7 @@ async fn inbound_callback_claim_is_scoped_to_the_server_route() {
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    preparation_id: None,
                     job_token: other_server_hash_job.token,
                     file_hash: other_server_hash,
                     display_name: "other-server.bin".to_string(),
@@ -375,6 +606,7 @@ async fn inbound_ticketed_callback_switches_a4af_after_file_not_found() {
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    preparation_id: None,
                     job_token: first_hash_job.token,
                     file_hash: first_hash,
                     display_name: "first.bin".to_string(),
@@ -407,6 +639,7 @@ async fn inbound_ticketed_callback_switches_a4af_after_file_not_found() {
                     None,
                     peer_tcp_port,
                     Ed2kCallbackDownload {
+                        preparation_id: None,
                         job_token: second_hash_job.token,
                         file_hash: second_hash,
                         display_name: "second.bin".to_string(),
@@ -513,6 +746,7 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    preparation_id: None,
                     job_token: first_hash_job.token,
                     file_hash: first_hash,
                     display_name: "first.bin".to_string(),
@@ -545,6 +779,7 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
                     None,
                     peer_tcp_port,
                     Ed2kCallbackDownload {
+                        preparation_id: None,
                         job_token: second_hash_job.token,
                         file_hash: second_hash,
                         display_name: "second.bin".to_string(),
@@ -601,6 +836,7 @@ async fn inbound_ticketed_callback_peer_close_consumes_current_and_retains_a4af_
                 None,
                 peer_tcp_port,
                 Ed2kCallbackDownload {
+                    preparation_id: None,
                     job_token: retry_hash_job.token,
                     file_hash: retry_hash,
                     display_name: "retry.bin".to_string(),
