@@ -24,6 +24,85 @@ fn query(token: JobToken) -> MetadataDownloadAvailabilityQuery {
 }
 
 #[test]
+fn live_callback_proof_needs_no_endpoint_and_supersedes_its_older_status() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = job(&store);
+    let q = MetadataDownloadScarcityQuery {
+        token: job.token,
+        session_id: [1; 16],
+        observed_since_s: 0,
+        observed_until_s: 20,
+        user_hash: [0x12; 16],
+    };
+    assert!(
+        store
+            .download_job_live_source_has_rare_part(q, 16, &[true])
+            .unwrap()
+    );
+    assert!(
+        store
+            .download_job_source_endpoints_after(job.token, 0, 256)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .download_job_live_source_has_rare_part(q, 17, &[true])
+            .is_err()
+    );
+    assert!(
+        store
+            .download_job_live_source_has_rare_part(q, 16, &[true, true])
+            .is_err()
+    );
+    store
+        .apply_download_peer_delta(job.token, &delta(1))
+        .unwrap();
+    assert!(
+        !store
+            .download_job_live_source_has_rare_part(q, 16, &[false])
+            .unwrap(),
+        "an older same-identity endpoint must not restore a part absent from the live reply"
+    );
+    let mut other = delta(2);
+    let MetadataDownloadPeerDelta::Availability { source, .. } = &mut other else {
+        unreachable!()
+    };
+    source.user_hash = Some("34".repeat(16));
+    store.apply_download_peer_delta(job.token, &other).unwrap();
+    assert!(
+        !store
+            .download_job_live_source_has_rare_part(q, 16, &[true])
+            .unwrap()
+    );
+    let stale = MetadataDownloadScarcityQuery {
+        token: JobToken {
+            generation: job.token.generation + 1,
+            ..job.token
+        },
+        ..q
+    };
+    assert!(
+        !store
+            .download_job_live_source_has_rare_part(stale, 16, &[true])
+            .unwrap()
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE download_jobs SET intent='stopped' WHERE id=?1",
+            [job.token.job_id],
+        )
+        .unwrap();
+    assert!(
+        !store
+            .download_job_live_source_has_rare_part(q, 16, &[true])
+            .unwrap()
+    );
+}
+
+#[test]
 fn scarcity_counts_reporters_not_endpoints_and_excludes_verified_or_stale_parts() {
     let store = MetadataStore::in_memory().unwrap();
     let job = job(&store);

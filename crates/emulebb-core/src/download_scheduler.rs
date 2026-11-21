@@ -166,20 +166,32 @@ impl EmulebbCore {
         // Missing/stale proof is ordinary work, never evidence of rarity.
         for entry in ready.iter_mut() {
             entry.rare = false;
-            if let crate::download_preparation::DownloadPreparation::Direct(source) = &entry.source
-            {
-                match self
-                    .ed2k_transfers
-                    .download_source_has_rare_part(
-                        entry.guard.token(),
-                        source.peer.availability().user_hash,
-                    )
-                    .await
-                {
-                    Ok(rare) => entry.rare = rare,
-                    Err(error) => {
-                        tracing::debug!(job_id = %entry.guard.token().job_id, %error, "ready scarcity observation unavailable")
-                    }
+            let result = match &entry.source {
+                crate::download_preparation::DownloadPreparation::Direct(source) => {
+                    self.ed2k_transfers
+                        .download_source_has_rare_part(
+                            entry.guard.token(),
+                            source.peer.availability().user_hash,
+                        )
+                        .await
+                }
+                crate::download_preparation::DownloadPreparation::Callback(source) => {
+                    self.ed2k_transfers
+                        .download_live_source_has_rare_part(
+                            entry.guard.token(),
+                            source.file_size,
+                            source.user_hash,
+                            std::sync::Arc::clone(&source.available_parts),
+                            source.observed_at,
+                        )
+                        .await
+                }
+                _ => Ok(false),
+            };
+            match result {
+                Ok(rare) => entry.rare = rare,
+                Err(error) => {
+                    tracing::debug!(job_id = %entry.guard.token().job_id, %error, "ready scarcity observation unavailable")
                 }
             }
         }

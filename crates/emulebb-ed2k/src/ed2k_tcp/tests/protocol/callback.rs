@@ -156,10 +156,48 @@ async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early
                 );
             }
         });
-        assert!(matches!(
-            owner.availability().await.unwrap(),
-            Ed2kCallbackPreparationOutcome::Available(_)
-        ));
+        let Ed2kCallbackPreparationOutcome::Available(availability) =
+            owner.availability().await.unwrap()
+        else {
+            panic!("expected accepted peer availability");
+        };
+        let user_hash = availability.user_hash;
+        let availability = std::sync::Arc::new(availability.available_parts.clone());
+        assert!(
+            runtime
+                .transfer_runtime
+                .download_live_source_has_rare_part(
+                    job.token,
+                    16,
+                    user_hash,
+                    std::sync::Arc::clone(&availability),
+                    std::time::Instant::now()
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !runtime
+                .transfer_runtime
+                .download_live_source_has_rare_part(
+                    job.token,
+                    16,
+                    user_hash,
+                    std::sync::Arc::clone(&availability),
+                    std::time::Instant::now() - Duration::from_secs(31)
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .transfer_runtime
+                .download_source_endpoints_after(job.token, 0, 256)
+                .await
+                .unwrap()
+                .is_empty(),
+            "accepted callback proof must not turn its socket or LowID into a direct source"
+        );
         quiet_rx.await.unwrap();
         assert_eq!(
             runtime

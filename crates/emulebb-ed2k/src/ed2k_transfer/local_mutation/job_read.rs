@@ -4,7 +4,7 @@ use super::*;
 use crate::ed2k_transfer as transfer;
 use emulebb_metadata::{DownloadJobRecord, JobId};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in crate::ed2k_transfer) enum JobRead {
     Exact(JobId),
     Detail(JobId),
@@ -18,6 +18,12 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Sources(emulebb_metadata::JobToken, i64, usize),
     SourceAvailability(emulebb_metadata::MetadataDownloadAvailabilityQuery),
     SourceScarcity(emulebb_metadata::MetadataDownloadScarcityQuery),
+    LiveSourceScarcity(
+        emulebb_metadata::MetadataDownloadScarcityQuery,
+        u64,
+        Arc<Vec<bool>>,
+        std::time::Instant,
+    ),
     Comments(emulebb_metadata::JobToken, i64, usize),
     Source(
         emulebb_metadata::JobToken,
@@ -73,7 +79,9 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
-            JobRead::VerifiedParts(_) | JobRead::SourceScarcity(_) => 128 * 1024,
+            JobRead::VerifiedParts(_)
+            | JobRead::SourceScarcity(_)
+            | JobRead::LiveSourceScarcity(..) => 128 * 1024,
             JobRead::Parts(_, _, limit) => {
                 ensure!((1..=256).contains(&limit), "invalid part page size");
                 32 * 1024
@@ -294,6 +302,15 @@ impl LocalMutationRegistry {
                     .map(|value| {
                         JobReadResult::Page(RetainedRead::new(value, capacity.take_result()))
                     }),
+                JobRead::LiveSourceScarcity(query, size, available, observed) => {
+                    if observed.elapsed() > std::time::Duration::from_secs(30) {
+                        Ok(JobReadResult::SourceScarcity(false))
+                    } else {
+                        metadata
+                            .download_job_live_source_has_rare_part(query, size, &available)
+                            .map(JobReadResult::SourceScarcity)
+                    }
+                }
                 JobRead::SourceScarcity(query) => metadata
                     .download_job_has_rare_source_part(query)
                     .map(JobReadResult::SourceScarcity),
@@ -419,6 +436,41 @@ impl transfer::Ed2kTransferRuntime {
             unreachable!()
         };
         Ok(rare)
+    }
+
+    /// Borrow listener-owned availability through the retained read. This never
+    /// stores an inbound socket address as an outbound source hint. Observer
+    /// cancellation leaves its shared backing charged until the worker settles.
+    pub async fn download_live_source_has_rare_part(
+        &self,
+        token: emulebb_metadata::JobToken,
+        file_size: u64,
+        user_hash: [u8; 16],
+        available: Arc<Vec<bool>>,
+        observed: std::time::Instant,
+    ) -> Result<bool> {
+        ensure!(
+            available.len() <= 65534 && available.capacity() <= 65536,
+            "unsupported live source geometry"
+        );
+        let now = chrono::Utc::now().timestamp().max(0);
+        let query = emulebb_metadata::MetadataDownloadScarcityQuery {
+            token,
+            session_id: self.source_discovery_session,
+            observed_since_s: now.saturating_sub(30),
+            observed_until_s: now,
+            user_hash,
+        };
+        let JobReadResult::SourceScarcity(rare) = self
+            .read_job_metadata(JobRead::LiveSourceScarcity(
+                query, file_size, available, observed,
+            ))
+            .await?
+        else {
+            unreachable!()
+        };
+        // Database contention must not renew a captured network observation.
+        Ok(rare && observed.elapsed() <= std::time::Duration::from_secs(30))
     }
 
     /// Current runtime/session observations only. Caller supplies an explicit
