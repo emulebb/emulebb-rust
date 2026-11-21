@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
+async fn direct_callback_preparation_dispatch_does_not_hydrate_or_depend_on_udp_reask() {
     let transfer_root = unique_runtime_dir("emulebb-core-direct-callback-without-reask");
     let mut network = test_network_config_with_store(
         &transfer_root,
@@ -50,7 +50,37 @@ async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
     });
 
     let file_hash = Ed2kHash::from_bytes([0x52; 16]);
-    let transfer = a4af_test_transfer(&core, &file_hash.to_string(), "downloading");
+    let (_, created) = core
+        .create_download(DownloadCreate {
+            source: DownloadCreateSource::Content {
+                hash: file_hash.to_string(),
+                name: "Sample.bin".into(),
+                size_bytes: Some(1024),
+            },
+            category: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            redownload: false,
+        })
+        .await
+        .unwrap();
+    let job_id = created.id;
+    drop(created);
+    let job = core
+        .ed2k_transfers
+        .download_job(job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let token = job.token;
+    assert!(job.storage.is_none());
+    drop(job);
+    let mut target = crate::download_callback::CallbackDownloadTarget {
+        token,
+        hash: file_hash,
+        name: "Sample.bin".into(),
+        size_bytes: 1024,
+        preparation_id: None,
+    };
     let source = Ed2kFoundSource {
         file_hash,
         ip: Ipv4Addr::LOCALHOST,
@@ -66,9 +96,18 @@ async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
         source_udp_port: Some(source_udp_port),
     };
 
+    let baseline = core
+        .ed2k_transfers
+        .download_resource_snapshot()
+        .resident_bytes;
+    let preparation = core
+        .ed2k_transfers
+        .prepare_callback_download(target.download_for_source(&source), Duration::from_secs(5))
+        .unwrap();
+    target.preparation_id = preparation.download().preparation_id;
     core.send_ed2k_direct_callbacks(
         &network,
-        &transfer,
+        &target,
         &[source],
         Duration::from_secs(5),
         &CancellationToken::new(),
@@ -88,6 +127,22 @@ async fn direct_callback_dispatch_does_not_depend_on_udp_reask() {
         datagram[20],
         emule_connect_options(network.ed2k.obfuscation_enabled)
     );
+    let job = core
+        .ed2k_transfers
+        .download_job(job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.token, token);
+    assert!(job.storage.is_none());
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .resident_bytes,
+        baseline
+    );
+    assert!(core.state.lock().await.transfers.is_empty());
+    drop(preparation);
 }
 
 #[tokio::test]

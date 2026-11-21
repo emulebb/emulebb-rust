@@ -54,10 +54,10 @@ use emulebb_ed2k::{
         set_publish_rust_identity,
     },
     ed2k_transfer::{
-        ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackDownload,
-        Ed2kCallbackReservation, Ed2kCallbackTicketRequest, Ed2kMediaMetadata, Ed2kResumeManifest,
-        Ed2kSharedEntry, Ed2kSharedPublishDemandSignal, Ed2kSourceConnectionAdmission,
-        Ed2kSourceHint, Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot,
+        ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackReservation,
+        Ed2kCallbackTicketRequest, Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry,
+        Ed2kSharedPublishDemandSignal, Ed2kSourceConnectionAdmission, Ed2kSourceHint,
+        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{
@@ -126,6 +126,7 @@ mod discovery_fetch;
 mod disk_guard;
 mod download_admission;
 mod download_attempts;
+mod download_callback;
 mod download_controls;
 mod library_policy;
 mod library_roots;
@@ -1079,6 +1080,13 @@ impl EmulebbCore {
             .parse()
             .with_context(|| format!("invalid ED2K transfer hash {}", transfer.hash))?;
         let transfer = transfer.clone();
+        let callback_target = download_callback::CallbackDownloadTarget {
+            token: job_token,
+            hash: file_hash,
+            name: transfer.name.clone(),
+            size_bytes: transfer.size_bytes,
+            preparation_id: None,
+        };
         let mut sources = if let Some(ready) = prepared.as_ref() {
             vec![ready.source.clone()]
         } else {
@@ -1169,7 +1177,7 @@ impl EmulebbCore {
             // requested_callback_sources set the reask/server-callback paths share.
             self.send_kad_buddy_callbacks(
                 network,
-                &transfer,
+                &callback_target,
                 &sources,
                 callback_window,
                 cancel,
@@ -1185,8 +1193,14 @@ impl EmulebbCore {
             // so it TCP-connects back to us. This precedes and excludes the
             // server-callback path below, exactly as MFC's TryToConnect orders
             // direct callback (5) before server callback (6).
-            self.send_ed2k_direct_callbacks(network, &transfer, &sources, callback_window, cancel)
-                .await;
+            self.send_ed2k_direct_callbacks(
+                network,
+                &callback_target,
+                &sources,
+                callback_window,
+                cancel,
+            )
+            .await;
             if cancel.is_cancelled() {
                 return Ok(None);
             }
@@ -1239,21 +1253,7 @@ impl EmulebbCore {
                     );
                     continue;
                 }
-                let callback_download = Ed2kCallbackDownload {
-                    preparation_id: None,
-                    job_token,
-                    file_hash,
-                    display_name: transfer.name.clone(),
-                    file_size: transfer.size_bytes,
-                    source: Ed2kSourceHint {
-                        ip: source.ip.to_string(),
-                        tcp_port: source.tcp_port,
-                        user_hash: source.user_hash.map(hex::encode),
-                        connect_options: source.obfuscation_options,
-                        file_comment: String::new(),
-                        file_rating: 0,
-                    },
-                };
+                let callback_download = callback_target.download_for_source(&source);
                 let callback_ticket = match Ed2kCallbackTicketRequest::server(
                     source_server,
                     source.client_id,
@@ -2906,7 +2906,7 @@ impl EmulebbCore {
     async fn send_ed2k_direct_callbacks(
         &self,
         network: &Ed2kNetworkConfig,
-        transfer: &Transfer,
+        target: &download_callback::CallbackDownloadTarget,
         sources: &[Ed2kFoundSource],
         callback_window: Duration,
         cancel: &CancellationToken,
@@ -2933,16 +2933,6 @@ impl EmulebbCore {
             .advertised_tcp_port(network.listen_port);
         let our_user_hash = network.user_hash;
         let our_connect_options = emule_connect_options(network.ed2k.obfuscation_enabled);
-        let file_hash = match transfer.hash.parse::<Ed2kHash>() {
-            Ok(hash) => hash,
-            Err(error) => {
-                tracing::warn!(
-                    "direct UDP callback skipped for invalid file hash {}: {error}",
-                    transfer.hash
-                );
-                return;
-            }
-        };
         for source in sources
             .iter()
             .filter(|source| source.is_direct_callback_source())
@@ -2956,28 +2946,14 @@ impl EmulebbCore {
             let Some(source_user_hash) = source.user_hash else {
                 tracing::warn!(
                     "direct UDP callback source lacks a user hash file_hash={} source={}:{}",
-                    transfer.hash,
+                    target.hash,
                     source.ip,
                     source.tcp_port,
                 );
                 continue;
             };
             let dest = SocketAddr::new(IpAddr::V4(source.ip), source_udp_port);
-            let callback_download = Ed2kCallbackDownload {
-                preparation_id: None,
-                job_token: transfer.job_token(),
-                file_hash,
-                display_name: transfer.name.clone(),
-                file_size: transfer.size_bytes,
-                source: Ed2kSourceHint {
-                    ip: source.ip.to_string(),
-                    tcp_port: source.tcp_port,
-                    user_hash: Some(hex::encode(source_user_hash)),
-                    connect_options: source.obfuscation_options,
-                    file_comment: String::new(),
-                    file_rating: 0,
-                },
-            };
+            let callback_download = target.download_for_source(source);
             let callback_ticket = match Ed2kCallbackTicketRequest::direct_udp(
                 dest,
                 source.client_id,
@@ -2990,7 +2966,7 @@ impl EmulebbCore {
                 Err(error) => {
                     tracing::warn!(
                         "direct UDP callback ticket rejected file_hash={} source={dest}: {error}",
-                        transfer.hash,
+                        target.hash,
                     );
                     continue;
                 }
@@ -3004,14 +2980,14 @@ impl EmulebbCore {
                 Ok(Ed2kCallbackReservation::Joined { .. }) => {
                     tracing::debug!(
                         "direct UDP callback joined pending peer session file_hash={} source={dest}",
-                        transfer.hash,
+                        target.hash,
                     );
                     continue;
                 }
                 Err(error) => {
                     tracing::warn!(
                         "direct UDP callback reservation failed file_hash={} source={dest}: {error}",
-                        transfer.hash,
+                        target.hash,
                     );
                     continue;
                 }
@@ -3032,7 +3008,7 @@ impl EmulebbCore {
                     .await;
                 tracing::debug!(
                     "direct UDP callback suppressed by cooldown file_hash={} source={dest}",
-                    transfer.hash,
+                    target.hash,
                 );
                 continue;
             };
@@ -3049,7 +3025,7 @@ impl EmulebbCore {
                 };
                 tracing::debug!(
                     "direct UDP callback settled before dispatch file_hash={} source={dest} cooldown_cancelled={cooldown_cancelled}",
-                    transfer.hash,
+                    target.hash,
                 );
                 continue;
             };
@@ -3087,7 +3063,7 @@ impl EmulebbCore {
                     };
                     tracing::debug!(
                         "sent OP_DIRECTCALLBACKREQ file_hash={} source={dest} our_tcp_port={our_tcp_port} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}",
-                        transfer.hash,
+                        target.hash,
                     );
                 }
                 Ok(DirectCallbackDispatchOutcome::NotSent { reason }) => {
@@ -3101,7 +3077,7 @@ impl EmulebbCore {
                     };
                     tracing::warn!(
                         "OP_DIRECTCALLBACKREQ not sent file_hash={} source={dest} ticket_cancelled={ticket_cancelled} cooldown_cancelled={cooldown_cancelled}: {reason}",
-                        transfer.hash,
+                        target.hash,
                     );
                 }
                 Err(error) => {
@@ -3119,7 +3095,7 @@ impl EmulebbCore {
                     };
                     tracing::warn!(
                         "OP_DIRECTCALLBACKREQ delivery unknown file_hash={} source={dest} ticket_outcome={ticket_outcome:?} cooldown_committed={cooldown_committed}: {error}",
-                        transfer.hash,
+                        target.hash,
                     );
                 }
             }

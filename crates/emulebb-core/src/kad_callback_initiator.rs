@@ -35,8 +35,7 @@ use std::time::{Duration, Instant};
 use emulebb_ed2k::{
     ed2k_server::Ed2kFoundSource,
     ed2k_transfer::{
-        Ed2kCallbackDispatchGuard, Ed2kCallbackDownload, Ed2kCallbackReservation,
-        Ed2kCallbackTicketRequest, Ed2kSourceHint,
+        Ed2kCallbackDispatchGuard, Ed2kCallbackReservation, Ed2kCallbackTicketRequest,
     },
 };
 use emulebb_kad_dht::{DhtNode, KadCallbackSearchDispatchOutcome, RpcWorkClass};
@@ -44,7 +43,7 @@ use emulebb_kad_proto::{CallbackReq, Ed2kHash, KadPacket, NodeId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::{Ed2kNetworkConfig, EmulebbCore, Transfer};
+use super::{Ed2kNetworkConfig, EmulebbCore, download_callback::CallbackDownloadTarget};
 
 /// How long we suppress a repeat `KADEMLIA_CALLBACK_REQ` for the same peer and
 /// callback route. This mirrors the oracle's `DS_WAITCALLBACKKAD` reap window
@@ -309,7 +308,7 @@ impl EmulebbCore {
     pub(super) async fn send_kad_buddy_callbacks(
         &self,
         network: &Ed2kNetworkConfig,
-        transfer: &Transfer,
+        target: &CallbackDownloadTarget,
         sources: &[Ed2kFoundSource],
         callback_window: Duration,
         cancel: &CancellationToken,
@@ -325,16 +324,7 @@ impl EmulebbCore {
         else {
             return;
         };
-        let file_hash = match transfer.hash.parse::<Ed2kHash>() {
-            Ok(hash) => hash,
-            Err(error) => {
-                tracing::warn!(
-                    "Kad callback skipped for invalid file hash {}: {error}",
-                    transfer.hash,
-                );
-                return;
-            }
-        };
+        let file_hash = target.hash;
         let our_tcp_port = self
             .ed2k_reachability
             .advertised_tcp_port(network.listen_port);
@@ -348,7 +338,7 @@ impl EmulebbCore {
             let Some(source_user_hash) = source.user_hash else {
                 tracing::warn!(
                     "Kad callback source lacks a user hash file_hash={} source={}:{}",
-                    transfer.hash,
+                    target.hash,
                     source.ip,
                     source.tcp_port,
                 );
@@ -356,21 +346,7 @@ impl EmulebbCore {
             };
             let buddy_endpoint = normalized_buddy_endpoint(source);
             let source_peer = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
-            let callback_download = Ed2kCallbackDownload {
-                preparation_id: None,
-                job_token: transfer.job_token(),
-                file_hash,
-                display_name: transfer.name.clone(),
-                file_size: transfer.size_bytes,
-                source: Ed2kSourceHint {
-                    ip: source.ip.to_string(),
-                    tcp_port: source.tcp_port,
-                    user_hash: Some(hex::encode(source_user_hash)),
-                    connect_options: source.obfuscation_options,
-                    file_comment: String::new(),
-                    file_rating: 0,
-                },
-            };
+            let callback_download = target.download_for_source(source);
             let callback_ticket = match Ed2kCallbackTicketRequest::kad_buddy(
                 buddy_id,
                 buddy_endpoint,
@@ -385,7 +361,7 @@ impl EmulebbCore {
                 Err(error) => {
                     tracing::warn!(
                         "Kad callback ticket rejected file_hash={} source={source_peer} buddy={}: {error}",
-                        transfer.hash,
+                        target.hash,
                         buddy_endpoint
                             .map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
                     );
@@ -401,7 +377,7 @@ impl EmulebbCore {
                 Ok(Ed2kCallbackReservation::Joined { .. }) => {
                     tracing::debug!(
                         "Kad callback joined pending peer session file_hash={} source={source_peer} buddy={}",
-                        transfer.hash,
+                        target.hash,
                         buddy_endpoint
                             .map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
                     );
@@ -410,7 +386,7 @@ impl EmulebbCore {
                 Err(error) => {
                     tracing::warn!(
                         "Kad callback reservation failed file_hash={} source={source_peer}: {error}",
-                        transfer.hash,
+                        target.hash,
                     );
                     continue;
                 }
@@ -432,7 +408,7 @@ impl EmulebbCore {
                     .await;
                 tracing::debug!(
                     "Kad callback suppressed by cooldown file_hash={} source={source_peer} buddy={}",
-                    transfer.hash,
+                    target.hash,
                     buddy_endpoint
                         .map_or_else(|| "FINDSOURCE".to_string(), |peer| peer.to_string()),
                 );
@@ -451,7 +427,7 @@ impl EmulebbCore {
                 };
                 tracing::debug!(
                     "Kad callback settled before dispatch file_hash={} source={source_peer} cooldown_cancelled={cooldown_cancelled}",
-                    transfer.hash,
+                    target.hash,
                 );
                 continue;
             };
@@ -462,7 +438,7 @@ impl EmulebbCore {
                 cooldown: callback_cooldown_permit,
                 source_peer,
                 buddy_peer: buddy_endpoint,
-                transfer_hash: transfer.hash.clone(),
+                transfer_hash: target.hash.to_string(),
                 our_tcp_port,
             };
             let Some(buddy_peer) = buddy_endpoint else {
