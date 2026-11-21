@@ -127,7 +127,7 @@ pub(crate) fn next_window(
     }
     AdmissionWindow {
         active: target,
-        burst: if starts > 0 && native.resident_bytes <= SOFT_RESIDENT_BYTES {
+        burst: if hydration_starts(native) > 0 && native.resident_bytes <= SOFT_RESIDENT_BYTES {
             target.div_ceil(4)
         } else {
             0

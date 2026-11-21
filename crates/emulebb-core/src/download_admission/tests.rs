@@ -46,6 +46,25 @@ fn prepared_hydration_does_not_require_a_second_connection_slot() {
     native.connections = 1;
     assert_eq!(construction_starts(native), 0);
     assert!(hydration_starts(native) > 0);
+    let ready = next_window(
+        AdmissionWindow::default(),
+        native,
+        Some(1024 * 1024 * 1024),
+        1,
+        1,
+    );
+    assert_eq!(
+        ready.preparing, 0,
+        "no new socket preparation at a full connection cap"
+    );
+    assert_eq!(
+        ready.burst, 1,
+        "owned ready sockets still have burst hydration headroom"
+    );
+    assert_eq!(
+        ready.total, 1,
+        "the shared cohort still enforces the physical connection ceiling"
+    );
     native.free_work_units = 0;
     assert_eq!(hydration_starts(native), 0);
 }
