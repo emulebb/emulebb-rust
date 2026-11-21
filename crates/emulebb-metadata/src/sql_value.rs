@@ -31,7 +31,7 @@ mod tests {
                     content_type: String::new(),
                     availability_score: 0,
                 },
-                crate::MetadataIndexedFileOrigin::PassiveCache,
+                crate::MetadataIndexedFileOrigin::LocalShare,
             )
             .unwrap();
         store

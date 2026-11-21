@@ -201,7 +201,7 @@ async fn seed_known_counter_file(runtime: &Ed2kTransferRuntime, hash: &Ed2kHash)
                 content_type: String::new(),
                 availability_score: 0,
             },
-            MetadataIndexedFileOrigin::PassiveCache,
+            MetadataIndexedFileOrigin::LocalShare,
         )
         .unwrap();
     seed_verified_entry(runtime, hash).await;

@@ -13,7 +13,7 @@ fn known(store: &mut MetadataStore, byte: u8) -> String {
                 content_type: String::new(),
                 availability_score: 0,
             },
-            emulebb_metadata::MetadataIndexedFileOrigin::PassiveCache,
+            emulebb_metadata::MetadataIndexedFileOrigin::LocalShare,
         )
         .unwrap();
     hash

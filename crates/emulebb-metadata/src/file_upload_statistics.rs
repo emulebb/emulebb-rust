@@ -70,8 +70,9 @@ pub(crate) fn apply_delta(
     // empty batches create no process-session accounting record.
     tx.prepare_cached(
         "INSERT INTO temp.session_file_upload_statistics
-            SELECT ed2k_hash,?2,?3,?4 FROM known_files
-            WHERE ed2k_hash=?1 AND (?2!=0 OR ?3!=0 OR ?4!=0)
+            SELECT k.ed2k_hash,?2,?3,?4 FROM known_files k
+            JOIN library_files l ON l.known_file_id=k.id
+            WHERE k.ed2k_hash=?1 AND (?2!=0 OR ?3!=0 OR ?4!=0)
          ON CONFLICT(ed2k_hash) DO UPDATE SET
             uploaded_bytes=uploaded_bytes+excluded.uploaded_bytes,
             upload_requests=upload_requests+excluded.upload_requests,

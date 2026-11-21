@@ -428,11 +428,10 @@ impl super::MetadataStore {
         conn.prepare_cached(
             "SELECT all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,
                  last_upload_requested_at_s,last_uploaded_at_s,
-                 CASE WHEN EXISTS(SELECT 1 FROM verified_local_content WHERE known_file_id=known_files.id)
-                 THEN 1 ELSE EXISTS(SELECT 1 FROM download_jobs INDEXED BY download_jobs_unremoved_unfinished_content_idx
-                     WHERE known_file_id=known_files.id AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL) END
-             FROM known_files WHERE ed2k_hash=?1"
-        )?.query_row(params![hash], |row| {
+                 EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id)
+             FROM known_files WHERE ed2k_hash=?1",
+        )?
+        .query_row(params![hash], |row| {
             Ok(crate::MetadataFileUploadSnapshot {
                 known_client: row.get(5)?,
                 totals: crate::MetadataFileUploadTotals {
@@ -443,7 +442,9 @@ impl super::MetadataStore {
                     last_uploaded_at_s: row.get(4)?,
                 },
             })
-        }).optional().map_err(Into::into)
+        })
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Returns the file's persisted `(all_time_uploaded_bytes, size_bytes)`,
