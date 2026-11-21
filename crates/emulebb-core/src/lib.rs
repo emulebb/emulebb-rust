@@ -801,33 +801,6 @@ impl EmulebbCore {
         Self::new(version, index, unique_runtime_dir("emulebb-core-transfers"))
     }
 
-    async fn uploads_by_queue_state(&self, waiting_queue: bool) -> Vec<Upload> {
-        let snapshots = self
-            .ed2k_transfers
-            .upload_queue_snapshot()
-            .await
-            .into_iter()
-            .filter(|entry| {
-                matches!(entry.phase, Ed2kUploadSessionPhaseSnapshot::Waiting) == waiting_queue
-            })
-            .collect::<Vec<_>>();
-        let mut uploads = Vec::with_capacity(snapshots.len());
-        for entry in snapshots {
-            let manifest = match self.ed2k_transfers.serving_view(&entry.file_hash).await {
-                Ok(manifest) => Some(manifest),
-                Err(error) => {
-                    tracing::warn!(
-                        hash = %entry.file_hash,
-                        "failed to hydrate ED2K manifest for upload snapshot: {error}"
-                    );
-                    None
-                }
-            };
-            uploads.push(upload_from_snapshot(entry, manifest.as_ref()));
-        }
-        uploads
-    }
-
     async fn upload_client_for_control(&self, client_id: &str) -> Option<Upload> {
         if let Some(upload) = self.upload(client_id, false).await {
             return Some(upload);

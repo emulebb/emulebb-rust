@@ -1768,10 +1768,25 @@ impl Ed2kUploadQueueState {
     }
 
     pub(super) fn snapshot(&mut self, now: Instant) -> Vec<Ed2kUploadQueueSnapshotEntry> {
+        self.snapshot_matching(now, |_| true)
+    }
+
+    pub(super) fn active_snapshot(&mut self, now: Instant) -> Vec<Ed2kUploadQueueSnapshotEntry> {
+        self.snapshot_matching(now, |session| {
+            session.phase != Ed2kUploadSessionPhase::Waiting
+        })
+    }
+
+    fn snapshot_matching(
+        &mut self,
+        now: Instant,
+        include: impl Fn(&Ed2kUploadSessionEntry) -> bool,
+    ) -> Vec<Ed2kUploadQueueSnapshotEntry> {
         self.reap_expired_sessions(now);
         let mut entries = self
             .sessions
             .iter()
+            .filter(|(_, session)| include(session))
             .map(|(key, session)| self.snapshot_entry(key, session, now))
             .collect::<Vec<_>>();
         entries.sort_by(Self::compare_snapshot_entries);
