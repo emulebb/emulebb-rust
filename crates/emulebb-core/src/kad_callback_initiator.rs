@@ -313,21 +313,22 @@ impl EmulebbCore {
         callback_window: Duration,
         cancel: &CancellationToken,
         findsource_tasks: &mut JoinSet<()>,
-    ) {
+    ) -> bool {
         if !sources.iter().any(is_kad_callback_candidate) || self.ed2k_self_tcp_firewalled().await {
-            return;
+            return false;
         }
         let Some(dht) = self
             .ed2k_dht_node()
             .await
             .filter(|dht| dht.is_bootstrapped())
         else {
-            return;
+            return false;
         };
         let file_hash = target.hash;
         let our_tcp_port = self
             .ed2k_reachability
             .advertised_tcp_port(network.listen_port);
+        let mut pending = false;
         for source in sources.iter().filter(|s| is_kad_callback_candidate(s)) {
             if cancel.is_cancelled() {
                 break;
@@ -375,6 +376,7 @@ impl EmulebbCore {
             {
                 Ok(Ed2kCallbackReservation::Dispatch(permit)) => permit,
                 Ok(Ed2kCallbackReservation::Joined { .. }) => {
+                    pending = true;
                     tracing::debug!(
                         "Kad callback joined pending peer session file_hash={} source={source_peer} buddy={}",
                         target.hash,
@@ -429,6 +431,9 @@ impl EmulebbCore {
                     "Kad callback settled before dispatch file_hash={} source={source_peer} cooldown_cancelled={cooldown_cancelled}",
                     target.hash,
                 );
+                // A fast inbound claim may already own this request. Its
+                // availability/settlement receipt decides whether it is usable.
+                pending = true;
                 continue;
             };
             let callback_deadline = callback_dispatch_guard.expires_at();
@@ -446,6 +451,7 @@ impl EmulebbCore {
                 let dht = dht.clone();
                 let cancel = cancel.clone();
                 let buddy_id_hex = hex::encode(buddy_id);
+                pending = true;
                 findsource_tasks.spawn(async move {
                     tracing::debug!(
                         "starting Kad FINDSOURCE callback walk file_hash={} source={source_peer} buddy_id={buddy_id_hex}",
@@ -476,8 +482,10 @@ impl EmulebbCore {
             let dispatch =
                 send_direct_kad_callback(&dht, buddy_peer, request, callback_deadline, cancel)
                     .await;
+            pending |= !matches!(&dispatch, KadCallbackDispatch::KnownNotSent(_));
             self.settle_kad_callback_dispatch(context, dispatch).await;
         }
+        pending
     }
 }
 

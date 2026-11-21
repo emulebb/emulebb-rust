@@ -225,9 +225,14 @@ impl EmulebbCore {
         shutdown: CancellationToken,
     ) {
         use crate::download_preparation::DownloadPreparation;
+        let mut callback = None;
         let mut prepared = match self.prepare_download_sources(&guard, &shutdown).await {
             Ok(DownloadPreparation::Direct(source)) => Some(source),
-            Ok(DownloadPreparation::Finalization | DownloadPreparation::Callback) => None,
+            Ok(DownloadPreparation::Callback(source)) => {
+                callback = Some(source);
+                None
+            }
+            Ok(DownloadPreparation::Finalization) => None,
             Ok(DownloadPreparation::Waiting) => return,
             Err(error) => {
                 tracing::warn!(job_id = %guard.token().job_id, %error, "download source preparation deferred");
@@ -246,6 +251,9 @@ impl EmulebbCore {
                 )
                 .await;
             }
+            if let Some(ready) = callback.take() {
+                ready.cancel_and_settle().await;
+            }
             return;
         }
         let previous = guard.token();
@@ -263,6 +271,9 @@ impl EmulebbCore {
         }
         if !matches!(result, Ok(Some(_))) {
             drop(prepared.take());
+            if let Some(ready) = callback.take() {
+                ready.cancel_and_settle().await;
+            }
         }
         let Some(transfer) = self
             .finish_download_hydration(&guard, result, &mut clock, &shutdown)
@@ -278,8 +289,41 @@ impl EmulebbCore {
                 break;
             }
             crate::diag_sched::download_attempt_started(&transfer.hash, false);
-            let attempt =
-                self.run_ed2k_download_attempt(&transfer, guard.token(), &cancel, prepared.take());
+            let attempt = async {
+                if let Some(ready) = callback.take() {
+                    use emulebb_ed2k::ed2k_tcp::Ed2kPeerDownloadOutcome;
+                    match ready.execute(guard.token(), &cancel, &shutdown).await? {
+                        None => Ok(None),
+                        Some(Ed2kPeerDownloadOutcome::Completed) => {
+                            let completed = self
+                                .ed2k_transfers
+                                .finalize_pending_transfer(guard.token())
+                                .await?;
+                            Ok(Some(if completed {
+                                "completed"
+                            } else {
+                                "downloading"
+                            }))
+                        }
+                        Some(
+                            Ed2kPeerDownloadOutcome::AcceptedButIncomplete
+                            | Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask,
+                        ) => Ok(Some("downloading")),
+                        Some(
+                            Ed2kPeerDownloadOutcome::NoNeededParts
+                            | Ed2kPeerDownloadOutcome::FileNotFound,
+                        ) => Ok(Some("queued")),
+                    }
+                } else {
+                    self.run_ed2k_download_attempt(
+                        &transfer,
+                        guard.token(),
+                        &cancel,
+                        prepared.take(),
+                    )
+                    .await
+                }
+            };
             tokio::pin!(attempt);
             let result = tokio::select! {
                 result = &mut attempt => result,
@@ -330,6 +374,12 @@ impl EmulebbCore {
                 !cancel.is_cancelled() && !shutdown.is_cancelled(),
             );
         }
+        // Cancellation can arrive after hydration but before the first attempt.
+        // Settle the unstarted listener owner before retiring Native execution.
+        if let Some(ready) = callback.take() {
+            ready.cancel_and_settle().await;
+        }
+        drop(prepared.take());
         self.retire_download_selection(&guard, &mut clock, &shutdown)
             .await;
     }

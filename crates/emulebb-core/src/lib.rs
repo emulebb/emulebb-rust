@@ -2650,22 +2650,22 @@ impl EmulebbCore {
         sources: &[Ed2kFoundSource],
         callback_window: Duration,
         cancel: &CancellationToken,
-    ) {
+    ) -> bool {
         if !sources
             .iter()
             .any(Ed2kFoundSource::is_direct_callback_source)
         {
-            return;
+            return false;
         }
         if self.ed2k_self_tcp_firewalled().await {
-            return;
+            return false;
         }
         let Some(dht) = self
             .ed2k_dht_node()
             .await
             .filter(emulebb_kad_dht::DhtNode::is_running)
         else {
-            return;
+            return false;
         };
         let direct_callback = DirectCallbackSender::new(dht, self.ed2k_reachability.clone());
         let our_tcp_port = self
@@ -2673,12 +2673,13 @@ impl EmulebbCore {
             .advertised_tcp_port(network.listen_port);
         let our_user_hash = network.user_hash;
         let our_connect_options = emule_connect_options(network.ed2k.obfuscation_enabled);
+        let mut pending = false;
         for source in sources
             .iter()
             .filter(|source| source.is_direct_callback_source())
         {
             if cancel.is_cancelled() {
-                return;
+                return pending;
             }
             let Some(source_udp_port) = source.source_udp_port else {
                 continue;
@@ -2718,6 +2719,7 @@ impl EmulebbCore {
             {
                 Ok(Ed2kCallbackReservation::Dispatch(permit)) => permit,
                 Ok(Ed2kCallbackReservation::Joined { .. }) => {
+                    pending = true;
                     tracing::debug!(
                         "direct UDP callback joined pending peer session file_hash={} source={dest}",
                         target.hash,
@@ -2767,6 +2769,9 @@ impl EmulebbCore {
                     "direct UDP callback settled before dispatch file_hash={} source={dest} cooldown_cancelled={cooldown_cancelled}",
                     target.hash,
                 );
+                // A fast inbound claim may already own this request. Its
+                // availability/settlement receipt decides whether it is usable.
+                pending = true;
                 continue;
             };
             let callback_deadline = callback_dispatch_guard.expires_at();
@@ -2792,6 +2797,7 @@ impl EmulebbCore {
                 .await;
             match dispatch {
                 Ok(DirectCallbackDispatchOutcome::Sent) => {
+                    pending = true;
                     let ticket_outcome = callback_dispatch_guard.mark_dispatched();
                     let cooldown_committed = {
                         let mut state = self.state.lock().await;
@@ -2821,6 +2827,7 @@ impl EmulebbCore {
                     );
                 }
                 Err(error) => {
+                    pending = true;
                     // Queue admission is the ambiguity boundary. Preserve both
                     // admission and cooldown when cancellation, expiry, or worker
                     // loss cannot prove whether the datagram write started.
@@ -2840,6 +2847,7 @@ impl EmulebbCore {
                 }
             }
         }
+        pending
     }
 
     async fn publish_ed2k_shared_catalog(&self) -> Result<Ed2kSharedCatalogPublishOutcome> {

@@ -1,4 +1,4 @@
-//! Bounded waiting-job discovery and direct availability before hydration.
+//! Bounded waiting-job discovery and availability before hydration.
 use crate::{
     EmulebbCore, OwnSourceIdentity, download_attempts::DownloadAttemptGuard, drop_self_sources,
     ed2k_source_batch::DownloadSourceTarget, found_source_from_endpoint, source_endpoint_key,
@@ -21,8 +21,7 @@ pub(crate) struct PreparedDownloadSource {
 pub(crate) enum DownloadPreparation {
     Waiting,
     Direct(PreparedDownloadSource),
-    /// Inbound callback preparation is not yet connected to the listener owner.
-    Callback,
+    Callback(Box<crate::download_callback::PreparedCallbackSource>),
     Finalization,
 }
 
@@ -58,14 +57,13 @@ impl EmulebbCore {
         };
         // Fresh direct discoveries are persisted by the common acquisition path.
         // Read them with old hints in pages, never an all-endpoints accumulator.
-        let discovered = tokio::select! {
+        let mut discovered = tokio::select! {
             biased;
             () = shutdown.cancelled() => return Ok(DownloadPreparation::Waiting),
             () = cancel.cancelled() => return Ok(DownloadPreparation::Waiting),
             result = self.acquire_ed2k_sources(network, &target, guard.hash(), target.size_bytes, true, false) => result?,
         };
-        let has_callback = discovered.iter().any(|source| !source.is_direct_dialable());
-        drop(discovered);
+        discovered.retain(|source| !source.is_direct_dialable());
         if !guard.preparation_has_headroom(crate::download_admission::construction_starts(
             self.ed2k_transfers.download_resource_snapshot(),
         )) {
@@ -188,10 +186,22 @@ impl EmulebbCore {
                 }
             }
         }
-        Ok(if has_callback {
-            DownloadPreparation::Callback
-        } else {
-            DownloadPreparation::Waiting
-        })
+        drop_self_sources(&mut discovered, &own);
+        discovered.retain(|source| {
+            !network.ip_filter.is_filtered(source.ip)
+                && !bans.is_banned(Some(source.ip), source.user_hash.as_ref())
+        });
+        for source in discovered {
+            if cancel.is_cancelled() || shutdown.is_cancelled() {
+                break;
+            }
+            if let Some(prepared) = self
+                .prepare_callback_source(guard, &source, &parts.verified_parts, shutdown)
+                .await?
+            {
+                return Ok(DownloadPreparation::Callback(Box::new(prepared)));
+            }
+        }
+        Ok(DownloadPreparation::Waiting)
     }
 }

@@ -219,7 +219,83 @@ async fn callback_preparation_dispatches_udp_routes_without_hydration_or_udp_rea
         baseline
     );
     assert!(core.state.lock().await.transfers.is_empty());
+    drop(job);
     drop(preparation);
+    for shutdown_requested in [false, true] {
+        source.user_hash = Some([if shutdown_requested { 0x56 } else { 0x55 }; 16]);
+        source.source_udp_port = Some(source_udp_port);
+        source.source_server = None;
+        source.obfuscation_options = Some(0x08);
+        let guard = core
+            .download_attempts
+            .try_prepare(token, file_hash)
+            .unwrap();
+        let cancel = guard.cancellation();
+        let shutdown = CancellationToken::new();
+        let prepare = core.prepare_callback_source(&guard, &source, &[false], &shutdown);
+        let cancel_waiting = async {
+            let mut frame = [0; 64];
+            let (len, _) = receiver.recv_from(&mut frame).await.unwrap();
+            assert_eq!(len, 21);
+            assert_eq!(&frame[..2], &[0xC5, 0x95]);
+            let job = core
+                .ed2k_transfers
+                .download_job(job_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(job.storage.is_none());
+            assert_eq!(job.token, token);
+            if shutdown_requested {
+                shutdown.cancel();
+            } else {
+                cancel.cancel();
+            }
+        };
+        let (prepared, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(prepare, cancel_waiting)
+        })
+        .await
+        .unwrap();
+        assert!(prepared.unwrap().is_none());
+        assert_eq!(
+            core.ed2k_transfers
+                .download_resource_snapshot()
+                .resident_bytes,
+            baseline
+        );
+        assert!(core.state.lock().await.transfers.is_empty());
+        // Cancellation must release the actual Native registration before the
+        // Core producer returns, including when no listener ever claimed it.
+        target.preparation_id = None;
+        let first = core
+            .ed2k_transfers
+            .prepare_callback_download(target.download_for_source(&source), Duration::from_secs(5))
+            .unwrap();
+        let second = core
+            .ed2k_transfers
+            .prepare_callback_download(target.download_for_source(&source), Duration::from_secs(5))
+            .unwrap();
+        drop((first, second));
+    }
+    source.source_udp_port = None;
+    source.source_server = None;
+    source.obfuscation_options = None;
+    let guard = core
+        .download_attempts
+        .try_prepare(token, file_hash)
+        .unwrap();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            core.prepare_callback_source(&guard, &source, &[false], &CancellationToken::new(),)
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none(),
+        "unavailable routes must not occupy preparation until timeout"
+    );
 }
 
 #[tokio::test]

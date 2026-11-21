@@ -1,7 +1,10 @@
 //! Scalar callback authority shared by selected and waiting downloads.
 use emulebb_ed2k::{
     ed2k_server::Ed2kFoundSource,
-    ed2k_transfer::{Ed2kCallbackDownload, Ed2kCallbackPreparationId, Ed2kSourceHint},
+    ed2k_transfer::{
+        Ed2kCallbackDownload, Ed2kCallbackPreparation, Ed2kCallbackPreparationId,
+        Ed2kCallbackPreparationOutcome, Ed2kSourceHint,
+    },
 };
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::JobToken;
@@ -46,6 +49,174 @@ use crate::{
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+/// Core owns admission; the listener owns the socket until its settlement receipt.
+pub(crate) struct PreparedCallbackSource {
+    preparation: Ed2kCallbackPreparation,
+}
+impl PreparedCallbackSource {
+    pub(crate) async fn cancel_and_settle(mut self) {
+        self.preparation.cancel();
+        let _ = self.preparation.completed().await;
+    }
+
+    pub(crate) async fn execute(
+        mut self,
+        token: JobToken,
+        cancel: &CancellationToken,
+        shutdown: &CancellationToken,
+    ) -> anyhow::Result<Option<emulebb_ed2k::ed2k_tcp::Ed2kPeerDownloadOutcome>> {
+        if cancel.is_cancelled() || shutdown.is_cancelled() {
+            self.cancel_and_settle().await;
+            return Ok(None);
+        }
+        if let Err(error) = self.preparation.start(token) {
+            self.cancel_and_settle().await;
+            return Err(error);
+        }
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {},
+            () = shutdown.cancelled() => {},
+            outcome = self.preparation.completed() => return outcome.map(Some),
+        }
+        self.cancel_and_settle().await;
+        Ok(None)
+    }
+}
+
+impl EmulebbCore {
+    /// Register before dispatch, then retain only metadata until selection admits payload.
+    pub(crate) async fn prepare_callback_source(
+        &self,
+        guard: &crate::download_attempts::DownloadAttemptGuard,
+        source: &Ed2kFoundSource,
+        verified_parts: &[bool],
+        shutdown: &CancellationToken,
+    ) -> anyhow::Result<Option<PreparedCallbackSource>> {
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return Ok(None);
+        };
+        let Some(job) = self
+            .ed2k_transfers
+            .download_job(guard.token().job_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if job.token != guard.token()
+            || guard.cancellation().is_cancelled()
+            || shutdown.is_cancelled()
+        {
+            return Ok(None);
+        }
+        let Some(size_bytes) = job.expected_size_bytes else {
+            return Ok(None);
+        };
+        let mut target = CallbackDownloadTarget {
+            token: guard.token(),
+            hash: guard.hash(),
+            name: job.display_name.clone(),
+            size_bytes,
+            preparation_id: None,
+        };
+        drop(job);
+        let window = Duration::from_secs(
+            network
+                .ed2k
+                .callback_timeout_secs
+                .max(network.ed2k.connect_timeout_secs.max(10)),
+        )
+        .min(emulebb_ed2k::ed2k_transfer::ED2K_CALLBACK_TICKET_MAX_LIFETIME);
+        let mut preparation = self
+            .ed2k_transfers
+            .prepare_callback_download(target.download_for_source(source), window)?;
+        target.preparation_id = preparation.download().preparation_id;
+        let dispatch_cancel = guard.cancellation().child_token();
+        let mut findsource_tasks = tokio::task::JoinSet::new();
+        let mut skipped = false;
+        let result: anyhow::Result<bool> = async {
+            let dispatch = async {
+                let pending = if crate::kad_callback_initiator::is_kad_callback_candidate(source) {
+                    self.send_kad_buddy_callbacks(
+                        network,
+                        &target,
+                        std::slice::from_ref(source),
+                        window,
+                        &dispatch_cancel,
+                        &mut findsource_tasks,
+                    )
+                    .await
+                } else if source.is_direct_callback_source() {
+                    self.send_ed2k_direct_callbacks(
+                        network,
+                        &target,
+                        std::slice::from_ref(source),
+                        window,
+                        &dispatch_cancel,
+                    )
+                    .await
+                } else {
+                    let config = self.effective_ed2k_config(&network.ed2k).await?;
+                    self.send_ed2k_server_callback(
+                        network,
+                        &target,
+                        source,
+                        window,
+                        &dispatch_cancel,
+                        &config,
+                    )
+                    .await
+                };
+                Ok::<_, anyhow::Error>(pending)
+            };
+            tokio::pin!(dispatch);
+            let pending = tokio::select! {
+                result = &mut dispatch => result?,
+                () = shutdown.cancelled() => { dispatch_cancel.cancel(); dispatch.await? },
+            };
+            if !pending {
+                return Ok(false);
+            }
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return Ok(false),
+                () = dispatch_cancel.cancelled() => return Ok(false),
+                outcome = preparation.availability() => match outcome? {
+                    Ed2kCallbackPreparationOutcome::Available(availability) => {
+                        let useful = availability.available_parts.len() == verified_parts.len()
+                            && availability.available_parts.iter().zip(verified_parts)
+                                .any(|(available, verified)| *available && !*verified);
+                        if !useful {
+                            preparation.skip()?;
+                            skipped = true;
+                        }
+                        Ok(useful)
+                    }
+                    Ed2kCallbackPreparationOutcome::FileNotFound
+                    | Ed2kCallbackPreparationOutcome::Incomplete
+                    | Ed2kCallbackPreparationOutcome::Deferred => Ok(false),
+                }
+            }
+        }
+        .await;
+        // WHY: a FINDSOURCE traversal owns dispatch settlement even after its
+        // caller is cancelled. Drain that producer before releasing preparation.
+        dispatch_cancel.cancel();
+        while findsource_tasks.join_next().await.is_some() {}
+        if matches!(result, Ok(true)) {
+            return Ok(Some(PreparedCallbackSource { preparation }));
+        }
+        if !skipped {
+            preparation.cancel();
+        }
+        let _ = preparation.completed().await;
+        if let Err(error) = result {
+            tracing::debug!(job_id = %guard.token().job_id, %error, "callback source preparation deferred");
+        }
+        Ok(None)
+    }
+}
+
 enum Ed2kServerCallbackDispatch {
     Sent,
     KnownNotSent(String),
@@ -62,13 +233,13 @@ impl EmulebbCore {
         callback_window: Duration,
         cancel: &CancellationToken,
         config: &Ed2kRuntimeConfig,
-    ) {
+    ) -> bool {
         if cancel.is_cancelled()
             || !source.low_id
             || source.has_kad_buddy_reask_target()
             || source.is_direct_callback_source()
         {
-            return;
+            return false;
         }
         // Oracle CanDoCallback forbids a firewalled requester asking its server
         // to relay to another LowID peer. Apply the same gate to both routes.
@@ -82,7 +253,7 @@ impl EmulebbCore {
                 target.hash,
                 source.client_id,
             );
-            return;
+            return false;
         };
         let callback_route =
             ed2k_server_callback_route(Some(source_server), connected_server_endpoint);
@@ -102,7 +273,7 @@ impl EmulebbCore {
                 connected_server_endpoint
                     .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
             );
-            return;
+            return false;
         }
         let callback_download = target.download_for_source(source);
         let callback_ticket = match Ed2kCallbackTicketRequest::server(
@@ -121,7 +292,7 @@ impl EmulebbCore {
                     source.client_id,
                     source_server,
                 );
-                return;
+                return false;
             }
         };
         let callback_dispatch_permit = match self
@@ -137,7 +308,7 @@ impl EmulebbCore {
                     source.client_id,
                     source_server,
                 );
-                return;
+                return true;
             }
             Err(error) => {
                 tracing::warn!(
@@ -146,7 +317,7 @@ impl EmulebbCore {
                     source.client_id,
                     source_server,
                 );
-                return;
+                return false;
             }
         };
         let callback_cooldown_permit = {
@@ -169,7 +340,7 @@ impl EmulebbCore {
                 source.client_id,
                 source_server,
             );
-            return;
+            return false;
         };
         let Some(callback_dispatch_guard) = self
             .ed2k_transfers
@@ -189,7 +360,9 @@ impl EmulebbCore {
                 source_server,
                 cooldown_cancelled,
             );
-            return;
+            // A fast inbound claim can consume dispatch ownership first.
+            // Keep waiting on its preparation receipt rather than cancelling it.
+            return true;
         };
         let callback_deadline = callback_dispatch_guard.expires_at();
         let callback_dispatch = if Instant::now() >= callback_deadline {
@@ -277,6 +450,7 @@ impl EmulebbCore {
                     source.tcp_port,
                     source_server,
                 );
+                true
             }
             Ed2kServerCallbackDispatch::KnownNotSent(reason) => {
                 let ticket_cancelled = callback_dispatch_guard.cancel();
@@ -295,6 +469,7 @@ impl EmulebbCore {
                     ticket_cancelled,
                     cooldown_cancelled,
                 );
+                false
             }
             Ed2kServerCallbackDispatch::DeliveryUnknown(error) => {
                 // The command may have reached the server. Conservatively
@@ -315,6 +490,7 @@ impl EmulebbCore {
                     source.client_id,
                     source_server,
                 );
+                true
             }
         }
     }
