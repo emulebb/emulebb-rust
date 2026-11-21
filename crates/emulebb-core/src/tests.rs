@@ -876,12 +876,21 @@ fn a4af_test_owner(core: &EmulebbCore, hash: &str) -> DownloadAttemptGuard {
 }
 
 fn a4af_test_transfer(core: &EmulebbCore, hash: &str, state_name: &str) -> Transfer {
+    a4af_test_transfer_with_size(core, hash, state_name, 1)
+}
+
+fn a4af_test_transfer_with_size(
+    core: &EmulebbCore,
+    hash: &str,
+    state_name: &str,
+    size: u64,
+) -> Transfer {
     let job = core
         .metadata_store
         .admit_download_job(&emulebb_metadata::DownloadJobRequest {
             file_hash: hash.to_owned(),
             display_name: "Sample.bin".into(),
-            expected_size_bytes: Some(1),
+            expected_size_bytes: Some(size),
             category_id: None,
             intent: emulebb_metadata::DownloadIntent::Started,
             piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
@@ -896,7 +905,7 @@ fn a4af_test_transfer(core: &EmulebbCore, hash: &str, state_name: &str) -> Trans
         path: String::new(),
         delivered_path: None,
         delivery_error: None,
-        size_bytes: 1,
+        size_bytes: size,
         completed_bytes: 0,
         state: state_name.to_string(),
         progress: 0.0,

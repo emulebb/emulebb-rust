@@ -548,7 +548,9 @@ impl Ed2kTransferRuntime {
             .count() as u32
     }
 
-    /// Per-part count of live sources advertising each part (index 0..part_total).
+    /// Per-part count of live reporters. Endpoints sharing a known HELLO
+    /// identity contribute at most once per part; unknown identities stay
+    /// separate so they cannot manufacture a single-source rarity advantage.
     pub fn available_sources_per_part(&self, token: JobToken, part_total: u32) -> Vec<u32> {
         self.available_sources_per_part_at(token, part_total, Instant::now())
     }
@@ -566,16 +568,27 @@ impl Ed2kTransferRuntime {
         let Some(peers) = sources.get(&token) else {
             return counts;
         };
-        for peer in peers.values() {
-            if is_activity_stale(peer.last_seen_at, now) {
-                continue;
+        // WHY: sorting borrowed references and reusing one part bitset avoids
+        // allocating a complete bitmap for every identity or scanning peers
+        // quadratically while suppressing duplicate endpoint votes.
+        let mut live = peers
+            .values()
+            .filter(|peer| !is_activity_stale(peer.last_seen_at, now) && peer.part_bitmap.is_some())
+            .collect::<Vec<_>>();
+        live.sort_unstable_by_key(|peer| peer.user_hash);
+        let mut seen = vec![0u8; counts.len().div_ceil(8)];
+        let mut previous = None;
+        for peer in live {
+            if peer.user_hash.is_none() || peer.user_hash != previous {
+                seen.fill(0);
             }
-            let Some(bitmap) = peer.part_bitmap.as_ref() else {
-                continue;
-            };
-            for (index, present) in bitmap.iter().enumerate() {
-                if *present && let Some(slot) = counts.get_mut(index) {
-                    *slot = slot.saturating_add(1);
+            previous = peer.user_hash;
+            let bitmap = peer.part_bitmap.as_ref().expect("filtered part status");
+            for (index, present) in bitmap.iter().take(counts.len()).enumerate() {
+                let mask = 1 << (index % 8);
+                if *present && seen[index / 8] & mask == 0 {
+                    counts[index] = counts[index].saturating_add(1);
+                    seen[index / 8] |= mask;
                 }
             }
         }

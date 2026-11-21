@@ -300,14 +300,25 @@ async fn callback_preparation_dispatches_udp_routes_without_hydration_or_udp_rea
 
 #[tokio::test]
 async fn a4af_ordinary_targets_rank_current_remaining_bytes_then_creation_order() {
+    assert_a4af_handoff_order(false).await;
+}
+
+#[tokio::test]
+async fn a4af_handoffs_rank_measured_rare_parts_before_remaining_bytes() {
+    assert_a4af_handoff_order(true).await;
+}
+
+async fn assert_a4af_handoff_order(prefer_rare: bool) {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let current = Ed2kHash::from_bytes([0x61; 16]).to_string();
-    let source = direct_test_source(
+    let mut source = direct_test_source(
         current.parse().unwrap(),
         Ipv4Addr::new(192, 0, 2, 30),
         41009,
     );
+    source.user_hash = prefer_rare.then_some([0x77; 16]);
     let mut expected = Vec::new();
+    let mut observations = Vec::new();
     {
         let mut state = core.state.lock().await;
         for (index, size, completed, lifecycle) in [
@@ -319,11 +330,11 @@ async fn a4af_ordinary_targets_rank_current_remaining_bytes_then_creation_order(
             (0x66, 1, 0, "completed"),
         ] {
             let hash = Ed2kHash::from_bytes([index; 16]).to_string();
-            let mut transfer = a4af_test_transfer(&core, &hash, lifecycle);
-            transfer.size_bytes = size;
+            let mut transfer = a4af_test_transfer_with_size(&core, &hash, lifecycle, size);
             transfer.completed_bytes = completed;
             if matches!(index, 0x62..=0x64) {
                 expected.push(transfer.job_token());
+                observations.push((transfer.job_token(), size));
             }
             state.transfers.insert(hash.clone(), transfer);
             state.download_source_registry.add_candidate(
@@ -342,13 +353,66 @@ async fn a4af_ordinary_targets_rank_current_remaining_bytes_then_creation_order(
             expected[2]
         );
     }
+    let resident = core
+        .ed2k_transfers
+        .download_resource_snapshot()
+        .resident_bytes;
+    if prefer_rare {
+        for (index, (token, size)) in observations.into_iter().enumerate() {
+            core.ed2k_transfers
+                .remember_source_availability(
+                    token,
+                    Ed2kSourceHint {
+                        ip: source.ip.to_string(),
+                        tcp_port: source.tcp_port,
+                        user_hash: Some("77".repeat(16)),
+                        connect_options: None,
+                        file_comment: String::new(),
+                        file_rating: 0,
+                    },
+                    size,
+                    vec![true],
+                )
+                .await
+                .unwrap();
+            if index != 0 {
+                core.ed2k_transfers
+                    .remember_source_availability(
+                        token,
+                        Ed2kSourceHint {
+                            ip: "192.0.2.39".into(),
+                            tcp_port: 41008,
+                            user_hash: Some("78".repeat(16)),
+                            connect_options: None,
+                            file_comment: String::new(),
+                            file_rating: 0,
+                        },
+                        size,
+                        vec![true],
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
     let plans = core
-        .a4af_alternate_download_files(&current, std::slice::from_ref(&source))
+        .a4af_alternate_download_files(&current, std::slice::from_ref(&source), None)
         .await;
     let plans = &plans[&source_endpoint_key(&source)];
     assert_eq!(
         plans.iter().map(|plan| plan.job_token).collect::<Vec<_>>(),
-        [expected[2], expected[0], expected[1]]
+        if prefer_rare {
+            [expected[0], expected[2], expected[1]]
+        } else {
+            [expected[2], expected[0], expected[1]]
+        }
+    );
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .resident_bytes,
+        resident,
+        "handoff ranking must not hydrate execution manifests"
     );
     assert!(
         core.state

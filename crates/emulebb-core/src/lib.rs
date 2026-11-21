@@ -1280,8 +1280,12 @@ impl EmulebbCore {
                     .map(source_endpoint_key)
                     .collect::<Vec<_>>();
                 let a4af_alternates = Arc::new(
-                    self.a4af_alternate_download_files(&transfer.hash, &direct_sources)
-                        .await,
+                    self.a4af_alternate_download_files(
+                        &transfer.hash,
+                        &direct_sources,
+                        prepared.as_ref(),
+                    )
+                    .await,
                 );
                 // Captured per-call into each peer attempt so a queued + UDP-eligible
                 // source can detach onto the reask loop (None when reask is off).
@@ -2013,46 +2017,74 @@ impl EmulebbCore {
 
     /// Build the ordered other-file plans a leased peer may visit on the same
     /// physical connection. Borrow the peer source set, filter authoritative
-    /// lifecycle, then rank ordinary work by remaining bytes and creation order.
+    /// lifecycle, then release state before reading measured reporter scarcity.
     async fn a4af_alternate_download_files(
         &self,
         current_file_hash: &str,
         sources: &[Ed2kFoundSource],
+        prepared: Option<&crate::download_preparation::PreparedDownloadSource>,
     ) -> HashMap<(Ipv4Addr, u16), Vec<Ed2kPeerDownloadFile>> {
-        let state = self.state.lock().await;
-        let now = Instant::now();
-        let mut by_endpoint = HashMap::new();
-        for source in sources {
-            let mut alternates = state
-                .download_source_registry
-                .swap_targets_for_peer(source, current_file_hash)
-                .filter_map(|candidate| {
-                    let target = state.transfers.get(&candidate.file_hash)?;
-                    if !should_retry_download_attempt_state(&target.state) {
-                        return None;
-                    }
-                    Some((
-                        target.size_bytes.saturating_sub(target.completed_bytes),
-                        target.id,
-                        Ed2kPeerDownloadFile {
-                            job_token: target.job_token(),
-                            file_hash: candidate.file_hash.parse().ok()?,
-                            display_name: target.name.clone(),
-                            file_size: target.size_bytes,
-                            current_source_count: state
-                                .download_source_registry
-                                .candidate_count_for_file(now, &target.hash),
-                        },
-                    ))
-                })
-                .collect::<Vec<_>>();
-            if !alternates.is_empty() {
-                alternates.sort_by_key(|(remaining, id, _)| (*remaining, *id));
-                by_endpoint.insert(
-                    source_endpoint_key(source),
-                    alternates.into_iter().map(|(_, _, file)| file).collect(),
-                );
+        let candidates = {
+            let state = self.state.lock().await;
+            let now = Instant::now();
+            let mut by_endpoint = HashMap::new();
+            for source in sources {
+                let alternates = state
+                    .download_source_registry
+                    .swap_targets_for_peer(source, current_file_hash)
+                    .filter_map(|candidate| {
+                        let target = state.transfers.get(&candidate.file_hash)?;
+                        if !should_retry_download_attempt_state(&target.state) {
+                            return None;
+                        }
+                        Some((
+                            true,
+                            target.size_bytes.saturating_sub(target.completed_bytes),
+                            target.id,
+                            Ed2kPeerDownloadFile {
+                                job_token: target.job_token(),
+                                file_hash: candidate.file_hash.parse().ok()?,
+                                display_name: target.name.clone(),
+                                file_size: target.size_bytes,
+                                current_source_count: state
+                                    .download_source_registry
+                                    .candidate_count_for_file(now, &target.hash),
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                if !alternates.is_empty() {
+                    let endpoint = source_endpoint_key(source);
+                    let reporter = prepared
+                        .filter(|ready| source_endpoint_key(&ready.source) == endpoint)
+                        .map(|ready| ready.peer.availability().user_hash)
+                        .or(source.user_hash);
+                    by_endpoint.insert(endpoint, (reporter, alternates));
+                }
             }
+            by_endpoint
+        };
+        let mut by_endpoint = HashMap::new();
+        for (endpoint, (reporter, mut alternates)) in candidates {
+            if let Some(user_hash) = reporter {
+                for (ordinary, _, _, file) in &mut alternates {
+                    match self
+                        .ed2k_transfers
+                        .download_source_has_rare_part(file.job_token, user_hash)
+                        .await
+                    {
+                        Ok(rare) => *ordinary = !rare,
+                        Err(error) => {
+                            tracing::debug!(job_id = %file.job_token.job_id, %error, "shared-peer scarcity observation unavailable")
+                        }
+                    }
+                }
+            }
+            alternates.sort_by_key(|(ordinary, remaining, id, _)| (*ordinary, *remaining, *id));
+            by_endpoint.insert(
+                endpoint,
+                alternates.into_iter().map(|(_, _, _, file)| file).collect(),
+            );
         }
         by_endpoint
     }
