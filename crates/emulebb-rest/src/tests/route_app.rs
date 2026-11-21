@@ -585,7 +585,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert_eq!(bundle["limits"]["searchResultsPerSnapshot"], 128);
     assert_eq!(bundle["limits"]["downloadSnapshots"], 200);
     assert_eq!(bundle["limits"]["uploadSnapshots"], 512);
-    assert_eq!(bundle["limits"]["uploadQueueSnapshots"], 512);
+    assert_eq!(bundle["limits"]["uploadQueueSnapshots"], 200);
     assert!(serde_json::to_string(&bundle).unwrap().contains("secret"));
 }
 
@@ -682,6 +682,60 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
 }
 
 #[tokio::test]
+async fn upload_queue_cursors_are_scoped_and_departed_anchors_require_refresh() {
+    let app = test_router();
+    let id = "12345678-1234-4234-8234-123456789abc";
+    for (uri, status) in [
+        (
+            "/api/v1/upload-queue?limit=0".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/api/v1/upload-queue?limit=201".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!(
+                "/api/v1/upload-queue?cursor={}",
+                hex::encode(format!("other-collection|{id}"))
+            ),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!(
+                "/api/v1/upload-queue?cursor={}",
+                hex::encode(format!("upload-queue|{id}"))
+            ),
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        if status == StatusCode::CONFLICT {
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"]["code"], "CONFLICT");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("refresh")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn uploads_and_upload_queue_use_canonical_envelopes() {
     let app = test_router();
     for path in ["/api/v1/uploads", "/api/v1/upload-queue"] {
@@ -699,14 +753,23 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+        let rows = if path.ends_with("upload-queue") {
+            &value["data"]
+        } else {
+            &value["data"]["items"]
+        };
+        assert_eq!(rows.as_array().unwrap().len(), 0);
+        if path.ends_with("upload-queue") {
+            assert!(value["meta"].get("total").is_none());
+            assert_eq!(value["meta"]["hasMore"], false);
+        }
     }
 
     let paged_queue = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/upload-queue?offset=1&limit=1&includeScoreBreakdown=true")
+                .uri("/api/v1/upload-queue?limit=1&countTotal=true")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -716,9 +779,9 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
     assert_eq!(paged_queue.status(), StatusCode::OK);
     let body = to_bytes(paged_queue.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["total"], 0);
-    assert_eq!(value["data"]["offset"], 1);
-    assert_eq!(value["data"]["limit"], 1);
+    assert_eq!(value["meta"]["total"], 0);
+    assert_eq!(value["meta"]["hasMore"], false);
+    assert!(value["meta"]["nextCursor"].is_null());
 
     for (path, expected_message) in [
         (

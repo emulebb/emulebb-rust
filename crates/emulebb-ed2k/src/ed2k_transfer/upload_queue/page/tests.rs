@@ -1,6 +1,6 @@
 use super::*;
 
-fn fixture() -> (Ed2kUploadQueueState, Instant) {
+fn fixture(software: Option<&str>) -> (Ed2kUploadQueueState, Instant) {
     let mut queue = Ed2kUploadQueueState::new(Ed2kUploadQueueConfig {
         base_slots: 1,
         elastic_percent: 0,
@@ -12,6 +12,7 @@ fn fixture() -> (Ed2kUploadQueueState, Instant) {
         peer.ip = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, id as u8));
         peer.tcp_port += id;
         peer.user_hash = Some([id as u8; 16]);
+        peer.client_software = software.map(str::to_owned);
         queue.begin_session(
             Ed2kUploadSessionKey {
                 peer,
@@ -65,7 +66,7 @@ fn traverse(queue: &Ed2kUploadQueueState, now: Instant) -> Vec<uuid::Uuid> {
 
 #[test]
 fn pages_match_scheduler_ranking_without_copying_requester_bitmaps() {
-    let (queue, now) = fixture();
+    let (queue, now) = fixture(None);
     assert_eq!(traverse(&queue, now), ranked_ids(&queue, now));
     assert!(
         queue
@@ -85,8 +86,29 @@ fn pages_match_scheduler_ranking_without_copying_requester_bitmaps() {
 }
 
 #[test]
+fn byte_limited_pages_preserve_every_client_and_complete_software_text() {
+    let (queue, now) = fixture(Some(&"€".repeat(65_535)));
+    let expected = ranked_ids(&queue, now);
+    let mut ids = Vec::new();
+    let mut after = None;
+    loop {
+        let page = queue.waiting_page(after, 200, false, now).unwrap();
+        assert!(page.entries.len() < expected.len());
+        for entry in &page.entries {
+            assert_eq!(entry.client_software.as_deref().unwrap().len(), 3 * 65_535);
+            ids.push(entry.id);
+        }
+        after = page.next_after;
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(ids, expected);
+}
+
+#[test]
 fn saturated_waiting_sequences_keep_stable_scheduler_ties() {
-    let (mut queue, now) = fixture();
+    let (mut queue, now) = fixture(None);
     for session in queue.sessions.values_mut() {
         session.waiting_sequence = u64::MAX;
         session.file_priority_score = 7;
@@ -97,7 +119,7 @@ fn saturated_waiting_sequences_keep_stable_scheduler_ties() {
 
 #[test]
 fn removed_promoted_and_expired_anchors_require_refresh() {
-    let (mut queue, now) = fixture();
+    let (mut queue, now) = fixture(None);
     let anchor = queue
         .waiting_page(None, 1, false, now)
         .unwrap()
@@ -134,7 +156,7 @@ fn removed_promoted_and_expired_anchors_require_refresh() {
 
 #[test]
 fn continuation_uses_live_anchor_rank_after_score_changes() {
-    let (mut queue, now) = fixture();
+    let (mut queue, now) = fixture(None);
     let first = queue.waiting_page(None, 7, false, now).unwrap();
     let anchor = first.next_after.unwrap();
     let anchor_key = queue

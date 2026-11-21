@@ -1,17 +1,67 @@
 use super::*;
 
+/// Owned response allowance, including conservative JSON escaping headroom.
+pub const UPLOAD_QUEUE_PAGE_BYTES: usize = 2 * 1024 * 1024;
+
+pub struct UploadQueuePage {
+    pub uploads: Vec<Upload>,
+    pub next_after: Option<uuid::Uuid>,
+    pub has_more: bool,
+    pub total: Option<usize>,
+}
+
 impl EmulebbCore {
-    async fn uploads_by_queue_state(&self, waiting_queue: bool) -> Vec<Upload> {
-        let snapshots = if waiting_queue {
-            self.ed2k_transfers
-                .upload_queue_snapshot()
-                .await
-                .into_iter()
-                .filter(|entry| matches!(entry.phase, Ed2kUploadSessionPhaseSnapshot::Waiting))
-                .collect::<Vec<_>>()
-        } else {
-            self.ed2k_transfers.active_upload_snapshot().await
-        };
+    /// Project only a bounded live waiting page. File-caption reads keep their
+    /// independent worker charges; failures propagate instead of omitting facts.
+    pub async fn upload_queue_page(
+        &self,
+        after: Option<uuid::Uuid>,
+        limit: usize,
+        count_total: bool,
+    ) -> Result<emulebb_ed2k::ed2k_transfer::RetainedRead<UploadQueuePage>> {
+        let page = self
+            .ed2k_transfers
+            .upload_queue_page(after, limit, count_total)
+            .await?;
+        page.try_project_async(UPLOAD_QUEUE_PAGE_BYTES, |page| async move {
+            let mut uploads = Vec::with_capacity(page.entries.len());
+            let mut bytes = uploads.capacity() * std::mem::size_of::<Upload>();
+            let mut has_more = page.has_more;
+            let mut last = None;
+            for entry in page.entries {
+                let summary = self
+                    .ed2k_transfers
+                    .upload_file_summary(&entry.file_hash)
+                    .await?;
+                // Sevenfold text headroom covers simultaneous owned strings and
+                // worst-case JSON escaping; scalar fields fit the fixed allowance.
+                let text = entry.client_software.as_ref().map_or(0, String::len)
+                    + summary.as_deref().map_or(0, |file| file.display_name.len())
+                    + 256;
+                let row_bytes = text.saturating_mul(7).saturating_add(4096);
+                if bytes.saturating_add(row_bytes) > UPLOAD_QUEUE_PAGE_BYTES {
+                    anyhow::ensure!(!uploads.is_empty(), LocalMutationError::TooLarge);
+                    has_more = true;
+                    break;
+                }
+                bytes += row_bytes;
+                last = Some(entry.id);
+                let mut upload = upload_from_snapshot(entry, summary.as_deref());
+                upload.score_breakdown = None;
+                uploads.push(upload);
+            }
+            Ok(UploadQueuePage {
+                uploads,
+                next_after: if has_more { last } else { None },
+                has_more,
+                total: page.total,
+            })
+        })
+        .await
+    }
+
+    pub async fn uploads(&self) -> Vec<Upload> {
+        let snapshots = self.ed2k_transfers.active_upload_snapshot().await;
         let mut uploads = Vec::with_capacity(snapshots.len());
         for entry in snapshots {
             let summary = match self
@@ -28,14 +78,6 @@ impl EmulebbCore {
             uploads.push(upload_from_snapshot(entry, summary.as_deref()));
         }
         uploads
-    }
-
-    pub async fn uploads(&self) -> Vec<Upload> {
-        self.uploads_by_queue_state(false).await
-    }
-
-    pub async fn upload_queue(&self) -> Vec<Upload> {
-        self.uploads_by_queue_state(true).await
     }
 
     pub async fn upload_policy_metrics(&self) -> UploadPolicyMetrics {

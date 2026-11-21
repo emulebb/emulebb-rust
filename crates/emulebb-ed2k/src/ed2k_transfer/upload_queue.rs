@@ -1777,6 +1777,19 @@ impl Ed2kUploadQueueState {
         })
     }
 
+    pub(super) fn peer_ipv4_addresses(&self) -> Vec<std::net::Ipv4Addr> {
+        self.sessions
+            .keys()
+            .filter_map(|key| {
+                if let IpAddr::V4(ip) = key.peer.ip {
+                    Some(ip)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn snapshot_matching(
         &mut self,
         now: Instant,

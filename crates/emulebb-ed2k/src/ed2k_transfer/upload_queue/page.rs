@@ -17,12 +17,14 @@ pub struct Ed2kUploadQueuePage {
 pub enum Ed2kUploadQueuePageError {
     InvalidLimit,
     CursorExpired,
+    RowTooLarge,
 }
 impl std::fmt::Display for Ed2kUploadQueuePageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::InvalidLimit => "upload queue page limit must be between 1 and 200",
             Self::CursorExpired => "upload queue cursor expired; refresh from the first page",
+            Self::RowTooLarge => "upload queue row exceeds read allowance",
         })
     }
 }
@@ -88,11 +90,23 @@ impl Ed2kUploadQueueState {
             }
         }
         let selected = best.into_sorted_vec();
-        let has_more = selected.len() > limit;
+        let mut has_more = selected.len() > limit;
         let mut entries = Vec::with_capacity(selected.len().min(limit));
+        let mut retained_bytes =
+            entries.capacity() * std::mem::size_of::<Ed2kUploadQueueSnapshotEntry>();
         for (offset, (_, position)) in selected.into_iter().take(limit).enumerate() {
             let key = &self.waiting_order[position];
             let session = &self.sessions[key];
+            let row_bytes =
+                key.file_hash.len() + key.peer.client_software.as_ref().map_or(0, String::len);
+            if retained_bytes.saturating_add(row_bytes) > 512 * 1024 {
+                if entries.is_empty() {
+                    return Err(Ed2kUploadQueuePageError::RowTooLarge);
+                }
+                has_more = true;
+                break;
+            }
+            retained_bytes += row_bytes;
             let rank = u16::try_from(preceding + offset + 1).unwrap_or(u16::MAX);
             entries.push(self.project_snapshot_entry(key, session, now, Some(rank), false));
         }

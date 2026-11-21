@@ -409,13 +409,9 @@ export function App({ appearance }: { appearance: Appearance }) {
     let cancelled = false;
     const loadUploads = async () => {
       try {
-        const [nextUploads, nextUploadQueue] = await Promise.all([
-          client.get<Page<Upload>>("uploads"),
-          client.get<Page<Upload>>(`upload-queue?limit=${SNAPSHOT_LIMIT}`)
-        ]);
+        const nextUploads = await client.get<Page<Upload>>("uploads");
         if (!cancelled) {
           setUploads(nextUploads.items ?? []);
-          setUploadQueue(nextUploadQueue.items ?? []);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -975,7 +971,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 refreshGeneration={manualRefreshGeneration}
               />
             )}
-            {tab === "uploads" && <UploadsView uploads={uploads} uploadQueue={uploadQueue} client={client} run={run} />}
+            {tab === "uploads" && <UploadsView uploads={uploads} refreshGeneration={refreshGeneration} client={client} run={run} />}
             {tab === "network" && (
               <NetworkHealthView
                 servers={servers}

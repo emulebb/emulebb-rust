@@ -205,7 +205,7 @@ fn is_search_result_sort(value: &str) -> bool {
 }
 
 fn is_boolean_query_field(name: &str) -> bool {
-    matches!(name, "confirm" | "includeScoreBreakdown")
+    matches!(name, "confirm" | "countTotal")
 }
 
 fn is_boolean_query_value(value: &str) -> bool {
@@ -522,7 +522,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const DOWNLOADS: &[&str] = &["view", "category", "cursor", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
-    const UPLOAD_QUEUE: &[&str] = &["offset", "limit", "includeScoreBreakdown"];
+    const UPLOAD_QUEUE: &[&str] = &["cursor", "limit", "countTotal"];
 
     if matches!(
         path,

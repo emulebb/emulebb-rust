@@ -59,7 +59,6 @@ pub(crate) fn upload_from_snapshot(
         user_hash,
         client_software: entry
             .client_software
-            .clone()
             .unwrap_or_else(|| "unknown".to_string()),
         client_mod: String::new(),
         upload_state,

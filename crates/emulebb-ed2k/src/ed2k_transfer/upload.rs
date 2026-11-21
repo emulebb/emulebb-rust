@@ -593,6 +593,12 @@ impl Ed2kTransferRuntime {
             .active_snapshot(Instant::now())
     }
 
+    /// Scalar candidates for the existing background hostname lookup owner.
+    /// Avoid constructing upload rows or file captions for address enrichment.
+    pub async fn upload_peer_ipv4_addresses(&self) -> Vec<std::net::Ipv4Addr> {
+        self.upload_queue.lock().await.peer_ipv4_addresses()
+    }
+
     /// Select one bounded waiting page without copying peer part maps. A cursor
     /// whose entry is no longer waiting requires a refresh from the first page.
     pub async fn upload_queue_page(
@@ -600,11 +606,13 @@ impl Ed2kTransferRuntime {
         after: Option<uuid::Uuid>,
         limit: usize,
         count_total: bool,
-    ) -> Result<super::Ed2kUploadQueuePage, super::Ed2kUploadQueuePageError> {
-        self.upload_queue
-            .lock()
+    ) -> anyhow::Result<super::RetainedRead<super::Ed2kUploadQueuePage>> {
+        self.local_mutations
+            .retain_read(1024 * 1024, || async {
+                let queue = self.upload_queue.lock().await;
+                Ok(queue.waiting_page(after, limit, count_total, Instant::now())?)
+            })
             .await
-            .waiting_page(after, limit, count_total, Instant::now())
     }
 
     /// Return one management entry without materializing the full upload queue.
