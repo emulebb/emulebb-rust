@@ -593,6 +593,20 @@ impl Ed2kTransferRuntime {
             .active_snapshot(Instant::now())
     }
 
+    /// Select one bounded waiting page without copying peer part maps. A cursor
+    /// whose entry is no longer waiting requires a refresh from the first page.
+    pub async fn upload_queue_page(
+        &self,
+        after: Option<uuid::Uuid>,
+        limit: usize,
+        count_total: bool,
+    ) -> Result<super::Ed2kUploadQueuePage, super::Ed2kUploadQueuePageError> {
+        self.upload_queue
+            .lock()
+            .await
+            .waiting_page(after, limit, count_total, Instant::now())
+    }
+
     /// Return one management entry without materializing the full upload queue.
     pub async fn upload_client_snapshot(
         &self,
