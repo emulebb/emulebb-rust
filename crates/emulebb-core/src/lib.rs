@@ -512,6 +512,8 @@ pub struct EmulebbCore {
     #[cfg(test)]
     download_hydration_busy: Arc<AtomicBool>,
     #[cfg(test)]
+    download_ready_count: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
     category_probe_waiting: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     shared_root_change: Arc<shared_dir_monitor::RootChangeSignal>,
     category_probe_sender: Arc<
@@ -758,6 +760,8 @@ impl EmulebbCore {
             category_probe_gate: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             download_hydration_busy: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            download_ready_count: Arc::default(),
             #[cfg(test)]
             category_probe_waiting: Arc::new(std::sync::Mutex::new(None)),
             shared_root_change: Arc::default(),
@@ -1276,8 +1280,12 @@ impl EmulebbCore {
                     .map(source_endpoint_key)
                     .collect::<Vec<_>>();
                 let a4af_alternates = Arc::new(
-                    self.a4af_alternate_download_files(&transfer.hash, &direct_sources)
-                        .await,
+                    self.a4af_alternate_download_files(
+                        &transfer.hash,
+                        &direct_sources,
+                        prepared.as_ref(),
+                    )
+                    .await,
                 );
                 // Captured per-call into each peer attempt so a queued + UDP-eligible
                 // source can detach onto the reask loop (None when reask is off).
@@ -1474,7 +1482,7 @@ impl EmulebbCore {
             // Mid-round cancel check (after the direct-download leg, before the
             // requery sleep): stop promptly on delete/pause/stop/recheck instead
             // of sleeping then requerying for a transfer that is going away.
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || self.ed2k_transfers.download_yield_requested(job_token) {
                 return Ok(None);
             }
             if ed2k_download_retry::should_wait_for_deferred_direct_sources(
@@ -1491,6 +1499,7 @@ impl EmulebbCore {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = cancel.cancelled() => return Ok(None),
+                        () = self.ed2k_transfers.download_yield_notified(job_token) => return Ok(None),
                     }
                     continue;
                 }
@@ -1776,6 +1785,42 @@ impl EmulebbCore {
         (acquired, deferred, deferred_retry_delay)
     }
 
+    async fn capture_download_probe_lease(
+        &self,
+        token: emulebb_metadata::JobToken,
+        source: &Ed2kFoundSource,
+        hash: &str,
+    ) -> Option<download_source_registry::DownloadSourceLeaseId> {
+        let state = self.state.lock().await;
+        if state
+            .active_download_peer_endpoints
+            .get(&source_endpoint_key(source))
+            != Some(&token)
+        {
+            return None;
+        }
+        state.download_source_registry.source_lease_id(source, hash)
+    }
+
+    async fn finish_download_probe_lease(
+        &self,
+        token: emulebb_metadata::JobToken,
+        source: &Ed2kFoundSource,
+        hash: &str,
+        lease: download_source_registry::DownloadSourceLeaseId,
+        not_started: bool,
+    ) {
+        let mut state = self.state.lock().await;
+        let endpoint = source_endpoint_key(source);
+        if state.active_download_peer_endpoints.get(&endpoint) == Some(&token)
+            && state
+                .download_source_registry
+                .finish_probe_lease(source, hash, lease, not_started)
+        {
+            state.active_download_peer_endpoints.remove(&endpoint);
+        }
+    }
+
     async fn release_direct_download_source_leases(
         &self,
         token: emulebb_metadata::JobToken,
@@ -1942,7 +1987,6 @@ impl EmulebbCore {
         sources: &[Ed2kFoundSource],
     ) -> (usize, usize) {
         let mut state = self.state.lock().await;
-        let needed_parts = transfer.needed_parts;
         let now = Instant::now();
         let source_count_before = state
             .download_source_registry
@@ -1961,8 +2005,6 @@ impl EmulebbCore {
                 now,
                 DownloadSourceCandidate {
                     file_hash: transfer.hash.clone(),
-                    needed_parts,
-                    rare_parts: 0,
                     source: source.clone(),
                     last_seen: now,
                 },
@@ -1975,41 +2017,75 @@ impl EmulebbCore {
     }
 
     /// Build the ordered other-file plans a leased peer may visit on the same
-    /// physical connection. This is the full A4AF source-set/hijacking bridge:
-    /// the peer-centric registry orders candidates, core filters authoritative
-    /// transfer lifecycle, and the ED2K session switches files in place.
+    /// physical connection. Borrow the peer source set, filter authoritative
+    /// lifecycle, then release state before reading measured reporter scarcity.
     async fn a4af_alternate_download_files(
         &self,
         current_file_hash: &str,
         sources: &[Ed2kFoundSource],
+        prepared: Option<&crate::download_preparation::PreparedDownloadSource>,
     ) -> HashMap<(Ipv4Addr, u16), Vec<Ed2kPeerDownloadFile>> {
-        let state = self.state.lock().await;
-        let now = Instant::now();
-        let mut by_endpoint = HashMap::new();
-        for source in sources {
-            let alternates = state
-                .download_source_registry
-                .swap_targets_for_peer(source, current_file_hash)
-                .into_iter()
-                .filter_map(|candidate| {
-                    let target = state.transfers.get(&candidate.file_hash)?;
-                    if !should_retry_download_attempt_state(&target.state) {
-                        return None;
-                    }
-                    Some(Ed2kPeerDownloadFile {
-                        job_token: target.job_token(),
-                        file_hash: candidate.file_hash.parse().ok()?,
-                        display_name: target.name.clone(),
-                        file_size: target.size_bytes,
-                        current_source_count: state
-                            .download_source_registry
-                            .candidate_count_for_file(now, &target.hash),
+        let candidates = {
+            let state = self.state.lock().await;
+            let now = Instant::now();
+            let mut by_endpoint = HashMap::new();
+            for source in sources {
+                let alternates = state
+                    .download_source_registry
+                    .swap_targets_for_peer(source, current_file_hash)
+                    .filter_map(|candidate| {
+                        let target = state.transfers.get(&candidate.file_hash)?;
+                        if !should_retry_download_attempt_state(&target.state) {
+                            return None;
+                        }
+                        Some((
+                            true,
+                            target.size_bytes.saturating_sub(target.completed_bytes),
+                            target.id,
+                            Ed2kPeerDownloadFile {
+                                job_token: target.job_token(),
+                                file_hash: candidate.file_hash.parse().ok()?,
+                                display_name: target.name.clone(),
+                                file_size: target.size_bytes,
+                                current_source_count: state
+                                    .download_source_registry
+                                    .candidate_count_for_file(now, &target.hash),
+                            },
+                        ))
                     })
-                })
-                .collect::<Vec<_>>();
-            if !alternates.is_empty() {
-                by_endpoint.insert(source_endpoint_key(source), alternates);
+                    .collect::<Vec<_>>();
+                if !alternates.is_empty() {
+                    let endpoint = source_endpoint_key(source);
+                    let reporter = prepared
+                        .filter(|ready| source_endpoint_key(&ready.source) == endpoint)
+                        .map(|ready| ready.peer.availability().user_hash)
+                        .or(source.user_hash);
+                    by_endpoint.insert(endpoint, (reporter, alternates));
+                }
             }
+            by_endpoint
+        };
+        let mut by_endpoint = HashMap::new();
+        for (endpoint, (reporter, mut alternates)) in candidates {
+            if let Some(user_hash) = reporter {
+                for (ordinary, _, _, file) in &mut alternates {
+                    match self
+                        .ed2k_transfers
+                        .download_source_has_rare_part(file.job_token, user_hash)
+                        .await
+                    {
+                        Ok(rare) => *ordinary = !rare,
+                        Err(error) => {
+                            tracing::debug!(job_id = %file.job_token.job_id, %error, "shared-peer scarcity observation unavailable")
+                        }
+                    }
+                }
+            }
+            alternates.sort_by_key(|(ordinary, remaining, id, _)| (*ordinary, *remaining, *id));
+            by_endpoint.insert(
+                endpoint,
+                alternates.into_iter().map(|(_, _, _, file)| file).collect(),
+            );
         }
         by_endpoint
     }
@@ -7032,11 +7108,8 @@ fn should_retry_download_attempt_state(state: &str) -> bool {
     matches!(state, "downloading" | "queued")
 }
 
-/// Select the best still-wanted OTHER file from one peer's A4AF source set.
-/// The registry owns deterministic priority ordering; core owns authoritative
-/// transfer lifecycle, so a completed/paused top candidate must not hide a live
-/// lower-ranked fallback (the oracle skips non-ready/stopped part files while
-/// walking `m_OtherRequests_list` / `m_OtherNoNeeded_list`).
+/// Select ordinary wanted work by remaining bytes, then creation order. Borrow
+/// candidates and reject stopped/terminal jobs before choosing or copying one.
 fn wanted_a4af_swap_target(
     state: &CoreState,
     source: &Ed2kFoundSource,
@@ -7045,14 +7118,19 @@ fn wanted_a4af_swap_target(
     state
         .download_source_registry
         .swap_targets_for_peer(source, current_file_hash)
-        .into_iter()
-        .find_map(|candidate| {
+        .filter_map(|candidate| {
             state
                 .transfers
                 .get(&candidate.file_hash)
                 .filter(|target| should_retry_download_attempt_state(&target.state))
-                .cloned()
         })
+        .min_by_key(|target| {
+            (
+                target.size_bytes.saturating_sub(target.completed_bytes),
+                target.id,
+            )
+        })
+        .cloned()
 }
 
 /// Case-insensitive check that `path` resides within `dir`, tolerating the

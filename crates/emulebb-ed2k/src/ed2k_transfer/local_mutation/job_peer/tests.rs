@@ -44,6 +44,12 @@ async fn source_status_works_at_full_resident_budget_and_requires_new_session_pr
         .unwrap();
     assert_eq!(page.len(), 1);
     assert!(page[0].has_part(0));
+    assert!(
+        runtime
+            .download_source_has_rare_part(job.token, [0x12; 16])
+            .await
+            .unwrap()
+    );
     assert_eq!(
         runtime.download_resource_snapshot().resident_bytes,
         128 * 1024 * 1024
@@ -54,6 +60,12 @@ async fn source_status_works_at_full_resident_budget_and_requires_new_session_pr
     runtime.local_mutations.seal_and_drain().await.unwrap();
     drop(runtime);
     let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+    assert!(
+        !runtime
+            .download_source_has_rare_part(job.token, [0x12; 16])
+            .await
+            .unwrap()
+    );
     assert!(
         runtime
             .download_source_availability_after(job.token, 0, i64::MAX, 0, 256)

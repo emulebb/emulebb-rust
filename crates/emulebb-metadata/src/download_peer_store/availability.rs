@@ -15,6 +15,16 @@ pub struct MetadataDownloadAvailabilityQuery {
     pub limit: usize,
 }
 
+/// A selected reporter's current opportunity, not a persistent priority score.
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataDownloadScarcityQuery {
+    pub token: JobToken,
+    pub session_id: [u8; 16],
+    pub observed_since_s: i64,
+    pub observed_until_s: i64,
+    pub user_hash: [u8; 16],
+}
+
 #[derive(Debug)]
 pub struct MetadataDownloadSourceAvailability {
     pub source_id: i64,
@@ -101,6 +111,136 @@ const PAGE_SQL: &str = "SELECT a.source_id,s.ip,s.tcp_port,a.observed_user_hash,
     ORDER BY a.source_id LIMIT ?7";
 
 impl MetadataStore {
+    /// Does this reporter offer a missing part no other freshly observed
+    /// identity offers? Stream all observations in one SQLite snapshot with
+    /// two protocol-bounded bitsets; repeated endpoints never add votes.
+    pub fn download_job_has_rare_source_part(
+        &self,
+        query: MetadataDownloadScarcityQuery,
+    ) -> Result<bool> {
+        self.source_scarcity(query, None)
+    }
+
+    /// A listener-owned callback supplies fresh status without creating a
+    /// dialable endpoint. Other reporter claims and verified parts use the
+    /// same database snapshot and identity rules as persisted observations.
+    pub fn download_job_live_source_has_rare_part(
+        &self,
+        query: MetadataDownloadScarcityQuery,
+        file_size: u64,
+        parts: &[bool],
+    ) -> Result<bool> {
+        self.source_scarcity(query, Some((file_size, parts)))
+    }
+
+    fn source_scarcity(
+        &self,
+        query: MetadataDownloadScarcityQuery,
+        live: Option<(u64, &[bool])>,
+    ) -> Result<bool> {
+        ensure!(
+            query.observed_since_s >= 0 && query.observed_until_s >= query.observed_since_s,
+            "invalid scarcity observation interval"
+        );
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let geometry = tx
+            .query_row(
+                "SELECT expected_size_bytes,
+            1+(expected_size_bytes-1)/part_size_bytes FROM download_jobs
+            WHERE id=?1 AND execution_generation=?2 AND intent='started'
+            AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL
+            AND delete_requested_at_s IS NULL AND storage_failure_code IS NULL
+            AND internal_storage_retired=0 AND expected_size_bytes>0",
+                params![query.token.job_id, i64::try_from(query.token.generation)?],
+                |row| {
+                    Ok((
+                        crate::sql_value::unsigned::<u64>(row, 0)?,
+                        crate::sql_value::unsigned::<usize>(row, 1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((size, part_count)) = geometry else {
+            return Ok(false);
+        };
+        ensure!(
+            (1..=65534).contains(&part_count),
+            "unsupported scarcity geometry"
+        );
+        let mut offered = vec![0u8; part_count.div_ceil(8)];
+        let mut others = vec![0u8; offered.len()];
+        if let Some((live_size, parts)) = live {
+            ensure!(
+                live_size == size && parts.len() == part_count,
+                "live source differs from job geometry"
+            );
+            for (index, present) in parts.iter().enumerate() {
+                if *present {
+                    offered[index / 8] |= 1 << (index % 8);
+                }
+            }
+        }
+        {
+            let mut stmt = tx.prepare_cached(PAGE_SQL)?;
+            let mut rows = stmt.query(params![
+                query.token.job_id,
+                0,
+                i64::try_from(query.token.generation)?,
+                query.session_id.as_slice(),
+                query.observed_since_s,
+                query.observed_until_s,
+                -1
+            ])?;
+            while let Some(row) = rows.next()? {
+                let count = crate::sql_value::unsigned::<usize>(row, 5)?;
+                let bits = row.get_ref(6)?.as_blob()?;
+                ensure!(
+                    (1..=65534).contains(&count) && bits.len() == count.div_ceil(8),
+                    "invalid observed part status"
+                );
+                ensure!(count == part_count, "inconsistent observed geometry");
+                let identity = row.get_ref(3)?.as_blob()?;
+                ensure!(identity.len() == 16, "invalid observed identity");
+                // A live reply supersedes older status from the same identity;
+                // it must not regain unavailable parts through another endpoint.
+                if live.is_some() && identity == query.user_hash {
+                    continue;
+                }
+                let target = if identity == query.user_hash {
+                    &mut offered
+                } else {
+                    &mut others
+                };
+                for (target, bits) in target.iter_mut().zip(bits) {
+                    *target |= bits;
+                }
+            }
+        }
+        for (offered, others) in offered.iter_mut().zip(others) {
+            *offered &= !others;
+        }
+        {
+            let mut stmt = tx.prepare_cached(
+                "SELECT piece_index FROM download_job_pieces
+                WHERE job_id=?1 AND state='Verified' ORDER BY piece_index",
+            )?;
+            let mut rows = stmt.query([query.token.job_id])?;
+            while let Some(row) = rows.next()? {
+                let index = crate::sql_value::unsigned::<usize>(row, 0)?;
+                ensure!(index < part_count, "verified part outside job geometry");
+                offered[index / 8] &= !(1 << (index % 8));
+            }
+        }
+        // WHY: status padding is not a data part and cannot establish rarity.
+        if !part_count.is_multiple_of(8) {
+            *offered.last_mut().expect("nonempty part geometry") &= (1 << (part_count % 8)) - 1;
+        }
+        let rare = offered.iter().any(|byte| *byte != 0);
+        tx.commit()?;
+        Ok(rare)
+    }
+
     /// Byte-bounded keyset page over observed peers, independent of hint count.
     pub fn download_job_source_availability(
         &self,

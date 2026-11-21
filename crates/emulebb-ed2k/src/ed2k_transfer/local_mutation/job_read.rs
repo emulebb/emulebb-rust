@@ -4,7 +4,7 @@ use super::*;
 use crate::ed2k_transfer as transfer;
 use emulebb_metadata::{DownloadJobRecord, JobId};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in crate::ed2k_transfer) enum JobRead {
     Exact(JobId),
     Detail(JobId),
@@ -12,11 +12,23 @@ pub(in crate::ed2k_transfer) enum JobRead {
     VerifiedParts(emulebb_metadata::JobToken),
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
+    Scheduling(
+        Arc<transfer::Ed2kTransferRuntime>,
+        emulebb_metadata::JobToken,
+        Option<u64>,
+    ),
     TransferCounts,
     Execution(emulebb_metadata::JobToken),
     SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
     SourceAvailability(emulebb_metadata::MetadataDownloadAvailabilityQuery),
+    SourceScarcity(emulebb_metadata::MetadataDownloadScarcityQuery),
+    LiveSourceScarcity(
+        emulebb_metadata::MetadataDownloadScarcityQuery,
+        u64,
+        Arc<Vec<bool>>,
+        std::time::Instant,
+    ),
     Comments(emulebb_metadata::JobToken, i64, usize),
     Source(
         emulebb_metadata::JobToken,
@@ -39,10 +51,12 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     VerifiedParts(Option<RetainedRead<emulebb_metadata::MetadataDownloadVerifiedParts>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
+    Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
     SourceAvailability(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceAvailability>>),
+    SourceScarcity(bool),
     Comments(RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>),
     Source(RetainedRead<Option<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
@@ -71,7 +85,10 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
-            JobRead::VerifiedParts(_) => 128 * 1024,
+            JobRead::Scheduling(..) => transfer::download_scheduling::WORK_BYTES,
+            JobRead::VerifiedParts(_)
+            | JobRead::SourceScarcity(_)
+            | JobRead::LiveSourceScarcity(..) => 128 * 1024,
             JobRead::Parts(_, _, limit) => {
                 ensure!((1..=256).contains(&limit), "invalid part page size");
                 32 * 1024
@@ -152,6 +169,9 @@ impl LocalMutationRegistry {
                 JobRead::Query(query) => metadata.download_job_page(query).map(|value| {
                     JobReadResult::Query(RetainedRead::new(value, capacity.take_result()))
                 }),
+                JobRead::Scheduling(runtime, token, expected) => runtime
+                    .classify_or_yield_download(token, expected)
+                    .map(JobReadResult::Scheduling),
                 JobRead::Counts => metadata.download_job_counts().map(|value| {
                     JobReadResult::Counts(RetainedRead::new(value, capacity.take_result()))
                 }),
@@ -292,6 +312,18 @@ impl LocalMutationRegistry {
                     .map(|value| {
                         JobReadResult::Page(RetainedRead::new(value, capacity.take_result()))
                     }),
+                JobRead::LiveSourceScarcity(query, size, available, observed) => {
+                    if observed.elapsed() > std::time::Duration::from_secs(30) {
+                        Ok(JobReadResult::SourceScarcity(false))
+                    } else {
+                        metadata
+                            .download_job_live_source_has_rare_part(query, size, &available)
+                            .map(JobReadResult::SourceScarcity)
+                    }
+                }
+                JobRead::SourceScarcity(query) => metadata
+                    .download_job_has_rare_source_part(query)
+                    .map(JobReadResult::SourceScarcity),
                 JobRead::SourceAvailability(query) => metadata
                     .download_job_source_availability(query)
                     .map(|value| {
@@ -331,6 +363,42 @@ impl LocalMutationRegistry {
     }
 }
 impl transfer::Ed2kTransferRuntime {
+    /// Classify only an already cached/current execution. The shared worker
+    /// owns its temporary frequency buffers; cancellation cannot release that
+    /// credit before the worker and its resident read loan actually finish.
+    pub async fn download_scheduling_state(
+        self: &Arc<Self>,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<Option<transfer::DownloadSchedulingState>> {
+        let JobReadResult::Scheduling(state) = self
+            .read_job_metadata(JobRead::Scheduling(Arc::clone(self), token, None))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(state)
+    }
+
+    /// Recheck current protection and accepted progress before requesting a safe
+    /// yield. Capacity remains owned until producers and retirement settle.
+    pub async fn request_download_yield(
+        self: &Arc<Self>,
+        token: emulebb_metadata::JobToken,
+        expected_bytes: u64,
+    ) -> Result<bool> {
+        let JobReadResult::Scheduling(state) = self
+            .read_job_metadata(JobRead::Scheduling(
+                Arc::clone(self),
+                token,
+                Some(expected_bytes),
+            ))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(state.is_some_and(|state| state.yielding))
+    }
+
     /// Caller must release job/content guards before retrying Busy. No read
     /// waits for registry capacity while a writer could need its held guard.
     pub(in crate::ed2k_transfer) async fn read_job_metadata(
@@ -390,6 +458,65 @@ impl transfer::Ed2kTransferRuntime {
             unreachable!()
         };
         Ok(page)
+    }
+
+    /// Current-session observed rarity, computed off the async executor without
+    /// hydrating a manifest or retaining an unbounded peer-identity set.
+    pub async fn download_source_has_rare_part(
+        &self,
+        token: emulebb_metadata::JobToken,
+        user_hash: [u8; 16],
+    ) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp().max(0);
+        let query = emulebb_metadata::MetadataDownloadScarcityQuery {
+            token,
+            session_id: self.source_discovery_session,
+            observed_since_s: now.saturating_sub(30),
+            observed_until_s: now,
+            user_hash,
+        };
+        let JobReadResult::SourceScarcity(rare) = self
+            .read_job_metadata(JobRead::SourceScarcity(query))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(rare)
+    }
+
+    /// Borrow listener-owned availability through the retained read. This never
+    /// stores an inbound socket address as an outbound source hint. Observer
+    /// cancellation leaves its shared backing charged until the worker settles.
+    pub async fn download_live_source_has_rare_part(
+        &self,
+        token: emulebb_metadata::JobToken,
+        file_size: u64,
+        user_hash: [u8; 16],
+        available: Arc<Vec<bool>>,
+        observed: std::time::Instant,
+    ) -> Result<bool> {
+        ensure!(
+            available.len() <= 65534 && available.capacity() <= 65536,
+            "unsupported live source geometry"
+        );
+        let now = chrono::Utc::now().timestamp().max(0);
+        let query = emulebb_metadata::MetadataDownloadScarcityQuery {
+            token,
+            session_id: self.source_discovery_session,
+            observed_since_s: now.saturating_sub(30),
+            observed_until_s: now,
+            user_hash,
+        };
+        let JobReadResult::SourceScarcity(rare) = self
+            .read_job_metadata(JobRead::LiveSourceScarcity(
+                query, file_size, available, observed,
+            ))
+            .await?
+        else {
+            unreachable!()
+        };
+        // Database contention must not renew a captured network observation.
+        Ok(rare && observed.elapsed() <= std::time::Duration::from_secs(30))
     }
 
     /// Current runtime/session observations only. Caller supplies an explicit

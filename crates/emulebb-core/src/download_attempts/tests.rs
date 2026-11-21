@@ -10,6 +10,118 @@ fn hash(byte: u8) -> Ed2kHash {
 }
 
 #[test]
+fn displacement_keeps_capacity_owned_and_protects_fresh_readiness() {
+    let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));
+    let prepared = control.try_prepare(token(1, 1), hash(1)).unwrap();
+    assert!(prepared.promote_ready(true));
+    let owners = control.displacement_owners();
+    assert_eq!(owners.len(), 1);
+    assert!(owners[0].protected_readiness);
+    assert!(
+        !control.mark_yielding(token(1, 2)),
+        "stale selection cannot mark a successor"
+    );
+    assert!(control.mark_yielding(token(1, 1)));
+    assert!(control.displacement_owners()[0].draining);
+    assert_eq!(control.admission_counts().1, 1);
+    assert_eq!(control.available().0, 0);
+    assert!(
+        !prepared.cancellation().is_cancelled(),
+        "safe yield does not abort its producer"
+    );
+    drop(prepared);
+    assert!(control.displacement_owners().is_empty());
+    assert_eq!(control.available().0, 1);
+}
+
+#[test]
+fn rare_bursts_round_up_and_do_not_admit_ordinary_work_over_its_limit() {
+    for (ordinary, ceiling) in [(1u32, 2usize), (4, 5), (5, 7)] {
+        let control = Arc::new(DownloadAttemptControl::with_limit(Some(ordinary)));
+        control.apply_admission_window(crate::download_admission::AdmissionWindow {
+            active: 32,
+            burst: 8,
+            preparing: 2,
+            total: 42,
+        });
+        let mut active = (1..=ordinary)
+            .map(|id| {
+                control
+                    .try_enter(token(i64::from(id), 1), hash(id as u8))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for id in ordinary as usize + 1..=ceiling {
+            let prepared = control
+                .try_prepare(token(id as i64, 1), hash(id as u8))
+                .unwrap();
+            assert!(
+                !prepared.promote(),
+                "ordinary work must wait at its configured ceiling"
+            );
+            assert!(prepared.promote_ready(true));
+            active.push(prepared);
+        }
+        let waiting = control
+            .try_prepare(token(ceiling as i64 + 1, 1), hash(ceiling as u8 + 1))
+            .unwrap();
+        assert!(
+            !waiting.promote_ready(true),
+            "rarity cannot exceed the rounded-up allowance"
+        );
+        drop(active.pop());
+        assert!(!waiting.promote());
+        assert!(waiting.promote_ready(true));
+        control.apply_admission_window(crate::download_admission::AdmissionWindow {
+            active: 0,
+            burst: 0,
+            preparing: 0,
+            total: 0,
+        });
+        assert!(
+            active
+                .iter()
+                .all(|owner| !owner.cancellation().is_cancelled())
+        );
+        assert!(
+            waiting.promote(),
+            "an owned burst execution drains after pressure closes admission"
+        );
+    }
+}
+
+#[test]
+fn rare_admission_respects_resource_ceiling_and_shared_cohort_drain() {
+    let control = Arc::new(DownloadAttemptControl::with_limit(Some(4)));
+    let active = (1..=4)
+        .map(|id| control.try_enter(token(id, 1), hash(id as u8)).unwrap())
+        .collect::<Vec<_>>();
+    let prepared = control.try_prepare(token(5, 1), hash(5)).unwrap();
+    control.apply_admission_window(crate::download_admission::AdmissionWindow {
+        active: 16,
+        burst: 0,
+        preparing: 2,
+        total: 20,
+    });
+    assert!(
+        !prepared.promote_ready(true),
+        "resource pressure closes the burst allowance"
+    );
+    control.apply_admission_window(crate::download_admission::AdmissionWindow {
+        active: 4,
+        burst: 1,
+        preparing: 2,
+        total: 4,
+    });
+    assert!(
+        !prepared.promote_ready(true),
+        "pending owners do not count as released capacity"
+    );
+    drop(active);
+    assert!(prepared.promote_ready(true));
+}
+
+#[test]
 fn promotion_keeps_one_guard_and_waits_for_ordinary_capacity() {
     let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));
     let active = control.try_enter(token(1, 1), hash(1)).unwrap();
@@ -57,10 +169,15 @@ fn preparation_cannot_promote_while_the_shared_cohort_must_drain() {
     let second = control.try_prepare(token(2, 1), hash(2)).unwrap();
     control.apply_admission_window(crate::download_admission::AdmissionWindow {
         active: 1,
+        burst: 0,
         preparing: 0,
         total: 1,
     });
     assert!(!first.promote());
+    assert!(
+        !first.promote_ready(true),
+        "rarity cannot treat another preparation as retired"
+    );
     assert!(!first.cancellation().is_cancelled());
     drop(second);
     assert!(first.promote());
@@ -72,6 +189,7 @@ fn adaptive_window_honors_user_limit_without_initial_baseline_clipping() {
     let control = Arc::new(DownloadAttemptControl::with_limit(Some(24)));
     control.apply_admission_window(crate::download_admission::AdmissionWindow {
         active: 32,
+        burst: 8,
         preparing: 2,
         total: 34,
     });
@@ -84,6 +202,7 @@ fn adaptive_window_honors_user_limit_without_initial_baseline_clipping() {
     ));
     control.apply_admission_window(crate::download_admission::AdmissionWindow {
         active: 0,
+        burst: 0,
         preparing: 0,
         total: 0,
     });
@@ -107,6 +226,7 @@ fn active_and_preparation_share_adaptive_total_capacity() {
     let control = Arc::new(DownloadAttemptControl::default());
     control.apply_admission_window(crate::download_admission::AdmissionWindow {
         active: 2,
+        burst: 1,
         preparing: 2,
         total: 2,
     });

@@ -4,7 +4,10 @@ use anyhow::{Result, ensure};
 use rusqlite::{Connection, TransactionBehavior, params};
 
 mod availability;
-pub use availability::{MetadataDownloadAvailabilityQuery, MetadataDownloadSourceAvailability};
+pub use availability::{
+    MetadataDownloadAvailabilityQuery, MetadataDownloadScarcityQuery,
+    MetadataDownloadSourceAvailability,
+};
 
 #[derive(Debug, Clone)]
 pub enum MetadataDownloadPeerDelta {

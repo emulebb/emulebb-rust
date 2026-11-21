@@ -44,6 +44,7 @@ impl MemorySampler {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdmissionWindow {
     pub active: usize,
+    pub burst: usize,
     pub preparing: usize,
     pub total: usize,
 }
@@ -51,6 +52,7 @@ impl Default for AdmissionWindow {
     fn default() -> Self {
         Self {
             active: INITIAL_ACTIVE,
+            burst: INITIAL_ACTIVE.div_ceil(4),
             preparing: INITIAL_PREPARING,
             total: INITIAL_ACTIVE + INITIAL_PREPARING,
         }
@@ -125,6 +127,11 @@ pub(crate) fn next_window(
     }
     AdmissionWindow {
         active: target,
+        burst: if hydration_starts(native) > 0 && native.resident_bytes <= SOFT_RESIDENT_BYTES {
+            target.div_ceil(4)
+        } else {
+            0
+        },
         preparing,
         total,
     }

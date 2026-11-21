@@ -47,6 +47,100 @@ fn local_preparation_core(
 }
 
 #[tokio::test]
+async fn native_probe_capacity_refusal_releases_only_its_exact_core_reservation() {
+    use emulebb_ed2k::{
+        ed2k_tcp::{Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, probe_file_from_peer},
+        ed2k_transfer::Ed2kDownloadCoordinatorConfig,
+    };
+    let root = unique_runtime_dir("core-probe-capacity-refusal");
+    let (core, network) = local_preparation_core(&root, [0x65; 16], None);
+    let hash = Ed2kHash::from_bytes([0x66; 16]);
+    let file = hash.to_string();
+    let owner = a4af_test_owner(&core, &file);
+    let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41012);
+    core.state
+        .lock()
+        .await
+        .download_source_registry
+        .add_candidate(
+            Instant::now(),
+            DownloadSourceCandidate {
+                file_hash: file.clone(),
+                source: source.clone(),
+                last_seen: Instant::now(),
+            },
+        );
+    let (leased, _, _) = core
+        .acquire_direct_download_source_leases(owner.token(), &file, std::slice::from_ref(&source))
+        .await;
+    assert_eq!(leased.len(), 1);
+    let first = core
+        .capture_download_probe_lease(owner.token(), &source, &file)
+        .await
+        .unwrap();
+    core.ed2k_transfers
+        .apply_download_coordinator_config(Ed2kDownloadCoordinatorConfig {
+            max_connections: 1,
+            max_connections_per_window: 0,
+            ..Ed2kDownloadCoordinatorConfig::default()
+        });
+    let held = core.ed2k_transfers.try_admit_source_connection();
+    assert!(held.decision().admitted);
+    let result = probe_file_from_peer(Ed2kPeerProbeOptions {
+        bind_ip: network.bind_ip,
+        egress_route: network.egress_route,
+        peer: &source,
+        hello_identity: core.ed2k_hello_identity(&network),
+        secure_ident: Arc::clone(&network.secure_ident),
+        transfer_runtime: Arc::clone(&core.ed2k_transfers),
+        file_size: 1024,
+        verified_parts: &[false],
+        timeout: Duration::from_secs(1),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Ed2kPeerProbeOutcome::Deferred));
+    core.finish_download_probe_lease(owner.token(), &source, &file, first, true)
+        .await;
+    assert!(
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .is_empty()
+    );
+    let (leased, _, retry) = core
+        .acquire_direct_download_source_leases(owner.token(), &file, std::slice::from_ref(&source))
+        .await;
+    assert_eq!(leased.len(), 1);
+    assert!(retry.is_none());
+    let second = core
+        .capture_download_probe_lease(owner.token(), &source, &file)
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+    core.finish_download_probe_lease(owner.token(), &source, &file, first, true)
+        .await;
+    assert_eq!(
+        core.capture_download_probe_lease(owner.token(), &source, &file)
+            .await,
+        Some(second)
+    );
+    core.finish_download_probe_lease(owner.token(), &source, &file, second, false)
+        .await;
+    let (leased, deferred, retry) = core
+        .acquire_direct_download_source_leases(owner.token(), &file, std::slice::from_ref(&source))
+        .await;
+    assert!(leased.is_empty());
+    assert_eq!(deferred, 1);
+    assert!(retry.unwrap() > Duration::from_secs(1190));
+    drop(held);
+    drop(owner);
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_reask() {
     let root = unique_runtime_dir("core-prepared-hydration-recovery");
     let library = root.join("library");
@@ -276,7 +370,20 @@ async fn known_size_waiting_preparation_never_hydrates_without_a_useful_source()
 
 #[tokio::test]
 async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining_work() {
-    let root = unique_runtime_dir("core-ready-admission-order");
+    assert_ready_admission_order(false).await;
+}
+
+#[tokio::test]
+async fn ready_admission_prefers_unique_reporter_part_over_smaller_remaining_work() {
+    assert_ready_admission_order(true).await;
+}
+
+async fn assert_ready_admission_order(prefer_rare: bool) {
+    let root = unique_runtime_dir(if prefer_rare {
+        "core-ready-rare-order"
+    } else {
+        "core-ready-admission-order"
+    });
     let mut seeds = Vec::new();
     let mut files = Vec::new();
     for (index, size) in [(0u8, 4096), (1u8, 2048)] {
@@ -305,32 +412,74 @@ async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining
         seeds.push(seed);
     }
     let (download, _) = local_preparation_core(&root.join("download"), [0x66; 16], Some(1));
-    let (_, blocker) = download
-        .create_download(DownloadCreate {
-            source: DownloadCreateSource::Content {
-                hash: "67676767676767676767676767676767".into(),
-                name: "Active.bin".into(),
-                size_bytes: Some(16),
-            },
-            category: None,
-            intent: emulebb_metadata::DownloadIntent::Started,
-            redownload: false,
-        })
-        .await
-        .unwrap();
-    let blocker_id = blocker.id;
-    drop(blocker);
-    let header = download
-        .ed2k_transfers
-        .download_job(blocker_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let active = download
-        .download_attempts
-        .try_enter(header.token, header.file_hash.parse().unwrap())
-        .unwrap();
-    drop(header);
+    // Occupy the full 1 + ceil(1/4) ceiling before preparing the ready cohort.
+    // Lowering a limit retains existing owners, as it does during real drains.
+    download.download_attempts.apply_concurrency_limit(Some(2));
+    let mut active = Vec::new();
+    let mut victim = None;
+    for byte in [0x67, 0x68] {
+        let (_, blocker) = download
+            .create_download(DownloadCreate {
+                source: DownloadCreateSource::Content {
+                    hash: Ed2kHash::from_bytes([byte; 16]).to_string(),
+                    name: "Active.bin".into(),
+                    size_bytes: Some(16),
+                },
+                category: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                redownload: false,
+            })
+            .await
+            .unwrap();
+        let blocker_id = blocker.id;
+        drop(blocker);
+        if byte == 0x67 {
+            let header = download
+                .ed2k_transfers
+                .download_job(blocker_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let token = header.token;
+            let temp = download.download_temp_selection(&header).await.unwrap();
+            drop(header);
+            let selected = download
+                .ed2k_transfers
+                .begin_download_job_execution(token, Some(&temp))
+                .await
+                .unwrap();
+            let token = selected.as_ref().unwrap().token;
+            drop(selected);
+            let execution = emulebb_ed2k::ed2k_transfer::new_transfer_job(
+                token,
+                Ed2kHash::from_bytes([byte; 16]),
+                "Active.bin".into(),
+                16,
+            );
+            drop(
+                download
+                    .ed2k_transfers
+                    .ensure_job(&execution)
+                    .await
+                    .unwrap(),
+            );
+            victim = Some(token);
+        }
+        let header = download
+            .ed2k_transfers
+            .download_job(blocker_id)
+            .await
+            .unwrap()
+            .unwrap();
+        active.push(
+            download
+                .download_attempts
+                .try_enter(header.token, header.file_hash.parse().unwrap())
+                .unwrap(),
+        );
+        drop(header);
+    }
+    download.download_attempts.apply_concurrency_limit(Some(1));
     let mut ids = Vec::new();
     for (hash, size, port, user_hash) in &files {
         let (_, created) = download
@@ -372,16 +521,32 @@ async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining
             .await
             .unwrap();
         ids.push((id, token));
+        if prefer_rare && *size == 2048 {
+            // The smaller file has a second independently observed reporter.
+            // Discovery hints alone must not change the scarcity decision.
+            download
+                .ed2k_transfers
+                .remember_source_availability(
+                    token,
+                    Ed2kSourceHint {
+                        ip: "192.0.2.254".into(),
+                        tcp_port: 4662,
+                        user_hash: Some("79".repeat(16)),
+                        connect_options: None,
+                        file_comment: String::new(),
+                        file_rating: 0,
+                    },
+                    *size,
+                    vec![true],
+                )
+                .await
+                .unwrap();
+        }
     }
     download.connect_ed2k().await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if download
-                .ed2k_transfers
-                .download_resource_snapshot()
-                .connections
-                == 2
-            {
+            if download.download_ready_count.load(Ordering::Acquire) == 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -405,7 +570,27 @@ async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining
     download
         .download_hydration_busy
         .store(true, Ordering::Release);
-    drop(active);
+    let victim = victim.unwrap();
+    assert!(
+        download.ed2k_transfers.download_yield_requested(victim),
+        "the blocked rare cohort requests an ordinary yield"
+    );
+    assert_eq!(
+        download.download_attempts.admission_counts().1,
+        2,
+        "a yield request does not release its owner's capacity"
+    );
+    download
+        .ed2k_transfers
+        .release_download_job_execution(victim)
+        .await
+        .unwrap();
+    assert_eq!(
+        download.download_attempts.admission_counts().1,
+        2,
+        "Native retirement precedes guard release"
+    );
+    drop(active.remove(0));
     tokio::time::timeout(Duration::from_secs(10), async {
         while download.download_hydration_busy.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
@@ -413,25 +598,36 @@ async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining
     })
     .await
     .unwrap();
-    let large = download
+    let expected_first = usize::from(!prefer_rare);
+    let waiting = download
         .ed2k_transfers
-        .download_job(ids[0].0)
+        .download_job(ids[1 - expected_first].0)
         .await
         .unwrap()
         .unwrap();
-    let small = download
+    let started = download
         .ed2k_transfers
-        .download_job(ids[1].0)
+        .download_job(ids[expected_first].0)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        large.token, ids[0].1,
-        "creation order must not displace smaller ready work"
+        waiting.token,
+        ids[1 - expected_first].1,
+        "ready ordering must honor reporter scarcity before remaining bytes"
     );
-    assert!(large.storage.is_none());
-    assert_eq!(small.token.generation, ids[1].1.generation + 1);
-    drop((large, small));
+    assert!(waiting.storage.is_none());
+    assert_eq!(
+        started.token.generation,
+        ids[expected_first].1.generation + 1
+    );
+    assert_eq!(
+        download.download_attempts.admission_counts().1,
+        2,
+        "the ready rare file starts in the burst slot while the ordinary owner remains"
+    );
+    drop((waiting, started));
+    drop(active);
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if download.share(&files[0].0).await.is_some()

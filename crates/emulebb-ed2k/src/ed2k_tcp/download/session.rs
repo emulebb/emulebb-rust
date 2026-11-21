@@ -297,6 +297,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
     let mut pending_part_requests: Vec<PendingPartRequest> = Vec::new();
     let mut pending_compressed_parts: Vec<PendingCompressedPart> = Vec::new();
     let mut manifest = transfer_runtime.manifest(job_token).await?;
+    let Some(scheduling_yield) = transfer_runtime.download_yield_signal(job_token) else {
+        return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+    };
     anyhow::ensure!(
         manifest.file_hash == file_hash_hex,
         "download session hash differs from its captured job"
@@ -323,6 +326,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         loop {
             if manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kPeerDownloadOutcome::Completed);
+            }
+            if scheduling_yield.is_cancelled() {
+                return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
             }
 
             if prepared_metadata.is_empty() {
@@ -362,6 +368,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 )
                 .await?
                 {
+                    DownloadRequestWindowOutcome::Yielded => return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete),
                     DownloadRequestWindowOutcome::RequestSent(next_deadline) => {
                         session_state.part_response_deadline = Some(next_deadline);
                     }
@@ -419,7 +426,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 .map_or(download_read_timeout, |upload_timeout| {
                     download_read_timeout.min(upload_timeout)
                 });
-            let packet = match tokio::time::timeout(
+            // WHY: packet handlers have settled their accepted storage work.
+            // Interrupting this read closes the connection through the incomplete
+            // outcome; its partially read frame must never be reused for A4AF.
+            let read_result = tokio::select! {
+                biased;
+                () = scheduling_yield.cancelled() => return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete),
+                result = tokio::time::timeout(
                 read_timeout,
                 async {
                     // WHY: apply already-received metadata through the normal
@@ -430,9 +443,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         transport.read_packet_diagnostic("native_download", peer_addr, "session").await
                     }
                 },
-            )
-            .await
-            {
+                ) => result,
+            };
+            let packet = match read_result {
                 Ok(Ok(Some(packet))) => packet,
                 Ok(Ok(None)) => {
                     if session_state.hello_complete {

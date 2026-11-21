@@ -14,7 +14,6 @@ pub(crate) struct DownloadSourceTarget {
     pub token: emulebb_metadata::JobToken,
     pub hash: String,
     pub size_bytes: u64,
-    pub needed_parts: u32,
 }
 impl From<&Transfer> for DownloadSourceTarget {
     fn from(transfer: &Transfer) -> Self {
@@ -22,7 +21,6 @@ impl From<&Transfer> for DownloadSourceTarget {
             token: transfer.job_token(),
             hash: transfer.hash.clone(),
             size_bytes: transfer.size_bytes,
-            needed_parts: transfer.parts_total.saturating_sub(transfer.parts_obtained),
         }
     }
 }
@@ -252,7 +250,6 @@ mod tests {
             },
             hash: hash.to_string(),
             size_bytes: 4096,
-            needed_parts: 1,
         };
         let batch = claim_connected_server_source_batch(&mut state, &target, hash, Instant::now());
         assert_eq!(batch.targets.len(), 1);
