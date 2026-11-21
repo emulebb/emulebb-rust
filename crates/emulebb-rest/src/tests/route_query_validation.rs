@@ -152,6 +152,19 @@ async fn shared_files_keyset_cursor_and_priority_are_validated() {
 }
 
 #[tokio::test]
+async fn library_filename_search_requires_three_characters() {
+    for query in ["", "ab", "%C3%A9%F0%9F%99%82", "%C4%B0A"] {
+        let (status, value) = query_error_value(&format!("/api/v1/shared-files?q={query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            value["error"]["message"],
+            "q must contain at least 3 characters"
+        );
+    }
+}
+
+#[tokio::test]
 async fn downloads_category_query_uses_name_validation() {
     let cases = [
         (

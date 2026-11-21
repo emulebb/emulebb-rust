@@ -153,12 +153,12 @@ async fn shared_files_use_canonical_route_and_envelope() {
 }
 
 #[tokio::test]
-async fn shared_files_support_path_cursor_search_and_publication_status() {
+async fn shared_files_page_filename_search_and_publication_status() {
     let runtime_dir = unique_test_dir("shared-files-query");
     let transfer_root = runtime_dir.join("transfers");
     let library_dir = runtime_dir.join("library");
     std::fs::create_dir_all(&library_dir).unwrap();
-    let alpha_path = library_dir.join("Alpha Sample.bin");
+    let alpha_path = library_dir.join("Alpha Sample ÄBC.bin");
     let zeta_path = library_dir.join("Zeta Sample.bin");
     std::fs::write(&alpha_path, b"alpha shared payload").unwrap();
     std::fs::write(&zeta_path, b"zeta shared payload").unwrap();
@@ -194,8 +194,6 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     let first = get_json(&app, "/api/v1/shared-files?limit=1").await;
     assert_eq!(first["data"]["total"], 2);
     assert_eq!(first["data"]["limit"], 1);
-    assert!(first["data"].get("offset").is_none());
-    assert!(first["data"].get("nextAfterHash").is_none());
     assert_eq!(first["data"]["items"][0]["hash"], alpha.hash);
     assert_eq!(
         first["data"]["items"][0]["publication"]["ed2k"]["state"],
@@ -211,14 +209,15 @@ async fn shared_files_support_path_cursor_search_and_publication_status() {
     assert_eq!(second["data"]["items"][0]["hash"], zeta.hash);
     assert!(second["data"]["nextCursor"].is_null());
 
-    for query in [
-        "q=alpha".to_string(),
-        "q=alpha%20sample".to_string(),
-        format!("q={}", &alpha.hash[..12]),
-    ] {
+    for query in ["q=ALPHA", "q=pha%20sam", "q=%C3%A4bc"] {
         let searched = get_json(&app, &format!("/api/v1/shared-files?{query}")).await;
         assert_eq!(searched["data"]["total"], 1);
         assert_eq!(searched["data"]["items"][0]["hash"], alpha.hash);
+    }
+    for query in ["q=library".to_string(), format!("q={}", &alpha.hash[..12])] {
+        let searched = get_json(&app, &format!("/api/v1/shared-files?{query}")).await;
+        assert_eq!(searched["data"]["total"], 0);
+        assert!(searched["data"]["items"].as_array().unwrap().is_empty());
     }
 
     let filtered = get_json(&app, "/api/v1/shared-files?priority=normal").await;

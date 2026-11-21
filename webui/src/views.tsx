@@ -1197,6 +1197,8 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
   const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([]);
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
+  const searchError = searchDraft.trim() && [...searchDraft.trim()].length < 3
+    ? "Enter at least 3 characters to search filenames." : "";
   const [priorityFilter, setPriorityFilter] = useState("");
   const [pageSize, setPageSize] = useState(100);
   const [loadGeneration, setLoadGeneration] = useState(0);
@@ -1297,15 +1299,17 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
         </div>
         <form class="shared-files-toolbar" onSubmit={(event) => {
           event.preventDefault();
+          if (searchError) return;
           setSearch(searchDraft.trim());
           resetPaging();
         }}>
           <label class="shared-files-search">
-            Search name, path, or hash
+            Search filename
             <div class="copy-row">
               <input class="form-control" value={searchDraft} onInput={(event) => setSearchDraft(event.currentTarget.value)} />
-              <button class="btn" type="submit"><Search size={15} />Search</button>
+              <button class="btn" type="submit" disabled={Boolean(searchError)}><Search size={15} />Search</button>
             </div>
+            {searchError && <span class="field-error">{searchError}</span>}
           </label>
           <label>
             Priority

@@ -2,6 +2,22 @@ use super::*;
 use crate::{NativeFileFingerprint, NativeFileIdentity, NativeFileTimestamp, NativePath};
 
 #[test]
+fn library_search_counts_characters_before_unicode_lowercasing() {
+    assert_eq!(normalize_library_search(None).unwrap(), None);
+    for short in ["", "  ", "ab", "é🙂", "İA"] {
+        assert!(normalize_library_search(Some(short)).is_err(), "{short:?}");
+    }
+    assert_eq!(
+        normalize_library_search(Some("  ÄBC  ")).unwrap(),
+        Some("äbc".into())
+    );
+    assert_eq!(
+        normalize_library_search(Some("a_%")).unwrap(),
+        Some("a_%".into())
+    );
+}
+
+#[test]
 fn large_catalog_uses_hash_seeks_and_path_cursors() {
     let database = format!(
         "file:library-catalog-{}?mode=memory&cache=shared",
@@ -205,6 +221,19 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         .unwrap();
     assert_eq!(filtered.entries.len(), 1);
     assert!(filtered.next_cursor.is_none());
+    // Filename matching does not include the parent directory or content hash.
+    for search in ["synthetic-catalog", "3030303030303030", "sample_%"] {
+        let page = store
+            .query_active_local_share_entries(&MetadataSharedFileQuery {
+                limit: 2,
+                search: Some(search.into()),
+                count_total: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 0, "{search}");
+        assert!(page.entries.is_empty(), "{search}");
+    }
     // A one-content mutation must not rewrite the other 99,999 index rows.
     {
         let conn = store.connection().unwrap();

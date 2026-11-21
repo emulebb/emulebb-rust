@@ -72,7 +72,9 @@ pub use library_read_store::{
     LIBRARY_READ_MAX_BYTES, MetadataLibraryLocation, MetadataLibraryLocationPage,
 };
 mod local_catalog;
-pub use local_catalog::{MetadataPartialOffer, MetadataVerifiedShareBatch};
+pub use local_catalog::{
+    MetadataPartialOffer, MetadataVerifiedShareBatch, normalize_library_search,
+};
 mod upload_read_store;
 pub use upload_read_store::MetadataUploadFileSummary;
 mod local_file_store;

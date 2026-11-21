@@ -1008,7 +1008,11 @@ test("top refresh preserves the shared-files query, page, and selection", async 
   await page.goto("/");
   await page.getByRole("link", { name: "Shared Files" }).click();
   const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
-  await panel.getByLabel("Search name, path, or hash").fill("Shared Sample");
+  const filenameSearch = panel.getByLabel("Search filename");
+  await filenameSearch.fill("é🙂");
+  await expect(panel.getByRole("button", { name: "Search" })).toBeDisabled();
+  await expect(panel.getByText("Enter at least 3 characters to search filenames.")).toBeVisible();
+  await filenameSearch.fill("Shared Sample");
   await panel.getByRole("button", { name: "Search" }).click();
   await panel.getByLabel("Priority").selectOption("normal");
   await panel.getByRole("button", { name: "Next" }).click();
