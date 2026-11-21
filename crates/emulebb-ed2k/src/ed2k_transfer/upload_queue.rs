@@ -1777,6 +1777,19 @@ impl Ed2kUploadQueueState {
         })
     }
 
+    pub(super) fn peer_ipv4_addresses(&self) -> Vec<std::net::Ipv4Addr> {
+        self.sessions
+            .keys()
+            .filter_map(|key| {
+                if let IpAddr::V4(ip) = key.peer.ip {
+                    Some(ip)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn snapshot_matching(
         &mut self,
         now: Instant,
@@ -1818,6 +1831,19 @@ impl Ed2kUploadQueueState {
         session: &Ed2kUploadSessionEntry,
         now: Instant,
     ) -> Ed2kUploadQueueSnapshotEntry {
+        let rank =
+            (session.phase == Ed2kUploadSessionPhase::Waiting).then(|| self.rank_for_key(key, now));
+        self.project_snapshot_entry(key, session, now, rank, true)
+    }
+
+    fn project_snapshot_entry(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        session: &Ed2kUploadSessionEntry,
+        now: Instant,
+        queue_rank: Option<u16>,
+        include_part_status: bool,
+    ) -> Ed2kUploadQueueSnapshotEntry {
         Ed2kUploadQueueSnapshotEntry {
             id: session.public_id,
             ip: key.peer.ip,
@@ -1831,8 +1857,7 @@ impl Ed2kUploadQueueState {
             file_hash: key.file_hash.clone(),
             connected: session.connected,
             phase: phase_snapshot(session.phase),
-            queue_rank: (session.phase == Ed2kUploadSessionPhase::Waiting)
-                .then(|| self.rank_for_key(key, now)),
+            queue_rank,
             wait_time_ms: now
                 .saturating_duration_since(session.queued_at)
                 .as_millis()
@@ -1849,7 +1874,11 @@ impl Ed2kUploadQueueState {
             low_id_divisor: score::low_id_divisor_value(session.score_modifiers.low_id),
             old_client_penalty_applied: session.score_modifiers.old_client,
             client_software: key.peer.client_software.clone(),
-            requester_part_status: session.requester_part_status.clone(),
+            requester_part_status: if include_part_status {
+                session.requester_part_status.clone()
+            } else {
+                None
+            },
             requester_complete_source_count: session.requester_complete_source_count,
         }
     }
@@ -3183,7 +3212,9 @@ fn upload_payload_send_chunk_len(packet_len: usize, limit_bytes_per_sec: u64) ->
 }
 
 mod admission;
+mod page;
 pub(super) use admission::hard_queue_limit;
+pub use page::{Ed2kUploadQueuePage, Ed2kUploadQueuePageError};
 mod helpers;
 mod rate_meter;
 mod score;

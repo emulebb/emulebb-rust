@@ -73,6 +73,8 @@ pub use library_read_store::{
 };
 mod local_catalog;
 pub use local_catalog::{MetadataPartialOffer, MetadataVerifiedShareBatch};
+mod upload_read_store;
+pub use upload_read_store::MetadataUploadFileSummary;
 mod local_file_store;
 mod local_ingest_store;
 pub use local_ingest_store::{

@@ -333,7 +333,7 @@ async fn query_routes_use_canonical_error_envelope() {
     let allowed_query = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/upload-queue?includeScoreBreakdown=true")
+                .uri("/api/v1/upload-queue?countTotal=true")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -345,7 +345,7 @@ async fn query_routes_use_canonical_error_envelope() {
     let decoded_allowed_query = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/upload-queue?includeScore%42reakdown=true")
+                .uri("/api/v1/upload-queue?count%54otal=true")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -664,8 +664,8 @@ async fn boolean_query_values_use_canonical_validation_messages() {
         ),
         (
             "GET",
-            "/api/v1/upload-queue?includeScoreBreakdown=yes",
-            "includeScoreBreakdown must be true or false",
+            "/api/v1/upload-queue?countTotal=yes",
+            "countTotal must be true or false",
         ),
     ];
     for (method, uri, expected_message) in cases {
@@ -690,7 +690,7 @@ async fn boolean_query_values_use_canonical_validation_messages() {
     let accepted = test_router()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/upload-queue?includeScoreBreakdown=false")
+                .uri("/api/v1/upload-queue?countTotal=false")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),

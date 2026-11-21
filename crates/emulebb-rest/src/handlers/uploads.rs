@@ -1,7 +1,4 @@
 //! Upload and upload-queue REST handlers (`/uploads`, `/upload-queue`).
-//!
-//! Extracted verbatim from `lib.rs` during the maintainability restructuring;
-//! behavior is unchanged.
 
 use axum::{
     extract::{Path, RawQuery, State},
@@ -31,7 +28,7 @@ fn upload_queue_entry(upload: Upload) -> UploadQueueEntry {
     }
 }
 
-/// Drops `scoreBreakdown` from compact list endpoints unless the caller opts in.
+/// Compact lists fetch score evidence through the detail resource.
 pub(crate) fn without_score_breakdown(mut uploads: Vec<Upload>) -> Vec<Upload> {
     for upload in &mut uploads {
         upload.score_breakdown = None;
@@ -58,18 +55,68 @@ pub(crate) async fn upload_queue(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    let include_score_breakdown = query.include_score_breakdown.unwrap_or(false);
-    let items = state.core.upload_queue().await;
-    let items = if include_score_breakdown {
-        items
-    } else {
-        without_score_breakdown(items)
+    let limit = query.limit.unwrap_or(100);
+    if !(1..=200).contains(&limit) {
+        return out_of_range_response("limit", 1, 200);
+    }
+    let after = match query
+        .cursor
+        .as_deref()
+        .map(|value| super::resource::decode_cursor(value, "upload-queue"))
+        .transpose()
+    {
+        Ok(Some(value)) => match uuid::Uuid::try_parse(&value)
+            .ok()
+            .filter(|id| id.to_string() == value)
+        {
+            Some(id) => Some(id),
+            None => return super::resource::invalid("cursor is invalid for this collection"),
+        },
+        Ok(None) => None,
+        Err(error) => return *error,
     };
-    let items = items
-        .into_iter()
-        .map(upload_queue_entry)
-        .collect::<Vec<_>>();
-    api_collection_page(items, query.page()).into_response()
+    let page = match state
+        .core
+        .upload_queue_page(after, limit, query.count_total.unwrap_or(false))
+        .await
+    {
+        Ok(page) => page,
+        Err(error)
+            if error.downcast_ref::<emulebb_core::Ed2kUploadQueuePageError>()
+                == Some(&emulebb_core::Ed2kUploadQueuePageError::CursorExpired) =>
+        {
+            return api_error(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                "upload queue cursor expired; refresh from the first page",
+            )
+            .into_response();
+        }
+        Err(error) => return super::persistence::persistence_error(error),
+    };
+    let next = page
+        .next_after
+        .map(|id| super::resource::encode_cursor("upload-queue", &id.to_string()));
+    let more = page.has_more;
+    let total = page.total;
+    let encoded = page
+        .try_project(emulebb_core::UPLOAD_QUEUE_PAGE_BYTES + 4096, |page| {
+            let rows = page
+                .uploads
+                .into_iter()
+                .map(upload_queue_entry)
+                .collect::<Vec<_>>();
+            Ok(super::resource::page_document(rows, next, more, total))
+        })
+        .and_then(|page| page.serialize_json());
+    match encoded {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            axum::body::Body::from(axum::body::Bytes::from_owner(bytes)),
+        )
+            .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
+    }
 }
 
 pub(crate) async fn upload_queue_client(

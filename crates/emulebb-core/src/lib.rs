@@ -57,7 +57,7 @@ use emulebb_ed2k::{
         ED2K_CALLBACK_TICKET_MAX_LIFETIME, ED2K_PART_SIZE, Ed2kCallbackReservation,
         Ed2kCallbackTicketRequest, Ed2kMediaMetadata, Ed2kResumeManifest, Ed2kSharedEntry,
         Ed2kSharedPublishDemandSignal, Ed2kSourceConnectionAdmission, Ed2kSourceHint,
-        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot,
+        Ed2kTransferRuntime,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::{
@@ -216,6 +216,8 @@ mod transfer_control_api;
 mod transfer_create_api;
 mod transfer_state_api;
 mod upload_api;
+pub use emulebb_ed2k::ed2k_transfer::Ed2kUploadQueuePageError;
+pub use upload_api::{UPLOAD_QUEUE_PAGE_BYTES, UploadQueuePage};
 mod upload_view;
 mod views;
 pub mod vpn_guard;

@@ -14,6 +14,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
     Waiting(Vec<JobId>),
+    UploadFile([u8; 16]),
     Scheduling(
         Arc<transfer::Ed2kTransferRuntime>,
         emulebb_metadata::JobToken,
@@ -54,6 +55,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Waiting(RetainedRead<u64>),
+    UploadFile(Option<RetainedRead<emulebb_metadata::MetadataUploadFileSummary>>),
     Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
@@ -88,6 +90,7 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
+            JobRead::UploadFile(_) => 256 * 1024,
             JobRead::Waiting(ref ids) => ids
                 .capacity()
                 .checked_mul(std::mem::size_of::<JobId>())
@@ -185,6 +188,11 @@ impl LocalMutationRegistry {
                 }),
                 JobRead::Waiting(ids) => metadata.waiting_download_count(&ids).map(|value| {
                     JobReadResult::Waiting(RetainedRead::new(value, capacity.take_result()))
+                }),
+                JobRead::UploadFile(hash) => metadata.upload_file_summary(&hash).map(|value| {
+                    JobReadResult::UploadFile(
+                        value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                    )
                 }),
                 JobRead::TransferCounts => metadata.transfer_counts().map(|value| {
                     JobReadResult::TransferCounts(RetainedRead::new(value, capacity.take_result()))
@@ -374,6 +382,21 @@ impl LocalMutationRegistry {
     }
 }
 impl transfer::Ed2kTransferRuntime {
+    /// Cached upload captions through the existing bounded metadata worker.
+    /// Retained results own their temporary allowance; no manifest is hydrated.
+    pub async fn upload_file_summary(
+        &self,
+        hash: &str,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataUploadFileSummary>>> {
+        let hash: emulebb_kad_proto::Ed2kHash = hash.parse()?;
+        let JobReadResult::UploadFile(summary) =
+            self.read_job_metadata(JobRead::UploadFile(hash.0)).await?
+        else {
+            unreachable!()
+        };
+        Ok(summary)
+    }
+
     /// Classify only an already cached/current execution. The shared worker
     /// owns its temporary frequency buffers; cancellation cannot release that
     /// credit before the worker and its resident read loan actually finish.

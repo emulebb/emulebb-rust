@@ -138,6 +138,7 @@ mod kad_publish_candidates;
 mod kad_publish_runtime;
 mod search_servers;
 mod transfer_lifecycle;
+mod upload_pages;
 
 fn test_server_connect_plan_sender() -> tokio::sync::watch::Sender<Ed2kServerConnectPlan> {
     tokio::sync::watch::channel(Ed2kServerConnectPlan::new(

@@ -1263,9 +1263,7 @@ pub struct Upload {
     pub requested_parts_obtained: u32,
     pub requested_parts_total: u32,
     pub requested_parts_progress_text: String,
-    /// Optional per-client upload score diagnostics. Like master, attached only
-    /// when the caller opts in (single-client lookups always; `/upload-queue`
-    /// list only with `includeScoreBreakdown=true`; `/uploads` list never).
+    /// Per-client upload score diagnostics, fetched through detail resources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_breakdown: Option<UploadScoreBreakdown>,
     // Internal-only: queue position is not in the `Upload` contract (it belongs

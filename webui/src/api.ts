@@ -162,7 +162,7 @@ export type DownloadDetail = DownloadSummary & {
 
 export type CursorPage<T> = {
   data: T[];
-  meta: { apiVersion: string; nextCursor: string | null; hasMore: boolean };
+  meta: { apiVersion: string; nextCursor: string | null; hasMore: boolean; total?: number };
 };
 
 export type LibraryTag = { name: string };
