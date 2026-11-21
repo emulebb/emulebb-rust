@@ -276,7 +276,11 @@ impl EmulebbCore {
                 if let Some(remaining_bytes) = remaining_bytes {
                     match core.prepare_download_sources(&guard, &shutdown).await {
                         Ok(crate::download_preparation::DownloadPreparation::Waiting) => None,
-                        Ok(source) => Some(ReadyDownload { guard, source, remaining_bytes, rare: false }),
+                        Ok(source) => {
+                            let ready = ReadyDownload { guard, source, remaining_bytes, rare: false };
+                            ready.guard.mark_ready(ready.deadline());
+                            Some(ready)
+                        },
                         Err(error) => {
                             tracing::warn!(job_id = %token.job_id, %error, "download source preparation deferred");
                             None

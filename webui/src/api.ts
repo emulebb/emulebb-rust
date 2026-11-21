@@ -138,6 +138,8 @@ export type DownloadEventRuntimeDiagnostics = {
   [key: string]: unknown;
 };
 
+export type DownloadWaitingReason = "network" | "sources" | "resources";
+export type DownloadState = "queued" | "waiting-metadata" | "downloading" | "stopping" | "stopped" | "verifying" | "delivering" | "completed" | "removing" | "failed";
 export type DownloadSummary = {
   id: string;
   hash: string;
@@ -145,12 +147,12 @@ export type DownloadSummary = {
   sizeBytes: number | null;
   progress: number | null;
   intent: "started" | "stopped";
-  state: "queued" | "waiting-metadata" | "downloading" | "stopping" | "stopped" | "verifying" | "delivering" | "completed" | "removing" | "failed";
   category: string | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
-};
+} & ({ state: "queued"; waitingReason: DownloadWaitingReason }
+  | { state: Exclude<DownloadState, "queued">; waitingReason: null });
 
 export type DownloadDetail = DownloadSummary & {
   payloadVerified: boolean;

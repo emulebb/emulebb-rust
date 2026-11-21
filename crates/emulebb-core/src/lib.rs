@@ -161,7 +161,7 @@ use download_attempts::DownloadAttemptControl;
 pub use downloads::{
     DownloadCommentPage, DownloadCounts, DownloadDelivery, DownloadDeliveryOwnership,
     DownloadDeliveryState, DownloadDetail, DownloadFailure, DownloadPage, DownloadPart,
-    DownloadPartPage, DownloadSourcePage, DownloadState, DownloadSummary,
+    DownloadPartPage, DownloadSourcePage, DownloadState, DownloadSummary, DownloadWaitingReason,
 };
 mod download_source_registry;
 mod download_task_supervisor;

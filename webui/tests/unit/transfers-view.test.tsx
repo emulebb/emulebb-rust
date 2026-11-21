@@ -9,6 +9,17 @@ afterEach(() => {
 });
 
 describe("TransfersView", () => {
+  it.each([
+    ["network", "Waiting for network"],
+    ["sources", "Waiting for useful sources"],
+    ["resources", "Waiting for resources"],
+  ] as const)("shows the %s waiting reason from the canonical row", async (waitingReason, label) => {
+    const client = new RestClient();
+    vi.spyOn(client, "getPage").mockResolvedValue({ data: [{ ...job("1", "Sample.bin"), state: "queued", waitingReason }], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
+    render(<TransfersView categories={[]} client={client} run={async (operation) => { await operation(); }} refreshGeneration={0} />);
+    expect(await screen.findByText(label)).toBeVisible();
+  });
+
   it("replaces the current page and preserves its cursor on refresh", async () => {
     const client = new RestClient();
     const getPage = vi.spyOn(client, "getPage").mockImplementation(async (path) => ({
@@ -144,5 +155,5 @@ describe("TransfersView", () => {
 
 function job(id: string, name: string): DownloadSummary {
   return { id, name, hash: "00112233445566778899aabbccddeeff", sizeBytes: 1, progress: 0,
-    intent: "started", state: "queued", category: null, createdAt: 1, updatedAt: 1, completedAt: null };
+    intent: "started", state: "queued", waitingReason: "sources", category: null, createdAt: 1, updatedAt: 1, completedAt: null };
 }

@@ -75,7 +75,10 @@ impl EmulebbCore {
         let mut verifying = self.ed2k_transfers.verifying_downloads().await;
         verifying.extend(self.download_attempts.verifications());
         let running = self.download_attempts.snapshot();
+        let transport_available = self.download_transport_available();
         let state = self.state.lock().await;
+        let waiting =
+            WaitingObservation::capture(transport_available, &state, &self.download_attempts);
         self.persistence_owner.check_coherent_state()?;
         let category = detail
             .job
@@ -134,6 +137,7 @@ impl EmulebbCore {
                     category.map(|value| value.name.as_str()),
                     &running,
                     &verifying,
+                    &waiting,
                 ),
                 delivery: DownloadDelivery {
                     state: delivery_state,

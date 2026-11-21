@@ -116,7 +116,7 @@ const secondSharedFile = {
 };
 
 export function mockDownloadFixture() {
-  return [{ id: "1", hash: transferHash.toLowerCase(), name: "Sample Transfer.bin", state: "downloading" as const,
+  return [{ id: "1", hash: transferHash.toLowerCase(), name: "Sample Transfer.bin", state: "downloading" as const, waitingReason: null,
     intent: "started" as const, progress: 0.25, sizeBytes: 4096, category: "Sample-Category", createdAt: 1, updatedAt: 1, completedAt: null }];
 }
 

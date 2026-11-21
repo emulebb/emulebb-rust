@@ -74,7 +74,12 @@ struct Entry {
     wake: Arc<tokio::sync::Notify>,
     selected_at: Instant,
     rare_until: Option<Instant>,
+    ready: Option<ReadyObservation>,
     yielding: bool,
+}
+
+struct ReadyObservation {
+    deadline: Option<tokio::time::Instant>,
 }
 
 pub(crate) struct DisplacementOwner {
@@ -102,6 +107,24 @@ pub(crate) struct DownloadAttemptGuard {
     wake: Arc<tokio::sync::Notify>,
 }
 impl DownloadAttemptControl {
+    /// Only a live, useful preparation may explain a queued resource wait.
+    pub(crate) fn ready_preparations(&self) -> Vec<JobToken> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let now = tokio::time::Instant::now();
+        state
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.kind == Kind::Preparation
+                    && !entry.cancel.is_cancelled()
+                    && entry
+                        .ready
+                        .as_ref()
+                        .is_some_and(|ready| ready.deadline.is_none_or(|deadline| deadline > now))
+            })
+            .map(|entry| entry.token)
+            .collect()
+    }
     /// Coarse observation only; draining owners continue to consume capacity.
     pub(crate) fn resource_stats(&self) -> AttemptStats {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -237,6 +260,7 @@ impl DownloadAttemptControl {
                 wake: Arc::clone(&wake),
                 selected_at: Instant::now(),
                 rare_until: None,
+                ready: None,
                 yielding: false,
             },
         );
@@ -471,6 +495,18 @@ impl Drop for DownloadVerificationGuard {
     }
 }
 impl DownloadAttemptGuard {
+    /// Publish existing preparation evidence, never a new waiter or admission.
+    pub(crate) fn mark_ready(&self, deadline: Option<tokio::time::Instant>) {
+        let mut state = self.control.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = state.entries.get_mut(&self.token.job_id).filter(|entry| {
+            entry.nonce == self.nonce
+                && entry.token == self.token
+                && entry.kind == Kind::Preparation
+                && !entry.cancel.is_cancelled()
+        }) {
+            entry.ready = Some(ReadyObservation { deadline });
+        }
+    }
     /// Avoid spending a peer reask on readiness the current cohort cannot admit.
     /// Native reservations and promotion still recheck after the network wait.
     pub(crate) fn preparation_has_headroom(&self, construction_starts: usize) -> bool {
@@ -565,6 +601,7 @@ impl DownloadAttemptGuard {
         let active = !entry.cancel.is_cancelled();
         entry.token = token;
         self.token = token;
+        entry.ready = None;
         active
     }
     pub(crate) fn cancellation(&self) -> CancellationToken {

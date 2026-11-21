@@ -14,6 +14,7 @@ pub(crate) struct DownloadCreateCommand {
     pub runtime: Arc<Ed2kTransferRuntime>,
     pub attempts: Arc<DownloadAttemptControl>,
     pub events: Arc<crate::download_events::DownloadEvents>,
+    pub transport_available: bool,
 }
 
 impl DownloadCreateCommand {
@@ -105,6 +106,11 @@ pub(super) async fn process(
     let mut verifying = command.runtime.verifying_downloads().await;
     verifying.extend(command.attempts.verifications());
     let state = state.lock().await;
+    let waiting = crate::downloads::WaitingObservation::capture(
+        command.transport_available,
+        &state,
+        &command.attempts,
+    );
     let category = admitted
         .job
         .category_id
@@ -127,6 +133,7 @@ pub(super) async fn process(
                 category.map(|category| category.name.as_str()),
                 &running,
                 &verifying,
+                &waiting,
             ))
         })
         .context("job admission completed; response projection failed")?;

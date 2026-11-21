@@ -43,6 +43,32 @@ fn resource_observation_preserves_draining_owners_and_separates_preparation() {
     assert!(stats.selected.is_empty());
 }
 
+#[tokio::test(start_paused = true)]
+async fn preparation_evidence_expires_and_never_survives_rebind_cancel_or_drop() {
+    let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));
+    let mut guard = control.try_prepare(token(1, 1), hash(1)).unwrap();
+    assert!(control.ready_preparations().is_empty());
+    guard.mark_ready(Some(tokio::time::Instant::now() + Duration::from_secs(1)));
+    assert_eq!(control.ready_preparations(), vec![token(1, 1)]);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(control.ready_preparations().is_empty());
+    guard.mark_ready(None);
+    assert!(guard.rebind(token(1, 2)));
+    assert!(control.ready_preparations().is_empty());
+    guard.mark_ready(None);
+    assert_eq!(control.ready_preparations(), vec![token(1, 2)]);
+    control.cancel_all();
+    guard.mark_ready(None);
+    assert!(control.ready_preparations().is_empty());
+    drop(guard);
+    assert!(control.ready_preparations().is_empty());
+    let next = control.try_prepare(token(1, 3), hash(1)).unwrap();
+    assert!(control.ready_preparations().is_empty());
+    next.mark_ready(None);
+    assert!(next.promote());
+    assert!(control.ready_preparations().is_empty());
+}
+
 #[test]
 fn displacement_keeps_capacity_owned_and_protects_fresh_readiness() {
     let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));

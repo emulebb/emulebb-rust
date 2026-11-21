@@ -350,7 +350,7 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
       <TableScroll label="Transfers"><table class="table table-vcenter card-table"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
         {(page?.data ?? []).map((job) => <tr key={job.id} class={selectedId === job.id ? "selected-row" : ""}>
           <td><button type="button" class="link-button" onClick={() => setSelectedId(job.id)}>{job.name}</button></td>
-          <td><StatusPill value={job.state} /></td><td>{formatProgress(job)}</td>
+          <td><DownloadStateLabel download={job} /></td><td>{formatProgress(job)}</td>
           <td><select class="form-select" aria-label={`Category for ${job.name}`} value={job.category ?? ""} onInput={(event) => void props.run(() => props.client.patch(`downloads/${job.id}`, { category: event.currentTarget.value || null }), "Category updated")}>
             <option value="">Uncategorized</option>{props.categories.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
           </select></td>
@@ -2872,6 +2872,11 @@ export function LogsView(props: { logs: LogRecord[]; client: RestClient; run: Ru
   );
 }
 
+function DownloadStateLabel({ download }: { download: DownloadSummary }) {
+  const labels = { network: "Waiting for network", sources: "Waiting for useful sources", resources: "Waiting for resources" };
+  return <span><StatusPill value={download.state} />{download.state === "queued" && <small class="text-muted"> {labels[download.waitingReason]}</small>}</span>;
+}
+
 function CompactTransferList(props: { transfers: DownloadSummary[] }) {
   if (props.transfers.length === 0) {
     return <p class="empty">No transfers.</p>;
@@ -2881,7 +2886,7 @@ function CompactTransferList(props: { transfers: DownloadSummary[] }) {
       {props.transfers.map((transfer) => (
         <div class="compact-row" key={transfer.id}>
           <span>{transfer.name ?? transfer.hash}</span>
-          <StatusPill value={transfer.state ?? "unknown"} />
+          <DownloadStateLabel download={transfer} />
           <strong>{formatProgress(transfer)}</strong>
         </div>
       ))}
