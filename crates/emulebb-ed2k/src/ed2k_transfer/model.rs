@@ -244,6 +244,8 @@ pub(crate) struct Ed2kCallbackPeer {
 /// One file to negotiate after an expected callback peer is admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kCallbackDownload {
+    /// Waiting preparation identity; active callback executions have no pending decision.
+    pub preparation_id: Option<super::Ed2kCallbackPreparationId>,
     /// Exact execution captured when the callback ticket is reserved.
     pub job_token: emulebb_metadata::JobToken,
     /// Binary ED2K file hash; callback admission never accepts an invalid hex form.

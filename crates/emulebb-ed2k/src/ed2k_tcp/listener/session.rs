@@ -683,26 +683,56 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             "failed to read callback session work for {peer_addr}: {error:?}"
                         )
                     })? {
+                        let mut pending = transfer_runtime.claim_callback_preparation(&download)?;
+                        if download.preparation_id.is_some() && pending.is_none() {
+                            callback_session.acknowledge_download(&download).map_err(|error|
+                                anyhow::anyhow!("failed to retire cancelled callback work: {error:?}"))?;
+                            continue;
+                        }
+                        let cancellation = pending.as_ref().map(|owner| owner.cancellation())
+                            .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+                        let probe_timeout = pending.as_ref().map_or(ED2K_CONNECTION_IDLE_TIMEOUT,
+                            |owner| owner.deadline().saturating_duration_since(tokio::time::Instant::now())
+                                .min(ED2K_CONNECTION_IDLE_TIMEOUT));
                         let file_hash_hex = download.file_hash.to_string();
                         debug!(
                             "claimed ticketed inbound ED2K callback download file_hash={} client_id={} peer={peer_addr} a4af_file_index={file_index}",
                             download.file_hash, hello_profile.identity.client_id
                         );
+                        let attempt = async {
                         let preparation = probe_accepted_file(AcceptedFileProbeOptions {
                             dispatcher: &mut transport, peer_addr, hello_identity: response_identity,
                             secure_ident: secure_ident.as_ref(), runtime: transfer_runtime,
                             job_token: download.job_token, file_hash: download.file_hash,
                             file_size: download.file_size, profile: hello_profile.clone(),
-                            connection_state: connection_state.clone(), timeout: ED2K_CONNECTION_IDLE_TIMEOUT,
+                            connection_state: connection_state.clone(), timeout: probe_timeout,
                         }).await?;
                         let outcome = match preparation {
-                            AcceptedFileProbeOutcome::Deferred => break,
-                            AcceptedFileProbeOutcome::Incomplete => Ed2kPeerDownloadOutcome::AcceptedButIncomplete,
+                            AcceptedFileProbeOutcome::Deferred => {
+                                if let Some(owner) = pending.as_mut() { owner.publish(crate::ed2k_transfer::Ed2kCallbackPreparationOutcome::Deferred)?; }
+                                return Ok::<_, anyhow::Error>(None);
+                            }
+                            AcceptedFileProbeOutcome::Incomplete => {
+                                if let Some(owner) = pending.as_mut() { owner.publish(crate::ed2k_transfer::Ed2kCallbackPreparationOutcome::Incomplete)?; }
+                                Ed2kPeerDownloadOutcome::AcceptedButIncomplete
+                            }
                             AcceptedFileProbeOutcome::FileNotFound(connection) => {
+                                if let Some(owner) = pending.as_mut() { owner.publish(crate::ed2k_transfer::Ed2kCallbackPreparationOutcome::FileNotFound)?; }
                                 connection_state = *connection;
                                 Ed2kPeerDownloadOutcome::FileNotFound
                             }
                             AcceptedFileProbeOutcome::Available(prepared) => {
+                                let execution_token = if let Some(owner) = pending.as_mut() {
+                                    owner.publish(crate::ed2k_transfer::Ed2kCallbackPreparationOutcome::Available(prepared.availability().clone()))?;
+                                    match owner.admit(transfer_runtime).await? {
+                                        Some(token) => token,
+                                        None => {
+                                            let (_, connection) = prepared.into_session(false);
+                                            connection_state = connection;
+                                            return Ok(Some(Ed2kPeerDownloadOutcome::NoNeededParts));
+                                        }
+                                    }
+                                } else { download.job_token };
                                 debug!(peer = %peer_addr, parts = prepared.availability().available_parts.len(),
                                     "prepared ticketed callback availability");
                                 let (prepared_state, connection) = prepared.into_session(true);
@@ -714,7 +744,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             secure_ident: secure_ident.as_ref(),
                             transfer_runtime,
                             file_hash: download.file_hash,
-                            job_token: download.job_token,
+                            job_token: execution_token,
                             file_hash_hex: &file_hash_hex,
                             timeout: ED2K_CONNECTION_IDLE_TIMEOUT,
                             send_initial_requests: true,
@@ -735,11 +765,20 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         .await?
                             }
                         };
+                        Ok(Some(outcome))
+                        };
+                        let outcome = tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => anyhow::bail!("callback preparation cancelled"),
+                            result = attempt => result?,
+                        };
+                        let Some(outcome) = outcome else { break; };
                         callback_session.acknowledge_download(&download).map_err(|error| {
                             anyhow::anyhow!(
                                 "failed to acknowledge callback session work for {peer_addr}: {error:?}"
                             )
                         })?;
+                        if let Some(owner) = pending.take() { owner.complete(outcome); }
                         file_index += 1;
                         if matches!(
                             outcome,

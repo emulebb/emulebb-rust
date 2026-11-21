@@ -1240,6 +1240,7 @@ impl EmulebbCore {
                     continue;
                 }
                 let callback_download = Ed2kCallbackDownload {
+                    preparation_id: None,
                     job_token,
                     file_hash,
                     display_name: transfer.name.clone(),
@@ -2963,6 +2964,7 @@ impl EmulebbCore {
             };
             let dest = SocketAddr::new(IpAddr::V4(source.ip), source_udp_port);
             let callback_download = Ed2kCallbackDownload {
+                preparation_id: None,
                 job_token: transfer.job_token(),
                 file_hash,
                 display_name: transfer.name.clone(),

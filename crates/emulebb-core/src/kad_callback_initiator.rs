@@ -357,6 +357,7 @@ impl EmulebbCore {
             let buddy_endpoint = normalized_buddy_endpoint(source);
             let source_peer = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
             let callback_download = Ed2kCallbackDownload {
+                preparation_id: None,
                 job_token: transfer.job_token(),
                 file_hash,
                 display_name: transfer.name.clone(),
