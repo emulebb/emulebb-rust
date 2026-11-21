@@ -92,6 +92,15 @@ mod tests {
                 }],
             )
             .unwrap();
+        store
+            .publish_file_upload_captures(&[crate::MetadataFileUploadCapture {
+                file_hash: [0x11; 16],
+                session_uploaded_bytes: 1,
+                session_upload_requests: 1,
+                session_accepted_uploads: 1,
+                ..Default::default()
+            }])
+            .unwrap();
         let maximum = store.file_upload_statistics(&hash).unwrap().unwrap();
         assert_eq!(maximum.lifetime.uploaded_bytes, i64::MAX as u64);
         assert_eq!(maximum.lifetime.upload_requests, i64::MAX as u64);

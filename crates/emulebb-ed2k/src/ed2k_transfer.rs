@@ -50,6 +50,7 @@ pub use completed_verification::CompletedOutputVerification;
 mod corruption_blackbox;
 mod credit_ledger;
 mod file_accounting;
+mod file_statistics_publication;
 pub use file_accounting::Ed2kFileUploadStatistics;
 mod deliver;
 mod delivery_tombstone;

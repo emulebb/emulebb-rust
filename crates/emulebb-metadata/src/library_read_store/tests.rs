@@ -149,6 +149,13 @@ fn passive_knowledge_requires_client_acceptance_before_library_policy_and_sessio
         .unwrap();
     store.set_library_file_tag(&hash, "Group-1", true).unwrap();
     store.apply_credit_deltas(&[], &[demand]).unwrap();
+    store
+        .publish_file_upload_captures(&[crate::MetadataFileUploadCapture {
+            file_hash: [0x55; 16],
+            session_upload_requests: 1,
+            ..Default::default()
+        }])
+        .unwrap();
     let client = store.file_upload_statistics(&hash).unwrap().unwrap();
     assert_eq!(client.lifetime.upload_requests, 2);
     assert_eq!(client.session_upload_requests, 1);

@@ -393,8 +393,8 @@ async fn session_statistics_survive_removal_rebuild_and_checkpoint_but_reset_on_
     runtime.flush_parked_credit().await;
     assert_eq!(runtime.file_upload_statistics(&hash), Some(expected));
     let committed = runtime
-        .metadata
-        .file_upload_statistics(&hash.to_string())
+        .library_file_statistics(&hash.to_string())
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -406,6 +406,7 @@ async fn session_statistics_survive_removal_rebuild_and_checkpoint_but_reset_on_
         (17, 2, 1)
     );
     assert_eq!(committed.lifetime, expected.lifetime);
+    drop(committed);
     runtime.shared_catalog().write().await.retain(|_| false);
     runtime.shared_catalog().write().await.push(stale);
     assert_eq!(runtime.file_upload_statistics(&hash), Some(expected));

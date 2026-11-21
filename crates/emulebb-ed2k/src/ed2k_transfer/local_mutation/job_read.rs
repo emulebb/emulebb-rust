@@ -15,6 +15,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Counts,
     Waiting(Vec<JobId>),
     UploadFile([u8; 16]),
+    LibraryStatistics([u8; 16]),
     LibraryLocations([u8; 16], i64, usize),
     Scheduling(
         Arc<transfer::Ed2kTransferRuntime>,
@@ -57,6 +58,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Waiting(RetainedRead<u64>),
     UploadFile(Option<RetainedRead<emulebb_metadata::MetadataUploadFileSummary>>),
+    LibraryStatistics(Option<RetainedRead<emulebb_metadata::MetadataFileUploadStatistics>>),
     LibraryLocations(Option<RetainedRead<emulebb_metadata::MetadataLibraryLocationPage>>),
     Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
@@ -93,6 +95,7 @@ impl LocalMutationRegistry {
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
             JobRead::UploadFile(_) => 256 * 1024,
+            JobRead::LibraryStatistics(_) => 64 * 1024,
             JobRead::LibraryLocations(_, after, limit) => {
                 ensure!(
                     after >= 0 && (1..=200).contains(&limit),
@@ -169,6 +172,7 @@ impl LocalMutationRegistry {
                 (Self::reserve_unit(&mut state, charge, false, false)?, None)
             };
         let metadata = runtime.metadata.clone();
+        let accounting = runtime.parked_credit_flush_parts();
         let cache = Arc::clone(&runtime.manifest_cache);
         let content_locks = Arc::clone(&runtime.content_locks);
         let categories = Arc::clone(&runtime.category_assignment_gate);
@@ -203,6 +207,16 @@ impl LocalMutationRegistry {
                         value.map(|value| RetainedRead::new(value, capacity.take_result())),
                     )
                 }),
+                JobRead::LibraryStatistics(hash) => {
+                    accounting.publish_file_statistics()?;
+                    metadata
+                        .file_upload_statistics(&hex::encode(hash))
+                        .map(|value| {
+                            JobReadResult::LibraryStatistics(
+                                value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                            )
+                        })
+                }
                 JobRead::LibraryLocations(hash, after, limit) => metadata
                     .library_locations(
                         &hex::encode(hash),
@@ -403,6 +417,22 @@ impl LocalMutationRegistry {
     }
 }
 impl transfer::Ed2kTransferRuntime {
+    /// Publish captured counters without checkpointing durable credit, then read
+    /// one scalar snapshot through the admitted owner. No execution is hydrated.
+    pub async fn library_file_statistics(
+        &self,
+        hash: &str,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataFileUploadStatistics>>> {
+        let hash: emulebb_kad_proto::Ed2kHash = hash.parse()?;
+        let JobReadResult::LibraryStatistics(stats) = self
+            .read_job_metadata(JobRead::LibraryStatistics(hash.0))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(stats)
+    }
+
     /// Read a bounded cached copy window through the admitted metadata owner.
     /// The result retains its allowance; no file or execution is opened.
     pub async fn library_locations(

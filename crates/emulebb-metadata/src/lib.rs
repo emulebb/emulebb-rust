@@ -34,7 +34,9 @@ pub use download_job_query::{
 mod download_browse_store;
 mod download_job_store;
 mod file_upload_statistics;
-pub use file_upload_statistics::MetadataFileUploadStatistics;
+pub use file_upload_statistics::{
+    FILE_UPLOAD_CAPTURE_BATCH, MetadataFileUploadCapture, MetadataFileUploadStatistics,
+};
 mod download_patch_store;
 pub use download_browse_store::{
     MetadataDownloadDetail, MetadataDownloadPart, MetadataDownloadPartPage,
