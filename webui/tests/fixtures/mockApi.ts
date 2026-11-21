@@ -10,8 +10,8 @@ export type RecordedApiRequest = {
 };
 
 const transferHash = "00112233445566778899AABBCCDDEEFF";
-const sharedFileHash = "FFEEDDCCBBAA99887766554433221100";
-const secondSharedFileHash = "0123456789ABCDEFFEDCBA9876543210";
+const sharedFileHash = "ffeeddccbbaa99887766554433221100";
+const secondSharedFileHash = "0123456789abcdeffedcba9876543210";
 const longSharedRoot =
   "\\\\?\\F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
 
@@ -156,6 +156,14 @@ export function installMockApi(requests: RecordedApiRequest[]) {
     if (request.method() === "GET" && path === "library/roots") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
         data: roots, meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
+      }) });
+      return;
+    }
+    if (request.method() === "GET" && /^library\/files\/[0-9a-f]{32}\/locations$/.test(path)) {
+      const next = url.searchParams.has("cursor");
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: [{ path: next ? "/library/Cached-Second.bin" : "/library/Cached-First.bin", present: !next }],
+        meta: { apiVersion: "v1", nextCursor: next ? null : "location-next", hasMore: !next }
       }) });
       return;
     }

@@ -311,7 +311,9 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
                 ));
             }
         }
-        ("GET", ["library", "files", hash, "tags"]) => validate_lowercase_md4_hex(hash, "hash")?,
+        ("GET", ["library", "files", hash, "tags" | "locations"]) => {
+            validate_lowercase_md4_hex(hash, "hash")?
+        }
         ("GET" | "PATCH" | "DELETE", ["categories", category]) => {
             let category = decode_path_parameter(category, "categoryName")?;
             if !emulebb_core::valid_category_name(&category) {
@@ -635,6 +637,7 @@ fn route_query_fields_for_parameterized(
         ("GET" | "PATCH" | "DELETE", ["library", "roots", _]) => Some(NONE),
         ("GET" | "DELETE", ["library", "tags", _]) => Some(NONE),
         ("GET", ["library", "files", _, "tags"]) => Some(LIBRARY_TAGS),
+        ("GET", ["library", "files", _, "locations"]) => Some(LIBRARY_TAGS),
         ("GET", ["categories", _])
         | ("PATCH", ["categories", _])
         | ("DELETE", ["categories", _])

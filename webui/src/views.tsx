@@ -2,6 +2,7 @@ import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { SearchObservations } from "./searchObservations";
 import { FileTags, LibraryTags } from "./libraryTags";
+import { LibraryLocations } from "./libraryLocations";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
 import {
   Ban,
@@ -1429,6 +1430,7 @@ export function SharedFilesView(props: { client: RestClient; run: RunFunction; r
         <h3>Comments</h3>
         <JsonPanel value={comments} />
       </section>
+      {selected && <LibraryLocations key={selected.hash} client={props.client} hash={selected.hash} refreshGeneration={props.refreshGeneration} />}
     </section>
   );
 }

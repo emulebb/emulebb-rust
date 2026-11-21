@@ -228,6 +228,108 @@ async fn shared_files_page_filename_search_and_publication_status() {
     );
 }
 
+#[tokio::test]
+async fn library_location_pages_preserve_cached_paths_when_sharing_is_disabled() {
+    let runtime_dir = unique_test_dir("library-location-pages");
+    let library = runtime_dir.join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    let core = Arc::new(
+        EmulebbCore::new(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            runtime_dir.join("transfers"),
+        )
+        .unwrap(),
+    );
+    core.create_library_root(&library.display().to_string(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut hash = String::new();
+    let mut paths = Vec::new();
+    for n in 1..=3 {
+        let path = library.join(format!("Copy-{n}.bin"));
+        std::fs::write(&path, b"sample identical content").unwrap();
+        let shared = core
+            .share_local_file(LocalShareCreate {
+                path: path.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        if hash.is_empty() {
+            hash = shared.hash;
+        } else {
+            assert_eq!(hash, shared.hash);
+        }
+        paths.push(path);
+    }
+    let policy = core
+        .set_library_sharing(&emulebb_core::LibrarySharingRequest {
+            enabled: false,
+            hashes: vec![hash.clone()],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        &policy.value()[0].outcome,
+        Ok(emulebb_core::LibraryFileChange::Changed)
+    ));
+    drop(policy);
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    let base = format!("/api/v1/library/files/{hash}/locations?limit=1");
+    let first = get_json(&app, &base).await;
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+    assert!(
+        first["data"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Copy-1.bin")
+    );
+    assert_eq!(first["data"][0]["present"], true);
+    assert_eq!(first["meta"]["hasMore"], true);
+    let cursor = utf8_percent_encode(
+        first["meta"]["nextCursor"].as_str().unwrap(),
+        NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let second = get_json(&app, &format!("{base}&cursor={cursor}")).await;
+    assert!(
+        second["data"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Copy-2.bin")
+    );
+    let cursor = utf8_percent_encode(
+        second["meta"]["nextCursor"].as_str().unwrap(),
+        NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let third = get_json(&app, &format!("{base}&cursor={cursor}")).await;
+    assert!(
+        third["data"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Copy-3.bin")
+    );
+    assert_eq!(third["meta"]["hasMore"], false);
+    assert!(third["meta"]["nextCursor"].is_null());
+    for path in paths {
+        std::fs::remove_file(path).unwrap();
+    }
+    let cached = get_json(&app, &base).await;
+    assert_eq!(
+        cached["data"], first["data"],
+        "reading cached evidence must not inspect the deleted file"
+    );
+}
+
 async fn get_json(app: &axum::Router, uri: &str) -> Value {
     let response = app
         .clone()

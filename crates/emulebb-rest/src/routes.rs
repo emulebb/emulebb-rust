@@ -85,6 +85,10 @@ pub fn router_with_shutdown(
             get(library_tag).delete(delete_library_tag),
         )
         .route("/api/v1/library/files/{hash}/tags", get(library_file_tags))
+        .route(
+            "/api/v1/library/files/{hash}/locations",
+            get(library_file_locations),
+        )
         .route("/api/v1/library/files/sharing", post(set_library_sharing))
         .route(
             "/api/v1/library/files/tags/add",

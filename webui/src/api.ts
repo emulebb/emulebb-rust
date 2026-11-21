@@ -426,6 +426,8 @@ export type Upload = {
   [key: string]: unknown;
 };
 
+export type LibraryLocation = { path: string; present: boolean };
+
 export type SharedFile = {
   hash: string;
   name?: string;

@@ -1,4 +1,4 @@
-//! Compact job reads use the same retained registry; no history worker hydration.
+//! Retained metadata reads, with execution hydration admitted explicitly.
 use super::read_result::RetainedRead;
 use super::*;
 use crate::ed2k_transfer as transfer;
@@ -15,6 +15,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Counts,
     Waiting(Vec<JobId>),
     UploadFile([u8; 16]),
+    LibraryLocations([u8; 16], i64, usize),
     Scheduling(
         Arc<transfer::Ed2kTransferRuntime>,
         emulebb_metadata::JobToken,
@@ -56,6 +57,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Waiting(RetainedRead<u64>),
     UploadFile(Option<RetainedRead<emulebb_metadata::MetadataUploadFileSummary>>),
+    LibraryLocations(Option<RetainedRead<emulebb_metadata::MetadataLibraryLocationPage>>),
     Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
@@ -91,6 +93,13 @@ impl LocalMutationRegistry {
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
             JobRead::UploadFile(_) => 256 * 1024,
+            JobRead::LibraryLocations(_, after, limit) => {
+                ensure!(
+                    after >= 0 && (1..=200).contains(&limit),
+                    "invalid library location page"
+                );
+                emulebb_metadata::LIBRARY_READ_MAX_BYTES
+            }
             JobRead::Waiting(ref ids) => ids
                 .capacity()
                 .checked_mul(std::mem::size_of::<JobId>())
@@ -194,6 +203,18 @@ impl LocalMutationRegistry {
                         value.map(|value| RetainedRead::new(value, capacity.take_result())),
                     )
                 }),
+                JobRead::LibraryLocations(hash, after, limit) => metadata
+                    .library_locations(
+                        &hex::encode(hash),
+                        after,
+                        limit,
+                        emulebb_metadata::LIBRARY_READ_MAX_BYTES,
+                    )
+                    .map(|value| {
+                        JobReadResult::LibraryLocations(
+                            value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                        )
+                    }),
                 JobRead::TransferCounts => metadata.transfer_counts().map(|value| {
                     JobReadResult::TransferCounts(RetainedRead::new(value, capacity.take_result()))
                 }),
@@ -382,6 +403,24 @@ impl LocalMutationRegistry {
     }
 }
 impl transfer::Ed2kTransferRuntime {
+    /// Read a bounded cached copy window through the admitted metadata owner.
+    /// The result retains its allowance; no file or execution is opened.
+    pub async fn library_locations(
+        &self,
+        hash: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataLibraryLocationPage>>> {
+        let hash: emulebb_kad_proto::Ed2kHash = hash.parse()?;
+        let JobReadResult::LibraryLocations(page) = self
+            .read_job_metadata(JobRead::LibraryLocations(hash.0, after, limit))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+
     /// Cached upload captions through the existing bounded metadata worker.
     /// Retained results own their temporary allowance; no manifest is hydrated.
     pub async fn upload_file_summary(
