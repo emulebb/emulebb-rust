@@ -47,6 +47,7 @@ pub fn router_with_shutdown(
         api_key: Arc::new(config.api_key),
         shutdown,
         process_resources: Arc::default(),
+        diagnostic_capture: Arc::new(tokio::sync::Semaphore::new(1)),
     };
     let health_router = Router::new()
         .route("/healthz", get(health))

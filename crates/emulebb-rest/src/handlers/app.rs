@@ -135,6 +135,19 @@ pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) ->
     api_ok(json!({"ok": true})).into_response()
 }
 
+/// The capture slot follows encoded backing through body/frame clones, including
+/// a slow receiver; constructing the response does not release its ownership.
+struct DiagnosticBundleBody {
+    bytes: Box<[u8]>,
+    _capture: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for DiagnosticBundleBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 pub(crate) async fn capture_diagnostic_bundle(
     State(state): State<RestState>,
     body: Bytes,
@@ -161,12 +174,25 @@ pub(crate) async fn capture_diagnostic_bundle(
         )
         .into_response();
     }
+    // WHY: a caller can retain a completed body indefinitely. Bound aggregate
+    // capture work and backing until that body is actually dropped, not queued.
+    let Ok(capture) = state.diagnostic_capture.clone().try_acquire_owned() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_BUSY",
+            "a diagnostic capture or its response is already active",
+        )
+        .into_response();
+    };
     match capture_bundle(&state, request.max_bytes).await {
         Ok(bundle) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::CONTENT_LENGTH, bundle.len().to_string())
-            .body(Body::from(bundle))
+            .body(Body::from(Bytes::from_owner(DiagnosticBundleBody {
+                bytes: bundle,
+                _capture: capture,
+            })))
             .expect("diagnostic bundle response must be valid"),
         Err(error) => super::persistence::persistence_error(error),
     }

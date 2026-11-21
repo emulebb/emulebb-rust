@@ -607,6 +607,76 @@ async fn diagnostic_crash_test_requires_confirmation() {
 }
 
 #[tokio::test]
+async fn diagnostic_capture_slot_follows_response_frames_and_their_clones() {
+    use http_body_util::BodyExt;
+    let app = test_router();
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/diagnostics/bundles")
+            .header("X-API-Key", "secret")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"confirmCapture":true,"maxBytes":4194304}"#))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(!frame.is_empty());
+    let retained = frame.clone();
+    drop(frame);
+    drop(body);
+    let blocked = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let rejected: Value =
+        serde_json::from_slice(&to_bytes(blocked.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(rejected["error"]["code"], "SERVICE_BUSY");
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    drop(status);
+    drop(retained);
+    let next = app.oneshot(request()).await.unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn failed_diagnostic_capture_releases_its_slot() {
+    let (app, core, _, _) = atomic_settings_router();
+    core.drain_persistence().await.unwrap();
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/diagnostics/bundles")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmCapture":true,"maxBytes":4194304}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(value["error"]["code"], "PERSISTENCE_CLOSING");
+    }
+}
+
+#[tokio::test]
 async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let runtime_dir = unique_test_dir("snapshot");
     let transfer_root = runtime_dir.join("transfers");
