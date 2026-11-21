@@ -36,8 +36,6 @@ const NNP_PURGE_INTERVAL: Duration = Duration::from_secs(40);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadSourceCandidate {
     pub file_hash: String,
-    pub needed_parts: u32,
-    pub rare_parts: u32,
     pub source: Ed2kFoundSource,
     /// When this candidate was last added/refreshed. Stamped by
     /// [`DownloadSourceRegistry::add_candidate`]; the value supplied at
@@ -227,8 +225,8 @@ impl DownloadSourceRegistry {
         let candidates = self.peers.get(&peer_key)?;
         let candidate = candidates
             .iter()
-            .max_by_key(|candidate| candidate_score(candidate))?;
-        if candidate.file_hash != file_hash || self.leased_peers.contains_key(&peer_key) {
+            .find(|candidate| candidate.file_hash == file_hash)?;
+        if self.leased_peers.contains_key(&peer_key) {
             return None;
         }
         self.next_lease = self.next_lease.checked_add(1)?;
@@ -374,26 +372,20 @@ impl DownloadSourceRegistry {
         }
     }
 
-    /// All OTHER files known for this peer, best first. Keeping target ordering
-    /// in the peer-centric registry mirrors the oracle's one-client/many-files
-    /// source set, while the core filters stopped/terminal transfers using its
-    /// authoritative lifecycle state. Used for NNP and FNF/AICH swap-or-remove.
-    pub(crate) fn swap_targets_for_peer(
-        &self,
+    /// Borrow this peer's other files without copying its entire source set.
+    /// Core filters lifecycle and ranks eligible work using current job state;
+    /// a source registration alone carries no scheduling priority.
+    pub(crate) fn swap_targets_for_peer<'a>(
+        &'a self,
         source: &Ed2kFoundSource,
-        current_file_hash: &str,
-    ) -> Vec<DownloadSourceCandidate> {
+        current_file_hash: &'a str,
+    ) -> impl Iterator<Item = &'a DownloadSourceCandidate> {
         let peer_key = DownloadPeerKey::from_source(source);
-        let Some(candidates) = self.peers.get(&peer_key) else {
-            return Vec::new();
-        };
-        let mut targets = candidates
-            .iter()
-            .filter(|candidate| candidate.file_hash != current_file_hash)
-            .cloned()
-            .collect::<Vec<_>>();
-        targets.sort_by_key(|candidate| std::cmp::Reverse(candidate_score(candidate)));
-        targets
+        self.peers
+            .get(&peer_key)
+            .into_iter()
+            .flatten()
+            .filter(move |candidate| candidate.file_hash != current_file_hash)
     }
 
     /// Resolve the exact candidate that detached onto UDP reask. The TCP lease
@@ -565,10 +557,6 @@ impl DownloadPeerKey {
 /// of `now` (a saturating elapsed so a future `last_seen` never reads as stale).
 fn is_stale(candidate: &DownloadSourceCandidate, now: Instant) -> bool {
     now.saturating_duration_since(candidate.last_seen) > CANDIDATE_LIVENESS_TTL
-}
-
-fn candidate_score(candidate: &DownloadSourceCandidate) -> (u32, u32) {
-    (candidate.rare_parts, candidate.needed_parts)
 }
 
 #[cfg(test)]

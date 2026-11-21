@@ -50,11 +50,6 @@ impl EmulebbCore {
             token: guard.token(),
             hash: guard.hash().to_string(),
             size_bytes: parts.file_size_bytes,
-            needed_parts: parts
-                .verified_parts
-                .iter()
-                .filter(|verified| !**verified)
-                .count() as u32,
         };
         // Fresh direct discoveries are persisted by the common acquisition path.
         // Read them with old hints in pages, never an all-endpoints accumulator.

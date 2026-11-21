@@ -15,7 +15,7 @@ fn no_socket_probe_settlement_preserves_newer_lease_and_real_attempt_cooldown() 
     let now = Instant::now();
     let cooldown = Duration::from_secs(1200);
     let mut registry = DownloadSourceRegistry::default();
-    registry.add_candidate(now, candidate(file, 1, 0, source.clone()));
+    registry.add_candidate(now, candidate(file, source.clone()));
     registry
         .lease_best_for_file(now, cooldown, &source, file)
         .unwrap();
@@ -54,7 +54,7 @@ fn no_socket_probe_settlement_does_not_clear_no_needed_parts_hold() {
     let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let now = Instant::now();
     let mut registry = DownloadSourceRegistry::default();
-    registry.add_candidate(now, candidate(file, 1, 0, source.clone()));
+    registry.add_candidate(now, candidate(file, source.clone()));
     registry
         .lease_best_for_file(now, Duration::ZERO, &source, file)
         .unwrap();
@@ -76,11 +76,11 @@ fn registry_derives_a4af_candidates_from_peer_fanout() {
 
     registry.add_candidate(
         now,
-        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 1, source.clone()),
+        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", source.clone()),
     );
     registry.add_candidate(
         now,
-        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 2, 1, source.clone()),
+        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", source.clone()),
     );
 
     assert_eq!(registry.candidate_count_for_peer(&source), 2);
@@ -88,17 +88,17 @@ fn registry_derives_a4af_candidates_from_peer_fanout() {
 }
 
 #[test]
-fn registry_leases_one_file_per_peer_and_prefers_best_candidate() {
+fn registry_leases_requested_registered_file_and_excludes_concurrent_peer_use() {
     let source = source_with_hash([0x22; 16]);
     let mut registry = DownloadSourceRegistry::default();
     let now = Instant::now();
     registry.add_candidate(
         now,
-        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 1, source.clone()),
+        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", source.clone()),
     );
     registry.add_candidate(
         now,
-        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 10, source.clone()),
+        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", source.clone()),
     );
 
     let leased = registry
@@ -141,7 +141,7 @@ fn registry_refreshing_same_source_does_not_bypass_retry_cooldown() {
     let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let now = Instant::now();
     let retry_cooldown = Duration::from_secs(20 * 60);
-    registry.add_candidate(now, candidate(file, 1, 10, source.clone()));
+    registry.add_candidate(now, candidate(file, source.clone()));
 
     assert!(
         registry
@@ -154,7 +154,7 @@ fn registry_refreshing_same_source_does_not_bypass_retry_cooldown() {
     // download attempt. That must not clear the last-attempt stamp; otherwise
     // a failing source can be redialed every short retry cycle.
     let refreshed_at = now + Duration::from_secs(30);
-    registry.add_candidate(refreshed_at, candidate(file, 1, 10, source.clone()));
+    registry.add_candidate(refreshed_at, candidate(file, source.clone()));
 
     assert!(
         registry
@@ -168,17 +168,17 @@ fn registry_refreshing_same_source_does_not_bypass_retry_cooldown() {
 }
 
 #[test]
-fn registry_defers_when_peer_is_better_for_another_file() {
+fn registry_can_lease_each_registered_file_after_exclusive_owner_releases() {
     let source = source_with_hash([0x33; 16]);
     let mut registry = DownloadSourceRegistry::default();
     let now = Instant::now();
     registry.add_candidate(
         now,
-        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 1, source.clone()),
+        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", source.clone()),
     );
     registry.add_candidate(
         now,
-        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 10, source.clone()),
+        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", source.clone()),
     );
 
     assert!(
@@ -189,8 +189,9 @@ fn registry_defers_when_peer_is_better_for_another_file() {
                 &source,
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )
-            .is_none()
+            .is_some()
     );
+    registry.release_peer(&source);
     assert!(
         registry
             .lease_best_for_file(
@@ -204,29 +205,30 @@ fn registry_defers_when_peer_is_better_for_another_file() {
 }
 
 #[test]
-fn registry_swap_target_picks_best_other_wanted_file_and_skips_current() {
+fn registry_borrows_all_other_files_and_skips_current() {
     let source = source_with_hash([0x55; 16]);
     let mut registry = DownloadSourceRegistry::default();
     let now = Instant::now();
-    // Peer serves three files. Exclude the current file (a), then prefer
-    // the other file with more needed parts (c) over file b at equal rarity.
+    // Source membership does not choose which other job should execute.
     registry.add_candidate(
         now,
-        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9, 9, source.clone()),
+        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", source.clone()),
     );
     registry.add_candidate(
         now,
-        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1, 1, source.clone()),
+        candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", source.clone()),
     );
     registry.add_candidate(
         now,
-        candidate("cccccccccccccccccccccccccccccccc", 5, 1, source.clone()),
+        candidate("cccccccccccccccccccccccccccccccc", source.clone()),
     );
 
-    let targets = registry.swap_targets_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let targets = registry
+        .swap_targets_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .collect::<Vec<_>>();
     assert_eq!(targets.len(), 2);
-    assert_eq!(targets[0].file_hash, "cccccccccccccccccccccccccccccccc");
-    assert_eq!(targets[1].file_hash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    assert_eq!(targets[0].file_hash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    assert_eq!(targets[1].file_hash, "cccccccccccccccccccccccccccccccc");
 }
 
 #[test]
@@ -236,13 +238,14 @@ fn registry_swap_target_is_none_when_peer_serves_only_the_current_file() {
     let now = Instant::now();
     registry.add_candidate(
         now,
-        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9, 9, source.clone()),
+        candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", source.clone()),
     );
 
     assert!(
         registry
             .swap_targets_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_empty()
+            .next()
+            .is_none()
     );
 }
 
@@ -258,14 +261,11 @@ fn stale_candidates_age_out_of_the_per_file_count_and_are_pruned() {
     let t0 = Instant::now();
 
     // A dead source registered long ago.
-    registry.add_candidate(t0, candidate(file, 5, 1, source_with_endpoint(0x01, 41100)));
+    registry.add_candidate(t0, candidate(file, source_with_endpoint(0x01, 41100)));
 
     // A fresh source registered well past the TTL: only it is still live.
     let later = t0 + CANDIDATE_LIVENESS_TTL + Duration::from_secs(1);
-    registry.add_candidate(
-        later,
-        candidate(file, 5, 1, source_with_endpoint(0x02, 41101)),
-    );
+    registry.add_candidate(later, candidate(file, source_with_endpoint(0x02, 41101)));
 
     // The stale candidate is excluded from the live per-file count.
     assert_eq!(
@@ -285,7 +285,7 @@ fn stale_candidates_age_out_of_the_per_file_count_and_are_pruned() {
     let refreshed = later + Duration::from_secs(1);
     registry.add_candidate(
         refreshed,
-        candidate(file, 5, 1, source_with_endpoint(0x02, 41101)),
+        candidate(file, source_with_endpoint(0x02, 41101)),
     );
     assert_eq!(registry.candidate_count_for_file(refreshed, file), 1);
 }
@@ -303,7 +303,7 @@ fn release_file_clears_candidates_and_only_that_files_leases() {
 
     // Peer 1 serves only the target file and is leased on it.
     let peer_target = source_with_endpoint(0x01, 41200);
-    registry.add_candidate(now, candidate(target, 5, 1, peer_target.clone()));
+    registry.add_candidate(now, candidate(target, peer_target.clone()));
     assert!(
         registry
             .lease_best_for_file(now, Duration::ZERO, &peer_target, target)
@@ -312,7 +312,7 @@ fn release_file_clears_candidates_and_only_that_files_leases() {
 
     // Peer 2 serves a different file and is leased on it.
     let peer_other = source_with_endpoint(0x02, 41201);
-    registry.add_candidate(now, candidate(other, 5, 1, peer_other.clone()));
+    registry.add_candidate(now, candidate(other, peer_other.clone()));
     assert!(
         registry
             .lease_best_for_file(now, Duration::ZERO, &peer_other, other)
@@ -321,7 +321,7 @@ fn release_file_clears_candidates_and_only_that_files_leases() {
 
     // Peer 3 serves the target file but is NOT leased.
     let peer_unleased = source_with_endpoint(0x03, 41202);
-    registry.add_candidate(now, candidate(target, 5, 1, peer_unleased.clone()));
+    registry.add_candidate(now, candidate(target, peer_unleased.clone()));
 
     assert_eq!(registry.candidate_count_for_file(now, target), 2);
     assert_eq!(registry.leased_peer_count(), 2);
@@ -350,7 +350,7 @@ fn released_endpoint_stays_cooldown_deferred_until_retry_window_expires() {
     let now = Instant::now();
     let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let cooldown = Duration::from_secs(20 * 60);
-    registry.add_candidate(now, candidate(file, 5, 1, source.clone()));
+    registry.add_candidate(now, candidate(file, source.clone()));
 
     assert!(
         registry
@@ -389,7 +389,7 @@ fn endpoint_cooldown_is_per_file_so_a_multi_file_peer_serves_files_back_to_back(
     let file_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let file_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let cooldown = Duration::from_secs(20 * 60);
-    registry.add_candidate(now, candidate(file_a, 5, 1, source.clone()));
+    registry.add_candidate(now, candidate(file_a, source.clone()));
 
     assert!(
         registry
@@ -401,7 +401,7 @@ fn endpoint_cooldown_is_per_file_so_a_multi_file_peer_serves_files_back_to_back(
     registry.release_peer(&source);
     registry.release_file(file_a);
     let later = now + Duration::from_secs(5);
-    registry.add_candidate(later, candidate(file_b, 5, 1, source.clone()));
+    registry.add_candidate(later, candidate(file_b, source.clone()));
 
     assert!(
         registry
@@ -428,7 +428,7 @@ fn nnp_hold_defers_the_lease_for_the_doubled_reask_interval() {
     let now = Instant::now();
     let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let cooldown = Duration::from_secs(20 * 60);
-    registry.add_candidate(now, candidate(file, 5, 1, source.clone()));
+    registry.add_candidate(now, candidate(file, source.clone()));
 
     assert!(registry.mark_no_needed_parts(now, &source, file));
     assert_eq!(registry.nnp_source_count(now), 1);
@@ -472,7 +472,7 @@ fn peer_acquiring_needed_parts_clears_the_nnp_flag_and_resumes_normal_cadence() 
     let now = Instant::now();
     let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let cooldown = Duration::from_secs(20 * 60);
-    registry.add_candidate(now, candidate(file, 5, 1, source.clone()));
+    registry.add_candidate(now, candidate(file, source.clone()));
     registry.mark_no_needed_parts(now, &source, file);
 
     // Hold elapsed -> re-ask leases (this is "the next reask/session").
@@ -511,7 +511,7 @@ fn nnp_hold_refreshes_liveness_and_is_cleaned_up_with_its_candidate() {
     let mut registry = DownloadSourceRegistry::default();
     let t0 = Instant::now();
     let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    registry.add_candidate(t0, candidate(file, 5, 1, source.clone()));
+    registry.add_candidate(t0, candidate(file, source.clone()));
 
     // Marking NNP at t0+50min refreshes liveness: at t0+70min (past the TTL
     // from t0, inside it from the mark) the held candidate must survive the
@@ -554,16 +554,9 @@ fn source_with_endpoint(last_octet: u8, tcp_port: u16) -> Ed2kFoundSource {
     source
 }
 
-fn candidate(
-    file_hash: &str,
-    needed_parts: u32,
-    rare_parts: u32,
-    source: Ed2kFoundSource,
-) -> DownloadSourceCandidate {
+fn candidate(file_hash: &str, source: Ed2kFoundSource) -> DownloadSourceCandidate {
     DownloadSourceCandidate {
         file_hash: file_hash.to_string(),
-        needed_parts,
-        rare_parts,
         source,
         // Overwritten by add_candidate; placeholder only.
         last_seen: Instant::now(),

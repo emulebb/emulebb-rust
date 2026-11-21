@@ -1982,7 +1982,6 @@ impl EmulebbCore {
         sources: &[Ed2kFoundSource],
     ) -> (usize, usize) {
         let mut state = self.state.lock().await;
-        let needed_parts = transfer.needed_parts;
         let now = Instant::now();
         let source_count_before = state
             .download_source_registry
@@ -2001,8 +2000,6 @@ impl EmulebbCore {
                 now,
                 DownloadSourceCandidate {
                     file_hash: transfer.hash.clone(),
-                    needed_parts,
-                    rare_parts: 0,
                     source: source.clone(),
                     last_seen: now,
                 },
@@ -2015,9 +2012,8 @@ impl EmulebbCore {
     }
 
     /// Build the ordered other-file plans a leased peer may visit on the same
-    /// physical connection. This is the full A4AF source-set/hijacking bridge:
-    /// the peer-centric registry orders candidates, core filters authoritative
-    /// transfer lifecycle, and the ED2K session switches files in place.
+    /// physical connection. Borrow the peer source set, filter authoritative
+    /// lifecycle, then rank ordinary work by remaining bytes and creation order.
     async fn a4af_alternate_download_files(
         &self,
         current_file_hash: &str,
@@ -2027,28 +2023,35 @@ impl EmulebbCore {
         let now = Instant::now();
         let mut by_endpoint = HashMap::new();
         for source in sources {
-            let alternates = state
+            let mut alternates = state
                 .download_source_registry
                 .swap_targets_for_peer(source, current_file_hash)
-                .into_iter()
                 .filter_map(|candidate| {
                     let target = state.transfers.get(&candidate.file_hash)?;
                     if !should_retry_download_attempt_state(&target.state) {
                         return None;
                     }
-                    Some(Ed2kPeerDownloadFile {
-                        job_token: target.job_token(),
-                        file_hash: candidate.file_hash.parse().ok()?,
-                        display_name: target.name.clone(),
-                        file_size: target.size_bytes,
-                        current_source_count: state
-                            .download_source_registry
-                            .candidate_count_for_file(now, &target.hash),
-                    })
+                    Some((
+                        target.size_bytes.saturating_sub(target.completed_bytes),
+                        target.id,
+                        Ed2kPeerDownloadFile {
+                            job_token: target.job_token(),
+                            file_hash: candidate.file_hash.parse().ok()?,
+                            display_name: target.name.clone(),
+                            file_size: target.size_bytes,
+                            current_source_count: state
+                                .download_source_registry
+                                .candidate_count_for_file(now, &target.hash),
+                        },
+                    ))
                 })
                 .collect::<Vec<_>>();
             if !alternates.is_empty() {
-                by_endpoint.insert(source_endpoint_key(source), alternates);
+                alternates.sort_by_key(|(remaining, id, _)| (*remaining, *id));
+                by_endpoint.insert(
+                    source_endpoint_key(source),
+                    alternates.into_iter().map(|(_, _, file)| file).collect(),
+                );
             }
         }
         by_endpoint
@@ -7072,11 +7075,8 @@ fn should_retry_download_attempt_state(state: &str) -> bool {
     matches!(state, "downloading" | "queued")
 }
 
-/// Select the best still-wanted OTHER file from one peer's A4AF source set.
-/// The registry owns deterministic priority ordering; core owns authoritative
-/// transfer lifecycle, so a completed/paused top candidate must not hide a live
-/// lower-ranked fallback (the oracle skips non-ready/stopped part files while
-/// walking `m_OtherRequests_list` / `m_OtherNoNeeded_list`).
+/// Select ordinary wanted work by remaining bytes, then creation order. Borrow
+/// candidates and reject stopped/terminal jobs before choosing or copying one.
 fn wanted_a4af_swap_target(
     state: &CoreState,
     source: &Ed2kFoundSource,
@@ -7085,14 +7085,19 @@ fn wanted_a4af_swap_target(
     state
         .download_source_registry
         .swap_targets_for_peer(source, current_file_hash)
-        .into_iter()
-        .find_map(|candidate| {
+        .filter_map(|candidate| {
             state
                 .transfers
                 .get(&candidate.file_hash)
                 .filter(|target| should_retry_download_attempt_state(&target.state))
-                .cloned()
         })
+        .min_by_key(|target| {
+            (
+                target.size_bytes.saturating_sub(target.completed_bytes),
+                target.id,
+            )
+        })
+        .cloned()
 }
 
 /// Case-insensitive check that `path` resides within `dir`, tolerating the

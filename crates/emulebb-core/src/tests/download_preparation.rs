@@ -66,8 +66,6 @@ async fn native_probe_capacity_refusal_releases_only_its_exact_core_reservation(
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: file.clone(),
-                needed_parts: 1,
-                rare_parts: 0,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },

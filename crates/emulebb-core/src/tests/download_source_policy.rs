@@ -299,6 +299,67 @@ async fn callback_preparation_dispatches_udp_routes_without_hydration_or_udp_rea
 }
 
 #[tokio::test]
+async fn a4af_ordinary_targets_rank_current_remaining_bytes_then_creation_order() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let current = Ed2kHash::from_bytes([0x61; 16]).to_string();
+    let source = direct_test_source(
+        current.parse().unwrap(),
+        Ipv4Addr::new(192, 0, 2, 30),
+        41009,
+    );
+    let mut expected = Vec::new();
+    {
+        let mut state = core.state.lock().await;
+        for (index, size, completed, lifecycle) in [
+            (0x61, 16, 0, "downloading"),
+            (0x62, 1000, 600, "downloading"),
+            (0x63, 400, 0, "queued"),
+            (0x64, 2000, 1990, "downloading"),
+            (0x65, 1, 0, "paused"),
+            (0x66, 1, 0, "completed"),
+        ] {
+            let hash = Ed2kHash::from_bytes([index; 16]).to_string();
+            let mut transfer = a4af_test_transfer(&core, &hash, lifecycle);
+            transfer.size_bytes = size;
+            transfer.completed_bytes = completed;
+            if matches!(index, 0x62..=0x64) {
+                expected.push(transfer.job_token());
+            }
+            state.transfers.insert(hash.clone(), transfer);
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
+                    file_hash: hash,
+                    source: source.clone(),
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+        assert_eq!(
+            wanted_a4af_swap_target(&state, &source, &current)
+                .unwrap()
+                .job_token(),
+            expected[2]
+        );
+    }
+    let plans = core
+        .a4af_alternate_download_files(&current, std::slice::from_ref(&source))
+        .await;
+    let plans = &plans[&source_endpoint_key(&source)];
+    assert_eq!(
+        plans.iter().map(|plan| plan.job_token).collect::<Vec<_>>(),
+        [expected[2], expected[0], expected[1]]
+    );
+    assert!(
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
     // A4AF source-set leg 1: a peer registered for two of our files is engaged for
     // exactly one file at a time; the second file defers the same peer
@@ -316,15 +377,13 @@ async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
     );
     {
         let mut state = core.state.lock().await;
-        // File A needs more parts, so it wins the single per-peer
-        // relationship; file B is the other wanted file.
-        for (hash, needed_parts) in [(&file_a, 9u32), (&file_b, 3u32)] {
+        // File A is selected first; the same peer cannot be engaged for B
+        // until that owner releases it.
+        for hash in [&file_a, &file_b] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-                    needed_parts,
-                    rare_parts: 1,
                     source: source.clone(),
                     last_seen: Instant::now(),
                 },
@@ -347,7 +406,7 @@ async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
         )
         .await;
 
-    // Engaged once (file A, the peer's best), deferred (NOT double-engaged)
+    // Engaged once for file A, deferred (NOT double-engaged)
     // for file B: one active relationship per peer, like eMule.
     assert_eq!(a_sources, vec![source.clone()]);
     assert_eq!(a_deferred, 0);
@@ -411,9 +470,6 @@ async fn fnf_dead_listed_relation_swaps_peer_to_other_file_and_blocks_readmissio
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: (*hash).clone(),
-
-                    needed_parts: 4,
-                    rare_parts: 0,
                     source: source.clone(),
                     last_seen: Instant::now(),
                 },
@@ -499,8 +555,6 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: file.clone(),
-                needed_parts: 4,
-                rare_parts: 0,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -552,9 +606,6 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: shared_ip_file.clone(),
-
-                    needed_parts: 4,
-                    rare_parts: 0,
                     source: direct_test_source(
                         Ed2kHash::from_bytes([0x77; 16]),
                         shared_ip,
@@ -605,9 +656,6 @@ async fn udp_fnf_dead_lists_the_exact_registered_source() {
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: reused_file.clone(),
-
-                    needed_parts: 4,
-                    rare_parts: 0,
                     source: candidate_source,
                     last_seen: Instant::now(),
                 },
@@ -662,9 +710,6 @@ async fn a4af_nnp_source_is_swapped_to_another_wanted_file() {
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-
-                    needed_parts: 4,
-                    rare_parts: 1,
                     source: source.clone(),
                     last_seen: Instant::now(),
                 },
@@ -698,8 +743,6 @@ async fn a4af_nnp_source_without_other_wanted_file_is_dropped() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: current.clone(),
-                needed_parts: 4,
-                rare_parts: 1,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -738,13 +781,11 @@ async fn a4af_nnp_swap_skips_terminal_best_candidate_for_live_fallback() {
             fallback.clone(),
             a4af_test_transfer(&core, &fallback, "downloading"),
         );
-        for (hash, needed_parts) in [(&current, 5), (&other, 9), (&fallback, 1)] {
+        for hash in [&current, &other, &fallback] {
             state.download_source_registry.add_candidate(
                 Instant::now(),
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-                    needed_parts,
-                    rare_parts: 1,
                     source: source.clone(),
                     last_seen: Instant::now(),
                 },
@@ -781,9 +822,6 @@ async fn completed_file_releases_peer_for_next_wanted_file() {
                 now,
                 DownloadSourceCandidate {
                     file_hash: hash.clone(),
-
-                    needed_parts: 1,
-                    rare_parts: 0,
                     source: source.clone(),
                     last_seen: now,
                 },
@@ -827,8 +865,6 @@ async fn nnp_source_is_held_for_the_doubled_reask_cycle_not_dropped_or_dead_list
             now,
             DownloadSourceCandidate {
                 file_hash: file.clone(),
-                needed_parts: 4,
-                rare_parts: 1,
                 source: source.clone(),
                 last_seen: now,
             },
@@ -913,9 +949,6 @@ async fn nnp_hold_purges_one_source_per_window_under_source_cap_pressure() {
                 now,
                 DownloadSourceCandidate {
                     file_hash: file.clone(),
-
-                    needed_parts: 4,
-                    rare_parts: 1,
                     source: source.clone(),
                     last_seen: now,
                 },
