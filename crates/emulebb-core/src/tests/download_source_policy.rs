@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn direct_callback_preparation_dispatch_does_not_hydrate_or_depend_on_udp_reask() {
+async fn callback_preparation_dispatches_udp_routes_without_hydration_or_udp_reask() {
     let transfer_root = unique_runtime_dir("emulebb-core-direct-callback-without-reask");
     let mut network = test_network_config_with_store(
         &transfer_root,
@@ -9,6 +9,8 @@ async fn direct_callback_preparation_dispatch_does_not_hydrate_or_depend_on_udp_
         SnoopQueueConfig::default(),
     );
     network.ed2k.enable_udp_reask = false;
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.p2p_bind_ip = Some(Ipv4Addr::LOCALHOST);
     let core = EmulebbCore::new_with_network(
         "test",
         FileIndex::in_memory().unwrap(),
@@ -81,7 +83,7 @@ async fn direct_callback_preparation_dispatch_does_not_hydrate_or_depend_on_udp_
         size_bytes: 1024,
         preparation_id: None,
     };
-    let source = Ed2kFoundSource {
+    let mut source = Ed2kFoundSource {
         file_hash,
         ip: Ipv4Addr::LOCALHOST,
         tcp_port: 4662,
@@ -108,7 +110,7 @@ async fn direct_callback_preparation_dispatch_does_not_hydrate_or_depend_on_udp_
     core.send_ed2k_direct_callbacks(
         &network,
         &target,
-        &[source],
+        std::slice::from_ref(&source),
         Duration::from_secs(5),
         &CancellationToken::new(),
     )
@@ -126,6 +128,81 @@ async fn direct_callback_preparation_dispatch_does_not_hydrate_or_depend_on_udp_
     assert_eq!(
         datagram[20],
         emule_connect_options(network.ed2k.obfuscation_enabled)
+    );
+    drop(preparation);
+
+    let server_endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, source_udp_port - 4));
+    source.source_server = Some(server_endpoint);
+    source.source_udp_port = None;
+    source.obfuscation_options = None;
+    source.user_hash = Some([0x54; 16]);
+    let config = Ed2kRuntimeConfig {
+        server_endpoints: vec![server_endpoint.to_string()],
+        ..network.ed2k.clone()
+    };
+    core.ed2k_runtime
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .reachability
+        .writer()
+        .set_fallback_public_ip(Ipv4Addr::LOCALHOST);
+    target.preparation_id = None;
+    let preparation = core
+        .ed2k_transfers
+        .prepare_callback_download(target.download_for_source(&source), Duration::from_secs(5))
+        .unwrap();
+    target.preparation_id = preparation.download().preparation_id;
+    let cancel = CancellationToken::new();
+    core.send_ed2k_server_callback(
+        &network,
+        &target,
+        &source,
+        Duration::from_secs(5),
+        &cancel,
+        &config,
+    )
+    .await;
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), receiver.recv_from(&mut datagram))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut expected = vec![0xE3, 0x9C, 127, 0, 0, 1];
+    expected.extend_from_slice(&network.listen_port.to_le_bytes());
+    expected.extend_from_slice(&source.client_id.to_le_bytes());
+    assert_eq!(&datagram[..len], expected);
+    core.send_ed2k_server_callback(
+        &network,
+        &target,
+        &source,
+        Duration::from_secs(5),
+        &cancel,
+        &config,
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), receiver.recv_from(&mut datagram))
+            .await
+            .is_err(),
+        "pending callback must not be dispatched twice"
+    );
+    cancel.cancel();
+    source.client_id += 1;
+    core.send_ed2k_server_callback(
+        &network,
+        &target,
+        &source,
+        Duration::from_secs(5),
+        &cancel,
+        &config,
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), receiver.recv_from(&mut datagram))
+            .await
+            .is_err(),
+        "cancelled callback must not dispatch"
     );
     let job = core
         .ed2k_transfers
