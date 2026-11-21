@@ -296,3 +296,78 @@ async fn checkpoint_waits_for_publication_and_retains_captures_made_during_it() 
     );
     assert!(runtime.parked_credit.lock().statistics_dirty.is_empty());
 }
+
+#[tokio::test]
+async fn library_pages_publish_live_and_inactive_durable_facts_without_hydration() {
+    use emulebb_metadata::{LibraryFileQuery, LibraryFileSort, LibraryFileView};
+    let runtime =
+        Ed2kTransferRuntime::load_or_create(&unique_test_dir("library-global-statistics")).unwrap();
+    let active = seed(&runtime, 0x41, 100);
+    let inactive = seed(&runtime, 0x42, 200);
+    runtime.add_file_all_time_uploaded(&active, 7).unwrap();
+    let resident = runtime.download_resource_snapshot().resident_bytes;
+    let mut query = LibraryFileQuery {
+        view: LibraryFileView::AllKnown,
+        sort: LibraryFileSort::LifetimeUploadedBytes,
+        descending: true,
+        limit: 1,
+        count_total: true,
+        ..Default::default()
+    };
+    let first = runtime.library_file_page(query.clone()).await.unwrap();
+    assert_eq!(first.total, Some(2));
+    assert_eq!(first.files[0].file_hash, inactive.to_string());
+    assert_eq!(first.files[0].statistics.lifetime.uploaded_bytes, 200);
+    assert_eq!(first.files[0].statistics.session_uploaded_bytes, 0);
+    assert!(
+        runtime.file_upload_statistics(&inactive).is_none(),
+        "a metadata-only read must not allocate runtime accounting"
+    );
+    assert_eq!(
+        runtime.download_resource_snapshot().resident_bytes,
+        resident
+    );
+    assert_eq!(
+        runtime.download_resource_snapshot().transient_bytes,
+        2 * 1024 * 1024
+    );
+    query.after = first.next_after;
+    drop(first);
+    assert_eq!(runtime.download_resource_snapshot().transient_bytes, 0);
+    let second = runtime.library_file_page(query).await.unwrap();
+    assert_eq!(second.files[0].file_hash, active.to_string());
+    assert_eq!(second.files[0].statistics.session_uploaded_bytes, 7);
+    assert_eq!(second.files[0].statistics.lifetime.uploaded_bytes, 107);
+    assert!(second.next_after.is_none());
+    drop(second);
+    assert_eq!(
+        runtime
+            .metadata
+            .file_upload_snapshot(&active.to_string())
+            .unwrap()
+            .unwrap()
+            .totals
+            .uploaded_bytes,
+        100
+    );
+    assert!(
+        runtime
+            .library_file_page(LibraryFileQuery::default())
+            .await
+            .unwrap()
+            .files
+            .is_empty()
+    );
+    let mut oversized = String::with_capacity(65_537);
+    oversized.push_str("abc");
+    assert!(
+        runtime
+            .library_file_page(LibraryFileQuery {
+                search: Some(oversized),
+                ..Default::default()
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(runtime.download_resource_snapshot().transient_bytes, 0);
+}

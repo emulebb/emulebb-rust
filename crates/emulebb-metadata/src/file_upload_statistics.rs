@@ -42,32 +42,53 @@ pub(crate) fn initialize(conn: &Connection) -> Result<()> {
             lifetime_requests INTEGER NOT NULL CHECK(lifetime_requests>=0),
             lifetime_accepts INTEGER NOT NULL CHECK(lifetime_accepts>=0),
             last_requested_at_s INTEGER CHECK(last_requested_at_s>=0),
-            last_uploaded_at_s INTEGER CHECK(last_uploaded_at_s>=0)
+            last_uploaded_at_s INTEGER CHECK(last_uploaded_at_s>=0),
+            last_requested_key INTEGER GENERATED ALWAYS AS (coalesce(last_requested_at_s,-1)) STORED,
+            last_uploaded_key INTEGER GENERATED ALWAYS AS (coalesce(last_uploaded_at_s,-1)) STORED,
+            present INTEGER NOT NULL DEFAULT 0 CHECK(present IN (0,1))
          ) STRICT;
          CREATE INDEX temp.session_upload_bytes_idx
-            ON session_file_upload_statistics(uploaded_bytes,ed2k_hash);
+            ON session_file_upload_statistics(present,uploaded_bytes,ed2k_hash);
          CREATE INDEX temp.session_upload_requests_idx
-            ON session_file_upload_statistics(upload_requests,ed2k_hash);
+            ON session_file_upload_statistics(present,upload_requests,ed2k_hash);
          CREATE INDEX temp.session_upload_accepts_idx
-            ON session_file_upload_statistics(accepted_sessions,ed2k_hash);
-         CREATE INDEX temp.lifetime_upload_bytes_idx ON session_file_upload_statistics(lifetime_bytes,ed2k_hash);
-         CREATE INDEX temp.lifetime_upload_requests_idx ON session_file_upload_statistics(lifetime_requests,ed2k_hash);
-         CREATE INDEX temp.lifetime_upload_accepts_idx ON session_file_upload_statistics(lifetime_accepts,ed2k_hash);
-         CREATE INDEX temp.last_upload_requested_idx ON session_file_upload_statistics(last_requested_at_s,ed2k_hash);
-         CREATE INDEX temp.last_uploaded_idx ON session_file_upload_statistics(last_uploaded_at_s,ed2k_hash);
-         INSERT INTO session_file_upload_statistics
+            ON session_file_upload_statistics(present,accepted_sessions,ed2k_hash);
+         CREATE INDEX temp.lifetime_upload_bytes_idx ON session_file_upload_statistics(present,lifetime_bytes,ed2k_hash);
+         CREATE INDEX temp.lifetime_upload_requests_idx ON session_file_upload_statistics(present,lifetime_requests,ed2k_hash);
+         CREATE INDEX temp.lifetime_upload_accepts_idx ON session_file_upload_statistics(present,lifetime_accepts,ed2k_hash);
+         CREATE INDEX temp.last_upload_requested_idx ON session_file_upload_statistics(present,last_requested_key,ed2k_hash);
+         CREATE INDEX temp.last_uploaded_idx ON session_file_upload_statistics(present,last_uploaded_key,ed2k_hash);
+         INSERT INTO session_file_upload_statistics(known_file_id,ed2k_hash,uploaded_bytes,upload_requests,accepted_sessions,
+            lifetime_bytes,lifetime_requests,lifetime_accepts,last_requested_at_s,last_uploaded_at_s)
             SELECT k.id,k.ed2k_hash,0,0,0,k.all_time_uploaded_bytes,k.all_time_upload_requests,
                    k.all_time_upload_accepts,k.last_upload_requested_at_s,k.last_uploaded_at_s
             FROM library_files l CROSS JOIN known_files k ON k.id=l.known_file_id;
+         CREATE TEMP TABLE session_statistics_pending(known_file_id INTEGER PRIMARY KEY) STRICT;
+         CREATE TEMP TRIGGER session_statistics_durable_update
+         AFTER UPDATE OF all_time_uploaded_bytes,all_time_upload_requests,all_time_upload_accepts,
+                         last_upload_requested_at_s,last_uploaded_at_s ON main.known_files
+         WHEN (old.all_time_uploaded_bytes,old.all_time_upload_requests,old.all_time_upload_accepts,
+               old.last_upload_requested_at_s,old.last_uploaded_at_s)
+           IS NOT (new.all_time_uploaded_bytes,new.all_time_upload_requests,new.all_time_upload_accepts,
+               new.last_upload_requested_at_s,new.last_uploaded_at_s)
+         BEGIN
+            INSERT INTO session_statistics_pending
+                SELECT new.id WHERE EXISTS(SELECT 1 FROM library_files WHERE known_file_id=new.id)
+                ON CONFLICT(known_file_id) DO NOTHING;
+         END;
          CREATE TEMP TRIGGER session_statistics_accept AFTER INSERT ON main.library_files
          BEGIN
-            INSERT INTO session_file_upload_statistics
+            INSERT INTO session_file_upload_statistics(known_file_id,ed2k_hash,uploaded_bytes,upload_requests,accepted_sessions,
+                lifetime_bytes,lifetime_requests,lifetime_accepts,last_requested_at_s,last_uploaded_at_s)
                 SELECT k.id,k.ed2k_hash,0,0,0,k.all_time_uploaded_bytes,k.all_time_upload_requests,
                        k.all_time_upload_accepts,k.last_upload_requested_at_s,k.last_uploaded_at_s
                 FROM known_files k WHERE k.id=new.known_file_id;
          END;
          CREATE TEMP TRIGGER session_statistics_remove AFTER DELETE ON main.library_files
-         BEGIN DELETE FROM session_file_upload_statistics WHERE known_file_id=old.known_file_id; END;",
+         BEGIN
+            DELETE FROM session_file_upload_statistics WHERE known_file_id=old.known_file_id;
+            DELETE FROM session_statistics_pending WHERE known_file_id=old.known_file_id;
+         END;",
     )?;
     Ok(())
 }
@@ -107,6 +128,26 @@ pub(crate) fn apply_delta(
 }
 
 impl MetadataStore {
+    /// Durable changes outside the capture ledger also invalidate published
+    /// lifetime facts. Return one bounded cohort, leaving removal to publication.
+    pub fn pending_file_upload_captures(&self) -> Result<Vec<[u8; 16]>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT k.ed2k_hash FROM temp.session_statistics_pending p CROSS JOIN known_files k
+             ON k.id=p.known_file_id ORDER BY p.known_file_id LIMIT ?1",
+        )?;
+        let rows = statement.query_map([FILE_UPLOAD_CAPTURE_BATCH as i64], |row| {
+            row.get_ref(0)?.as_blob()?.try_into().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Blob,
+                    Box::new(error),
+                )
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
     /// Publish one bounded batch to TEMP only. Repeating absolute captures is
     /// idempotent. The caller excludes checkpoint drain/commit/restore while
     /// capturing and publishing; capture mutexes must be released before SQL.
@@ -125,7 +166,8 @@ impl MetadataStore {
         let tx = conn.transaction()?;
         {
             let mut write = tx.prepare_cached(
-                "INSERT INTO temp.session_file_upload_statistics
+                "INSERT INTO temp.session_file_upload_statistics(known_file_id,ed2k_hash,uploaded_bytes,upload_requests,accepted_sessions,
+                    lifetime_bytes,lifetime_requests,lifetime_accepts,last_requested_at_s,last_uploaded_at_s)
                  SELECT k.id,k.ed2k_hash,?2,?3,?4,
                     k.all_time_uploaded_bytes+?5,k.all_time_upload_requests+?6,k.all_time_upload_accepts+?7,
                     CASE WHEN ?8 IS NULL THEN k.last_upload_requested_at_s
@@ -155,6 +197,11 @@ impl MetadataStore {
                     capture.pending.last_requested_at_s,
                     capture.pending.last_uploaded_at_s
                 ])?;
+                tx.execute(
+                    "DELETE FROM temp.session_statistics_pending
+                    WHERE known_file_id=(SELECT id FROM known_files WHERE ed2k_hash=?1)",
+                    [capture.file_hash.as_slice()],
+                )?;
             }
         }
         tx.commit()?;

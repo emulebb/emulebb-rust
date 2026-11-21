@@ -61,6 +61,24 @@ impl ParkedCreditFlushParts {
             self.metadata
                 .publish_file_upload_captures(&captures[..count])?;
         }
+        // Durable seed/import facts can change without a process capture. Drain
+        // their SQL-owned invalidations without allocating runtime counter rows.
+        loop {
+            let pending = self.metadata.pending_file_upload_captures()?;
+            if pending.is_empty() {
+                break;
+            }
+            let mut captures = [MetadataFileUploadCapture::default(); FILE_UPLOAD_CAPTURE_BATCH];
+            {
+                let owner = self.ledger.lock();
+                for (slot, hash) in captures.iter_mut().zip(&pending) {
+                    *slot = owner.file_capture(*hash);
+                }
+            }
+            captured();
+            self.metadata
+                .publish_file_upload_captures(&captures[..pending.len()])?;
+        }
         batch.complete = true;
         Ok(())
     }

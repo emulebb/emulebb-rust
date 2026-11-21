@@ -70,6 +70,11 @@ mod kad_publish_store;
 mod kad_routing_store;
 mod library_policy_store;
 mod library_projection;
+mod library_query;
+pub use library_query::{
+    LibraryFileQuery, LibraryFileSort, LibraryFileView, MetadataLibraryCursorExpired,
+    MetadataLibraryFile, MetadataLibraryFilePage,
+};
 mod library_read_store;
 pub use library_policy_store::{LibraryTagError, MetadataLibraryTag, MetadataLibraryTagPage};
 pub use library_read_store::{

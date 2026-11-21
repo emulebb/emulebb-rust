@@ -219,7 +219,7 @@ fn session_statistic_indexes_support_bounded_scalar_seeks() {
     ] {
         let sql = format!(
             "SELECT lower(hex(ed2k_hash)),{field} FROM temp.session_file_upload_statistics
-            WHERE ({field},ed2k_hash)>(?1,?2) ORDER BY {field},ed2k_hash LIMIT 1"
+            WHERE present=0 AND ({field},ed2k_hash)>(?1,?2) ORDER BY {field},ed2k_hash LIMIT 1"
         );
         let plan = conn
             .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
@@ -332,10 +332,15 @@ fn every_statistic_orders_the_full_hundred_thousand_hash_population_without_sort
         ("last_requested_at_s", "last_upload_requested_idx"),
         ("last_uploaded_at_s", "last_uploaded_idx"),
     ] {
+        let sort_key = match field {
+            "last_requested_at_s" => "last_requested_key",
+            "last_uploaded_at_s" => "last_uploaded_key",
+            _ => field,
+        };
         for direction in ["ASC", "DESC"] {
             let sql = format!(
-                "SELECT ed2k_hash,{field} FROM session_file_upload_statistics
-                ORDER BY {field} {direction},ed2k_hash {direction} LIMIT 200"
+                "SELECT ed2k_hash,{field} FROM session_file_upload_statistics WHERE present=0
+                ORDER BY {sort_key} {direction},ed2k_hash {direction} LIMIT 200"
             );
             let plan: Vec<String> = conn
                 .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
@@ -372,14 +377,11 @@ fn every_statistic_orders_the_full_hundred_thousand_hash_population_without_sort
             assert_eq!(statement.get_status(rusqlite::StatementStatus::Sort), 0);
             assert!(statement.get_status(rusqlite::StatementStatus::FullscanStep) <= 200);
         }
-        let predicate = if field.ends_with("_s") {
-            format!("{field} IS NULL AND ed2k_hash>?1")
-        } else {
-            format!("({field},ed2k_hash)>(0,?1)")
-        };
+        let boundary = if field.ends_with("_s") { -1 } else { 0 };
+        let predicate = format!("({sort_key},ed2k_hash)>({boundary},?1)");
         let sql = format!(
-            "SELECT ed2k_hash FROM session_file_upload_statistics WHERE {predicate}
-            ORDER BY {field},ed2k_hash LIMIT 200"
+            "SELECT ed2k_hash FROM session_file_upload_statistics WHERE present=0 AND {predicate}
+            ORDER BY {sort_key},ed2k_hash LIMIT 200"
         );
         let mut statement = conn.prepare(&sql).unwrap();
         let rows: Vec<Vec<u8>> = statement
