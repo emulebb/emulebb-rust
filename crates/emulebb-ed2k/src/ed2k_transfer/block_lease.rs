@@ -195,6 +195,22 @@ impl Ed2kDownloadBlockLease {
 }
 
 impl Ed2kTransferRuntime {
+    /// Only live block ownership proves acquisition. A queued source's bitmap
+    /// alone must not protect a stalled execution indefinitely.
+    pub(super) fn acquiring_rare_block(&self, job: JobToken, frequencies: &[u32]) -> bool {
+        self.download_block_leases
+            .0
+            .lock()
+            .unwrap()
+            .files
+            .get(&job)
+            .is_some_and(|leases| {
+                leases
+                    .keys()
+                    .any(|(piece, _, _)| frequencies.get(*piece as usize) == Some(&1))
+            })
+    }
+
     /// Reserve the next missing, currently-unleased eMule block for a peer.
     /// `preferred_piece` keeps productive work together among equally scarce
     /// parts; it cannot bypass an observed rarer opportunity.
@@ -207,6 +223,9 @@ impl Ed2kTransferRuntime {
         peer_rate_bytes_per_sec: u32,
     ) -> Result<Option<Ed2kDownloadBlockLease>> {
         let _guard = self.lock_manifest(job).await;
+        if self.download_yield_requested(job) {
+            return Ok(None);
+        }
         let manifest = self.load_manifest_unlocked(job).await?;
         let policy = endgame_policy(
             manifest.file_size,

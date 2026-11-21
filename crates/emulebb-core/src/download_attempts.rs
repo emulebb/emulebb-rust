@@ -4,6 +4,7 @@ use emulebb_metadata::{JobId, JobToken};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -71,6 +72,16 @@ struct Entry {
     nonce: u64,
     cancel: CancellationToken,
     wake: Arc<tokio::sync::Notify>,
+    selected_at: Instant,
+    rare_until: Option<Instant>,
+    yielding: bool,
+}
+
+pub(crate) struct DisplacementOwner {
+    pub token: JobToken,
+    pub selected_at: Instant,
+    pub protected_readiness: bool,
+    pub draining: bool,
 }
 
 /// This guard owns only scalar controls. Drop needs neither an async runtime,
@@ -198,6 +209,9 @@ impl DownloadAttemptControl {
                 nonce,
                 cancel: cancel.clone(),
                 wake: Arc::clone(&wake),
+                selected_at: Instant::now(),
+                rare_until: None,
+                yielding: false,
             },
         );
         Ok(DownloadAttemptGuard {
@@ -249,6 +263,34 @@ impl DownloadAttemptControl {
             .filter(|entry| entry.kind == Kind::Active)
             .map(|entry| (entry.token, entry.cancel.is_cancelled()))
             .collect()
+    }
+
+    pub(crate) fn displacement_owners(&self) -> Vec<DisplacementOwner> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        state
+            .entries
+            .values()
+            .filter(|entry| entry.kind == Kind::Active)
+            .map(|entry| DisplacementOwner {
+                token: entry.token,
+                selected_at: entry.selected_at,
+                protected_readiness: entry.rare_until.is_some_and(|until| now < until),
+                draining: entry.yielding || entry.cancel.is_cancelled(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn mark_yielding(&self, token: JobToken) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(entry) = state.entries.get_mut(&token.job_id).filter(|entry| {
+            entry.token == token && entry.kind == Kind::Active && !entry.cancel.is_cancelled()
+        }) else {
+            return false;
+        };
+        entry.yielding = true;
+        entry.wake.notify_one();
+        true
     }
     /// Wake only a currently selected execution. Queued rows own no notifier.
     pub(crate) fn wake(&self, token: JobToken) {
@@ -451,11 +493,13 @@ impl DownloadAttemptGuard {
         if active >= limit || state.entries.len() > state.window.total {
             return false;
         }
-        state
+        let entry = state
             .entries
             .get_mut(&self.token.job_id)
-            .expect("owned preparation")
-            .kind = Kind::Active;
+            .expect("owned preparation");
+        entry.kind = Kind::Active;
+        entry.selected_at = Instant::now();
+        entry.rare_until = rare.then(|| entry.selected_at + Duration::from_secs(30));
         true
     }
 

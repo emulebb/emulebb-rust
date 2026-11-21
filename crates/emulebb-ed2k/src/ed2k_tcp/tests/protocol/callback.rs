@@ -4,7 +4,7 @@ use crate::ed2k_tcp::{reply_with_firewall_udp, send_kad_firewall_tcp_ack};
 #[tokio::test]
 async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early_hydration() {
     use crate::ed2k_transfer::Ed2kCallbackPreparationOutcome;
-    for decision in 0..3 {
+    for decision in 0..4 {
         let mut runtime = ListenerTestRuntime::new(
             "callback-core-decision",
             listener_hello_identity(),
@@ -73,6 +73,7 @@ async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early
         let listener = runtime.spawn_listener_results(1);
         let addr = runtime.peer_addr;
         let (quiet_tx, quiet_rx) = tokio::sync::oneshot::channel();
+        let (yield_point_tx, yield_point_rx) = tokio::sync::oneshot::channel();
         let peer_payload = payload.clone();
         let peer = tokio::spawn(async move {
             let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -111,7 +112,7 @@ async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early
                 "listener must wait for Core before queue/hashset/payload work"
             );
             quiet_tx.send(()).unwrap();
-            if decision == 0 {
+            if decision == 0 || decision == 3 {
                 let mut start = read_packet(&mut stream).await;
                 if start[5] == OP_REQUESTSOURCES2 {
                     assert_eq!(start, encode_request_sources2(&hash));
@@ -124,20 +125,36 @@ async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early
                 let (requested, ranges) =
                     decode_request_parts_payload(&request[6..], false).unwrap();
                 assert_eq!(requested, hash);
-                for (start, end) in ranges {
-                    stream
-                        .write_all(
-                            &encode_sending_part(
-                                &hash,
-                                start,
-                                end,
-                                &peer_payload[start as usize..end as usize],
-                                false,
+                if decision == 3 {
+                    // Leave an incomplete next frame in the decoder. Yield must
+                    // close this stream, never pass it to another file session.
+                    let (start, end) = ranges[0];
+                    let packet = encode_sending_part(
+                        &hash,
+                        start,
+                        end,
+                        &peer_payload[start as usize..end as usize],
+                        false,
+                    )
+                    .unwrap();
+                    stream.write_all(&packet[..3]).await.unwrap();
+                    yield_point_tx.send(()).unwrap();
+                } else {
+                    for (start, end) in ranges {
+                        stream
+                            .write_all(
+                                &encode_sending_part(
+                                    &hash,
+                                    start,
+                                    end,
+                                    &peer_payload[start as usize..end as usize],
+                                    false,
+                                )
+                                .unwrap(),
                             )
-                            .unwrap(),
-                        )
-                        .await
-                        .unwrap();
+                            .await
+                            .unwrap();
+                    }
                 }
                 let mut bytes = [0; 256];
                 tokio::time::timeout(Duration::from_secs(3), async {
@@ -219,7 +236,7 @@ async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early
                 .is_none_or(|storage| !storage.path.exists())
         );
         drop(record);
-        if decision == 0 {
+        if decision == 0 || decision == 3 {
             let selected = runtime
                 .transfer_runtime
                 .begin_download_job_execution(job.token, None)
@@ -236,21 +253,57 @@ async fn callback_preparation_waits_for_start_skip_or_cancellation_without_early
                     .await
                     .unwrap(),
             );
+            if decision == 3 {
+                for (last, identity) in [(250, [0x78; 16]), (251, [0x79; 16])] {
+                    assert!(runtime.transfer_runtime.note_download_source_part_bitmap(
+                        token,
+                        format!("192.0.2.{last}:4662").parse().unwrap(),
+                        Some(identity),
+                        None,
+                        vec![true]
+                    ));
+                }
+            }
             owner.start(token).unwrap();
-            assert_eq!(
-                owner.completed().await.unwrap(),
-                Ed2kPeerDownloadOutcome::Completed
-            );
-            assert_eq!(
-                runtime
-                    .transfer_runtime
-                    .manifest(token)
-                    .await
-                    .unwrap()
-                    .pieces[0]
-                    .bytes_written,
-                16
-            );
+            if decision == 3 {
+                yield_point_rx.await.unwrap();
+                assert!(
+                    runtime
+                        .transfer_runtime
+                        .request_download_yield(token, 0)
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(
+                    owner.completed().await.unwrap(),
+                    Ed2kPeerDownloadOutcome::AcceptedButIncomplete
+                );
+                assert_eq!(
+                    runtime
+                        .transfer_runtime
+                        .manifest(token)
+                        .await
+                        .unwrap()
+                        .pieces[0]
+                        .bytes_written,
+                    0
+                );
+            } else {
+                assert_eq!(
+                    owner.completed().await.unwrap(),
+                    Ed2kPeerDownloadOutcome::Completed
+                );
+                assert_eq!(
+                    runtime
+                        .transfer_runtime
+                        .manifest(token)
+                        .await
+                        .unwrap()
+                        .pieces[0]
+                        .bytes_written,
+                    16
+                );
+            }
         } else if decision == 1 {
             owner.skip().unwrap();
             assert_eq!(

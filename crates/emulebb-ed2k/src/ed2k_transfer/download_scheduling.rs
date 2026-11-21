@@ -1,5 +1,5 @@
-//! Read-only classification of already selected executions for safe scheduling.
-use super::{Ed2kTransferRuntime, Ed2kTransferState, LocalMutationError, block_lease, store};
+//! Current-execution classification and fenced runtime yield requests.
+use super::{Ed2kTransferRuntime, LocalMutationError, block_lease, store};
 use anyhow::Result;
 use emulebb_metadata::JobToken;
 use std::time::Instant;
@@ -10,18 +10,20 @@ pub(super) const WORK_BYTES: usize = 1024 * 1024;
 /// cancellation/retirement has released the execution's backing.
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadSchedulingState {
-    pub rare: bool,
+    pub acquiring_rare: bool,
     pub endgame: bool,
     pub session_bytes: u64,
     pub last_payload_at: Option<Instant>,
+    pub yielding: bool,
 }
 
 impl Ed2kTransferRuntime {
     /// Called only by the existing bounded blocking owner. Refuse contention
     /// instead of parking a work credit behind a payload producer's job gate.
-    pub(super) fn read_download_scheduling_state(
+    pub(super) fn classify_or_yield_download(
         &self,
         token: JobToken,
+        yield_if_unchanged: Option<u64>,
     ) -> Result<Option<DownloadSchedulingState>> {
         let _job = store::scoped_lock(&self.manifest_locks, token.job_id)
             .try_lock_owned()
@@ -47,11 +49,7 @@ impl Ed2kTransferRuntime {
                 Some(WORK_BYTES - 4096),
             )
             .ok_or(LocalMutationError::Busy)?;
-        let rare = manifest.pieces.iter().any(|piece| {
-            piece.state != Ed2kTransferState::Verified
-                && u64::from(piece.piece_index) * manifest.piece_size < manifest.file_size
-                && frequencies.get(piece.piece_index as usize) == Some(&1)
-        });
+        let acquiring_rare = self.acquiring_rare_block(token, &frequencies);
         let endgame = manifest.completed
             || manifest.final_rehash_pending
             || block_lease::download_is_in_endgame(
@@ -61,15 +59,52 @@ impl Ed2kTransferRuntime {
             );
         let (session_bytes, last_payload_at) = self.download_payload_observation(token);
         // Logical stop/removal may retire authority while the read computes.
-        if self.active_job_session(token).is_none() {
+        let Some(sessions) = self.active_job_session(token) else {
             return Ok(None);
+        };
+        let session = sessions.get(&token.job_id).expect("fenced current session");
+        // WHY: recheck accepted progress under the same short ledger fence as
+        // payload accounting; a stale selection cannot displace renewed work.
+        if yield_if_unchanged.is_some_and(|expected| expected == session_bytes)
+            && !acquiring_rare
+            && !endgame
+            && self.download_payload_observation(token).0 == session_bytes
+        {
+            session.scheduling_yield.cancel();
         }
+        let yielding = session.scheduling_yield.is_cancelled();
+        drop(sessions);
         Ok(Some(DownloadSchedulingState {
-            rare,
+            acquiring_rare,
             endgame,
             session_bytes,
             last_payload_at,
+            yielding,
         }))
+    }
+
+    pub(crate) fn download_yield_signal(
+        &self,
+        token: JobToken,
+    ) -> Option<tokio_util::sync::CancellationToken> {
+        self.active_job_session(token)?
+            .get(&token.job_id)
+            .map(|session| session.scheduling_yield.clone())
+    }
+
+    /// A runtime-only request leaves logical intent and resumable storage intact.
+    pub fn download_yield_requested(&self, token: JobToken) -> bool {
+        self.download_yield_signal(token)
+            .is_some_and(|signal| signal.is_cancelled())
+    }
+
+    /// Wake an idle current execution without canceling an in-flight producer.
+    pub async fn download_yield_notified(&self, token: JobToken) {
+        if let Some(signal) = self.download_yield_signal(token) {
+            signal.cancelled().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
     }
 }
 

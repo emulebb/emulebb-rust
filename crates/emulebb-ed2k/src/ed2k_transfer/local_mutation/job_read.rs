@@ -15,6 +15,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Scheduling(
         Arc<transfer::Ed2kTransferRuntime>,
         emulebb_metadata::JobToken,
+        Option<u64>,
     ),
     TransferCounts,
     Execution(emulebb_metadata::JobToken),
@@ -168,8 +169,8 @@ impl LocalMutationRegistry {
                 JobRead::Query(query) => metadata.download_job_page(query).map(|value| {
                     JobReadResult::Query(RetainedRead::new(value, capacity.take_result()))
                 }),
-                JobRead::Scheduling(runtime, token) => runtime
-                    .read_download_scheduling_state(token)
+                JobRead::Scheduling(runtime, token, expected) => runtime
+                    .classify_or_yield_download(token, expected)
                     .map(JobReadResult::Scheduling),
                 JobRead::Counts => metadata.download_job_counts().map(|value| {
                     JobReadResult::Counts(RetainedRead::new(value, capacity.take_result()))
@@ -370,12 +371,32 @@ impl transfer::Ed2kTransferRuntime {
         token: emulebb_metadata::JobToken,
     ) -> Result<Option<transfer::DownloadSchedulingState>> {
         let JobReadResult::Scheduling(state) = self
-            .read_job_metadata(JobRead::Scheduling(Arc::clone(self), token))
+            .read_job_metadata(JobRead::Scheduling(Arc::clone(self), token, None))
             .await?
         else {
             unreachable!()
         };
         Ok(state)
+    }
+
+    /// Recheck current protection and accepted progress before requesting a safe
+    /// yield. Capacity remains owned until producers and retirement settle.
+    pub async fn request_download_yield(
+        self: &Arc<Self>,
+        token: emulebb_metadata::JobToken,
+        expected_bytes: u64,
+    ) -> Result<bool> {
+        let JobReadResult::Scheduling(state) = self
+            .read_job_metadata(JobRead::Scheduling(
+                Arc::clone(self),
+                token,
+                Some(expected_bytes),
+            ))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(state.is_some_and(|state| state.yielding))
     }
 
     /// Caller must release job/content guards before retrying Busy. No read

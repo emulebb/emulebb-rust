@@ -10,6 +10,31 @@ fn hash(byte: u8) -> Ed2kHash {
 }
 
 #[test]
+fn displacement_keeps_capacity_owned_and_protects_fresh_readiness() {
+    let control = Arc::new(DownloadAttemptControl::with_limit(Some(1)));
+    let prepared = control.try_prepare(token(1, 1), hash(1)).unwrap();
+    assert!(prepared.promote_ready(true));
+    let owners = control.displacement_owners();
+    assert_eq!(owners.len(), 1);
+    assert!(owners[0].protected_readiness);
+    assert!(
+        !control.mark_yielding(token(1, 2)),
+        "stale selection cannot mark a successor"
+    );
+    assert!(control.mark_yielding(token(1, 1)));
+    assert!(control.displacement_owners()[0].draining);
+    assert_eq!(control.admission_counts().1, 1);
+    assert_eq!(control.available().0, 0);
+    assert!(
+        !prepared.cancellation().is_cancelled(),
+        "safe yield does not abort its producer"
+    );
+    drop(prepared);
+    assert!(control.displacement_owners().is_empty());
+    assert_eq!(control.available().0, 1);
+}
+
+#[test]
 fn rare_bursts_round_up_and_do_not_admit_ordinary_work_over_its_limit() {
     for (ordinary, ceiling) in [(1u32, 2usize), (4, 5), (5, 7)] {
         let control = Arc::new(DownloadAttemptControl::with_limit(Some(ordinary)));

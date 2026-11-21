@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 const PAGE_SIZE: usize = 32;
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_SELECTION_INTERVAL: Duration = Duration::from_secs(30);
+mod displacement;
 
 #[cfg(test)]
 mod retirement_tests;
@@ -165,35 +166,7 @@ impl EmulebbCore {
         // Re-evaluate current proof rather than retaining a score across waits.
         // Missing/stale proof is ordinary work, never evidence of rarity.
         for entry in ready.iter_mut() {
-            entry.rare = false;
-            let result = match &entry.source {
-                crate::download_preparation::DownloadPreparation::Direct(source) => {
-                    self.ed2k_transfers
-                        .download_source_has_rare_part(
-                            entry.guard.token(),
-                            source.peer.availability().user_hash,
-                        )
-                        .await
-                }
-                crate::download_preparation::DownloadPreparation::Callback(source) => {
-                    self.ed2k_transfers
-                        .download_live_source_has_rare_part(
-                            entry.guard.token(),
-                            source.file_size,
-                            source.user_hash,
-                            std::sync::Arc::clone(&source.available_parts),
-                            source.observed_at,
-                        )
-                        .await
-                }
-                _ => Ok(false),
-            };
-            match result {
-                Ok(rare) => entry.rare = rare,
-                Err(error) => {
-                    tracing::debug!(job_id = %entry.guard.token().job_id, %error, "ready scarcity observation unavailable")
-                }
-            }
+            entry.rare = self.ready_source_is_rare(entry).await;
         }
         let mut index = 0;
         while index < ready.len() {
@@ -213,6 +186,9 @@ impl EmulebbCore {
                 self.ed2k_transfers.download_resource_snapshot(),
             ) == 0
             {
+                if let Some(entry) = ready.iter().find(|entry| entry.rare) {
+                    self.displace_ordinary_download(entry, shutdown).await;
+                }
                 break;
             }
             let index = ready
@@ -230,6 +206,10 @@ impl EmulebbCore {
                 .expect("nonempty ready cohort")
                 .0;
             if !ready[index].guard.promote_ready(ready[index].rare) {
+                if ready[index].rare {
+                    self.displace_ordinary_download(&ready[index], shutdown)
+                        .await;
+                }
                 break;
             }
             let ready = ready.swap_remove(index);
@@ -422,7 +402,10 @@ impl EmulebbCore {
         let mut progress =
             SelectionProgress::new(self.ed2k_transfers.downloaded_session_bytes(guard.token()));
         loop {
-            if shutdown.is_cancelled() || cancel.is_cancelled() {
+            if shutdown.is_cancelled()
+                || cancel.is_cancelled()
+                || self.ed2k_transfers.download_yield_requested(guard.token())
+            {
                 break;
             }
             crate::diag_sched::download_attempt_started(&transfer.hash, false);
@@ -496,7 +479,9 @@ impl EmulebbCore {
                     tracing::warn!(job_id = %guard.token().job_id, %error, "download network attempt deferred")
                 }
             }
-            if progress.idle(self.ed2k_transfers.downloaded_session_bytes(guard.token())) {
+            if self.ed2k_transfers.download_yield_requested(guard.token())
+                || progress.idle(self.ed2k_transfers.downloaded_session_bytes(guard.token()))
+            {
                 break;
             }
             tokio::select! {

@@ -1482,7 +1482,7 @@ impl EmulebbCore {
             // Mid-round cancel check (after the direct-download leg, before the
             // requery sleep): stop promptly on delete/pause/stop/recheck instead
             // of sleeping then requerying for a transfer that is going away.
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || self.ed2k_transfers.download_yield_requested(job_token) {
                 return Ok(None);
             }
             if ed2k_download_retry::should_wait_for_deferred_direct_sources(
@@ -1499,6 +1499,7 @@ impl EmulebbCore {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = cancel.cancelled() => return Ok(None),
+                        () = self.ed2k_transfers.download_yield_notified(job_token) => return Ok(None),
                     }
                     continue;
                 }

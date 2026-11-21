@@ -416,6 +416,7 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
     // Lowering a limit retains existing owners, as it does during real drains.
     download.download_attempts.apply_concurrency_limit(Some(2));
     let mut active = Vec::new();
+    let mut victim = None;
     for byte in [0x67, 0x68] {
         let (_, blocker) = download
             .create_download(DownloadCreate {
@@ -432,6 +433,38 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
             .unwrap();
         let blocker_id = blocker.id;
         drop(blocker);
+        if byte == 0x67 {
+            let header = download
+                .ed2k_transfers
+                .download_job(blocker_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let token = header.token;
+            let temp = download.download_temp_selection(&header).await.unwrap();
+            drop(header);
+            let selected = download
+                .ed2k_transfers
+                .begin_download_job_execution(token, Some(&temp))
+                .await
+                .unwrap();
+            let token = selected.as_ref().unwrap().token;
+            drop(selected);
+            let execution = emulebb_ed2k::ed2k_transfer::new_transfer_job(
+                token,
+                Ed2kHash::from_bytes([byte; 16]),
+                "Active.bin".into(),
+                16,
+            );
+            drop(
+                download
+                    .ed2k_transfers
+                    .ensure_job(&execution)
+                    .await
+                    .unwrap(),
+            );
+            victim = Some(token);
+        }
         let header = download
             .ed2k_transfers
             .download_job(blocker_id)
@@ -537,7 +570,27 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
     download
         .download_hydration_busy
         .store(true, Ordering::Release);
-    drop(active.pop());
+    let victim = victim.unwrap();
+    assert!(
+        download.ed2k_transfers.download_yield_requested(victim),
+        "the blocked rare cohort requests an ordinary yield"
+    );
+    assert_eq!(
+        download.download_attempts.admission_counts().1,
+        2,
+        "a yield request does not release its owner's capacity"
+    );
+    download
+        .ed2k_transfers
+        .release_download_job_execution(victim)
+        .await
+        .unwrap();
+    assert_eq!(
+        download.download_attempts.admission_counts().1,
+        2,
+        "Native retirement precedes guard release"
+    );
+    drop(active.remove(0));
     tokio::time::timeout(Duration::from_secs(10), async {
         while download.download_hydration_busy.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
