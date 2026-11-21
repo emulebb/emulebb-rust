@@ -6,6 +6,153 @@ use crate::ed2k_tcp::{
 fn assert_worker_owned<T: Send + 'static>(_: &T) {}
 
 #[tokio::test]
+async fn accepted_probe_preserves_listener_ownership_without_hydration_or_payload() {
+    use crate::ed2k_tcp::download::{
+        AcceptedFileProbeOptions, AcceptedFileProbeOutcome, DownloadConnectionState,
+        probe_accepted_file,
+    };
+    use crate::ed2k_tcp::{Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher};
+    for mode in 0..3 {
+        let root = unique_test_dir("accepted-availability-probe");
+        let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+        let secure = test_peer_secure_ident();
+        let hash = Ed2kHash([0x61; 16]);
+        let size = ED2K_PART_SIZE + 1;
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
+            hash,
+            "Accepted.bin".into(),
+            size,
+        );
+        let baseline = runtime.download_resource_snapshot().resident_bytes;
+        let mut held = Vec::new();
+        if mode == 1 {
+            held.push(runtime.try_admit_source_probe().unwrap());
+            held.push(runtime.try_admit_source_probe().unwrap());
+        }
+        let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            if mode == 0 {
+                let request = read_packet(&mut stream).await;
+                assert_startup_multipacket_ext2_with_source_exchange(
+                    request[0],
+                    request[5],
+                    &request[6..],
+                    &hash,
+                    size,
+                    true,
+                    false,
+                );
+                stream
+                    .write_all(
+                        &crate::ed2k_tcp::encode_multipacket_ext2_answer(
+                            &Ed2kFileIdentifier {
+                                file_hash: hash,
+                                file_size: Some(size),
+                                aich_root: None,
+                            },
+                            "Accepted.bin",
+                            crate::ed2k_string::Ed2kStringEncoding::Utf8,
+                            true,
+                            Some(&[2, 0, 1]),
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0,
+                "accepted preparation must not send HELLO, queue, hashset or payload requests"
+            );
+        });
+        let (stream, peer_addr) = listener.accept().await.unwrap();
+        let mut dispatcher = Ed2kPeerDispatcher::new(
+            Ed2kTransport::from_parts(
+                stream,
+                VecDeque::new(),
+                None,
+                None,
+                Ed2kTransportMode::Plaintext,
+            ),
+            peer_addr,
+            Ed2kPeerConnectionOrigin::InboundAccepted,
+        );
+        let profile = decode_hello_answer_profile(&test_peer_hello(addr)[6..]).unwrap();
+        let connection_state = DownloadConnectionState::from_inbound_hello(
+            &profile,
+            &Ed2kPeerSecureIdentState::default(),
+            true,
+        );
+        let result = probe_accepted_file(AcceptedFileProbeOptions {
+            dispatcher: &mut dispatcher,
+            peer_addr,
+            hello_identity: peer_hello_identity(),
+            secure_ident: secure.as_ref(),
+            runtime: runtime.as_ref(),
+            job_token: job.token,
+            file_hash: if mode == 2 {
+                Ed2kHash([0x62; 16])
+            } else {
+                hash
+            },
+            file_size: size,
+            profile,
+            connection_state,
+            timeout: Duration::from_secs(3),
+        })
+        .await;
+        match (mode, result) {
+            (0, Ok(AcceptedFileProbeOutcome::Available(prepared))) => {
+                assert_eq!(prepared.availability().user_hash, [0x42; 16]);
+                assert_eq!(prepared.availability().available_parts, [true, false]);
+                let other = runtime.try_admit_source_probe().unwrap();
+                assert!(
+                    runtime.try_admit_source_probe().is_none(),
+                    "prepared metadata retains its quota"
+                );
+                drop(other);
+                drop(prepared);
+            }
+            (1, Ok(AcceptedFileProbeOutcome::Deferred)) => {}
+            (2, Err(_)) => {}
+            _ => panic!("unexpected accepted probe outcome"),
+        }
+        assert_eq!(
+            runtime.download_resource_snapshot().resident_bytes,
+            baseline
+        );
+        assert_eq!(runtime.download_resource_snapshot().connections, 0);
+        let record = runtime
+            .download_job(job.token.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.token, job.token);
+        assert!(
+            record
+                .storage
+                .as_ref()
+                .is_none_or(|storage| !storage.path.exists())
+        );
+        drop(record);
+        drop(held);
+        let first = runtime.try_admit_source_probe().unwrap();
+        let second = runtime.try_admit_source_probe().unwrap();
+        drop((first, second));
+        drop(dispatcher);
+        peer.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn prepared_a4af_keeps_one_socket_and_retains_outcomes_after_a_later_close() {
     use crate::ed2k_tcp::{Ed2kPeerDownloadFile, Ed2kPeerFileDownloadOutcome};
     for termination in 0..3 {
@@ -437,8 +584,12 @@ async fn prepared_peer_persists_status_and_downloads_on_the_original_socket() {
             ))
             .await
             .unwrap();
-        // The first frame after promotion must join the queue on this socket,
-        // without another HELLO/file request. This fixture suppresses SX2 below.
+        // Preparation omitted SX2. Admission sends it once before joining the
+        // upload queue, without another HELLO or metadata request on this socket.
+        assert_eq!(
+            read_packet(&mut stream).await,
+            encode_request_sources2(&hash)
+        );
         let (requested_hash, ranges) =
             accept_upload_and_read_parts_request(&mut stream, false).await;
         assert_eq!(requested_hash, hash);
@@ -499,7 +650,7 @@ async fn prepared_peer_persists_status_and_downloads_on_the_original_socket() {
         .download(Ed2kPreparedDownloadOptions {
             job_token: job.token,
             timeout: Duration::from_secs(3),
-            current_source_count: usize::MAX,
+            current_source_count: 0,
             upload_context: None,
             established_context: None,
             reask_register: None,

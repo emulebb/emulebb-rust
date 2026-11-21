@@ -62,6 +62,9 @@ mod startup;
 mod state;
 
 use parts::{DownloadPartPacket, handle_download_part_packet};
+pub(in crate::ed2k_tcp) use probe::{
+    AcceptedFileProbeOptions, AcceptedFileProbeOutcome, probe_accepted_file,
+};
 pub use probe::{
     Ed2kPeerAvailability, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, Ed2kPreparedDownloadOptions,
     Ed2kPreparedPeer, probe_file_from_peer,

@@ -1,4 +1,6 @@
 //! Short availability sessions share normal codecs, transport and secure ident.
+mod accepted;
+mod exchange;
 use super::*;
 use crate::ed2k_server::Ed2kFoundSource;
 use crate::ed2k_tcp::{
@@ -10,6 +12,10 @@ use crate::ed2k_transfer::{
     ED2K_PART_SIZE, Ed2kPeerConnectionGuard, Ed2kSourceConnectionAdmission,
     Ed2kSourceConnectionPermit,
 };
+pub(in crate::ed2k_tcp) use accepted::{
+    AcceptedFileProbeOptions, AcceptedFileProbeOutcome, probe_accepted_file,
+};
+use exchange::{ProbeExchangeOptions, ProbeExchangeOutcome, exchange_probe};
 
 /// Inputs contain compact verified-part status, without execution/storage state.
 pub struct Ed2kPeerProbeOptions<'request> {
@@ -321,7 +327,7 @@ async fn run_probe(
             &encode_hello_request(options.hello_identity),
         )
         .await?;
-    let mut state = DownloadSessionState::new(
+    let state = DownloadSessionState::new(
         false,
         false,
         false,
@@ -329,218 +335,45 @@ async fn run_probe(
         options.peer.obfuscation_options,
         None,
     );
-    let mut requested = false;
-    let mut file_name = None;
-    let mut observed_profile = None;
-    let mut metadata = std::collections::VecDeque::with_capacity(2);
-    // WHY: metadata probes must retire even when a peer floods unrelated control
-    // frames. Packet framing/decompression retain the transport's existing caps.
-    for _ in 0..64 {
-        let packet = transport
-            .read_packet_diagnostic("source_probe", peer_addr, "availability")
-            .await?
-            .context("peer closed availability probe")?;
-        match (packet.protocol, packet.opcode) {
-            (OP_EDONKEYPROT, OP_HELLO | OP_HELLOANSWER) => {
-                let profile = if packet.opcode == OP_HELLO {
-                    decode_hello_profile(&packet.payload)?
-                } else {
-                    decode_hello_answer_profile(&packet.payload)?
-                };
-                anyhow::ensure!(
-                    !runtime
-                        .ban_store()
-                        .is_banned(Some(options.peer.ip), Some(&profile.identity.user_hash)),
-                    "banned probe identity"
-                );
-                anyhow::ensure!(
-                    !state.hello_complete
-                        || state.peer_user_hash == Some(profile.identity.user_hash),
-                    "probe peer changed identity"
-                );
-                if packet.opcode == OP_HELLO {
-                    for reply in build_hello_responses(&packet.payload, options.hello_identity)? {
-                        transport
-                            .write_all_diagnostic("source_probe", peer_addr, "hello_reply", &reply)
-                            .await?;
-                    }
-                }
-                state.peer_user_hash = Some(profile.identity.user_hash);
-                state.peer_secure_ident.peer_sec_ident = profile.misc_options1.secure_ident;
-                state.remote_supports_unicode = profile.misc_options1.unicode_support;
-                state.hello_complete = true;
-                let connection = DownloadConnectionState::from_inbound_hello(
-                    &profile,
-                    &state.peer_secure_ident,
-                    state.secure_ident_started,
-                );
-                state = DownloadSessionState::new(
-                    true,
-                    state.secure_ident_started,
-                    false,
-                    Some(profile.identity.user_hash),
-                    Some(profile.connect_options),
-                    Some(&connection),
-                );
-                if profile.supports_secure_ident && !state.peer_secure_ident.requested_peer_key {
-                    let challenge = begin_secure_ident_probe(&mut state.peer_secure_ident);
-                    transport
-                        .write_all_diagnostic(
-                            "source_probe",
-                            peer_addr,
-                            "secure_ident_probe",
-                            &challenge,
-                        )
-                        .await?;
-                    state.secure_ident_started = true;
-                }
-                if !requested {
-                    let verified = options.verified_parts.iter().copied();
-                    let hash = options.peer.file_hash;
-                    let request = if profile.supports_file_identifiers {
-                        encode_multipacket_ext2_request(
-                            &Ed2kFileIdentifier {
-                                file_hash: hash,
-                                file_size: Some(options.file_size),
-                                aich_root: None,
-                            },
-                            options.file_size,
-                            verified,
-                            PeerSourceExchangeRequest::None,
-                        )
-                    } else if profile.supports_multipacket {
-                        encode_multipacket_request(
-                            &hash,
-                            options.file_size,
-                            verified,
-                            profile.supports_ext_multipacket,
-                            PeerSourceExchangeRequest::None,
-                            false,
-                        )
-                    } else {
-                        encode_request_filename(&hash, options.file_size, verified)
-                    };
-                    transport
-                        .write_all_diagnostic("source_probe", peer_addr, "file_request", &request)
-                        .await?;
-                    if !profile.supports_file_identifiers
-                        && !profile.supports_multipacket
-                        && options.file_size > ED2K_PART_SIZE
-                    {
-                        transport
-                            .write_all_diagnostic(
-                                "source_probe",
-                                peer_addr,
-                                "file_status_request",
-                                &encode_set_req_file_id(&hash),
-                            )
-                            .await?;
-                    }
-                    requested = true;
-                }
-                observed_profile = Some(profile);
-            }
-            (OP_EMULEPROT, OP_SECIDENTSTATE) => {
-                secure_ident::handle_secident_state(
-                    &mut transport,
-                    peer_addr,
-                    options.secure_ident.as_ref(),
-                    &mut state,
-                    &packet.payload,
-                )
-                .await?
-            }
-            (OP_EMULEPROT, OP_PUBLICKEY) => {
-                secure_ident::handle_public_key(
-                    &mut transport,
-                    peer_addr,
-                    options.secure_ident.as_ref(),
-                    &mut state,
-                    &packet.payload,
-                )
-                .await?
-            }
-            (OP_EMULEPROT, OP_SIGNATURE) => secure_ident::handle_signature(
-                &transport,
-                peer_addr,
-                options.secure_ident.as_ref(),
-                &mut state,
-                runtime,
-                &packet.payload,
-            ),
-            (OP_EMULEPROT, OP_EMULEINFO | OP_EMULEINFOANSWER) => {
-                apply_emule_info_profile(&mut state, decode_emule_info_profile(&packet.payload)?);
-                if packet.opcode == OP_EMULEINFO {
-                    transport
-                        .write_all_diagnostic(
-                            "source_probe",
-                            peer_addr,
-                            "emule_info_answer",
-                            &encode_emule_info_answer(options.hello_identity.udp_port),
-                        )
-                        .await?;
-                }
-            }
-            _ if requested => {
-                match decode_probe_reply(
-                    &packet,
-                    options.peer.file_hash,
-                    options.file_size,
-                    parts,
-                    state.remote_supports_unicode,
-                    &mut file_name,
-                )? {
-                    ProbeReply::NotFound => return Ok(Ed2kPeerProbeOutcome::FileNotFound),
-                    ProbeReply::Parts(available_parts) => {
-                        metadata.push_back(packet);
-                        return Ok(Ed2kPeerProbeOutcome::Available(Box::new(
-                            Ed2kPreparedPeer {
-                                availability: Ed2kPeerAvailability {
-                                    peer: peer_addr,
-                                    user_hash: state
-                                        .peer_user_hash
-                                        .context("missing probe identity")?,
-                                    file_name,
-                                    available_parts,
-                                },
-                                dispatcher: transport,
-                                state: Some(state),
-                                metadata,
-                                profile: observed_profile.context("missing probe profile")?,
-                                peer: options.peer.clone(),
-                                file_size: options.file_size,
-                                runtime: options.transfer_runtime,
-                                secure_ident: options.secure_ident,
-                                hello_identity: options.hello_identity,
-                                preparation: Some(preparation),
-                                _connection: connection,
-                                _peer_connection: _peer,
-                            },
-                        )));
-                    }
-                    ProbeReply::Continue => {
-                        if matches!(
-                            (packet.protocol, packet.opcode),
-                            (OP_EDONKEYPROT, OP_REQFILENAMEANSWER)
-                                | (
-                                    OP_EMULEPROT,
-                                    OP_MULTIPACKETANSWER | OP_MULTIPACKETANSWER_EXT2
-                                )
-                        ) {
-                            // Keep at most the last incomplete metadata answer
-                            // before final status; never retain unrelated frames.
-                            metadata.clear();
-                            metadata.push_back(packet);
-                        }
-                    }
-                }
-            }
-            _ => {}
+    let observed = exchange_probe(
+        &mut transport,
+        ProbeExchangeOptions {
+            peer_addr,
+            file_hash: options.peer.file_hash,
+            file_size: options.file_size,
+            verified_parts: options.verified_parts,
+            hello_identity: options.hello_identity,
+            secure_ident: options.secure_ident.as_ref(),
+            runtime,
+            parts,
+        },
+        state,
+        None,
+    )
+    .await?;
+    Ok(match observed {
+        ProbeExchangeOutcome::Closed(Some(error)) => return Err(error),
+        ProbeExchangeOutcome::Closed(None) => anyhow::bail!("peer closed availability probe"),
+        ProbeExchangeOutcome::FileNotFound(_) => Ed2kPeerProbeOutcome::FileNotFound,
+        ProbeExchangeOutcome::Available(observed) => {
+            Ed2kPeerProbeOutcome::Available(Box::new(Ed2kPreparedPeer {
+                availability: observed.availability,
+                dispatcher: transport,
+                state: Some(observed.state),
+                metadata: observed.metadata,
+                profile: observed.profile,
+                peer: options.peer.clone(),
+                file_size: options.file_size,
+                runtime: options.transfer_runtime,
+                secure_ident: options.secure_ident,
+                hello_identity: options.hello_identity,
+                preparation: Some(preparation),
+                _connection: connection,
+                _peer_connection: _peer,
+            }))
         }
-    }
-    anyhow::bail!("peer availability probe packet allowance exhausted")
+    })
 }
-
 #[derive(Debug, PartialEq, Eq)]
 enum ProbeReply {
     Continue,

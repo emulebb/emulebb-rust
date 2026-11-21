@@ -14,7 +14,8 @@ pub(in crate::ed2k_tcp) use blocks::{
 };
 pub use session::Ed2kPeerDownloadOutcome;
 pub(in crate::ed2k_tcp) use session::{
-    DownloadConnectionState, DownloadSessionOptions, drive_download_session,
+    AcceptedFileProbeOptions, AcceptedFileProbeOutcome, DownloadConnectionState,
+    DownloadSessionOptions, drive_download_session, probe_accepted_file,
 };
 pub use session::{
     Ed2kPeerAvailability, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, Ed2kPreparedDownloadOptions,

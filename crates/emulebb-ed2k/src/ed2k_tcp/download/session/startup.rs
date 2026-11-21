@@ -154,10 +154,12 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
     // omission): only request sources from an SX2-capable peer via
     // OP_REQUESTSOURCES2. We never send the legacy SX1 OP_REQUESTSOURCES, so a
     // peer that advertised only SX1 is not asked for sources.
+    // WHY: metadata-only preparation deliberately omits SX2. The actual sent
+    // flag, not file-identifier capability, prevents a duplicate embedded or
+    // standalone request while still allowing SX2 after prepared admission.
     if send_initial_requests
         && session_state.hello_complete
         && !session_state.source_request_sent
-        && !session_state.remote_supports_file_identifiers
         && session_state.source_exchange_allowed
         && session_state.remote_supports_source_exchange2
     {
