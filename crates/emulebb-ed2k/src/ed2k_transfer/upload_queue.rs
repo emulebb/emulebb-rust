@@ -1897,11 +1897,40 @@ impl Ed2kUploadQueueState {
     }
 
     fn rank_for_key(&self, key: &Ed2kUploadSessionKey, now: Instant) -> u16 {
-        let ranked = self.ranked_waiting_keys(now);
-        let Some(position) = ranked.iter().position(|queued| *queued == key) else {
+        let Some(session) = self
+            .sessions
+            .get(key)
+            .filter(|session| session.phase == Ed2kUploadSessionPhase::Waiting)
+        else {
             return 0;
         };
-        u16::try_from(position.saturating_add(1)).unwrap_or(u16::MAX)
+        let target = self.waiting_sort_key(key, session, now);
+        let mut found = false;
+        let mut ahead = 0usize;
+        // WHY: a rank reply needs a count, not a sorted copy of the queue.
+        // Preserve stable waiting-order ties even at sequence saturation.
+        for queued in &self.waiting_order {
+            if queued == key {
+                found = true;
+                continue;
+            }
+            let Some(other) = self
+                .sessions
+                .get(queued)
+                .filter(|session| session.phase == Ed2kUploadSessionPhase::Waiting)
+            else {
+                continue;
+            };
+            let order = self.waiting_sort_key(queued, other, now).cmp(&target);
+            if order.is_lt() || (order.is_eq() && !found) {
+                ahead += 1;
+            }
+        }
+        if found {
+            u16::try_from(ahead.saturating_add(1)).unwrap_or(u16::MAX)
+        } else {
+            0
+        }
     }
 
     fn active_session_count(&self) -> usize {
@@ -2658,24 +2687,26 @@ impl Ed2kUploadQueueState {
                     .is_some_and(|session| session.phase == Ed2kUploadSessionPhase::Waiting)
             })
             .collect::<Vec<_>>();
-        ranked.sort_by(|left, right| {
-            let left_session = self
+        ranked.sort_by_key(|key| {
+            let session = self
                 .sessions
-                .get(*left)
+                .get(*key)
                 .expect("ranked waiter must exist in session map");
-            let right_session = self
-                .sessions
-                .get(*right)
-                .expect("ranked waiter must exist in session map");
-            self.waiting_score(right, right_session, now)
-                .cmp(&self.waiting_score(left, left_session, now))
-                .then_with(|| {
-                    left_session
-                        .waiting_sequence
-                        .cmp(&right_session.waiting_sequence)
-                })
+            self.waiting_sort_key(key, session, now)
         });
         ranked
+    }
+
+    fn waiting_sort_key(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        session: &Ed2kUploadSessionEntry,
+        now: Instant,
+    ) -> (std::cmp::Reverse<i128>, u64) {
+        (
+            std::cmp::Reverse(self.waiting_score(key, session, now)),
+            session.waiting_sequence,
+        )
     }
 
     /// Best waiter eligible for a slot grant, applying the RUST-PAR-020 U-GAP3
@@ -3178,6 +3209,57 @@ pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counted_ranks_match_scheduler_order_and_preserve_saturated_sequence_ties() {
+        let mut queue = Ed2kUploadQueueState::new(Ed2kUploadQueueConfig {
+            base_slots: 1,
+            elastic_percent: 0,
+            ..Ed2kUploadQueueConfig::default()
+        });
+        let now = Instant::now();
+        for id in 1..=16u16 {
+            let mut peer = test_support_peer();
+            peer.ip = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, id as u8));
+            peer.tcp_port += id;
+            peer.user_hash = Some([id as u8; 16]);
+            queue.begin_session(
+                Ed2kUploadSessionKey {
+                    peer,
+                    file_hash: "45".repeat(16),
+                },
+                u64::from(id),
+                now,
+                i128::from(2 + id % 5),
+                i128::from(1000 + id * 25),
+                1000,
+                1000,
+            );
+        }
+        assert!(queue.waiting_order.len() > 2);
+        for seconds in [0, 10, 100] {
+            let time = now + Duration::from_secs(seconds);
+            for (index, key) in queue.ranked_waiting_keys(time).iter().enumerate() {
+                assert_eq!(usize::from(queue.rank_for_key(key, time)), index + 1);
+            }
+        }
+        for session in queue.sessions.values_mut() {
+            session.waiting_sequence = u64::MAX;
+            session.file_priority_score = 7;
+            session.credit_score_permille = 1000;
+        }
+        for (index, key) in queue.waiting_order.iter().enumerate() {
+            assert_eq!(
+                usize::from(queue.rank_for_key(key, now + Duration::from_secs(10))),
+                index + 1
+            );
+        }
+        let unknown = Ed2kUploadSessionKey {
+            peer: test_support_peer(),
+            file_hash: "46".repeat(16),
+        };
+        assert_eq!(queue.rank_for_key(&unknown, now), 0);
+    }
 
     #[test]
     fn default_waiting_timeout_matches_emule_purge_window() {
