@@ -39,10 +39,6 @@ export function formatDurationMs(value?: number | null): string {
   return `${hours}h ${remainingMinutes}m`;
 }
 
-export function formatKiBRate(value?: number): string {
-  return `${formatBytes(value === undefined ? undefined : value * 1024)}/s`;
-}
-
 export function formatBytes(value?: number | null): string {
   if (!value || value < 0) {
     return "0 B";

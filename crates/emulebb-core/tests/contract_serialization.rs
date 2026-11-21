@@ -135,82 +135,91 @@ fn download_summary_has_decimal_identity_seconds_and_no_nested_execution_history
 
 fn score_breakdown() -> UploadScoreBreakdown {
     UploadScoreBreakdown {
-        availability: "available".to_string(),
-        base_score: 100,
-        effective_score: 100,
-        core_score: 100.0,
-        effective_score_float: 100.0,
+        score: 100.0,
         credit_ratio: 1.0,
-        file_priority: 1,
+        file_priority_score: 1.0,
         low_ratio_applied: false,
         low_ratio_bonus: 0,
         low_id_penalty_applied: false,
         low_id_divisor: 1,
         old_client_penalty_applied: false,
-        cooldown_remaining_ms: 0,
     }
 }
 
 fn populated_upload(score_breakdown: Option<UploadScoreBreakdown>) -> Upload {
     Upload {
-        id: "12345678-1234-4234-8234-123456789abc".to_string(),
-        user_name: "peer".to_string(),
-        user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
-        client_software: "eMule".to_string(),
-        client_mod: String::new(),
-        upload_state: "uploading".to_string(),
-        upload_speed_ki_bps: 8.0,
-        uploaded_bytes: 1024,
-        queue_session_uploaded: 1024,
-        payload_buffered: 0,
-        wait_time_ms: 5000,
-        wait_started_tick: 0,
-        score: 100,
-        address: "192.0.2.10".to_string(),
+        id: "12345678-1234-4234-8234-123456789abc".into(),
+        user_hash: Some("0102030405060708090a0b0c0d0e0f10".into()),
+        client_software: Some("Sample Client".into()),
+        upload_state: "uploading".into(),
+        upload_rate_bytes_per_sec: 8192,
+        session_uploaded_bytes: 1024,
+        wait_time_seconds: 5,
+        upload_duration_seconds: Some(2),
+        address: "192.0.2.10".into(),
         port: 4662,
-        server_ip: String::new(),
-        server_port: 0,
-        low_id: false,
+        low_id: None,
         friend_slot: false,
-        uploading: true,
-        waiting_queue: false,
-        requested_file_hash: Some("00112233445566778899aabbccddeeff".to_string()),
-        requested_file_name: Some("file.bin".to_string()),
+        connected: true,
+        requested_file_hash: "00112233445566778899aabbccddeeff".into(),
+        requested_file_name: Some("Sample.bin".into()),
         requested_file_size_bytes: Some(4096),
-        requested_parts_obtained: 1,
-        requested_parts_total: 1,
-        requested_parts_progress_text: "1/1".to_string(),
+        file_parts_available: Some(1),
+        file_parts_total: Some(1),
         score_breakdown,
-        // Internal-only: must never leak into the contract JSON.
-        queue_rank: Some(3),
+        queue_rank: None,
     }
 }
 
 #[test]
-fn upload_serializes_without_queue_rank() {
+fn active_upload_serializes_canonical_units_and_nullable_rank() {
     let value = serde_json::to_value(populated_upload(Some(score_breakdown()))).unwrap();
-    assert!(
-        value.get("queueRank").is_none(),
-        "Upload must not serialize `queueRank` (it belongs to source JSON)"
+    assert_eq!(
+        value,
+        json!({
+            "id":"12345678-1234-4234-8234-123456789abc",
+            "userHash":"0102030405060708090a0b0c0d0e0f10","clientSoftware":"Sample Client",
+            "uploadState":"uploading","uploadRateBytesPerSec":8192,"sessionUploadedBytes":1024,
+            "waitTimeSeconds":5,"uploadDurationSeconds":2,"address":"192.0.2.10","port":4662,
+            "lowId":null,"friendSlot":false,"connected":true,
+            "requestedFileHash":"00112233445566778899aabbccddeeff","requestedFileName":"Sample.bin",
+            "requestedFileSizeBytes":4096,"filePartsAvailable":1,"filePartsTotal":1,"queueRank":null,
+            "scoreBreakdown":{"score":100.0,"creditRatio":1.0,"filePriorityScore":1.0,
+                "lowRatioApplied":false,"lowRatioBonus":0,"lowIdPenaltyApplied":false,
+                "lowIdDivisor":1,"oldClientPenaltyApplied":false}
+        })
     );
-    // Sanity: a representative contract field is present.
-    assert_eq!(value["id"], json!("12345678-1234-4234-8234-123456789abc"));
 }
 
 #[test]
-fn upload_score_breakdown_is_gated_on_the_flag() {
-    // Present when the caller opts in (single-client lookups / flagged list).
-    let with = serde_json::to_value(populated_upload(Some(score_breakdown()))).unwrap();
-    assert!(
-        with.get("scoreBreakdown").is_some(),
-        "scoreBreakdown must be present when requested"
-    );
-
-    // Absent otherwise (default list behaviour).
-    let without = serde_json::to_value(populated_upload(None)).unwrap();
-    assert!(
-        without.get("scoreBreakdown").is_none(),
-        "scoreBreakdown must be omitted when not requested"
+fn upload_summary_contains_only_scalar_fields() {
+    let value = serde_json::to_value(populated_upload(None)).unwrap();
+    assert_eq!(
+        object_keys(&value),
+        [
+            "id",
+            "userHash",
+            "clientSoftware",
+            "uploadState",
+            "uploadRateBytesPerSec",
+            "sessionUploadedBytes",
+            "waitTimeSeconds",
+            "uploadDurationSeconds",
+            "address",
+            "port",
+            "lowId",
+            "friendSlot",
+            "connected",
+            "requestedFileHash",
+            "requestedFileName",
+            "requestedFileSizeBytes",
+            "filePartsAvailable",
+            "filePartsTotal",
+            "queueRank"
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
     );
 }
 

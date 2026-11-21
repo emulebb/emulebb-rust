@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatBytes,
   formatDurationMs,
-  formatKiBRate,
+  formatRate,
   formatPercent,
   formatProgress,
   lifecycleLabel,
@@ -20,8 +20,8 @@ describe("format helpers", () => {
     expect(formatBytes(12 * 1024 * 1024)).toBe("12 MiB");
   });
 
-  it("formats rates from KiB inputs", () => {
-    expect(formatKiBRate(2)).toBe("2.0 KiB/s");
+  it("formats rates from bytes per second", () => {
+    expect(formatRate(2048)).toBe("2.0 KiB/s");
   });
 
   it("formats progress percentages and durations", () => {

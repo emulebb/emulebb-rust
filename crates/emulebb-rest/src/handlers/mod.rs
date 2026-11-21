@@ -22,9 +22,11 @@ pub(crate) mod downloads;
 pub(crate) mod friends;
 pub(crate) mod ip_filter;
 pub(crate) mod kad;
+mod library_locations;
 mod library_roots;
 mod library_sharing;
 mod library_tags;
+pub(crate) use library_locations::library_file_locations;
 pub(crate) use library_roots::{
     create_library_root, delete_library_root, library_root, library_roots, library_scan,
     scan_library, update_library_root,
@@ -79,5 +81,5 @@ pub(crate) use shared_files::{
 };
 pub(crate) use uploads::{
     upload, upload_add_friend, upload_ban, upload_queue, upload_queue_client, upload_release_slot,
-    upload_remove, upload_remove_friend, upload_unban, uploads, without_score_breakdown,
+    upload_remove, upload_remove_friend, upload_unban, uploads,
 };

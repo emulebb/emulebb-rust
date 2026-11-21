@@ -53,7 +53,8 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
     assert_eq!(second_status, Ed2kUploadSessionStatus::Granted);
     assert_eq!(third_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
     let all = runtime.upload_queue_snapshot().await;
-    let active = runtime.active_upload_snapshot().await;
+    let page = runtime.active_upload_page(None, 200, true).await.unwrap();
+    let active = &page.entries;
     assert_eq!(all.len(), 3);
     assert_eq!(active.len(), 2);
     assert!(active.iter().all(
@@ -61,11 +62,20 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
             && entry.queue_rank.is_none()
     ));
     assert_eq!(
-        active.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        all.iter()
-            .filter(|entry| entry.phase != Ed2kUploadSessionPhaseSnapshot::Waiting)
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>()
+        {
+            let mut ids = active.iter().map(|entry| entry.id).collect::<Vec<_>>();
+            ids.sort();
+            ids
+        },
+        {
+            let mut ids = all
+                .iter()
+                .filter(|entry| entry.phase != Ed2kUploadSessionPhaseSnapshot::Waiting)
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        }
     );
 }
 
@@ -115,6 +125,7 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
     let promoted = runtime
         .upload_client_snapshot(&waiting_id.to_string(), false)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(promoted.id, waiting_id);
     assert_eq!(promoted.phase, Ed2kUploadSessionPhaseSnapshot::Granted);
@@ -307,10 +318,12 @@ async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
     let active = runtime
         .upload_client_snapshot(&snapshot[0].id.to_string(), false)
         .await
+        .unwrap()
         .unwrap();
     let waiting = runtime
         .upload_client_snapshot(&snapshot[1].id.to_string(), true)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(active.phase, snapshot[0].phase);
     assert_eq!(active.user_hash, snapshot[0].user_hash);
@@ -323,18 +336,21 @@ async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
         runtime
             .upload_client_snapshot(&snapshot[0].id.to_string(), true)
             .await
+            .unwrap()
             .is_none()
     );
     assert!(
         runtime
             .upload_client_snapshot(&snapshot[1].id.to_string(), false)
             .await
+            .unwrap()
             .is_none()
     );
     assert!(
         runtime
             .upload_client_snapshot(&uuid::Uuid::new_v4().to_string(), true)
             .await
+            .unwrap()
             .is_none()
     );
 }

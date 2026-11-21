@@ -50,7 +50,7 @@ pub(crate) const LOCATION_PAGE_SQL: &str = concat!(
 
 impl MetadataStore {
     /// Enumerate retained copies by a stable internal path key. A missing library
-    /// hash returns None; known verified content with no remaining copies returns
+    /// hash returns None; client content with no remaining copies returns
     /// an empty page. Search/cache-only observations do not constitute a library.
     /// The caller supplies a pre-reserved result budget; pages stop before decode
     /// when the next path would exceed it, and never silently omit that path.
@@ -74,7 +74,7 @@ impl MetadataStore {
         let mut guard = self.connection()?;
         let tx = guard.transaction()?;
         let content: Option<i64> = tx.query_row(
-            "SELECT k.id FROM known_files k JOIN verified_local_content c ON c.known_file_id=k.id WHERE k.ed2k_hash=?1",
+            "SELECT k.id FROM known_files k JOIN library_files l ON l.known_file_id=k.id WHERE k.ed2k_hash=?1",
             [&hash], |row| row.get(0),
         ).optional()?;
         let Some(content) = content else {

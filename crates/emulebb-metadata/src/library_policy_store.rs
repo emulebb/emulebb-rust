@@ -154,7 +154,7 @@ impl MetadataStore {
             .ok_or(LibraryTagError::NotFound)?;
         let file_id: i64 = tx
             .query_row(
-                "SELECT id FROM known_files WHERE ed2k_hash=?1",
+                "SELECT k.id FROM known_files k JOIN library_files l ON l.known_file_id=k.id WHERE k.ed2k_hash=?1",
                 [hash],
                 |r| r.get(0),
             )
@@ -184,7 +184,7 @@ impl MetadataStore {
         let tx = conn.transaction()?;
         let file_id: Option<i64> = tx
             .query_row(
-                "SELECT id FROM known_files WHERE ed2k_hash=?1",
+                "SELECT k.id FROM known_files k JOIN library_files l ON l.known_file_id=k.id WHERE k.ed2k_hash=?1",
                 [hash],
                 |r| r.get(0),
             )
@@ -211,7 +211,7 @@ impl MetadataStore {
         let conn = self.connection()?;
         let enabled = conn
             .query_row(
-                "SELECT sharing_enabled FROM known_files WHERE ed2k_hash=?1",
+                "SELECT k.sharing_enabled FROM known_files k JOIN library_files l ON l.known_file_id=k.id WHERE k.ed2k_hash=?1",
                 [hash],
                 |row| row.get(0),
             )
@@ -227,7 +227,7 @@ impl MetadataStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let previous: Option<bool> = tx
             .query_row(
-                "SELECT sharing_enabled FROM known_files WHERE ed2k_hash=?1",
+                "SELECT k.sharing_enabled FROM known_files k JOIN library_files l ON l.known_file_id=k.id WHERE k.ed2k_hash=?1",
                 [&hash],
                 |row| row.get(0),
             )

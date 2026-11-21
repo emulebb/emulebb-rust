@@ -136,6 +136,8 @@ mod download_source_policy;
 mod kad_protocol;
 mod kad_publish_candidates;
 mod kad_publish_runtime;
+mod library_files;
+mod library_locations;
 mod search_servers;
 mod transfer_lifecycle;
 mod upload_pages;

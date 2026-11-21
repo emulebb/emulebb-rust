@@ -472,6 +472,15 @@ struct Ed2kUploadQueuedRange {
 }
 
 /// Read-only snapshot of one inbound upload queue session.
+#[derive(Debug, Clone, Copy)]
+pub struct Ed2kUploadClientIdentity {
+    pub ip: IpAddr,
+    pub tcp_port: u16,
+    pub user_hash: Option<[u8; 16]>,
+    pub phase: Ed2kUploadSessionPhaseSnapshot,
+}
+
+/// Selected management facts, independent of control identity lookups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kUploadQueueSnapshotEntry {
     /// Ephemeral management identity retained for this queue entry's lifetime.
@@ -492,7 +501,12 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub connected: bool,
     pub phase: Ed2kUploadSessionPhaseSnapshot,
     pub queue_rank: Option<u16>,
+    /// Full management rank; the wire protocol's rank remains limited to u16.
+    pub management_rank: Option<usize>,
     pub wait_time_ms: u64,
+    /// Waiting ends when the first accepted payload starts its upload stint.
+    pub wait_duration_seconds: u64,
+    pub upload_duration_seconds: Option<u64>,
     pub uploaded_bytes: u64,
     pub upload_speed_bytes_per_sec: u64,
     /// Computed upload-queue score for this peer.
@@ -1771,12 +1785,6 @@ impl Ed2kUploadQueueState {
         self.snapshot_matching(now, |_| true)
     }
 
-    pub(super) fn active_snapshot(&mut self, now: Instant) -> Vec<Ed2kUploadQueueSnapshotEntry> {
-        self.snapshot_matching(now, |session| {
-            session.phase != Ed2kUploadSessionPhase::Waiting
-        })
-    }
-
     pub(super) fn peer_ipv4_addresses(&self) -> Vec<std::net::Ipv4Addr> {
         self.sessions
             .keys()
@@ -1807,22 +1815,69 @@ impl Ed2kUploadQueueState {
     }
 
     pub(super) fn client_snapshot(
-        &mut self,
+        &self,
         client_id: &str,
         waiting_queue: bool,
         now: Instant,
-    ) -> Option<Ed2kUploadQueueSnapshotEntry> {
-        let id = uuid::Uuid::try_parse(client_id).ok()?;
-        self.reap_expired_sessions(now);
+    ) -> Result<Option<Ed2kUploadQueueSnapshotEntry>, Ed2kUploadQueuePageError> {
+        let Ok(id) = uuid::Uuid::try_parse(client_id) else {
+            return Ok(None);
+        };
         // WHY: detail reads select one lifetime identity before cloning state
         // or hydrating a file view, keeping unrelated queue data out of the read.
+        let entry = self.sessions.iter().find(|(_, session)| {
+            (session.phase == Ed2kUploadSessionPhase::Waiting) == waiting_queue
+                && session.public_id == id
+                && (!waiting_queue
+                    || now.saturating_duration_since(session.last_activity)
+                        <= self.config.waiting_timeout)
+        });
+        let Some((key, session)) = entry else {
+            return Ok(None);
+        };
+        if key.file_hash.len()
+            + key.peer.client_software.as_ref().map_or(0, String::len)
+            + std::mem::size_of::<Ed2kUploadQueueSnapshotEntry>()
+            > 512 * 1024
+        {
+            return Err(Ed2kUploadQueuePageError::RowTooLarge);
+        }
+        Ok(Some({
+            let rank = waiting_queue
+                .then(|| self.visible_waiting_rank(key, session, now))
+                .flatten();
+            let mut entry = self.project_snapshot_entry(
+                key,
+                session,
+                now,
+                rank.map(|rank| u16::try_from(rank).unwrap_or(u16::MAX)),
+                false,
+            );
+            entry.management_rank = rank;
+            entry
+        }))
+    }
+
+    pub(super) fn client_identity(
+        &self,
+        id: &str,
+        now: Instant,
+    ) -> Option<Ed2kUploadClientIdentity> {
+        let id = uuid::Uuid::try_parse(id).ok()?;
         self.sessions
             .iter()
             .find(|(_, session)| {
-                (session.phase == Ed2kUploadSessionPhase::Waiting) == waiting_queue
-                    && session.public_id == id
+                session.public_id == id
+                    && (session.phase != Ed2kUploadSessionPhase::Waiting
+                        || now.saturating_duration_since(session.last_activity)
+                            <= self.config.waiting_timeout)
             })
-            .map(|(key, session)| self.snapshot_entry(key, session, now))
+            .map(|(key, session)| Ed2kUploadClientIdentity {
+                ip: key.peer.ip,
+                tcp_port: key.peer.tcp_port,
+                user_hash: key.peer.user_hash,
+                phase: phase_snapshot(session.phase),
+            })
     }
 
     fn snapshot_entry(
@@ -1858,11 +1913,20 @@ impl Ed2kUploadQueueState {
             connected: session.connected,
             phase: phase_snapshot(session.phase),
             queue_rank,
+            management_rank: None,
             wait_time_ms: now
                 .saturating_duration_since(session.queued_at)
                 .as_millis()
                 .try_into()
                 .unwrap_or(u64::MAX),
+            wait_duration_seconds: session
+                .upload_started_at
+                .unwrap_or(now)
+                .saturating_duration_since(session.queued_at)
+                .as_secs(),
+            upload_duration_seconds: session
+                .upload_started_at
+                .map(|started| now.saturating_duration_since(started).as_secs()),
             uploaded_bytes: session.uploaded_bytes,
             upload_speed_bytes_per_sec: upload_speed_bytes_per_sec(session, now),
             score: self.waiting_score(key, session, now),

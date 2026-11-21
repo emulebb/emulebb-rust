@@ -97,6 +97,12 @@ CREATE TABLE known_files (
     CHECK((aich_root IS NULL) = (aich_root_origin IS NULL))
 ) STRICT;
 
+-- Client library knowledge survives the final job, copy and root. Remote-only
+-- observations do not establish membership in this domain.
+CREATE TABLE library_files (
+    known_file_id INTEGER PRIMARY KEY REFERENCES known_files(id) ON DELETE CASCADE
+) STRICT;
+
 -- Names are immutable public identities; numeric keys remain internal.
 CREATE TABLE library_tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
@@ -111,7 +117,7 @@ BEGIN
 END;
 
 CREATE TABLE known_file_tags (
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    known_file_id INTEGER NOT NULL REFERENCES library_files(known_file_id) ON DELETE CASCADE,
     tag_id INTEGER NOT NULL REFERENCES library_tags(id) ON DELETE CASCADE,
     PRIMARY KEY(known_file_id, tag_id)
 ) STRICT, WITHOUT ROWID;
@@ -1159,6 +1165,31 @@ CREATE INDEX search_results_hash_idx ON search_results(session_id,ed2k_hash);
 
 -- A cheap durable invalidation clock shared by every connection. It contains no
 -- parallel client state: session catalog projections are disposable derivatives.
+-- Capture client ownership in the accepting transaction; removing the evidence
+-- later does not erase this retained library identity.
+CREATE TRIGGER library_files_verified_insert AFTER INSERT ON verified_local_content
+BEGIN
+    INSERT INTO library_files VALUES(new.known_file_id)
+    ON CONFLICT(known_file_id) DO NOTHING;
+END;
+CREATE TRIGGER library_files_job_insert AFTER INSERT ON download_jobs
+BEGIN
+    INSERT INTO library_files VALUES(new.known_file_id)
+    ON CONFLICT(known_file_id) DO NOTHING;
+END;
+CREATE TRIGGER library_files_origin_insert AFTER INSERT ON known_file_origins
+WHEN new.origin IN ('local_share','transfer')
+BEGIN
+    INSERT INTO library_files VALUES(new.known_file_id)
+    ON CONFLICT(known_file_id) DO NOTHING;
+END;
+CREATE TRIGGER library_files_origin_update AFTER UPDATE OF known_file_id,origin ON known_file_origins
+WHEN new.origin IN ('local_share','transfer')
+BEGIN
+    INSERT INTO library_files VALUES(new.known_file_id)
+    ON CONFLICT(known_file_id) DO NOTHING;
+END;
+
 CREATE TABLE library_catalog_revision (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     revision INTEGER NOT NULL CHECK(revision >= 0)

@@ -265,7 +265,17 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
     let delivered = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Some(share) = download.share(&hash_hex).await {
-                break share;
+                // Publication can precede the final job checkpoint. Wait for
+                // both outcomes before asserting the recovery is complete.
+                let job = download
+                    .ed2k_transfers
+                    .download_job(id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if job.completed_at_s.is_some() {
+                    break share;
+                }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

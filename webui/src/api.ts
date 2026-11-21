@@ -399,32 +399,41 @@ export type Friend = {
   [key: string]: unknown;
 };
 
+export type UploadScoreBreakdown = {
+  score: number;
+  creditRatio: number;
+  filePriorityScore: number;
+  lowRatioApplied: boolean;
+  lowRatioBonus: number;
+  lowIdPenaltyApplied: boolean;
+  lowIdDivisor: number;
+  oldClientPenaltyApplied: boolean;
+};
+
 export type Upload = {
   id: string;
-  userName?: string;
-  userHash?: string | null;
-  clientSoftware?: string;
-  clientMod?: string;
-  uploadState?: string;
-  uploadSpeedKiBps?: number;
-  uploadedBytes?: number;
-  queueSessionUploaded?: number;
-  waitTimeMs?: number;
-  score?: number;
-  address?: string;
-  port?: number;
-  lowId?: boolean;
-  friendSlot?: boolean;
-  uploading?: boolean;
-  waitingQueue?: boolean;
-  requestedFileHash?: string | null;
-  requestedFileName?: string | null;
-  requestedFileSizeBytes?: number | null;
-  requestedPartsProgressText?: string;
-  queueRank?: number;
-  scoreBreakdown?: Record<string, unknown> | null;
-  [key: string]: unknown;
+  userHash: string | null;
+  clientSoftware: string | null;
+  uploadState: "queued" | "connecting" | "uploading";
+  uploadRateBytesPerSec: number;
+  sessionUploadedBytes: number;
+  waitTimeSeconds: number;
+  uploadDurationSeconds: number | null;
+  address: string;
+  port: number;
+  lowId: boolean | null;
+  friendSlot: boolean;
+  connected: boolean;
+  requestedFileHash: string;
+  requestedFileName: string | null;
+  requestedFileSizeBytes: number | null;
+  filePartsAvailable: number | null;
+  filePartsTotal: number | null;
+  queueRank: number | null;
+  scoreBreakdown?: UploadScoreBreakdown;
 };
+
+export type LibraryLocation = { path: string; present: boolean };
 
 export type SharedFile = {
   hash: string;

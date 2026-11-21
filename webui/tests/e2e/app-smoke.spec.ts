@@ -85,8 +85,8 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.getByRole("heading", { name: "Shared Folders" })).toBeVisible();
   await expect(page).toHaveURL(/\/sharing$/);
   await expect(page.locator("section.metric", { hasText: "Shared Files" }).locator("strong")).toHaveText("1");
-  await expect(page.locator("section.metric", { hasText: "Active Uploads" }).locator("strong")).toHaveText("1");
-  await expect(page.locator("section.metric", { hasText: "Waiting Uploads" }).locator("strong")).toHaveText("1");
+  await expect(page.locator("section.metric", { hasText: "Active Uploads" }).locator("strong")).toHaveText("2");
+  await expect(page.locator("section.metric", { hasText: "Waiting Uploads" }).locator("strong")).toHaveText("3");
   await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared", exact: true })).toBeVisible();
   await expect(page.getByRole("cell", { name: longSharedRoot, exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Recursive Coverage" })).toHaveCount(0);
@@ -1008,7 +1008,11 @@ test("top refresh preserves the shared-files query, page, and selection", async 
   await page.goto("/");
   await page.getByRole("link", { name: "Shared Files" }).click();
   const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
-  await panel.getByLabel("Search name, path, or hash").fill("Shared Sample");
+  const filenameSearch = panel.getByLabel("Search filename");
+  await filenameSearch.fill("é🙂");
+  await expect(panel.getByRole("button", { name: "Search" })).toBeDisabled();
+  await expect(panel.getByText("Enter at least 3 characters to search filenames.")).toBeVisible();
+  await filenameSearch.fill("Shared Sample");
   await panel.getByRole("button", { name: "Search" }).click();
   await panel.getByLabel("Priority").selectOption("normal");
   await panel.getByRole("button", { name: "Next" }).click();
@@ -1025,6 +1029,22 @@ test("top refresh preserves the shared-files query, page, and selection", async 
   expect(params.get("priority")).toBe("normal");
   await expect(panel.getByText("Second Shared Sample.bin", { exact: true })).toBeVisible();
   await expect(page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) }).getByText("Second Shared Sample.bin")).toBeVisible();
+});
+
+test("library locations browse one cached copy page at a time", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+  await page.goto("/");
+  await page.getByRole("link", { name: "Shared Files" }).click();
+  const locations = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Locations", exact: true }) });
+  await expect(locations.getByText("/library/Cached-First.bin")).toBeVisible();
+  await locations.getByRole("button", { name: "Next page" }).click();
+  await expect(locations.getByText("/library/Cached-Second.bin")).toBeVisible();
+  await expect(locations.getByText("/library/Cached-First.bin")).toHaveCount(0);
+  await expect(locations.getByText("Unavailable", { exact: true })).toBeVisible();
+  await expect(locations.getByRole("button", { name: "Next page" })).toBeDisabled();
+  const latest = requests.filter((request) => request.path.endsWith("/locations")).at(-1);
+  expect(new URLSearchParams(latest?.query ?? "").get("cursor")).toBe("location-next");
 });
 
 test("settings preserve modes, exact revisions and application status", async ({ page }) => {

@@ -9,6 +9,31 @@ const TEXT_BYTES: usize = 65_536;
 const INPUT_CHARGE: usize = TEXT_BYTES + 4096;
 const ENCODED_BYTES: usize = 6 * TEXT_BYTES + 2;
 
+#[test]
+fn borrowed_framing_charges_exact_wire_bytes_without_another_full_input_allowance() {
+    #[derive(serde::Serialize)]
+    struct Envelope<'a> {
+        data: &'a str,
+    }
+    let capacity = Arc::new(CapacityControl::default());
+    let input_charge = MAX_BYTES - ENCODED_BYTES - 64;
+    let input = RetainedRead::new(
+        "\0".repeat(TEXT_BYTES),
+        capacity.reserve(input_charge, false, false).unwrap(),
+    );
+    let encoded = {
+        let document = Envelope { data: &input };
+        input.serialize_json_ref(&document).unwrap()
+    };
+    assert_eq!(encoded.len(), ENCODED_BYTES + 9);
+    assert_eq!(capacity.usage().bytes, input_charge + encoded.len());
+    assert_eq!(&encoded.as_ref()[..8], b"{\"data\":");
+    drop(input);
+    assert_eq!(capacity.usage().bytes, encoded.len());
+    drop(encoded);
+    assert_eq!(capacity.usage().bytes, 0);
+}
+
 #[tokio::test]
 async fn cancelled_async_projection_drops_backing_before_both_allowances() {
     #[derive(Debug)]

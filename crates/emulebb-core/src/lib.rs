@@ -22,6 +22,7 @@ use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 pub use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+pub use emulebb_ed2k::ed2k_transfer::RetainedRead;
 pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_ed2k::{
     DirectCallbackArgs, DirectCallbackDispatchOutcome, DirectCallbackSender, NatManager,
@@ -128,7 +129,14 @@ mod download_admission;
 mod download_attempts;
 mod download_callback;
 mod download_controls;
+mod library_files;
+mod library_locations;
+pub use library_files::{
+    LIBRARY_FILE_PAGE_BYTES, LibraryFile, LibraryFilePage, LibraryFileQuery, LibraryFileSort,
+    LibraryFileView, MetadataLibraryCursorExpired,
+};
 mod library_policy;
+pub use library_locations::{LIBRARY_LOCATION_PAGE_BYTES, LibraryLocation, LibraryLocationPage};
 mod library_roots;
 pub use library_policy::LibraryReply;
 pub use library_roots::{LibraryRoot, LibraryRootPage, LibraryScan};
@@ -217,7 +225,7 @@ mod transfer_create_api;
 mod transfer_state_api;
 mod upload_api;
 pub use emulebb_ed2k::ed2k_transfer::Ed2kUploadQueuePageError;
-pub use upload_api::{UPLOAD_QUEUE_PAGE_BYTES, UploadQueuePage};
+pub use upload_api::{UPLOAD_PAGE_BYTES, UploadPage};
 mod upload_view;
 mod views;
 pub mod vpn_guard;
@@ -803,11 +811,11 @@ impl EmulebbCore {
         Self::new(version, index, unique_runtime_dir("emulebb-core-transfers"))
     }
 
-    async fn upload_client_for_control(&self, client_id: &str) -> Option<Upload> {
-        if let Some(upload) = self.upload(client_id, false).await {
-            return Some(upload);
-        }
-        self.upload(client_id, true).await
+    async fn upload_client_for_control(
+        &self,
+        client_id: &str,
+    ) -> Option<emulebb_ed2k::ed2k_transfer::Ed2kUploadClientIdentity> {
+        self.ed2k_transfers.upload_client_identity(client_id).await
     }
 
     pub async fn index_file(&self, file: IndexedFile) -> Result<()> {
