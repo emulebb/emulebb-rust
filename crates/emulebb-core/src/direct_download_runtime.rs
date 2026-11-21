@@ -50,6 +50,7 @@ where
     DownloadFuture: Future<Output = Result<Ed2kPeerDownloadReport>> + Send + 'static,
 {
     let DirectDownloadOptions {
+        mut prepared,
         job_token,
         bind_ip,
         hello_identity,
@@ -58,10 +59,20 @@ where
         file_hash_hex,
         file_name,
         file_size,
-        sources,
+        mut sources,
         connect_timeout,
         max_parallel_download_peers,
     } = options;
+    let prepared_endpoint = prepared
+        .as_ref()
+        .map(|ready| source_endpoint_key(&ready.source));
+    if let Some(ready) = prepared.as_ref() {
+        ensure!(
+            ready.source.file_hash.to_string() == file_hash_hex,
+            "prepared source differs from download content"
+        );
+        sources.retain(|source| Some(source_endpoint_key(source)) != prepared_endpoint);
+    }
     let max_parallel_download_peers = max_parallel_download_peers.max(1);
     let retry_deadline =
         if !sources.is_empty() && sources.iter().all(|source| source.ip.is_loopback()) {
@@ -90,6 +101,9 @@ where
         let mut accepted_incomplete_peers = 0u32;
         let mut retryable_error_seen = false;
         let mut pending_sources = VecDeque::from(retry_sources.clone());
+        if let Some(ready) = prepared.as_ref() {
+            pending_sources.push_front(ready.source.clone());
+        }
         let mut active_downloads = JoinSet::new();
         let spawn_context = DirectDownloadSpawnContext {
             job_token,
@@ -110,6 +124,7 @@ where
             &mut pending_sources,
             &spawn_context,
             max_parallel_download_peers,
+            &mut prepared,
         );
 
         while let Some(joined) = active_downloads.join_next().await {
@@ -238,7 +253,8 @@ where
                     }
                 }
                 Err(error) => {
-                    retryable_error_seen |= is_retryable_direct_download_error(&error);
+                    retryable_error_seen |= Some(source_endpoint_key(&source)) != prepared_endpoint
+                        && is_retryable_direct_download_error(&error);
                     tracing::warn!(
                         "ED2K direct download peer failed file_hash={} peer={}: {error}",
                         file_hash_hex,
@@ -269,6 +285,7 @@ where
                 &mut pending_sources,
                 &spawn_context,
                 max_parallel_download_peers,
+                &mut prepared,
             );
         }
 
@@ -313,6 +330,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
     pending_sources: &mut VecDeque<Ed2kFoundSource>,
     context: &DirectDownloadSpawnContext<'_, DownloadFn>,
     max_parallel_download_peers: usize,
+    prepared: &mut Option<crate::ed2k_direct_download_types::PreparedDirectDownload>,
 ) where
     DownloadFn: Fn(
             Ipv4Addr,
@@ -335,6 +353,17 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         let Some(source) = pending_sources.pop_front() else {
             break;
         };
+        if prepared
+            .as_ref()
+            .is_some_and(|ready| source_endpoint_key(&ready.source) == source_endpoint_key(&source))
+        {
+            let ready = prepared.take().expect("matched prepared connection");
+            let peer_addr = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
+            // WHY: this future already owns a Native connection permit. A second
+            // admission would deadlock at a full cap and discard a usable socket.
+            active_downloads.spawn(async move { (peer_addr, source, ready.download.await) });
+            continue;
+        }
         // Global connection budget (eMule CListenSocket::TooManySockets): the
         // shared coordinator caps concurrent outgoing source connections and
         // the new-connection per-5s rate across ALL transfers. When no slot is

@@ -34,8 +34,8 @@ use super::super::codec::{
     encode_port_test_result, encode_public_ip_answer,
 };
 use super::super::download::{
-    DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
-    drive_download_session,
+    AcceptedFileProbeOptions, AcceptedFileProbeOutcome, DownloadConnectionState,
+    DownloadSessionOptions, Ed2kPeerDownloadOutcome, drive_download_session, probe_accepted_file,
 };
 use super::super::dump::dump_ed2k_tcp_listener_meta;
 use super::super::established_peer::{
@@ -688,7 +688,26 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             "claimed ticketed inbound ED2K callback download file_hash={} client_id={} peer={peer_addr} a4af_file_index={file_index}",
                             download.file_hash, hello_profile.identity.client_id
                         );
-                        let outcome = drive_download_session(DownloadSessionOptions {
+                        let preparation = probe_accepted_file(AcceptedFileProbeOptions {
+                            dispatcher: &mut transport, peer_addr, hello_identity: response_identity,
+                            secure_ident: secure_ident.as_ref(), runtime: transfer_runtime,
+                            job_token: download.job_token, file_hash: download.file_hash,
+                            file_size: download.file_size, profile: hello_profile.clone(),
+                            connection_state: connection_state.clone(), timeout: ED2K_CONNECTION_IDLE_TIMEOUT,
+                        }).await?;
+                        let outcome = match preparation {
+                            AcceptedFileProbeOutcome::Deferred => break,
+                            AcceptedFileProbeOutcome::Incomplete => Ed2kPeerDownloadOutcome::AcceptedButIncomplete,
+                            AcceptedFileProbeOutcome::FileNotFound(connection) => {
+                                connection_state = *connection;
+                                Ed2kPeerDownloadOutcome::FileNotFound
+                            }
+                            AcceptedFileProbeOutcome::Available(prepared) => {
+                                debug!(peer = %peer_addr, parts = prepared.availability().available_parts.len(),
+                                    "prepared ticketed callback availability");
+                                let (prepared_state, connection) = prepared.into_session(true);
+                                connection_state = connection;
+                            drive_download_session(DownloadSessionOptions {
                             dispatcher: &mut transport,
                             peer_addr,
                             hello_identity: response_identity,
@@ -705,6 +724,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             peer_user_hash: Some(hello_profile.identity.user_hash),
                             peer_connect_options: Some(hello_profile.connect_options),
                             connection_state: Some(&mut connection_state),
+                            prepared_state: Some(prepared_state),
                             established_context: Some(&established_context),
                             upload_facet: None,
                             upload_context: None,
@@ -712,8 +732,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             // is driven only from the outbound download driver.
                             reask_register: None,
                         })
-                        .await?;
-                        callback_session.acknowledge_current().map_err(|error| {
+                        .await?
+                            }
+                        };
+                        callback_session.acknowledge_download(&download).map_err(|error| {
                             anyhow::anyhow!(
                                 "failed to acknowledge callback session work for {peer_addr}: {error:?}"
                             )

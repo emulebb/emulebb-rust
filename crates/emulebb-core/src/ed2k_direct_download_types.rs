@@ -47,6 +47,7 @@ pub(crate) struct DirectDownloadOutcome {
 }
 
 pub(crate) struct DirectDownloadOptions {
+    pub(crate) prepared: Option<PreparedDirectDownload>,
     pub(crate) job_token: emulebb_metadata::JobToken,
     pub(crate) bind_ip: Ipv4Addr,
     pub(crate) hello_identity: Ed2kHelloIdentity,
@@ -58,6 +59,13 @@ pub(crate) struct DirectDownloadOptions {
     pub(crate) sources: Vec<Ed2kFoundSource>,
     pub(crate) connect_timeout: Duration,
     pub(crate) max_parallel_download_peers: usize,
+}
+
+/// One already-admitted connection's execution; its future owns the Native peer
+/// and permits. Core neither clones it nor retries it through a fresh dial.
+pub(crate) struct PreparedDirectDownload {
+    pub(crate) source: Ed2kFoundSource,
+    pub(crate) download: futures_util::future::BoxFuture<'static, Result<Ed2kPeerDownloadReport>>,
 }
 
 pub(crate) struct DirectDownloadSpawnContext<'a, DownloadFn> {

@@ -9,12 +9,14 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Exact(JobId),
     Detail(JobId),
     Parts(JobId, Option<u32>, usize),
+    VerifiedParts(emulebb_metadata::JobToken),
     Query(emulebb_metadata::DownloadJobQuery),
     Counts,
     TransferCounts,
     Execution(emulebb_metadata::JobToken),
     SelectExecution(emulebb_metadata::JobToken),
     Sources(emulebb_metadata::JobToken, i64, usize),
+    SourceAvailability(emulebb_metadata::MetadataDownloadAvailabilityQuery),
     Comments(emulebb_metadata::JobToken, i64, usize),
     Source(
         emulebb_metadata::JobToken,
@@ -34,11 +36,13 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Exact(Option<RetainedRead<DownloadJobRecord>>),
     Detail(Option<RetainedRead<emulebb_metadata::MetadataDownloadDetail>>),
     Parts(Option<RetainedRead<emulebb_metadata::MetadataDownloadPartPage>>),
+    VerifiedParts(Option<RetainedRead<emulebb_metadata::MetadataDownloadVerifiedParts>>),
     Query(RetainedRead<emulebb_metadata::DownloadJobPage>),
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
     Execution(Option<transfer::ResidentManifest>),
     Sources(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEntry>>),
+    SourceAvailability(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceAvailability>>),
     Comments(RetainedRead<emulebb_metadata::MetadataDownloadCommentPage>),
     Source(RetainedRead<Option<emulebb_metadata::MetadataDownloadSourceEntry>>),
     Endpoints(RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>),
@@ -67,11 +71,19 @@ impl LocalMutationRegistry {
                 2 * 1024 * 1024 + 4096
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
+            JobRead::VerifiedParts(_) => 128 * 1024,
             JobRead::Parts(_, _, limit) => {
                 ensure!((1..=256).contains(&limit), "invalid part page size");
                 32 * 1024
             }
             JobRead::Source(..) => 1024 * 1024 + 4096,
+            JobRead::SourceAvailability(query) => {
+                ensure!(
+                    (1..=256).contains(&query.limit),
+                    "invalid availability page size"
+                );
+                1024 * 1024 + 4096
+            }
             JobRead::Endpoints(_, after, limit) => {
                 ensure!(
                     after >= 0 && (1..=256).contains(&limit),
@@ -158,6 +170,13 @@ impl LocalMutationRegistry {
                             value.map(|value| RetainedRead::new(value, capacity.take_result())),
                         )
                     }),
+                JobRead::VerifiedParts(token) => {
+                    metadata.download_job_verified_parts(token).map(|value| {
+                        JobReadResult::VerifiedParts(
+                            value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                        )
+                    })
+                }
                 JobRead::Endpoints(token, after, limit) => metadata
                     .download_job_source_endpoints_after(token, after, limit)
                     .map(|value| {
@@ -273,6 +292,14 @@ impl LocalMutationRegistry {
                     .map(|value| {
                         JobReadResult::Page(RetainedRead::new(value, capacity.take_result()))
                     }),
+                JobRead::SourceAvailability(query) => metadata
+                    .download_job_source_availability(query)
+                    .map(|value| {
+                        JobReadResult::SourceAvailability(RetainedRead::new(
+                            value,
+                            capacity.take_result(),
+                        ))
+                    }),
                 JobRead::Delivery(after, limit) => metadata
                     .pending_delivery_jobs_after(after, limit)
                     .map(|value| {
@@ -364,6 +391,33 @@ impl transfer::Ed2kTransferRuntime {
         };
         Ok(page)
     }
+
+    /// Current runtime/session observations only. Caller supplies an explicit
+    /// freshness interval; persisted status never implies permanent reachability.
+    pub async fn download_source_availability_after(
+        &self,
+        token: emulebb_metadata::JobToken,
+        observed_since_s: i64,
+        observed_until_s: i64,
+        after_source_id: i64,
+        limit: usize,
+    ) -> Result<RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceAvailability>>> {
+        let query = emulebb_metadata::MetadataDownloadAvailabilityQuery {
+            token,
+            session_id: self.source_discovery_session,
+            observed_since_s,
+            observed_until_s,
+            after_source_id,
+            limit,
+        };
+        let JobReadResult::SourceAvailability(page) = self
+            .read_job_metadata(JobRead::SourceAvailability(query))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
     pub async fn download_sources_after(
         &self,
         token: emulebb_metadata::JobToken,
@@ -444,6 +498,21 @@ impl transfer::Ed2kTransferRuntime {
             unreachable!()
         };
         Ok(page)
+    }
+
+    /// Read only durable verification bits for a waiting job. The existing
+    /// transient loan follows the returned bitmap; no resident view is created.
+    pub async fn download_verified_parts(
+        &self,
+        token: emulebb_metadata::JobToken,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataDownloadVerifiedParts>>> {
+        let JobReadResult::VerifiedParts(parts) = self
+            .read_job_metadata(JobRead::VerifiedParts(token))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(parts)
     }
 
     pub async fn download_job(&self, id: JobId) -> Result<Option<RetainedRead<DownloadJobRecord>>> {

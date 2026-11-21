@@ -22,9 +22,16 @@ impl LocalMutationRegistry {
             .ok_or(LocalMutationError::TooLarge)?;
         let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
         Self::reap(&mut state);
-        let (resident_write, lease) = self.residents.reserve_with(token.job_id, || {
-            Self::reserve_unit(&mut state, charge, false, false)
-        })?;
+        // WHY: only explicit renaming writes a cached manifest. Hint/status/name
+        // observations must remain possible without resident execution backing.
+        let (resident_write, lease) = if matches!(delta, MetadataDownloadPeerDelta::Rename(_)) {
+            let (write, lease) = self.residents.reserve_with(token.job_id, || {
+                Self::reserve_unit(&mut state, charge, false, false)
+            })?;
+            (Some(write), lease)
+        } else {
+            (None, Self::reserve_unit(&mut state, charge, false, false)?)
+        };
         let delta = delta.clone();
         let metadata = runtime.metadata.clone();
         let locks = Arc::clone(&runtime.content_locks);
@@ -60,10 +67,13 @@ impl LocalMutationRegistry {
                         .get_mut(&token.job_id)
                         .filter(|value| value.token == token)
                     {
-                        manifest.write_with(resident_write, |manifest| {
-                            manifest.display_name = name.clone();
-                            Ok(())
-                        })?;
+                        manifest.write_with(
+                            resident_write.expect("rename reserved resident credit"),
+                            |manifest| {
+                                manifest.display_name = name.clone();
+                                Ok(())
+                            },
+                        )?;
                     }
                     let mut catalog = catalog.blocking_write();
                     let mut changed = false;
@@ -127,3 +137,6 @@ impl transfer::Ed2kTransferRuntime {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

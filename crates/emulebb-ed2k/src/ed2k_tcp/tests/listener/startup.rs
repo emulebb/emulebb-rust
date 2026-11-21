@@ -1,4 +1,5 @@
 use super::*;
+use crate::ed2k_transfer::Ed2kTransferState;
 
 async fn close_hello_session(mut stream: TcpStream) {
     stream.shutdown().await.unwrap();
@@ -379,7 +380,14 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
 
     let manifest = transfer_runtime.manifest(job.token).await.unwrap();
     stream
-        .write_all(&super::encode_request_filename(&file_hash, &manifest))
+        .write_all(&super::encode_request_filename(
+            &file_hash,
+            manifest.file_size,
+            manifest
+                .pieces
+                .iter()
+                .map(|piece| piece.state == Ed2kTransferState::Verified),
+        ))
         .await
         .unwrap();
     let filename_answer =
@@ -507,7 +515,14 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     assert!(returned.md4_hashset.is_none());
     assert!(returned.aich_hashset.is_none());
 
-    let request_filename = super::encode_request_filename(&file_hash, &manifest);
+    let request_filename = super::encode_request_filename(
+        &file_hash,
+        manifest.file_size,
+        manifest
+            .pieces
+            .iter()
+            .map(|piece| piece.state == Ed2kTransferState::Verified),
+    );
     let mut legacy_multipacket_payload = Vec::new();
     legacy_multipacket_payload.extend_from_slice(&file_hash.0);
     legacy_multipacket_payload.extend_from_slice(&(payload.len() as u64).to_le_bytes());

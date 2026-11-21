@@ -810,10 +810,26 @@ CREATE TABLE download_job_sources (
 CREATE UNIQUE INDEX download_job_sources_identity_idx
 ON download_job_sources(job_id, ip, tcp_port);
 
-CREATE INDEX download_job_sources_page_idx ON download_job_sources(job_id, id);
+CREATE UNIQUE INDEX download_job_sources_page_idx ON download_job_sources(job_id, id);
 CREATE INDEX download_job_sources_comments_idx ON download_job_sources(job_id, id)
 WHERE file_comment<>'' OR file_rating>0;
 CREATE INDEX download_job_sources_user_idx ON download_job_sources(job_id, user_hash, id);
+
+-- Validated peer status is separate from discovery hints. One packed data-part
+-- bitmap per source; generation/session/freshness are checked by readers.
+CREATE TABLE download_job_source_availability (
+    job_id INTEGER NOT NULL,
+    source_id INTEGER NOT NULL,
+    execution_generation INTEGER NOT NULL CHECK(execution_generation >= 0),
+    session_id BLOB NOT NULL CHECK(length(session_id) = 16),
+    observed_user_hash BLOB NOT NULL CHECK(length(observed_user_hash) = 16),
+    file_size_bytes INTEGER NOT NULL CHECK(file_size_bytes > 0),
+    part_count INTEGER NOT NULL CHECK(part_count BETWEEN 1 AND 65534),
+    part_status BLOB NOT NULL CHECK(length(part_status) = (part_count + 7) / 8),
+    observed_at_s INTEGER NOT NULL CHECK(observed_at_s >= 0),
+    PRIMARY KEY(job_id, source_id),
+    FOREIGN KEY(job_id, source_id) REFERENCES download_job_sources(job_id, id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE download_job_file_name_observations (
     id INTEGER PRIMARY KEY,

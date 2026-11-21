@@ -36,6 +36,7 @@ mod download_job_store;
 mod download_patch_store;
 pub use download_browse_store::{
     MetadataDownloadDetail, MetadataDownloadPart, MetadataDownloadPartPage,
+    MetadataDownloadVerifiedParts,
 };
 pub use download_patch_store::{
     DownloadPatchError, MetadataDownloadPatch, MetadataDownloadPatched,
@@ -53,9 +54,10 @@ pub use download_job_model::{
     JobToken,
 };
 pub use download_peer_store::{
-    MetadataDownloadCommentEntry, MetadataDownloadCommentPage, MetadataDownloadInitialPeers,
-    MetadataDownloadNameEntry, MetadataDownloadPeerChange, MetadataDownloadPeerDelta,
-    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry, MetadataDownloadSourceSelector,
+    MetadataDownloadAvailabilityQuery, MetadataDownloadCommentEntry, MetadataDownloadCommentPage,
+    MetadataDownloadInitialPeers, MetadataDownloadNameEntry, MetadataDownloadPeerChange,
+    MetadataDownloadPeerDelta, MetadataDownloadSourceAvailability, MetadataDownloadSourceEndpoint,
+    MetadataDownloadSourceEntry, MetadataDownloadSourceSelector,
 };
 mod identity_model;
 mod identity_store;
