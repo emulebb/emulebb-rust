@@ -129,6 +129,7 @@ fn ed2k_link_parser_enriches_duplicate_source_metadata() {
 
 mod category_persistence;
 mod core_config;
+mod download_endgame;
 mod download_preparation;
 mod download_scheduler;
 mod download_source_policy;

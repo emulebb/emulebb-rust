@@ -93,7 +93,7 @@ async fn comment_pages_skip_plain_sources_and_preserve_byte_bounded_continuation
             .is_none()
     );
 }
-fn admit(
+pub(super) fn admit(
     core: &EmulebbCore,
     byte: u32,
     size: Option<u64>,
@@ -173,6 +173,7 @@ async fn unknown_size_projection_has_canonical_identity_shape_and_seconds() {
         "progress",
         "intent",
         "state",
+        "waitingReason",
         "category",
         "createdAt",
         "updatedAt",
@@ -194,6 +195,7 @@ async fn unknown_size_projection_has_canonical_identity_shape_and_seconds() {
     assert!(value["sizeBytes"].is_null());
     assert!(value["progress"].is_null());
     assert_eq!(value["state"], "waiting-metadata");
+    assert!(value["waitingReason"].is_null());
     assert_eq!(value["createdAt"], job.created_at_s);
 }
 #[test]

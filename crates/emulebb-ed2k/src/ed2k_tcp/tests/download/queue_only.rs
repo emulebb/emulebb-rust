@@ -100,8 +100,7 @@ async fn accepted_peer_without_claimable_blocks_is_cancelled_as_no_needed_parts(
         payload_len,
     );
     transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
-    // Hold the file's only block with another live peer. Persisted Requested
-    // markers are legacy state now and no longer suppress scheduling.
+    // Hold the file's only block with another live peer.
     let _held_lease = transfer_runtime
         .lease_next_download_block(
             file_hash_job.token,
@@ -109,6 +108,7 @@ async fn accepted_peer_without_claimable_blocks_is_cancelled_as_no_needed_parts(
             None,
             None,
             1_000,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap()

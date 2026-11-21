@@ -363,13 +363,13 @@ CREATE TABLE download_job_counts (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     unfinished INTEGER NOT NULL DEFAULT 0 CHECK(unfinished >= 0),
     completed INTEGER NOT NULL DEFAULT 0 CHECK(completed >= 0),
-    -- Started unfinished jobs, excluding admitted destructive deletion.
-    started INTEGER NOT NULL DEFAULT 0 CHECK(started >= 0),
+    -- Healthy, size-known work which has not reached verified delivery.
+    awaiting_execution INTEGER NOT NULL DEFAULT 0 CHECK(awaiting_execution >= 0),
     delete_requested_unfinished INTEGER NOT NULL DEFAULT 0 CHECK(delete_requested_unfinished >= 0),
     delete_requested_completed INTEGER NOT NULL DEFAULT 0 CHECK(delete_requested_completed >= 0),
     CHECK(delete_requested_unfinished <= unfinished),
     CHECK(delete_requested_completed <= completed),
-    CHECK(started <= unfinished - delete_requested_unfinished)
+    CHECK(awaiting_execution <= unfinished - delete_requested_unfinished)
 ) STRICT;
 INSERT INTO download_job_counts(id) VALUES(1);
 
@@ -491,16 +491,21 @@ BEGIN
         THEN RAISE(ABORT, 'download job count overflow') END FROM download_job_counts WHERE id=1;
     UPDATE download_job_counts SET unfinished=unfinished+(new.terminal_completed_at_s IS NULL),
         completed=completed+(new.terminal_completed_at_s IS NOT NULL),
-        started=started+(new.terminal_completed_at_s IS NULL AND new.intent='started' AND new.delete_requested_at_s IS NULL),
+        awaiting_execution=awaiting_execution+(new.terminal_completed_at_s IS NULL AND new.intent='started' AND new.delete_requested_at_s IS NULL
+            AND new.storage_failure_code IS NULL AND new.expected_size_bytes IS NOT NULL AND NOT(new.completed AND NOT new.final_rehash_pending)),
         delete_requested_unfinished=delete_requested_unfinished+(new.terminal_completed_at_s IS NULL AND new.delete_requested_at_s IS NOT NULL),
         delete_requested_completed=delete_requested_completed+(new.terminal_completed_at_s IS NOT NULL AND new.delete_requested_at_s IS NOT NULL)
         WHERE id=1;
 END;
-CREATE TRIGGER download_jobs_counts_update AFTER UPDATE OF removed_at_s, terminal_completed_at_s, intent, delete_requested_at_s ON download_jobs
+CREATE TRIGGER download_jobs_counts_update AFTER UPDATE OF removed_at_s, terminal_completed_at_s, intent, delete_requested_at_s,
+    storage_failure_code, expected_size_bytes, completed, final_rehash_pending ON download_jobs
 WHEN (old.removed_at_s IS NULL) != (new.removed_at_s IS NULL)
     OR (old.terminal_completed_at_s IS NULL) != (new.terminal_completed_at_s IS NULL)
     OR old.intent != new.intent
     OR (old.delete_requested_at_s IS NULL) != (new.delete_requested_at_s IS NULL)
+    OR (old.storage_failure_code IS NULL) != (new.storage_failure_code IS NULL)
+    OR (old.expected_size_bytes IS NULL) != (new.expected_size_bytes IS NULL)
+    OR old.completed != new.completed OR old.final_rehash_pending != new.final_rehash_pending
 BEGIN
     SELECT CASE WHEN
         (new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL
@@ -514,9 +519,11 @@ BEGIN
         completed=completed
         -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NOT NULL)
         +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NOT NULL),
-        started=started
-        -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NULL AND old.intent='started' AND old.delete_requested_at_s IS NULL)
-        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL AND new.intent='started' AND new.delete_requested_at_s IS NULL),
+        awaiting_execution=awaiting_execution
+        -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NULL AND old.intent='started' AND old.delete_requested_at_s IS NULL
+            AND old.storage_failure_code IS NULL AND old.expected_size_bytes IS NOT NULL AND NOT(old.completed AND NOT old.final_rehash_pending))
+        +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL AND new.intent='started' AND new.delete_requested_at_s IS NULL
+            AND new.storage_failure_code IS NULL AND new.expected_size_bytes IS NOT NULL AND NOT(new.completed AND NOT new.final_rehash_pending)),
         delete_requested_unfinished=delete_requested_unfinished
         -(old.removed_at_s IS NULL AND old.terminal_completed_at_s IS NULL AND old.delete_requested_at_s IS NOT NULL)
         +(new.removed_at_s IS NULL AND new.terminal_completed_at_s IS NULL AND new.delete_requested_at_s IS NOT NULL),
@@ -530,7 +537,8 @@ WHEN old.removed_at_s IS NULL
 BEGIN
     UPDATE download_job_counts SET unfinished=unfinished-(old.terminal_completed_at_s IS NULL),
         completed=completed-(old.terminal_completed_at_s IS NOT NULL),
-        started=started-(old.terminal_completed_at_s IS NULL AND old.intent='started' AND old.delete_requested_at_s IS NULL),
+        awaiting_execution=awaiting_execution-(old.terminal_completed_at_s IS NULL AND old.intent='started' AND old.delete_requested_at_s IS NULL
+            AND old.storage_failure_code IS NULL AND old.expected_size_bytes IS NOT NULL AND NOT(old.completed AND NOT old.final_rehash_pending)),
         delete_requested_unfinished=delete_requested_unfinished-(old.terminal_completed_at_s IS NULL AND old.delete_requested_at_s IS NOT NULL),
         delete_requested_completed=delete_requested_completed-(old.terminal_completed_at_s IS NOT NULL AND old.delete_requested_at_s IS NOT NULL)
         WHERE id=1;

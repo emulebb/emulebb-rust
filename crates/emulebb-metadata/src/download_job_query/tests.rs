@@ -37,6 +37,88 @@ fn counts(store: &MetadataStore, unfinished: u64, completed: u64) {
 }
 
 #[test]
+fn waiting_counter_tracks_lifecycle_and_excludes_only_matching_selected_jobs() {
+    let store = MetadataStore::in_memory().unwrap();
+    let a = add(&store, 91, None, 8);
+    let b = add(&store, 92, None, 8);
+    let aid = a.token.job_id;
+    let bid = b.token.job_id;
+    let check = |expected| {
+        assert_eq!(store.waiting_download_count(&[]).unwrap(), expected);
+        let actual: u64 = store.connection().unwrap().query_row(
+            "SELECT count(*) FROM download_jobs WHERE removed_at_s IS NULL
+             AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL
+             AND intent='started' AND storage_failure_code IS NULL AND expected_size_bytes IS NOT NULL
+             AND (completed=0 OR final_rehash_pending=1)",
+            [], |row| crate::sql_value::unsigned(row, 0),
+        ).unwrap();
+        assert_eq!(actual, expected);
+    };
+    let update = |id: JobId, set: &str| {
+        store
+            .connection()
+            .unwrap()
+            .execute(&format!("UPDATE download_jobs SET {set} WHERE id=?1"), [id])
+            .unwrap();
+    };
+    check(0);
+    update(aid, "intent='started'");
+    update(bid, "intent='started'");
+    check(2);
+    assert_eq!(store.waiting_download_count(&[aid]).unwrap(), 1);
+    assert_eq!(store.waiting_download_count(&[aid, bid]).unwrap(), 0);
+    assert!(store.waiting_download_count(&[aid, aid]).is_err());
+    assert!(store.waiting_download_count(&[bid, aid]).is_err());
+    update(aid, "expected_size_bytes=NULL");
+    check(1);
+    assert_eq!(store.waiting_download_count(&[aid]).unwrap(), 1);
+    update(aid, "expected_size_bytes=16");
+    check(2);
+    update(
+        aid,
+        "storage_failure_code='io', storage_failure_message='test fault', storage_failed_at_s=1",
+    );
+    check(1);
+    assert_eq!(store.waiting_download_count(&[aid]).unwrap(), 1);
+    update(
+        aid,
+        "storage_failure_code=NULL, storage_failure_message=NULL, storage_failed_at_s=NULL",
+    );
+    check(2);
+    update(aid, "completed=1, visible_state='completed'");
+    check(1);
+    update(aid, "final_rehash_pending=1");
+    check(2);
+    update(aid, "final_rehash_pending=0");
+    check(1);
+    update(bid, "delete_requested_at_s=1");
+    check(0);
+    store
+        .connection()
+        .unwrap()
+        .execute_batch("BEGIN; UPDATE download_jobs SET delete_requested_at_s=NULL; ROLLBACK;")
+        .unwrap();
+    check(0);
+    update(bid, "delete_requested_at_s=NULL");
+    check(1);
+    update(bid, "removed_at_s=1");
+    check(0);
+    update(bid, "removed_at_s=NULL");
+    check(1);
+    update(bid, "intent='stopped'");
+    check(0);
+    update(bid, "intent='started'");
+    check(1);
+    store
+        .connection()
+        .unwrap()
+        .execute("DELETE FROM download_jobs WHERE id=?1", [bid])
+        .unwrap();
+    check(0);
+    assert_eq!(store.waiting_download_count(&[bid]).unwrap(), 0);
+}
+
+#[test]
 fn dashboard_counters_track_intent_delete_admission_removal_and_rollback() {
     let store = MetadataStore::in_memory().unwrap();
     let a = add(&store, 81, None, 8);
@@ -44,23 +126,24 @@ fn dashboard_counters_track_intent_delete_admission_removal_and_rollback() {
     let c = add(&store, 83, None, 8);
     complete(&store, &c);
     let check = |total, active, completed| {
-        let expected = crate::MetadataTransferCounts {
-            total,
-            active,
-            completed,
-        };
+        assert_eq!(store.waiting_download_count(&[]).unwrap(), active);
+        let expected = crate::MetadataTransferCounts { total, completed };
         assert_eq!(store.transfer_counts().unwrap(), expected);
         // Independent row-scan oracle for the existing public membership rules.
         let conn = store.connection().unwrap();
-        let actual = conn.query_row(
-            "SELECT count(*),coalesce(sum(terminal_completed_at_s IS NULL AND intent='started'),0),coalesce(sum(terminal_completed_at_s IS NOT NULL),0)
+        let actual = conn
+            .query_row(
+                "SELECT count(*),coalesce(sum(terminal_completed_at_s IS NOT NULL),0)
              FROM download_jobs WHERE removed_at_s IS NULL AND delete_requested_at_s IS NULL",
-            [], |row| Ok(crate::MetadataTransferCounts {
-                total: crate::sql_value::unsigned(row, 0)?,
-                active: crate::sql_value::unsigned(row, 1)?,
-                completed: crate::sql_value::unsigned(row, 2)?,
-            }),
-        ).unwrap();
+                [],
+                |row| {
+                    Ok(crate::MetadataTransferCounts {
+                        total: crate::sql_value::unsigned(row, 0)?,
+                        completed: crate::sql_value::unsigned(row, 1)?,
+                    })
+                },
+            )
+            .unwrap();
         assert_eq!(actual, expected);
     };
     let update = |id: JobId, set: &str| {
@@ -570,7 +653,6 @@ fn mixed_100k_keysets_use_exact_indexes_and_summary_never_scans_jobs() {
             store.transfer_counts().unwrap(),
             crate::MetadataTransferCounts {
                 total: (unfinished + completed) as usize,
-                active: 0,
                 completed: completed as usize,
             }
         );

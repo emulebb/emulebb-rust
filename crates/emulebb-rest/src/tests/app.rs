@@ -509,7 +509,21 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
     assert_eq!(stats.status(), StatusCode::OK);
     let body = to_bytes(stats.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["activeDownloads"], 1);
+    assert_eq!(value["data"]["downloadResources"]["waiting"], 1);
+    assert_eq!(value["data"]["downloadResources"]["active"], 0);
+    assert_eq!(value["data"]["downloadResources"]["preparing"], 0);
+    assert_eq!(
+        value["data"]["downloadResources"]["concurrency"]["mode"],
+        "automatic"
+    );
+    assert_eq!(
+        value["data"]["downloadResources"]["concurrency"]["configuredLimit"],
+        Value::Null
+    );
+    assert_eq!(
+        value["data"]["downloadResources"]["residentMemory"]["limitBytes"],
+        128 * 1024 * 1024
+    );
     assert_eq!(value["data"]["downloadCount"], 2);
     assert_eq!(value["data"]["sharedHashingActive"], false);
     assert_eq!(value["data"]["sharedHashingCount"], 0);

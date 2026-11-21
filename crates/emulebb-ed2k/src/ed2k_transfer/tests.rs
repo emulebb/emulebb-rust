@@ -1583,6 +1583,7 @@ async fn dropping_block_lease_preserves_partial_piece_progress() {
             None,
             None,
             1_000,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap()
@@ -1611,6 +1612,7 @@ async fn dropping_block_lease_preserves_partial_piece_progress() {
             None,
             None,
             1_000,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap()
@@ -1638,6 +1640,7 @@ async fn two_peers_lease_distinct_blocks_from_the_same_part() {
             None,
             None,
             1_000,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap()
@@ -1649,6 +1652,7 @@ async fn two_peers_lease_distinct_blocks_from_the_same_part() {
             None,
             Some(0),
             1_000,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap()

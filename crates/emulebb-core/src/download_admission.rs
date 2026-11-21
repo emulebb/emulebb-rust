@@ -1,7 +1,7 @@
 //! Coarse adaptive admission; actual producers retain their existing budgets.
 use emulebb_ed2k::ed2k_transfer::DownloadResourceSnapshot;
 
-const SOFT_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const SOFT_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
 const PEER_FRAME_BYTES: usize = 2_000_000;
 const INITIAL_ACTIVE: usize = 16;
 const INITIAL_PREPARING: usize = 2;

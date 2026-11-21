@@ -48,12 +48,25 @@ export type AppInfo = {
   [key: string]: unknown;
 };
 
+export type DownloadResources = {
+  active: number;
+  preparing: number;
+  waiting: number;
+  concurrency: {
+    mode: "automatic" | "fixed";
+    configuredLimit: number | null;
+    target: number;
+    burstActive: number;
+  };
+  residentMemory: { usedBytes: number; softTargetBytes: number; limitBytes: number };
+};
+
 export type Stats = {
   downloadRateBytesPerSec?: number;
   uploadRateBytesPerSec?: number;
   downloadSpeedKiBps?: number;
   uploadSpeedKiBps?: number;
-  activeDownloads?: number;
+  downloadResources: DownloadResources;
   activeUploads?: number;
   waitingUploads?: number;
   totalTransfers?: number;
@@ -125,6 +138,8 @@ export type DownloadEventRuntimeDiagnostics = {
   [key: string]: unknown;
 };
 
+export type DownloadWaitingReason = "network" | "sources" | "resources";
+export type DownloadState = "queued" | "waiting-metadata" | "downloading" | "stopping" | "stopped" | "verifying" | "delivering" | "completed" | "removing" | "failed";
 export type DownloadSummary = {
   id: string;
   hash: string;
@@ -132,12 +147,12 @@ export type DownloadSummary = {
   sizeBytes: number | null;
   progress: number | null;
   intent: "started" | "stopped";
-  state: "queued" | "waiting-metadata" | "downloading" | "stopping" | "stopped" | "verifying" | "delivering" | "completed" | "removing" | "failed";
   category: string | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
-};
+} & ({ state: "queued"; waitingReason: DownloadWaitingReason }
+  | { state: Exclude<DownloadState, "queued">; waitingReason: null });
 
 export type DownloadDetail = DownloadSummary & {
   payloadVerified: boolean;

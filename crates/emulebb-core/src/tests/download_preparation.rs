@@ -1,7 +1,7 @@
 use super::*;
 use crate::download_preparation::DownloadPreparation;
 
-fn local_preparation_core(
+pub(super) fn local_preparation_core(
     root: &Path,
     user_hash: [u8; 16],
     max_concurrent: Option<u32>,
@@ -555,6 +555,13 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
     .await
     .unwrap();
     for (id, token) in &ids {
+        let detail = download.download_detail(*id).await.unwrap().unwrap();
+        assert_eq!(detail.summary.state, crate::DownloadState::Queued);
+        assert_eq!(
+            detail.summary.waiting_reason,
+            Some(crate::DownloadWaitingReason::Resources)
+        );
+        drop(detail);
         let header = download
             .ed2k_transfers
             .download_job(*id)

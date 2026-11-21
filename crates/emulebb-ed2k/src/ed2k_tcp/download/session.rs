@@ -300,6 +300,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
     let Some(scheduling_yield) = transfer_runtime.download_yield_signal(job_token) else {
         return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
     };
+    // WHY: one latched signal per peer wakes a redundant reader without a task
+    // or future allocation per outstanding block, and cannot lose verification
+    // that happens before the next read is registered.
+    let redundant_peer = tokio_util::sync::CancellationToken::new();
     anyhow::ensure!(
         manifest.file_hash == file_hash_hex,
         "download session hash differs from its captured job"
@@ -327,7 +331,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             if manifest.completed || manifest.final_rehash_pending {
                 return Ok(Ed2kPeerDownloadOutcome::Completed);
             }
-            if scheduling_yield.is_cancelled() {
+            if scheduling_yield.is_cancelled() || redundant_peer.is_cancelled() {
                 return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
             }
 
@@ -353,6 +357,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     peer_addr,
                     DownloadRequestWindowState {
                         transfer_runtime,
+                        redundant_peer: &redundant_peer,
                         file_hash: &file_hash,
                         file_hash_hex,
                         manifest: &manifest,
@@ -432,6 +437,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             let read_result = tokio::select! {
                 biased;
                 () = scheduling_yield.cancelled() => return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete),
+                () = redundant_peer.cancelled() => {
+                    tracing::debug!(%peer_addr, job_id = %job_token.job_id, "closing redundant download peer after part verification");
+                    return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                },
                 result = tokio::time::timeout(
                 read_timeout,
                 async {
