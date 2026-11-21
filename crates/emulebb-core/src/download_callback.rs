@@ -181,8 +181,8 @@ impl EmulebbCore {
             }
             tokio::select! {
                 biased;
-                () = shutdown.cancelled() => return Ok(false),
-                () = dispatch_cancel.cancelled() => return Ok(false),
+                () = shutdown.cancelled() => Ok(false),
+                () = dispatch_cancel.cancelled() => Ok(false),
                 outcome = preparation.availability() => match outcome? {
                     Ed2kCallbackPreparationOutcome::Available(availability) => {
                         let useful = availability.available_parts.len() == verified_parts.len()
