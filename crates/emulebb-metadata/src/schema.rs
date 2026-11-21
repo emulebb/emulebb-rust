@@ -1,6 +1,6 @@
 //! One current-schema compatibility domain for the complete profile database.
 //!
-//! `known_files` owns accepted content identity and its preferred index label;
+//! `known_files` owns accepted content identity and its first client-accepted label;
 //! observations retain their own claims. `download_jobs` owns download geometry and
 //! presentation, while `verified_local_content` owns verified local evidence.
 //! Paths identify native byte sequences; sort/search keys are derived projections.

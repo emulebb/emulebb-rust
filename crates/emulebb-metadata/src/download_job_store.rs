@@ -314,8 +314,12 @@ impl MetadataStore {
             );
         }
         // Admission records a claim on the job, never accepted size on content.
+        // WHY: passive knowledge must not choose the client's library label.
+        // Select it before the job trigger establishes retained membership;
+        // later jobs and observations preserve that first accepted label.
         tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
-            VALUES(?1,NULL,?2,?3,?3,?3) ON CONFLICT(ed2k_hash) DO NOTHING",
+            VALUES(?1,NULL,?2,?3,?3,?3) ON CONFLICT(ed2k_hash) DO UPDATE SET display_name=excluded.display_name
+            WHERE NOT EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id)",
             params![hash, request.display_name, unix_ms()])?;
         let (known, accepted): (i64, Option<i64>) = tx.query_row(
             "SELECT id,size_bytes FROM known_files WHERE ed2k_hash=?1",

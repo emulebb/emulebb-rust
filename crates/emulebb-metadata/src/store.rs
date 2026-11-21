@@ -318,7 +318,9 @@ impl MetadataStore {
                 tx.execute(
                     r#"
                     UPDATE known_files
-                    SET display_name = ?2,
+                    SET display_name = CASE
+                            WHEN EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id)
+                            THEN display_name ELSE ?2 END,
                         content_type = ?3,
                         availability_score = max(availability_score, ?4),
                         last_seen_at_ms = ?5,
@@ -1074,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_origin_metadata_preserves_stronger_canonical_values() {
+    fn indexed_origins_preserve_first_client_name_and_stronger_metadata() {
         let mut store = MetadataStore::in_memory().unwrap();
         let hash = "00112233445566778899aabbccddeeff";
         let transfer = MetadataIndexedFile {
@@ -1100,6 +1102,9 @@ mod tests {
         };
 
         store
+            .upsert_indexed_file(&passive, MetadataIndexedFileOrigin::PassiveCache)
+            .unwrap();
+        store
             .upsert_indexed_file(&transfer, MetadataIndexedFileOrigin::Transfer)
             .unwrap();
         store
@@ -1113,7 +1118,7 @@ mod tests {
             .unwrap();
 
         let canonical = store.find_indexed_file_by_hash(hash).unwrap().unwrap();
-        assert_eq!(canonical.name, local_share.name);
+        assert_eq!(canonical.name, transfer.name);
         assert_eq!(canonical.size_bytes, local_share.size_bytes);
         assert_eq!(canonical.content_type, local_share.content_type);
         assert_eq!(canonical.availability_score, passive.availability_score);
