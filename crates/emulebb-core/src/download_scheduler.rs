@@ -96,6 +96,11 @@ impl EmulebbCore {
                 &shutdown,
             )
             .await;
+            // Connection admission precedes metadata exchange. Tests of cohort
+            // ordering must synchronize on ready ownership, not socket count.
+            #[cfg(test)]
+            self.download_ready_count
+                .store(ready.len(), std::sync::atomic::Ordering::Release);
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,

@@ -1,7 +1,7 @@
 //! Bounded waiting-job discovery and availability before hydration.
 use crate::{
     EmulebbCore, OwnSourceIdentity, download_attempts::DownloadAttemptGuard, drop_self_sources,
-    ed2k_source_batch::DownloadSourceTarget, found_source_from_endpoint, source_endpoint_key,
+    ed2k_source_batch::DownloadSourceTarget, found_source_from_endpoint,
 };
 use anyhow::Result;
 use emulebb_ed2k::{
@@ -122,6 +122,13 @@ impl EmulebbCore {
                 if leased.is_empty() {
                     continue;
                 }
+                let Some(lease_id) = self
+                    .capture_download_probe_lease(guard.token(), source, &target.hash)
+                    .await
+                else {
+                    continue;
+                };
+                let mut not_started = false;
                 let result: Result<DownloadPreparation> = async {
                     let outcome = tokio::select! {
                         biased;
@@ -173,7 +180,7 @@ impl EmulebbCore {
                             )
                             .await;
                         }
-                        Ed2kPeerProbeOutcome::Deferred => {}
+                        Ed2kPeerProbeOutcome::Deferred => not_started = true,
                     }
                     Ok(DownloadPreparation::Waiting)
                 }
@@ -181,9 +188,12 @@ impl EmulebbCore {
                 if let Ok(DownloadPreparation::Direct(_)) = &result {
                     return result;
                 }
-                self.release_direct_download_source_leases(
+                self.finish_download_probe_lease(
                     guard.token(),
-                    &[source_endpoint_key(source)],
+                    source,
+                    &target.hash,
+                    lease_id,
+                    not_started,
                 )
                 .await;
                 if let Err(error) = result {

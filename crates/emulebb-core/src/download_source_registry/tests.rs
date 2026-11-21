@@ -9,6 +9,66 @@ use super::{
 };
 
 #[test]
+fn no_socket_probe_settlement_preserves_newer_lease_and_real_attempt_cooldown() {
+    let source = source_with_hash([0x24; 16]);
+    let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let now = Instant::now();
+    let cooldown = Duration::from_secs(1200);
+    let mut registry = DownloadSourceRegistry::default();
+    registry.add_candidate(now, candidate(file, 1, 0, source.clone()));
+    registry
+        .lease_best_for_file(now, cooldown, &source, file)
+        .unwrap();
+    let first = registry.source_lease_id(&source, file).unwrap();
+    assert!(registry.finish_probe_lease(&source, file, first, true));
+    assert!(
+        registry
+            .endpoint_retry_delay(now, cooldown, &source, file)
+            .is_none()
+    );
+    // Identical time, endpoint, file and owner still represent a new lease.
+    registry
+        .lease_best_for_file(now, cooldown, &source, file)
+        .unwrap();
+    let second = registry.source_lease_id(&source, file).unwrap();
+    assert_ne!(first, second);
+    assert!(!registry.finish_probe_lease(&source, file, first, true));
+    assert_eq!(registry.source_lease_id(&source, file), Some(second));
+    assert_eq!(
+        registry.endpoint_retry_delay(now, cooldown, &source, file),
+        Some(cooldown)
+    );
+    assert!(registry.finish_probe_lease(&source, file, second, false));
+    assert_eq!(registry.leased_peer_count(), 0);
+    assert_eq!(registry.candidate_count(), 1);
+    assert!(
+        registry
+            .lease_best_for_file(now, cooldown, &source, file)
+            .is_none()
+    );
+}
+
+#[test]
+fn no_socket_probe_settlement_does_not_clear_no_needed_parts_hold() {
+    let source = source_with_hash([0x25; 16]);
+    let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let now = Instant::now();
+    let mut registry = DownloadSourceRegistry::default();
+    registry.add_candidate(now, candidate(file, 1, 0, source.clone()));
+    registry
+        .lease_best_for_file(now, Duration::ZERO, &source, file)
+        .unwrap();
+    let id = registry.source_lease_id(&source, file).unwrap();
+    assert!(registry.mark_no_needed_parts(now, &source, file));
+    assert!(registry.finish_probe_lease(&source, file, id, true));
+    assert_eq!(
+        registry.endpoint_retry_delay(now, Duration::ZERO, &source, file),
+        Some(NNP_REASK_HOLD)
+    );
+    assert_eq!(registry.candidate_count(), 1);
+}
+
+#[test]
 fn registry_derives_a4af_candidates_from_peer_fanout() {
     let source = source_with_hash([0x11; 16]);
     let mut registry = DownloadSourceRegistry::default();

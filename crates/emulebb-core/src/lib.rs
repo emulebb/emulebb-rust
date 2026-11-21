@@ -512,6 +512,8 @@ pub struct EmulebbCore {
     #[cfg(test)]
     download_hydration_busy: Arc<AtomicBool>,
     #[cfg(test)]
+    download_ready_count: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
     category_probe_waiting: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     shared_root_change: Arc<shared_dir_monitor::RootChangeSignal>,
     category_probe_sender: Arc<
@@ -758,6 +760,8 @@ impl EmulebbCore {
             category_probe_gate: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             download_hydration_busy: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            download_ready_count: Arc::default(),
             #[cfg(test)]
             category_probe_waiting: Arc::new(std::sync::Mutex::new(None)),
             shared_root_change: Arc::default(),
@@ -1774,6 +1778,42 @@ impl EmulebbCore {
             state.last_source_count_emit_at = Some(now);
         }
         (acquired, deferred, deferred_retry_delay)
+    }
+
+    async fn capture_download_probe_lease(
+        &self,
+        token: emulebb_metadata::JobToken,
+        source: &Ed2kFoundSource,
+        hash: &str,
+    ) -> Option<download_source_registry::DownloadSourceLeaseId> {
+        let state = self.state.lock().await;
+        if state
+            .active_download_peer_endpoints
+            .get(&source_endpoint_key(source))
+            != Some(&token)
+        {
+            return None;
+        }
+        state.download_source_registry.source_lease_id(source, hash)
+    }
+
+    async fn finish_download_probe_lease(
+        &self,
+        token: emulebb_metadata::JobToken,
+        source: &Ed2kFoundSource,
+        hash: &str,
+        lease: download_source_registry::DownloadSourceLeaseId,
+        not_started: bool,
+    ) {
+        let mut state = self.state.lock().await;
+        let endpoint = source_endpoint_key(source);
+        if state.active_download_peer_endpoints.get(&endpoint) == Some(&token)
+            && state
+                .download_source_registry
+                .finish_probe_lease(source, hash, lease, not_started)
+        {
+            state.active_download_peer_endpoints.remove(&endpoint);
+        }
     }
 
     async fn release_direct_download_source_leases(

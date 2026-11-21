@@ -47,6 +47,102 @@ fn local_preparation_core(
 }
 
 #[tokio::test]
+async fn native_probe_capacity_refusal_releases_only_its_exact_core_reservation() {
+    use emulebb_ed2k::{
+        ed2k_tcp::{Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, probe_file_from_peer},
+        ed2k_transfer::Ed2kDownloadCoordinatorConfig,
+    };
+    let root = unique_runtime_dir("core-probe-capacity-refusal");
+    let (core, network) = local_preparation_core(&root, [0x65; 16], None);
+    let hash = Ed2kHash::from_bytes([0x66; 16]);
+    let file = hash.to_string();
+    let owner = a4af_test_owner(&core, &file);
+    let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41012);
+    core.state
+        .lock()
+        .await
+        .download_source_registry
+        .add_candidate(
+            Instant::now(),
+            DownloadSourceCandidate {
+                file_hash: file.clone(),
+                needed_parts: 1,
+                rare_parts: 0,
+                source: source.clone(),
+                last_seen: Instant::now(),
+            },
+        );
+    let (leased, _, _) = core
+        .acquire_direct_download_source_leases(owner.token(), &file, std::slice::from_ref(&source))
+        .await;
+    assert_eq!(leased.len(), 1);
+    let first = core
+        .capture_download_probe_lease(owner.token(), &source, &file)
+        .await
+        .unwrap();
+    core.ed2k_transfers
+        .apply_download_coordinator_config(Ed2kDownloadCoordinatorConfig {
+            max_connections: 1,
+            max_connections_per_window: 0,
+            ..Ed2kDownloadCoordinatorConfig::default()
+        });
+    let held = core.ed2k_transfers.try_admit_source_connection();
+    assert!(held.decision().admitted);
+    let result = probe_file_from_peer(Ed2kPeerProbeOptions {
+        bind_ip: network.bind_ip,
+        egress_route: network.egress_route,
+        peer: &source,
+        hello_identity: core.ed2k_hello_identity(&network),
+        secure_ident: Arc::clone(&network.secure_ident),
+        transfer_runtime: Arc::clone(&core.ed2k_transfers),
+        file_size: 1024,
+        verified_parts: &[false],
+        timeout: Duration::from_secs(1),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Ed2kPeerProbeOutcome::Deferred));
+    core.finish_download_probe_lease(owner.token(), &source, &file, first, true)
+        .await;
+    assert!(
+        core.state
+            .lock()
+            .await
+            .active_download_peer_endpoints
+            .is_empty()
+    );
+    let (leased, _, retry) = core
+        .acquire_direct_download_source_leases(owner.token(), &file, std::slice::from_ref(&source))
+        .await;
+    assert_eq!(leased.len(), 1);
+    assert!(retry.is_none());
+    let second = core
+        .capture_download_probe_lease(owner.token(), &source, &file)
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+    core.finish_download_probe_lease(owner.token(), &source, &file, first, true)
+        .await;
+    assert_eq!(
+        core.capture_download_probe_lease(owner.token(), &source, &file)
+            .await,
+        Some(second)
+    );
+    core.finish_download_probe_lease(owner.token(), &source, &file, second, false)
+        .await;
+    let (leased, deferred, retry) = core
+        .acquire_direct_download_source_leases(owner.token(), &file, std::slice::from_ref(&source))
+        .await;
+    assert!(leased.is_empty());
+    assert_eq!(deferred, 1);
+    assert!(retry.unwrap() > Duration::from_secs(1190));
+    drop(held);
+    drop(owner);
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_reask() {
     let root = unique_runtime_dir("core-prepared-hydration-recovery");
     let library = root.join("library");
@@ -376,12 +472,7 @@ async fn ready_admission_keeps_preparation_bounded_and_selects_smaller_remaining
     download.connect_ed2k().await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if download
-                .ed2k_transfers
-                .download_resource_snapshot()
-                .connections
-                == 2
-            {
+            if download.download_ready_count.load(Ordering::Acquire) == 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
