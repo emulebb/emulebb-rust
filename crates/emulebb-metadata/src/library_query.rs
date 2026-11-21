@@ -1,7 +1,7 @@
 //! Bounded hash-level library pages over indexed, process-local read projections.
 
 use anyhow::{Result, ensure};
-use rusqlite::{Row, params_from_iter, types::Value};
+use rusqlite::{OptionalExtension, Row, params_from_iter, types::Value};
 
 use crate::{MetadataFileUploadStatistics, MetadataFileUploadTotals, MetadataStore};
 
@@ -75,9 +75,10 @@ pub struct LibraryFileQuery {
     pub sort: LibraryFileSort,
     pub descending: bool,
     pub search: Option<String>,
-    /// Resolved immutable resources; no path or tag-name matching in this layer.
+    /// Immutable root resource identity; paths are not filter identities.
     pub root_id: Option<i64>,
-    pub tag_id: Option<i64>,
+    /// Public immutable tag name. SQLite resolves its internal key once.
+    pub tag: Option<String>,
     pub sharing_enabled: Option<bool>,
     /// Anchor hash remains addressable independently of the selected filters.
     pub after: Option<[u8; 16]>,
@@ -93,7 +94,7 @@ impl Default for LibraryFileQuery {
             descending: false,
             search: None,
             root_id: None,
-            tag_id: None,
+            tag: None,
             sharing_enabled: None,
             after: None,
             limit: 100,
@@ -172,8 +173,9 @@ fn source_and_filters(query: &LibraryFileQuery, search: Option<&str>) -> (String
                 AND r.enabled=1 AND r.deleted_at_ms IS NULL)",
         ),
         (
-            query.tag_id.map(Value::Integer),
-            "EXISTS(SELECT 1 FROM known_file_tags t WHERE t.tag_id=? AND t.known_file_id=f.known_file_id)",
+            query.tag.as_ref().map(|name|Value::Text(name.clone())),
+            "EXISTS(SELECT 1 FROM known_file_tags t WHERE t.tag_id=(SELECT id FROM library_tags WHERE name=?)
+                AND t.known_file_id=f.known_file_id)",
         ),
     ] {
         if let Some(value) = value {
@@ -254,6 +256,29 @@ fn page_sql(query: &LibraryFileQuery, source: &str, values: &mut Vec<Value>) -> 
 }
 
 impl MetadataStore {
+    /// Read one client hash, including unavailable/copyless content. This uses
+    /// the same cached facts as pages and never warms unrelated filename keys.
+    pub fn library_file(&self, hash: &[u8; 16]) -> Result<Option<MetadataLibraryFile>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM temp.session_library_files WHERE ed2k_hash=?1)",
+            [hash.as_slice()],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(None);
+        }
+        crate::library_projection::refresh(&tx)?;
+        let file=tx.query_row(&format!("SELECT f.ed2k_hash,{COLUMNS}
+            FROM temp.session_library_files f CROSS JOIN temp.session_file_upload_statistics s ON s.known_file_id=f.known_file_id
+            CROSS JOIN known_files k ON k.id=f.known_file_id WHERE f.ed2k_hash=?1"),[hash.as_slice()],|row| {
+                crate::download_job_store::bounded_row_bytes(row,&[(1,65_536,8)])?;
+                decode(row)
+            }).optional()?;
+        tx.commit()?;
+        Ok(file)
+    }
+
     /// A byte-bounded live page. The admitted caller publishes captured counters
     /// first and reserves work for one folded label plus this result. No paths,
     /// hashsets, jobs or per-file tag arrays are materialized by this read.
@@ -271,7 +296,11 @@ impl MetadataStore {
             "invalid library read budget"
         );
         ensure!(
-            query.root_id.is_none_or(|id| id > 0) && query.tag_id.is_none_or(|id| id > 0),
+            query.root_id.is_none_or(|id| id > 0)
+                && query
+                    .tag
+                    .as_ref()
+                    .is_none_or(|name| crate::valid_category_name(name)),
             "invalid library filter identity"
         );
         ensure!(

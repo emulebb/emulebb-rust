@@ -191,11 +191,10 @@ fn views_include_client_knowledge_and_preserve_independent_presence_and_policy()
 #[test]
 fn filename_substrings_and_root_tag_policy_filters_compose_without_expansion() {
     let store = fixture();
-    let tag = store.library_tag("Group-1").unwrap().unwrap().id;
     let selected = LibraryFileQuery {
         search: Some("ALPHA".into()),
         root_id: Some(1),
-        tag_id: Some(tag),
+        tag: Some("gRoUp-1".into()),
         sharing_enabled: Some(false),
         ..Default::default()
     };
@@ -356,7 +355,7 @@ fn byte_pages_keep_a_resume_anchor_and_cursor_does_not_require_filter_membership
             ..request.clone()
         },
         LibraryFileQuery {
-            tag_id: Some(-1),
+            tag: Some("invalid name".into()),
             ..request
         },
     ] {
@@ -376,6 +375,48 @@ fn idle_reads_do_not_rebuild_names_or_touch_the_projections() {
     let changes = store.connection().unwrap().total_changes();
     assert_eq!(page(&store, &request).files, before.files);
     assert_eq!(store.connection().unwrap().total_changes(), changes);
+}
+
+#[test]
+fn exact_reads_include_copyless_hashes_without_warming_other_names_or_passive_claims() {
+    let store = fixture();
+    let copyless = store.library_file(&hash(1)).unwrap().unwrap();
+    assert_eq!(copyless.display_name, "İİİ.bin");
+    assert_eq!(copyless.size_bytes, None);
+    assert!(!copyless.present);
+    let present = store.library_file(&hash(2)).unwrap().unwrap();
+    assert!(present.present);
+    assert_eq!(present.statistics.session_uploaded_bytes, 17);
+    assert!(store.library_file(&hash(5)).unwrap().is_none());
+    assert!(store.library_file(&hash(99)).unwrap().is_none());
+    assert_eq!(
+        store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM temp.session_library_files WHERE name_key IS NULL",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
+fn a_missing_tag_is_an_empty_named_filter_and_never_creates_a_tag() {
+    let store = fixture();
+    let result = page(
+        &store,
+        &LibraryFileQuery {
+            tag: Some("Missing-1".into()),
+            count_total: true,
+            ..query(LibraryFileView::AllKnown)
+        },
+    );
+    assert!(result.files.is_empty());
+    assert_eq!(result.total, Some(0));
+    assert!(store.library_tag("Missing-1").unwrap().is_none());
 }
 
 #[test]

@@ -128,7 +128,12 @@ mod download_admission;
 mod download_attempts;
 mod download_callback;
 mod download_controls;
+mod library_files;
 mod library_locations;
+pub use library_files::{
+    LIBRARY_FILE_PAGE_BYTES, LibraryFile, LibraryFilePage, LibraryFileQuery, LibraryFileSort,
+    LibraryFileView, MetadataLibraryCursorExpired,
+};
 mod library_policy;
 pub use library_locations::{LIBRARY_LOCATION_PAGE_BYTES, LibraryLocation, LibraryLocationPage};
 mod library_roots;
