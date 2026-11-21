@@ -110,6 +110,11 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             .await?;
         *manifest = refreshed_manifest;
         if outcome.is_completed() {
+            transfer_runtime.retire_redundant_piece_leases(
+                manifest.token,
+                request.piece_index,
+                peer_addr,
+            );
             *active_piece_request = None;
         }
         if manifest.completed {

@@ -13,6 +13,32 @@ const PREFIX: usize = 7 * BLOCK - 256;
 const TAIL: usize = 8 * BLOCK;
 const OP_SENDINGPART: u8 = 0x46;
 
+#[derive(Clone, Copy)]
+struct Geometry {
+    size: usize,
+    prefix: usize,
+    replacement_start: usize,
+    tail: usize,
+    served: usize,
+}
+
+impl Geometry {
+    const COMPLETE: Self = Self {
+        size: SIZE,
+        prefix: PREFIX,
+        replacement_start: 7 * BLOCK,
+        tail: TAIL,
+        served: SIZE,
+    };
+    const PARTIAL: Self = Self {
+        size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE as usize + 1024,
+        prefix: 51 * BLOCK - 256,
+        replacement_start: 51 * BLOCK,
+        tail: 52 * BLOCK,
+        served: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE as usize,
+    };
+}
+
 fn frames(
     read: tokio::net::tcp::OwnedReadHalf,
 ) -> FramedRead<tokio::net::tcp::OwnedReadHalf, LengthDelimitedCodec> {
@@ -89,18 +115,23 @@ async fn assert_peer_closed(forward: tokio::task::JoinHandle<std::io::Result<()>
 
 /// Obtain the prefix through the real downloader, with a valid final shortened
 /// data packet and then EOF. No manifest or byte-presence state is fabricated.
-async fn prefix_relay(listener: TcpListener, backend: SocketAddr) {
+async fn prefix_relay(listener: TcpListener, backend: SocketAddr, prefix: usize) {
     let (client, _) = listener.accept().await.unwrap();
     let (mut writer, mut incoming, forward) = relay_to_seed(client, backend).await;
     let mut forwarded = 0;
+    let mut next_progress = 0;
     while let Some(frame) = incoming.next().await {
         let mut frame = frame.unwrap();
         if let Some((start, end)) = payload_range(&frame) {
+            if end >= next_progress {
+                eprintln!("endgame prefix reached {end}, target={prefix}");
+                next_progress = end + 1024 * 1024;
+            }
             assert_eq!(start, forwarded);
-            if end >= PREFIX {
-                let keep = PREFIX - start;
+            if end >= prefix {
+                let keep = prefix - start;
                 frame.truncate(30 + keep);
-                frame[26..30].copy_from_slice(&(PREFIX as u32).to_le_bytes());
+                frame[26..30].copy_from_slice(&(prefix as u32).to_le_bytes());
                 let length = (frame.len() - 5) as u32;
                 frame[1..5].copy_from_slice(&length.to_le_bytes());
                 writer.write_all(&frame).await.unwrap();
@@ -109,6 +140,11 @@ async fn prefix_relay(listener: TcpListener, backend: SocketAddr) {
                 return;
             }
             forwarded = end;
+        } else {
+            eprintln!(
+                "endgame prefix control opcode={:02x}, forwarded={forwarded}",
+                frame[5]
+            );
         }
         writer.write_all(&frame).await.unwrap();
     }
@@ -126,7 +162,15 @@ enum Event {
     Tail(Role),
     Truncated(Role),
 }
+
+async fn expect_event(received: &mut mpsc::Receiver<Event>, expected: Event) {
+    let event = tokio::time::timeout(Duration::from_secs(8), received.recv())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {expected:?}"));
+    assert_eq!(event, Some(expected));
+}
 struct Gate {
+    geometry: Geometry,
     role: Role,
     listener: TcpListener,
     backend: SocketAddr,
@@ -139,6 +183,7 @@ struct Gate {
 impl Gate {
     async fn run(self) {
         let Self {
+            geometry,
             role,
             listener,
             backend,
@@ -160,14 +205,14 @@ impl Gate {
                         assert_eq!(
                             start,
                             match role {
-                                Role::Original => PREFIX,
-                                Role::Replacement => 7 * BLOCK,
+                                Role::Original => geometry.prefix,
+                                Role::Replacement => geometry.replacement_start,
                             }
                         );
                         events.send(Event::Warmup(role)).await.unwrap();
                         release.await.unwrap();
                     }
-                    if start == TAIL {
+                    if start == geometry.tail {
                         events.send(Event::Tail(role)).await.unwrap();
                         if !tail
                             .take()
@@ -203,30 +248,71 @@ async fn download_peer(
 
 #[tokio::test]
 async fn original_endgame_copy_wins_and_drains_replacement_peer() {
-    tokio::time::timeout(Duration::from_secs(50), qualify(Role::Original))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(50),
+        qualify(Role::Original, Geometry::COMPLETE),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
 async fn replacement_endgame_copy_wins_and_drains_original_peer() {
-    tokio::time::timeout(Duration::from_secs(50), qualify(Role::Replacement))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(50),
+        qualify(Role::Replacement, Geometry::COMPLETE),
+    )
+    .await
+    .unwrap();
 }
 
-async fn qualify(winner: Role) {
+#[tokio::test]
+async fn nonterminal_verified_part_drains_redundant_endgame_peer() {
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        qualify(Role::Replacement, Geometry::PARTIAL),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn nonterminal_original_copy_drains_replacement_endgame_peer() {
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        qualify(Role::Original, Geometry::PARTIAL),
+    )
+    .await
+    .unwrap();
+}
+
+async fn qualify(winner: Role, geometry: Geometry) {
+    let Geometry {
+        size,
+        prefix,
+        served,
+        ..
+    } = geometry;
+    eprintln!("endgame setup: size={size}, served={served}");
     let root = unique_runtime_dir(match winner {
         Role::Original => "endgame-original",
         Role::Replacement => "endgame-replacement",
     });
     // Deterministic, incompressible test bytes using the already pinned digest.
-    let mut payload = Vec::with_capacity(SIZE + 16);
-    for index in 0..SIZE.div_ceil(16) {
+    let mut payload = Vec::with_capacity(size + 16);
+    for index in 0..size.div_ceil(16) {
         payload.extend_from_slice(&Md4::digest((index as u64).to_le_bytes()));
     }
-    payload.truncate(SIZE);
-    let hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    payload.truncate(size);
+    let hashset: Vec<[u8; 16]> = payload
+        .chunks(emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE as usize)
+        .map(|part| Md4::digest(part).into())
+        .collect();
+    let hash = Ed2kHash::from_bytes(if hashset.len() == 1 {
+        hashset[0]
+    } else {
+        Md4::digest(hashset.concat()).into()
+    });
     let library = root.join("library");
     std::fs::create_dir_all(&library).unwrap();
     std::fs::write(library.join("endgame.bin"), &payload).unwrap();
@@ -238,21 +324,52 @@ async fn qualify(winner: Role) {
             [0x91 + id; 16],
             None,
         );
-        seed.create_library_root(&library.to_string_lossy(), false)
-            .await
-            .unwrap()
-            .unwrap();
-        let shares = seed.reload_shared_directories().await.unwrap();
-        assert!(shares.iter().any(|entry| entry.hash == hash.to_string()));
-        drop(shares);
+        if served < size {
+            // Real stopped partial sources advertise only their verified first part.
+            let token = admit_scheduler_test_job(
+                &seed.ed2k_transfers,
+                &root.join(format!("seed-{id}")),
+                hash,
+                "endgame.bin".into(),
+                size as u64,
+            )
+            .await;
+            drop(
+                seed.ed2k_transfers
+                    .store_md4_hashset(token, hashset.clone())
+                    .await
+                    .unwrap(),
+            );
+            seed.ed2k_transfers
+                .store_piece_data(token, 0, &payload[..served])
+                .await
+                .unwrap();
+            assert!(seed.ed2k_transfers.stop_download_job(token).await.unwrap());
+        } else {
+            seed.create_library_root(&library.to_string_lossy(), false)
+                .await
+                .unwrap()
+                .unwrap();
+            let shares = seed.reload_shared_directories().await.unwrap();
+            assert!(shares.iter().any(|entry| entry.hash == hash.to_string()));
+            drop(shares);
+        }
         seed.connect_ed2k().await.unwrap();
+        // Isolate endgame ownership from the independent upload rotation policy:
+        // the nonterminal fixture's resumable prefix exceeds the normal 90% cap.
+        let mut upload_policy = network.ed2k.upload_queue.clone();
+        upload_policy.session_transfer_percent = 0;
+        seed.ed2k_transfers
+            .apply_upload_queue_policy(&upload_policy)
+            .await;
         backends.push(SocketAddr::from((Ipv4Addr::LOCALHOST, network.listen_port)));
         seeds.push(seed);
     }
+    eprintln!("endgame seeds ready");
     let storage = root.join("receiver");
     let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&storage).unwrap());
     let token =
-        admit_scheduler_test_job(&runtime, &storage, hash, "endgame.bin".into(), SIZE as u64).await;
+        admit_scheduler_test_job(&runtime, &storage, hash, "endgame.bin".into(), size as u64).await;
     let ident =
         Arc::new(Ed2kSecureIdent::load_or_create(&root.join("receiver-ident.der")).unwrap());
     let prefix_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -261,41 +378,46 @@ async fn qualify(winner: Role) {
         Ipv4Addr::LOCALHOST,
         prefix_listener.local_addr().unwrap().port(),
     );
-    let prefix_server = tokio::spawn(prefix_relay(prefix_listener, backends[0]));
+    let prefix_server = tokio::spawn(prefix_relay(prefix_listener, backends[0], prefix));
     let mut hello_identity = direct_download_options(
         token,
         Arc::clone(&runtime),
         Arc::clone(&ident),
         hash.to_string(),
         "endgame.bin".into(),
-        SIZE as u64,
+        size as u64,
         Vec::new(),
     )
     .hello_identity;
     hello_identity.client_id = 0x5912_0559;
-    let report = download_peer(Ed2kPeerDownloadOptions {
-        job_token: token,
-        bind_ip: Ipv4Addr::LOCALHOST,
-        egress_route: emulebb_ed2k::networking::EgressRoute::default(),
-        peer: &prefix_source,
-        hello_identity,
-        secure_ident: &ident,
-        transfer_runtime: &runtime,
-        display_name: "endgame.bin".into(),
-        file_size: SIZE as u64,
-        current_source_count: 0,
-        timeout: Duration::from_secs(30),
-        upload_context: None,
-        established_context: None,
-        reask_register: None,
-    })
+    let report = tokio::time::timeout(
+        Duration::from_secs(60),
+        download_peer(Ed2kPeerDownloadOptions {
+            job_token: token,
+            bind_ip: Ipv4Addr::LOCALHOST,
+            egress_route: emulebb_ed2k::networking::EgressRoute::default(),
+            peer: &prefix_source,
+            hello_identity,
+            secure_ident: &ident,
+            transfer_runtime: &runtime,
+            display_name: "endgame.bin".into(),
+            file_size: size as u64,
+            current_source_count: 0,
+            timeout: Duration::from_secs(30),
+            upload_context: None,
+            established_context: None,
+            reask_register: None,
+        }),
+    )
     .await
+    .expect("prefix download must finish")
     .unwrap();
     assert_eq!(
         report.file_outcomes[0].outcome,
         Ed2kPeerDownloadOutcome::AcceptedButIncomplete
     );
     prefix_server.await.unwrap();
+    eprintln!("endgame prefix received");
     runtime.checkpoint_dirty_download_progress().await.unwrap();
     assert_eq!(
         runtime
@@ -304,7 +426,7 @@ async fn qualify(winner: Role) {
             .unwrap()
             .unwrap()
             .checkpointed_bytes,
-        PREFIX as u64
+        prefix as u64
     );
     let baseline = runtime.download_resource_snapshot();
     let bytes_before = runtime.session_downloaded_bytes();
@@ -325,6 +447,7 @@ async fn qualify(winner: Role) {
         controls.push((Some(start_tx), Some(warmup_tx), Some(tail_tx)));
         gates.push(tokio::spawn(
             Gate {
+                geometry,
                 role,
                 listener,
                 backend: backends[id],
@@ -342,7 +465,7 @@ async fn qualify(winner: Role) {
         ident,
         hash.to_string(),
         "endgame.bin".into(),
-        SIZE as u64,
+        size as u64,
         sources,
     );
     options.bind_ip = Ipv4Addr::LOCALHOST;
@@ -380,21 +503,18 @@ async fn qualify(winner: Role) {
         },
     ));
     controls[0].0.take().unwrap().send(()).unwrap();
-    assert_eq!(received.recv().await, Some(Event::Warmup(Role::Original)));
+    expect_event(&mut received, Event::Warmup(Role::Original)).await;
     controls[1].0.take().unwrap().send(()).unwrap();
-    assert_eq!(
-        received.recv().await,
-        Some(Event::Warmup(Role::Replacement))
-    );
+    expect_event(&mut received, Event::Warmup(Role::Replacement)).await;
     // Give the original a small, measured nonzero rate with generous fivefold
     // takeover margin, independent of startup speed or CPU contention.
     tokio::time::sleep(Duration::from_secs(2)).await;
     controls[0].1.take().unwrap().send(()).unwrap();
-    assert_eq!(received.recv().await, Some(Event::Tail(Role::Original)));
+    expect_event(&mut received, Event::Tail(Role::Original)).await;
     // Native lease aging uses std::time::Instant; exercise its real 15s bound.
     tokio::time::sleep(Duration::from_secs(16)).await;
     controls[1].1.take().unwrap().send(()).unwrap();
-    assert_eq!(received.recv().await, Some(Event::Tail(Role::Replacement)));
+    expect_event(&mut received, Event::Tail(Role::Replacement)).await;
     let winner_id = usize::from(winner == Role::Replacement);
     let loser_id = 1 - winner_id;
     let loser = if loser_id == 0 {
@@ -403,36 +523,54 @@ async fn qualify(winner: Role) {
         Role::Replacement
     };
     controls[loser_id].2.take().unwrap().send(false).unwrap();
-    assert_eq!(received.recv().await, Some(Event::Truncated(loser)));
+    expect_event(&mut received, Event::Truncated(loser)).await;
     tokio::task::yield_now().await;
     controls[winner_id].2.take().unwrap().send(true).unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(8), operation)
-        .await
-        .unwrap()
+    let outcome = tokio::time::timeout(Duration::from_secs(8), operation).await;
+    if outcome.is_err() {
+        let manifest = runtime.manifest(token).await.unwrap();
+        eprintln!(
+            "endgame drain timed out: completed={}, first part={:?}",
+            manifest.completed, manifest.pieces[0].state
+        );
+    }
+    let outcome = outcome
+        .expect("verified payload must retire redundant peer before socket timeout")
         .unwrap()
         .unwrap();
-    assert!(outcome.completed);
+    assert_eq!(outcome.completed, served == size);
     for gate in gates {
         tokio::time::timeout(Duration::from_secs(5), gate)
             .await
             .unwrap()
             .unwrap();
     }
-    assert!(runtime.manifest(token).await.unwrap().completed);
-    let mut actual = Vec::with_capacity(SIZE);
-    for start in (0..SIZE).step_by(BLOCK) {
+    let manifest = runtime.manifest(token).await.unwrap();
+    assert_eq!(manifest.completed, served == size);
+    if served < size {
+        assert_eq!(
+            manifest.pieces[0].state,
+            emulebb_ed2k::ed2k_transfer::Ed2kTransferState::Verified
+        );
+        assert_ne!(
+            manifest.pieces[1].state,
+            emulebb_ed2k::ed2k_transfer::Ed2kTransferState::Verified
+        );
+    }
+    let mut actual = Vec::with_capacity(served);
+    for start in (0..served).step_by(BLOCK) {
         actual.extend(
             runtime
-                .read_verified_range(&hash, start as u64, (start + BLOCK).min(SIZE) as u64)
+                .read_verified_range(&hash, start as u64, (start + BLOCK).min(served) as u64)
                 .await
                 .unwrap()
                 .unwrap(),
         );
     }
-    assert_eq!(actual, payload);
+    assert_eq!(actual, payload[..served]);
     assert_eq!(
         runtime.session_downloaded_bytes() - bytes_before,
-        (SIZE - PREFIX) as u64
+        (served - prefix) as u64
     );
     assert!(runtime.requested_download_parts(token).is_empty());
     let after = runtime.download_resource_snapshot();

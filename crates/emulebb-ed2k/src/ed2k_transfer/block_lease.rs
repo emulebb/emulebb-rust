@@ -14,6 +14,7 @@ use std::{
 
 use anyhow::Result;
 use emulebb_metadata::JobToken;
+use tokio_util::sync::CancellationToken;
 
 use super::{Ed2kTransferRuntime, Ed2kTransferState};
 
@@ -26,6 +27,7 @@ struct BlockLeaseOwner {
     leased_at: Instant,
     transferred_bytes: u64,
     peer_rate_bytes_per_sec: u32,
+    completed_elsewhere: CancellationToken,
 }
 
 const LATE_FILE_PERMILLE: u64 = 900;
@@ -37,7 +39,7 @@ const ENDGAME_STEAL_COOLDOWN: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
 struct LeaseRegistryState {
-    files: HashMap<JobToken, HashMap<BlockKey, BlockLeaseOwner>>,
+    files: HashMap<JobToken, HashMap<BlockKey, Vec<BlockLeaseOwner>>>,
     last_steal: HashMap<JobToken, Instant>,
 }
 
@@ -51,11 +53,12 @@ struct EndgamePolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LeaseRequest {
+struct LeaseRequest<'a> {
     peer_addr: SocketAddr,
     peer_rate_bytes_per_sec: u32,
     policy: EndgamePolicy,
     allow_takeover: bool,
+    completed_elsewhere: &'a CancellationToken,
 }
 
 fn endgame_policy(file_size: u64, present_bytes: u64, aggregate_rate: u64) -> EndgamePolicy {
@@ -127,11 +130,11 @@ impl Drop for BlockLeaseToken {
         let mut registry = self.registry.0.lock().unwrap();
         let remove_file = if let Some(file) = registry.files.get_mut(&self.job) {
             let key = (self.piece_index, self.start, self.end);
-            if file
-                .get(&key)
-                .is_some_and(|owner| owner.lease_id == self.lease_id)
-            {
-                file.remove(&key);
+            if let Some(owners) = file.get_mut(&key) {
+                owners.retain(|owner| owner.lease_id != self.lease_id);
+                if owners.is_empty() {
+                    file.remove(&key);
+                }
             }
             file.is_empty()
         } else {
@@ -185,6 +188,11 @@ impl Ed2kDownloadBlockLease {
             .files
             .get_mut(&self.token.job)
             .and_then(|file| file.get_mut(&key))
+            .and_then(|owners| {
+                owners
+                    .iter_mut()
+                    .find(|owner| owner.lease_id == self.token.lease_id)
+            })
         else {
             return;
         };
@@ -195,6 +203,29 @@ impl Ed2kDownloadBlockLease {
 }
 
 impl Ed2kTransferRuntime {
+    /// Publish verified-part completion to other live owners of its ranges.
+    /// The registry contains only live leases, including the original owner of
+    /// an endgame takeover; no state is retained for download history.
+    pub(crate) fn retire_redundant_piece_leases(
+        &self,
+        job: JobToken,
+        piece_index: u32,
+        winner: SocketAddr,
+    ) {
+        let registry = self.download_block_leases.0.lock().unwrap();
+        if let Some(file) = registry.files.get(&job) {
+            for ((piece, _, _), owners) in file {
+                if *piece == piece_index {
+                    for owner in owners {
+                        if owner.peer_addr != winner {
+                            owner.completed_elsewhere.cancel();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Only live block ownership proves acquisition. A queued source's bitmap
     /// alone must not protect a stalled execution indefinitely.
     pub(super) fn acquiring_rare_block(&self, job: JobToken, frequencies: &[u32]) -> bool {
@@ -221,9 +252,10 @@ impl Ed2kTransferRuntime {
         peer_bitmap: Option<&[bool]>,
         preferred_piece: Option<u32>,
         peer_rate_bytes_per_sec: u32,
+        completed_elsewhere: &CancellationToken,
     ) -> Result<Option<Ed2kDownloadBlockLease>> {
         let _guard = self.lock_manifest(job).await;
-        if self.download_yield_requested(job) {
+        if self.download_yield_requested(job) || completed_elsewhere.is_cancelled() {
             return Ok(None);
         }
         let manifest = self.load_manifest_unlocked(job).await?;
@@ -262,6 +294,7 @@ impl Ed2kTransferRuntime {
                     peer_rate_bytes_per_sec,
                     policy,
                     allow_takeover: false,
+                    completed_elsewhere,
                 },
             ) {
                 return Ok(Some(lease));
@@ -295,6 +328,7 @@ impl Ed2kTransferRuntime {
                     peer_rate_bytes_per_sec,
                     policy,
                     allow_takeover: true,
+                    completed_elsewhere,
                 },
             ) {
                 return Ok(Some(lease));
@@ -314,7 +348,7 @@ impl Ed2kTransferRuntime {
         manifest: &super::Ed2kResumeManifest,
         job: JobToken,
         piece_index: u32,
-        request: LeaseRequest,
+        request: LeaseRequest<'_>,
     ) -> Option<Ed2kDownloadBlockLease> {
         let piece = manifest
             .pieces
@@ -359,13 +393,14 @@ impl Ed2kTransferRuntime {
                 .fetch_add(1, Ordering::Relaxed);
             file.insert(
                 key,
-                BlockLeaseOwner {
+                vec![BlockLeaseOwner {
                     lease_id,
                     peer_addr: request.peer_addr,
                     leased_at: now,
                     transferred_bytes: 0,
                     peer_rate_bytes_per_sec: request.peer_rate_bytes_per_sec,
-                },
+                    completed_elsewhere: request.completed_elsewhere.clone(),
+                }],
             );
             return Some(Ed2kDownloadBlockLease {
                 token: Arc::new(BlockLeaseToken {
@@ -386,7 +421,8 @@ impl Ed2kTransferRuntime {
         if !request.allow_takeover {
             return None;
         }
-        let candidate = file.iter().find_map(|(&key, owner)| {
+        let candidate = file.iter().find_map(|(&key, owners)| {
+            let owner = owners.last()?;
             (key.0 == piece_index
                 && may_steal_lease(
                     request.policy,
@@ -402,16 +438,19 @@ impl Ed2kTransferRuntime {
             let lease_id = self
                 .next_download_block_lease_id
                 .fetch_add(1, Ordering::Relaxed);
-            file.insert(
-                key,
-                BlockLeaseOwner {
+            // WHY: replacing the original owner loses the only way to wake it
+            // when the replacement wins. Keep every live token until its exact
+            // drop; current ownership is the last surviving reservation.
+            file.get_mut(&key)
+                .expect("takeover candidate exists")
+                .push(BlockLeaseOwner {
                     lease_id,
                     peer_addr: request.peer_addr,
                     leased_at: now,
                     transferred_bytes: 0,
                     peer_rate_bytes_per_sec: request.peer_rate_bytes_per_sec,
-                },
-            );
+                    completed_elsewhere: request.completed_elsewhere.clone(),
+                });
             registry.last_steal.insert(token, now);
             tracing::debug!(
                 job_id = %token.job_id,
@@ -469,6 +508,90 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn verified_part_notifies_both_takeover_roles_and_exact_drops_keep_survivors() {
+        for replacement_wins in [false, true] {
+            let root = crate::paths::unique_test_dir("block-lease-verified-retirement");
+            let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+            let job = super::super::test_support::admit_download_job(
+                &runtime,
+                emulebb_kad_proto::Ed2kHash::from_bytes([0x64; 16]),
+                "Sample.bin".into(),
+                1024,
+            );
+            let manifest = runtime.ensure_job(&job).await.unwrap();
+            let original_peer = "127.0.0.1:4662".parse().unwrap();
+            let replacement_peer = "127.0.0.2:4662".parse().unwrap();
+            let original_signal = CancellationToken::new();
+            let replacement_signal = CancellationToken::new();
+            let original = runtime
+                .lease_next_download_block(
+                    job.token,
+                    original_peer,
+                    None,
+                    None,
+                    1,
+                    &original_signal,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            {
+                let mut state = runtime.download_block_leases.0.lock().unwrap();
+                let owners = state
+                    .files
+                    .get_mut(&job.token)
+                    .unwrap()
+                    .get_mut(&(0, 0, 1024))
+                    .unwrap();
+                owners[0].leased_at = Instant::now() - ENDGAME_STEAL_WAIT;
+            }
+            let replacement = runtime
+                .try_lease_block_in_piece(
+                    &manifest,
+                    job.token,
+                    0,
+                    LeaseRequest {
+                        peer_addr: replacement_peer,
+                        peer_rate_bytes_per_sec: 5,
+                        policy: EndgamePolicy {
+                            late: true,
+                            endgame: true,
+                        },
+                        allow_takeover: true,
+                        completed_elsewhere: &replacement_signal,
+                    },
+                )
+                .unwrap();
+            assert_eq!(runtime.active_download_block_lease_count(job.token), 1);
+            let winner = if replacement_wins {
+                replacement_peer
+            } else {
+                original_peer
+            };
+            let stale = JobToken {
+                generation: job.token.generation + 1,
+                ..job.token
+            };
+            runtime.retire_redundant_piece_leases(stale, 0, winner);
+            runtime.retire_redundant_piece_leases(job.token, 1, winner);
+            assert!(!original_signal.is_cancelled());
+            assert!(!replacement_signal.is_cancelled());
+            runtime.retire_redundant_piece_leases(job.token, 0, winner);
+            assert_eq!(original_signal.is_cancelled(), replacement_wins);
+            assert_eq!(replacement_signal.is_cancelled(), !replacement_wins);
+            // The latest lease may disappear first; the original remains a
+            // live reservation until its own final clone drops.
+            drop(replacement);
+            assert_eq!(runtime.active_download_block_lease_count(job.token), 1);
+            let clone = original.clone();
+            drop(original);
+            assert_eq!(runtime.active_download_block_lease_count(job.token), 1);
+            drop(clone);
+            assert_eq!(runtime.active_download_block_lease_count(job.token), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn block_reservations_apply_scarcity_before_preferred_part_affinity() {
         let root = crate::paths::unique_test_dir("block-lease-scarcity-order");
         let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -496,7 +619,14 @@ mod tests {
             vec![true, false, true]
         ));
         let lease = runtime
-            .lease_next_download_block(job.token, peer, Some(&[true; 3]), Some(0), 0)
+            .lease_next_download_block(
+                job.token,
+                peer,
+                Some(&[true; 3]),
+                Some(0),
+                0,
+                &CancellationToken::new(),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -511,7 +641,14 @@ mod tests {
             vec![false; 3]
         ));
         let lease = runtime
-            .lease_next_download_block(job.token, peer, Some(&[true; 3]), Some(2), 0)
+            .lease_next_download_block(
+                job.token,
+                peer,
+                Some(&[true; 3]),
+                Some(2),
+                0,
+                &CancellationToken::new(),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -527,6 +664,7 @@ mod tests {
             leased_at: now - age,
             transferred_bytes,
             peer_rate_bytes_per_sec: rate,
+            completed_elsewhere: CancellationToken::new(),
         }
     }
 
@@ -557,7 +695,7 @@ mod tests {
                 .files
                 .entry(job)
                 .or_default()
-                .insert(key, owner(Instant::now(), Duration::ZERO, 1, 0));
+                .insert(key, vec![owner(Instant::now(), Duration::ZERO, 1, 0)]);
             leases.push(Ed2kDownloadBlockLease {
                 token: Arc::new(BlockLeaseToken {
                     registry: registry.clone(),
@@ -577,7 +715,7 @@ mod tests {
         let state = registry.0.lock().unwrap();
         assert!(!state.files.contains_key(&tokens[0]));
         for token in &tokens[1..] {
-            assert_eq!(state.files[token][&key].transferred_bytes, 0);
+            assert_eq!(state.files[token][&key][0].transferred_bytes, 0);
         }
         drop(state);
         drop(leases);

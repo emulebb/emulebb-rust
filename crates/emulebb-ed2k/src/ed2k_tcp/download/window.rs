@@ -92,6 +92,7 @@ pub(in crate::ed2k_tcp) struct DownloadWindowLimits {
 
 pub(in crate::ed2k_tcp) struct DownloadRequestWindowState<'a> {
     pub(in crate::ed2k_tcp) transfer_runtime: &'a Ed2kTransferRuntime,
+    pub(in crate::ed2k_tcp) redundant_peer: &'a tokio_util::sync::CancellationToken,
     pub(in crate::ed2k_tcp) file_hash: &'a Ed2kHash,
     pub(in crate::ed2k_tcp) file_hash_hex: &'a str,
     pub(in crate::ed2k_tcp) manifest: &'a Ed2kResumeManifest,
@@ -121,6 +122,7 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
 ) -> Result<DownloadRequestWindowOutcome> {
     let DownloadRequestWindowState {
         transfer_runtime,
+        redundant_peer,
         file_hash,
         file_hash_hex,
         manifest,
@@ -132,7 +134,7 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         session_payload_down,
         part_response_grace,
     } = state;
-    if transfer_runtime.download_yield_requested(manifest.token) {
+    if transfer_runtime.download_yield_requested(manifest.token) || redundant_peer.is_cancelled() {
         return Ok(DownloadRequestWindowOutcome::Yielded);
     }
     let window = select_download_window_limits(
@@ -152,6 +154,7 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
                     peer_part_bitmap,
                     active_piece_request.as_ref().map(|piece| piece.piece_index),
                     peer_rate,
+                    redundant_peer,
                 )
                 .await?
             else {
@@ -165,7 +168,7 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         }
     }
 
-    if transfer_runtime.download_yield_requested(manifest.token) {
+    if transfer_runtime.download_yield_requested(manifest.token) || redundant_peer.is_cancelled() {
         return Ok(DownloadRequestWindowOutcome::Yielded);
     }
     let mut request_indices = Vec::with_capacity(3);

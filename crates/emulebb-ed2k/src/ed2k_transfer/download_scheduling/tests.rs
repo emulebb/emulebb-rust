@@ -43,6 +43,7 @@ async fn yield_request_rechecks_protection_progress_and_current_execution() {
             Some(&[true, false, false]),
             None,
             0,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap()
@@ -72,7 +73,8 @@ async fn yield_request_rechecks_protection_progress_and_current_execution() {
                 "192.0.2.1:4662".parse().unwrap(),
                 Some(&[true, false, false]),
                 None,
-                0
+                0,
+                &tokio_util::sync::CancellationToken::new(),
             )
             .await
             .unwrap()
@@ -199,6 +201,7 @@ async fn scheduling_protection_uses_current_reporters_progress_and_endgame_at_fu
             Some(&[true, false, false]),
             None,
             0,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap()
