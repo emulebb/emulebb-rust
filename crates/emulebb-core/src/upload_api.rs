@@ -14,14 +14,18 @@ impl EmulebbCore {
         };
         let mut uploads = Vec::with_capacity(snapshots.len());
         for entry in snapshots {
-            let manifest = match self.ed2k_transfers.serving_view(&entry.file_hash).await {
-                Ok(manifest) => Some(manifest),
+            let summary = match self
+                .ed2k_transfers
+                .upload_file_summary(&entry.file_hash)
+                .await
+            {
+                Ok(summary) => summary,
                 Err(error) => {
-                    tracing::warn!(hash = %entry.file_hash, "failed to hydrate ED2K manifest for upload snapshot: {error}");
+                    tracing::warn!(hash = %entry.file_hash, "failed to read cached file metadata for upload snapshot: {error}");
                     None
                 }
             };
-            uploads.push(upload_from_snapshot(entry, manifest.as_ref()));
+            uploads.push(upload_from_snapshot(entry, summary.as_deref()));
         }
         uploads
     }
@@ -65,17 +69,21 @@ impl EmulebbCore {
             .ed2k_transfers
             .upload_client_snapshot(client_id, waiting_queue)
             .await?;
-        let view = match self.ed2k_transfers.serving_view(&entry.file_hash).await {
-            Ok(view) => Some(view),
+        let view = match self
+            .ed2k_transfers
+            .upload_file_summary(&entry.file_hash)
+            .await
+        {
+            Ok(view) => view,
             Err(error) => {
                 tracing::warn!(
                     hash = %entry.file_hash,
-                    "failed to hydrate ED2K manifest for upload snapshot: {error}"
+                    "failed to read cached file metadata for upload snapshot: {error}"
                 );
                 None
             }
         };
-        Some(upload_from_snapshot(entry, view.as_ref()))
+        Some(upload_from_snapshot(entry, view.as_deref()))
     }
 
     pub async fn add_upload_client_friend(&self, client_id: &str) -> Result<Option<Friend>> {
