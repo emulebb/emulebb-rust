@@ -246,6 +246,58 @@ async fn source_protocol_state_outlives_activity_and_is_eventually_evicted() {
 }
 
 #[tokio::test]
+async fn part_frequencies_union_known_identity_endpoints_without_merging_unknown_reporters() {
+    let root = unique_test_dir("ed2k-transfer-reporter-part-frequency");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = admit_download_job(
+        &runtime,
+        Ed2kHash([0x73; 16]),
+        "parts.bin".into(),
+        2 * ED2K_PART_SIZE + 1,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    let now = Instant::now();
+    for (last, identity, bits, age) in [
+        (1, Some([1; 16]), vec![true, false, true], 0),
+        (2, Some([1; 16]), vec![true, true, false], 0),
+        (3, Some([2; 16]), vec![true, false, false], 0),
+        (4, None, vec![false, true, false], 0),
+        (5, None, vec![false, true, false], 0),
+        (6, Some([3; 16]), vec![true, true, true], 31),
+    ] {
+        assert!(runtime.note_download_source_part_bitmap_at(
+            job.token,
+            SocketAddr::from((Ipv4Addr::new(192, 0, 2, last), 4662)),
+            identity,
+            None,
+            bits,
+            now - Duration::from_secs(age)
+        ));
+    }
+    runtime.note_download_source_bytes_at(
+        job.token,
+        SocketAddr::from((Ipv4Addr::new(192, 0, 2, 7), 4662)),
+        Some([4; 16]),
+        None,
+        0,
+        now,
+    );
+    assert_eq!(
+        runtime.available_sources_per_part_at(job.token, 3, now),
+        [2, 3, 1]
+    );
+    assert_eq!(
+        runtime.available_sources_per_part_at(job.token, 3, now + Duration::from_secs(31)),
+        [0, 0, 0]
+    );
+    assert!(
+        runtime
+            .available_sources_per_part_at(job.token, 0, now)
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn complete_source_protocol_count_survives_until_the_stock_reask_window() {
     let root = unique_test_dir("ed2k-transfer-complete-source-retention");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

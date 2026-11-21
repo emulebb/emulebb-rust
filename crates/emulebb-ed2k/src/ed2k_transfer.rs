@@ -59,6 +59,8 @@ pub(crate) mod download_abuse;
 mod download_activity;
 mod download_coordinator;
 mod download_pick;
+mod download_scheduling;
+pub use download_scheduling::DownloadSchedulingState;
 mod download_throttle;
 mod duplicate;
 mod fs_durability;

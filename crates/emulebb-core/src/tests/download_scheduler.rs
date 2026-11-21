@@ -639,7 +639,7 @@ fn direct_download_candidates_skip_required_obfuscation_without_user_hash() {
 }
 
 #[tokio::test]
-async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
+async fn direct_download_source_leases_allow_selected_file_without_double_engaging_peer() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let lower_hash = Ed2kHash::from_bytes([0x48; 16]).to_string();
     let lower_hash_owner = a4af_test_owner(&core, &lower_hash.to_string());
@@ -656,8 +656,6 @@ async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: lower_hash.clone(),
-                needed_parts: 8,
-                rare_parts: 0,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -666,8 +664,6 @@ async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: higher_hash.clone(),
-                needed_parts: 1,
-                rare_parts: 1,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -689,12 +685,27 @@ async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
         )
         .await;
 
-    assert!(lower_sources.is_empty());
-    assert_eq!(lower_deferred, 1);
+    assert_eq!(lower_sources, vec![source.clone()]);
+    assert_eq!(lower_deferred, 0);
     assert!(lower_delay.is_none());
-    assert_eq!(higher_sources, vec![source.clone()]);
-    assert_eq!(higher_deferred, 0);
+    assert!(higher_sources.is_empty());
+    assert_eq!(higher_deferred, 1);
     assert!(higher_delay.is_none());
+    core.release_direct_download_source_leases(
+        lower_hash_owner.token(),
+        &[source_endpoint_key(&source)],
+    )
+    .await;
+    let (sources, deferred, retry) = core
+        .acquire_direct_download_source_leases(
+            higher_hash_owner.token(),
+            &higher_hash,
+            std::slice::from_ref(&source),
+        )
+        .await;
+    assert_eq!(sources, vec![source.clone()]);
+    assert_eq!(deferred, 0);
+    assert!(retry.is_none());
     core.release_direct_download_source_leases(
         higher_hash_owner.token(),
         &[source_endpoint_key(&source)],
@@ -723,8 +734,6 @@ async fn disconnect_releases_detached_reask_source_leases_and_re_engages() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: file_hash.clone(),
-                needed_parts: 4,
-                rare_parts: 0,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -799,8 +808,6 @@ async fn lease_release_is_tcp_keyed_so_a_udp_endpoint_never_matches() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: file_hash.clone(),
-                needed_parts: 4,
-                rare_parts: 0,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -973,8 +980,6 @@ async fn removal_cancels_but_retains_peer_ownership_until_worker_retirement() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: hash.clone(),
-                needed_parts: 4,
-                rare_parts: 0,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },
@@ -1081,8 +1086,6 @@ async fn late_peer_release_cannot_release_a_new_execution_lease() {
             Instant::now(),
             DownloadSourceCandidate {
                 file_hash: hash.into(),
-                needed_parts: 1,
-                rare_parts: 0,
                 source: source.clone(),
                 last_seen: Instant::now(),
             },

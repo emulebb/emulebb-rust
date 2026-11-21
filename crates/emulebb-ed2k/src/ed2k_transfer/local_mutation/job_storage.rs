@@ -128,6 +128,7 @@ impl LocalMutationRegistry {
                         transfer::store::JobStorageSession {
                             token,
                             storage: storage.clone(),
+                            scheduling_yield: tokio_util::sync::CancellationToken::new(),
                         },
                     );
                 Ok(storage)

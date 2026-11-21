@@ -53,9 +53,14 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct PreparedCallbackSource {
     preparation: Ed2kCallbackPreparation,
     pub admission_deadline: tokio::time::Instant,
+    pub available_parts: std::sync::Arc<Vec<bool>>,
+    pub user_hash: [u8; 16],
+    pub observed_at: Instant,
+    pub file_size: u64,
 }
 impl PreparedCallbackSource {
     pub(crate) async fn cancel_and_settle(mut self) {
+        drop(self.available_parts);
         self.preparation.cancel();
         let _ = self.preparation.completed().await;
     }
@@ -74,13 +79,15 @@ impl PreparedCallbackSource {
             self.cancel_and_settle().await;
             return Err(error);
         }
+        drop(self.available_parts);
         tokio::select! {
             biased;
             () = cancel.cancelled() => {},
             () = shutdown.cancelled() => {},
             outcome = self.preparation.completed() => return outcome.map(Some),
         }
-        self.cancel_and_settle().await;
+        self.preparation.cancel();
+        let _ = self.preparation.completed().await;
         Ok(None)
     }
 }
@@ -136,7 +143,7 @@ impl EmulebbCore {
         let dispatch_cancel = guard.cancellation().child_token();
         let mut findsource_tasks = tokio::task::JoinSet::new();
         let mut skipped = false;
-        let result: anyhow::Result<bool> = async {
+        let result: anyhow::Result<Option<_>> = async {
             let dispatch = async {
                 let pending = if crate::kad_callback_initiator::is_kad_callback_candidate(source) {
                     self.send_kad_buddy_callbacks(
@@ -177,26 +184,27 @@ impl EmulebbCore {
                 () = shutdown.cancelled() => { dispatch_cancel.cancel(); dispatch.await? },
             };
             if !pending {
-                return Ok(false);
+                return Ok(None);
             }
             tokio::select! {
                 biased;
-                () = shutdown.cancelled() => Ok(false),
-                () = dispatch_cancel.cancelled() => Ok(false),
+                () = shutdown.cancelled() => Ok(None),
+                () = dispatch_cancel.cancelled() => Ok(None),
                 outcome = preparation.availability() => match outcome? {
                     Ed2kCallbackPreparationOutcome::Available(availability) => {
                         let useful = availability.available_parts.len() == verified_parts.len()
                             && availability.available_parts.iter().zip(verified_parts)
                                 .any(|(available, verified)| *available && !*verified);
+                        let proof = useful.then(|| (availability.user_hash, std::sync::Arc::new(availability.available_parts.clone()), Instant::now()));
                         if !useful {
                             preparation.skip()?;
                             skipped = true;
                         }
-                        Ok(useful)
+                        Ok(proof)
                     }
                     Ed2kCallbackPreparationOutcome::FileNotFound
                     | Ed2kCallbackPreparationOutcome::Incomplete
-                    | Ed2kCallbackPreparationOutcome::Deferred => Ok(false),
+                    | Ed2kCallbackPreparationOutcome::Deferred => Ok(None),
                 }
             }
         }
@@ -205,10 +213,14 @@ impl EmulebbCore {
         // caller is cancelled. Drain that producer before releasing preparation.
         dispatch_cancel.cancel();
         while findsource_tasks.join_next().await.is_some() {}
-        if matches!(result, Ok(true)) {
+        if let Ok(Some((user_hash, available_parts, observed_at))) = result {
             return Ok(Some(PreparedCallbackSource {
                 preparation,
                 admission_deadline,
+                user_hash,
+                available_parts,
+                observed_at,
+                file_size: size_bytes,
             }));
         }
         if !skipped {

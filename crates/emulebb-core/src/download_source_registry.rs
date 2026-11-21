@@ -36,8 +36,6 @@ const NNP_PURGE_INTERVAL: Duration = Duration::from_secs(40);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadSourceCandidate {
     pub file_hash: String,
-    pub needed_parts: u32,
-    pub rare_parts: u32,
     pub source: Ed2kFoundSource,
     /// When this candidate was last added/refreshed. Stamped by
     /// [`DownloadSourceRegistry::add_candidate`]; the value supplied at
@@ -45,11 +43,22 @@ pub(crate) struct DownloadSourceCandidate {
     pub last_seen: Instant,
 }
 
-/// In-memory source registry that derives A4AF state from peer ownership.
+/// Unique reservation identity, independent of job generation and clock ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DownloadSourceLeaseId(u64);
+
+#[derive(Debug)]
+struct SourceAttempt {
+    at: Instant,
+    lease_id: DownloadSourceLeaseId,
+}
+
+/// Peer leases and per-file reask state owned by the download coordinator.
 #[derive(Debug, Default)]
 pub(crate) struct DownloadSourceRegistry {
     peers: HashMap<DownloadPeerKey, Vec<DownloadSourceCandidate>>,
-    leased_peers: HashSet<DownloadPeerKey>,
+    leased_peers: HashMap<DownloadPeerKey, DownloadSourceLeaseId>,
+    next_lease: u64,
     /// Per-(endpoint, file) attempt stamps backing the anti-churn retry
     /// cooldown. WHY keyed by file and not by endpoint alone: the cooldown
     /// exists to stop reconnect-hammering one endpoint for the SAME file
@@ -58,7 +67,7 @@ pub(crate) struct DownloadSourceRegistry {
     /// file B for the whole cooldown, serializing multi-file downloads from
     /// one peer with 20-minute gaps and dead-locking the A4AF NNP swap (the
     /// swapped-to file deferred against the stamp the swapped-from file left).
-    last_attempted_endpoints: HashMap<((Ipv4Addr, u16), String), Instant>,
+    last_attempted_endpoints: HashMap<((Ipv4Addr, u16), String), SourceAttempt>,
     /// Per-(endpoint, file) No-Needed-Parts hold stamps (oracle
     /// `DS_NONEEDEDPARTS` + `SetLastAskedTime`, DownloadClient.cpp:848-852):
     /// while a stamp is younger than [`NNP_REASK_HOLD`] the source is not
@@ -187,13 +196,13 @@ impl DownloadSourceRegistry {
         let peer_key = DownloadPeerKey::from_source(source);
         let endpoint = (source.ip, source.tcp_port);
         self.last_attempted_endpoints.retain(|_, last_attempted| {
-            now.saturating_duration_since(*last_attempted) < retry_cooldown
+            now.saturating_duration_since(last_attempted.at) < retry_cooldown
         });
         if self
             .last_attempted_endpoints
             .get(&(endpoint, file_hash.to_string()))
             .is_some_and(|last_attempted| {
-                now.saturating_duration_since(*last_attempted) < retry_cooldown
+                now.saturating_duration_since(last_attempted.at) < retry_cooldown
             })
         {
             return None;
@@ -216,13 +225,60 @@ impl DownloadSourceRegistry {
         let candidates = self.peers.get(&peer_key)?;
         let candidate = candidates
             .iter()
-            .max_by_key(|candidate| candidate_score(candidate))?;
-        if candidate.file_hash != file_hash || !self.leased_peers.insert(peer_key) {
+            .find(|candidate| candidate.file_hash == file_hash)?;
+        if self.leased_peers.contains_key(&peer_key) {
             return None;
         }
-        self.last_attempted_endpoints
-            .insert((endpoint, file_hash.to_string()), now);
+        self.next_lease = self.next_lease.checked_add(1)?;
+        let lease_id = DownloadSourceLeaseId(self.next_lease);
+        self.leased_peers.insert(peer_key, lease_id);
+        self.last_attempted_endpoints.insert(
+            (endpoint, file_hash.to_string()),
+            SourceAttempt { at: now, lease_id },
+        );
         Some(candidate.clone())
+    }
+
+    pub(crate) fn source_lease_id(
+        &self,
+        source: &Ed2kFoundSource,
+        file_hash: &str,
+    ) -> Option<DownloadSourceLeaseId> {
+        let id = *self
+            .leased_peers
+            .get(&DownloadPeerKey::from_source(source))?;
+        let attempt = self
+            .last_attempted_endpoints
+            .get(&((source.ip, source.tcp_port), file_hash.to_string()))?;
+        (attempt.lease_id == id).then_some(id)
+    }
+
+    /// Settle only the captured lease. A refusal before socket admission did
+    /// not contact the peer and must not consume its network reask cooldown.
+    pub(crate) fn finish_probe_lease(
+        &mut self,
+        source: &Ed2kFoundSource,
+        file_hash: &str,
+        id: DownloadSourceLeaseId,
+        not_started: bool,
+    ) -> bool {
+        let peer = DownloadPeerKey::from_source(source);
+        if self.leased_peers.get(&peer) != Some(&id) {
+            return false;
+        }
+        self.leased_peers.remove(&peer);
+        let key = ((source.ip, source.tcp_port), file_hash.to_string());
+        // WHY: the same job can reacquire the same peer, even within one clock
+        // tick; token/time checks alone could erase that newer attempt's stamp.
+        if not_started
+            && self
+                .last_attempted_endpoints
+                .get(&key)
+                .is_some_and(|attempt| attempt.lease_id == id)
+        {
+            self.last_attempted_endpoints.remove(&key);
+        }
+        true
     }
 
     /// How long until `(source, file_hash)` may be re-dialed: the remainder of
@@ -239,7 +295,7 @@ impl DownloadSourceRegistry {
         let cooldown_remaining = self
             .last_attempted_endpoints
             .get(&((source.ip, source.tcp_port), file_hash.to_string()))
-            .and_then(|last| retry_cooldown.checked_sub(now.saturating_duration_since(*last)));
+            .and_then(|last| retry_cooldown.checked_sub(now.saturating_duration_since(last.at)));
         let nnp_remaining = self.nnp_hold_remaining(now, source, file_hash);
         match (cooldown_remaining, nnp_remaining) {
             (Some(cooldown), Some(nnp)) => Some(cooldown.max(nnp)),
@@ -316,26 +372,20 @@ impl DownloadSourceRegistry {
         }
     }
 
-    /// All OTHER files known for this peer, best first. Keeping target ordering
-    /// in the peer-centric registry mirrors the oracle's one-client/many-files
-    /// source set, while the core filters stopped/terminal transfers using its
-    /// authoritative lifecycle state. Used for NNP and FNF/AICH swap-or-remove.
-    pub(crate) fn swap_targets_for_peer(
-        &self,
+    /// Borrow this peer's other files without copying its entire source set.
+    /// Core filters lifecycle and ranks eligible work using current job state;
+    /// a source registration alone carries no scheduling priority.
+    pub(crate) fn swap_targets_for_peer<'a>(
+        &'a self,
         source: &Ed2kFoundSource,
-        current_file_hash: &str,
-    ) -> Vec<DownloadSourceCandidate> {
+        current_file_hash: &'a str,
+    ) -> impl Iterator<Item = &'a DownloadSourceCandidate> {
         let peer_key = DownloadPeerKey::from_source(source);
-        let Some(candidates) = self.peers.get(&peer_key) else {
-            return Vec::new();
-        };
-        let mut targets = candidates
-            .iter()
-            .filter(|candidate| candidate.file_hash != current_file_hash)
-            .cloned()
-            .collect::<Vec<_>>();
-        targets.sort_by_key(|candidate| std::cmp::Reverse(candidate_score(candidate)));
-        targets
+        self.peers
+            .get(&peer_key)
+            .into_iter()
+            .flatten()
+            .filter(move |candidate| candidate.file_hash != current_file_hash)
     }
 
     /// Resolve the exact candidate that detached onto UDP reask. The TCP lease
@@ -412,7 +462,7 @@ impl DownloadSourceRegistry {
 
     pub(crate) fn release_endpoint(&mut self, endpoint: (Ipv4Addr, u16)) {
         self.leased_peers
-            .retain(|peer| (peer.ip, peer.tcp_port) != endpoint);
+            .retain(|peer, _| (peer.ip, peer.tcp_port) != endpoint);
     }
 
     /// Forget everything the registry holds for `file_hash`: drop every source
@@ -452,7 +502,7 @@ impl DownloadSourceRegistry {
         // engaged only for the file just cleared). A peer still present in `peers`
         // serves another file and keeps its lease.
         let mut cleared = Vec::new();
-        self.leased_peers.retain(|peer| {
+        self.leased_peers.retain(|peer, _| {
             if self.peers.contains_key(peer) {
                 true
             } else {
@@ -476,7 +526,7 @@ impl DownloadSourceRegistry {
     pub(crate) fn reset_leases(&mut self) -> Vec<(Ipv4Addr, u16)> {
         let cleared = self
             .leased_peers
-            .iter()
+            .keys()
             .map(|peer| (peer.ip, peer.tcp_port))
             .collect();
         self.leased_peers.clear();
@@ -507,10 +557,6 @@ impl DownloadPeerKey {
 /// of `now` (a saturating elapsed so a future `last_seen` never reads as stale).
 fn is_stale(candidate: &DownloadSourceCandidate, now: Instant) -> bool {
     now.saturating_duration_since(candidate.last_seen) > CANDIDATE_LIVENESS_TTL
-}
-
-fn candidate_score(candidate: &DownloadSourceCandidate) -> (u32, u32) {
-    (candidate.rare_parts, candidate.needed_parts)
 }
 
 #[cfg(test)]

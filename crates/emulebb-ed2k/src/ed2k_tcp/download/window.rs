@@ -108,6 +108,7 @@ pub(in crate::ed2k_tcp) struct DownloadRequestWindowState<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ed2k_tcp) enum DownloadRequestWindowOutcome {
+    Yielded,
     RequestSent(tokio::time::Instant),
     NoClaimablePart,
     Idle,
@@ -131,6 +132,9 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         session_payload_down,
         part_response_grace,
     } = state;
+    if transfer_runtime.download_yield_requested(manifest.token) {
+        return Ok(DownloadRequestWindowOutcome::Yielded);
+    }
     let window = select_download_window_limits(
         manifest,
         completed_block_count,
@@ -161,6 +165,9 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         }
     }
 
+    if transfer_runtime.download_yield_requested(manifest.token) {
+        return Ok(DownloadRequestWindowOutcome::Yielded);
+    }
     let mut request_indices = Vec::with_capacity(3);
     let mut requested_ranges = Vec::with_capacity(3);
     for (index, request) in pending_part_requests.iter().enumerate() {

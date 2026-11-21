@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 const PAGE_SIZE: usize = 32;
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_SELECTION_INTERVAL: Duration = Duration::from_secs(30);
+mod displacement;
 
 #[cfg(test)]
 mod retirement_tests;
@@ -46,6 +47,7 @@ struct ReadyDownload {
     guard: DownloadAttemptGuard,
     source: crate::download_preparation::DownloadPreparation,
     remaining_bytes: u64,
+    rare: bool,
 }
 impl ReadyDownload {
     fn deadline(&self) -> Option<tokio::time::Instant> {
@@ -96,6 +98,11 @@ impl EmulebbCore {
                 &shutdown,
             )
             .await;
+            // Connection admission precedes metadata exchange. Tests of cohort
+            // ordering must synchronize on ready ownership, not socket count.
+            #[cfg(test)]
+            self.download_ready_count
+                .store(ready.len(), std::sync::atomic::Ordering::Release);
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,
@@ -156,6 +163,11 @@ impl EmulebbCore {
         clock: &watch::Receiver<()>,
         shutdown: &CancellationToken,
     ) {
+        // Re-evaluate current proof rather than retaining a score across waits.
+        // Missing/stale proof is ordinary work, never evidence of rarity.
+        for entry in ready.iter_mut() {
+            entry.rare = self.ready_source_is_rare(entry).await;
+        }
         let mut index = 0;
         while index < ready.len() {
             if shutdown.is_cancelled()
@@ -174,6 +186,9 @@ impl EmulebbCore {
                 self.ed2k_transfers.download_resource_snapshot(),
             ) == 0
             {
+                if let Some(entry) = ready.iter().find(|entry| entry.rare) {
+                    self.displace_ordinary_download(entry, shutdown).await;
+                }
                 break;
             }
             let index = ready
@@ -182,6 +197,7 @@ impl EmulebbCore {
                 .min_by_key(|(_, entry)| {
                     let id = entry.guard.token().job_id;
                     (
+                        !entry.rare,
                         entry.remaining_bytes,
                         last_admitted.is_some_and(|last| id <= last),
                         id,
@@ -189,7 +205,11 @@ impl EmulebbCore {
                 })
                 .expect("nonempty ready cohort")
                 .0;
-            if !ready[index].guard.promote() {
+            if !ready[index].guard.promote_ready(ready[index].rare) {
+                if ready[index].rare {
+                    self.displace_ordinary_download(&ready[index], shutdown)
+                        .await;
+                }
                 break;
             }
             let ready = ready.swap_remove(index);
@@ -256,7 +276,7 @@ impl EmulebbCore {
                 if let Some(remaining_bytes) = remaining_bytes {
                     match core.prepare_download_sources(&guard, &shutdown).await {
                         Ok(crate::download_preparation::DownloadPreparation::Waiting) => None,
-                        Ok(source) => Some(ReadyDownload { guard, source, remaining_bytes }),
+                        Ok(source) => Some(ReadyDownload { guard, source, remaining_bytes, rare: false }),
                         Err(error) => {
                             tracing::warn!(job_id = %token.job_id, %error, "download source preparation deferred");
                             None
@@ -282,6 +302,7 @@ impl EmulebbCore {
             self.download_attempts
                 .apply_admission_window(AdmissionWindow {
                     active: 0,
+                    burst: 0,
                     preparing: 0,
                     total: 0,
                 });
@@ -381,7 +402,10 @@ impl EmulebbCore {
         let mut progress =
             SelectionProgress::new(self.ed2k_transfers.downloaded_session_bytes(guard.token()));
         loop {
-            if shutdown.is_cancelled() || cancel.is_cancelled() {
+            if shutdown.is_cancelled()
+                || cancel.is_cancelled()
+                || self.ed2k_transfers.download_yield_requested(guard.token())
+            {
                 break;
             }
             crate::diag_sched::download_attempt_started(&transfer.hash, false);
@@ -455,7 +479,9 @@ impl EmulebbCore {
                     tracing::warn!(job_id = %guard.token().job_id, %error, "download network attempt deferred")
                 }
             }
-            if progress.idle(self.ed2k_transfers.downloaded_session_bytes(guard.token())) {
+            if self.ed2k_transfers.download_yield_requested(guard.token())
+                || progress.idle(self.ed2k_transfers.downloaded_session_bytes(guard.token()))
+            {
                 break;
             }
             tokio::select! {

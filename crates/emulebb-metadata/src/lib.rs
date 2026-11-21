@@ -56,8 +56,8 @@ pub use download_job_model::{
 pub use download_peer_store::{
     MetadataDownloadAvailabilityQuery, MetadataDownloadCommentEntry, MetadataDownloadCommentPage,
     MetadataDownloadInitialPeers, MetadataDownloadNameEntry, MetadataDownloadPeerChange,
-    MetadataDownloadPeerDelta, MetadataDownloadSourceAvailability, MetadataDownloadSourceEndpoint,
-    MetadataDownloadSourceEntry, MetadataDownloadSourceSelector,
+    MetadataDownloadPeerDelta, MetadataDownloadScarcityQuery, MetadataDownloadSourceAvailability,
+    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry, MetadataDownloadSourceSelector,
 };
 mod identity_model;
 mod identity_store;

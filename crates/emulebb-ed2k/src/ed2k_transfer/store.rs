@@ -708,6 +708,7 @@ impl Ed2kTransferRuntime {
 pub(super) struct JobStorageSession {
     pub(super) token: JobToken,
     pub(super) storage: emulebb_metadata::DownloadJobStorage,
+    pub(super) scheduling_yield: tokio_util::sync::CancellationToken,
 }
 
 type LockRegistry<K> =
