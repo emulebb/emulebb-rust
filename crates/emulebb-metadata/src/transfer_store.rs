@@ -409,11 +409,11 @@ impl super::MetadataStore {
             .prepare_cached(
                 r#"
                 UPDATE known_files
-                SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes)
+                SET all_time_uploaded_bytes = all_time_uploaded_bytes + ?2
                 WHERE ed2k_hash = ?1
                 "#,
             )?
-            .execute(params![hash, i64::try_from(delta).unwrap_or(i64::MAX)])?;
+            .execute(params![hash, i64::try_from(delta)?])?;
         Ok(updated != 0)
     }
 

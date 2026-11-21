@@ -19,7 +19,7 @@ pub(crate) fn optional_unsigned<T: TryFrom<i64>>(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn file_counters_saturate_without_changing_sqlite_storage_type() {
+    fn file_counter_overflow_preserves_the_exact_committed_values() {
         let mut store = crate::MetadataStore::in_memory().unwrap();
         let hash = "11".repeat(16);
         store
@@ -43,37 +43,62 @@ mod tests {
                 [i64::MAX - 1],
             )
             .unwrap();
-        store.add_file_all_time_uploaded(&hash, u64::MAX).unwrap();
-        store
-            .apply_credit_deltas(
-                &[],
-                &[crate::MetadataFileUploadDelta {
-                    file_hash: hash.clone(),
-                    uploaded_bytes: u64::MAX,
-                    accepted_sessions: 0,
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-        for _ in 0..2 {
-            store
-                .apply_credit_deltas(
-                    &[],
-                    &[crate::MetadataFileUploadDelta {
-                        file_hash: hash.clone(),
-                        accepted_sessions: 1,
-                        upload_requests: u64::MAX,
-                        last_requested_at_s: Some(1),
-                        ..Default::default()
-                    }],
-                )
-                .unwrap();
+        assert!(store.add_file_all_time_uploaded(&hash, u64::MAX).is_err());
+        assert!(store.add_file_all_time_uploaded(&hash, 2).is_err());
+        for (bytes, requests, accepted) in [(u64::MAX, 0, 0), (2, 0, 0), (0, 2, 0), (0, 0, 2)] {
+            assert!(
+                store
+                    .apply_credit_deltas(
+                        &[("22".repeat(16), 1, 1)],
+                        &[crate::MetadataFileUploadDelta {
+                            file_hash: hash.clone(),
+                            uploaded_bytes: bytes,
+                            upload_requests: requests,
+                            accepted_sessions: accepted,
+                            ..Default::default()
+                        }],
+                    )
+                    .is_err()
+            );
         }
         let values: (i64, i64, i64) = store.connection().unwrap().query_row(
             "SELECT all_time_uploaded_bytes, all_time_upload_requests, all_time_upload_accepts FROM known_files",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).unwrap();
-        assert_eq!(values, (i64::MAX, i64::MAX, i64::MAX));
+        assert_eq!(values, (i64::MAX - 1, i64::MAX - 1, i64::MAX - 1));
+        assert!(
+            store
+                .peer_credit_by_hash(&"22".repeat(16))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .file_upload_statistics(&hash)
+                .unwrap()
+                .unwrap()
+                .session_uploaded_bytes,
+            0
+        );
+        store
+            .apply_credit_deltas(
+                &[],
+                &[crate::MetadataFileUploadDelta {
+                    file_hash: hash.clone(),
+                    uploaded_bytes: 1,
+                    upload_requests: 1,
+                    accepted_sessions: 1,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        let maximum = store.file_upload_statistics(&hash).unwrap().unwrap();
+        assert_eq!(maximum.lifetime.uploaded_bytes, i64::MAX as u64);
+        assert_eq!(maximum.lifetime.upload_requests, i64::MAX as u64);
+        assert_eq!(maximum.lifetime.accepted_sessions, i64::MAX as u64);
+        assert_eq!(maximum.session_uploaded_bytes, 1);
+        assert_eq!(maximum.session_upload_requests, 1);
+        assert_eq!(maximum.session_accepted_uploads, 1);
     }
 
     #[test]

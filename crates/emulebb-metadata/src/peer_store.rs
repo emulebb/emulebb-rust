@@ -195,18 +195,7 @@ impl super::MetadataStore {
                 "invalid actual-upload timestamp"
             );
             let hash = decode_fixed_hex(&delta.file_hash, 16, "ED2K hash")?;
-            tx.prepare_cached(
-                r#"
-                UPDATE known_files
-                SET all_time_uploaded_bytes = all_time_uploaded_bytes + min(?2, 9223372036854775807 - all_time_uploaded_bytes),
-                    all_time_upload_accepts = all_time_upload_accepts + min(?3, 9223372036854775807 - all_time_upload_accepts),
-                    last_uploaded_at_s = CASE WHEN ?4 IS NULL THEN last_uploaded_at_s ELSE max(coalesce(last_uploaded_at_s,?4),?4) END,
-                    all_time_upload_requests = all_time_upload_requests + min(?5, 9223372036854775807 - all_time_upload_requests),
-                    last_upload_requested_at_s = CASE WHEN ?6 IS NULL THEN last_upload_requested_at_s ELSE max(coalesce(last_upload_requested_at_s,?6),?6) END
-                WHERE ed2k_hash = ?1
-                "#,
-            )?
-            .execute(params![hash, u64_to_i64_saturating(delta.uploaded_bytes), u64_to_i64_saturating(delta.accepted_sessions), delta.last_uploaded_at_s, u64_to_i64_saturating(delta.upload_requests), delta.last_requested_at_s])?;
+            crate::file_upload_statistics::apply_delta(&tx, &hash, delta)?;
         }
         tx.commit()?;
         Ok(())

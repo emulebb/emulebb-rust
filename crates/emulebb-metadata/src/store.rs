@@ -122,6 +122,7 @@ impl MetadataStore {
             )",
         )?;
         crate::library_projection::initialize(&*store.connection()?)?;
+        crate::file_upload_statistics::initialize(&*store.connection()?)?;
         Ok(store)
     }
 
