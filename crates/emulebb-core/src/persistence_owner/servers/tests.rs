@@ -2,31 +2,13 @@ use super::*;
 use crate::{LibraryTagRequest, persistence_owner::tests::usage};
 use emulebb_index::FileIndex;
 
-fn record() -> MetadataServer {
-    MetadataServer {
+fn record() -> MetadataServerCreate {
+    MetadataServerCreate {
         address: "seed.example".into(),
         port: 4661,
-        name: "Sample Server".into(),
-        description: String::new(),
-        dynamic_host: String::new(),
-        auxiliary_ports: vec![],
-        server_priority: "normal".into(),
+        priority: "normal".into(),
         static_server: false,
         enabled: true,
-        failed_count: 7,
-        ping_ms: Some(42),
-        users: 83,
-        files: 12,
-        max_users: 0,
-        low_id_users: 0,
-        soft_files: 0,
-        hard_files: 0,
-        version: String::new(),
-        obfuscation_tcp_port: None,
-        obfuscation_udp_port: None,
-        udp_flags: None,
-        udp_key: None,
-        udp_key_ip: None,
     }
 }
 
@@ -34,7 +16,7 @@ async fn disconnected_mutation(action: u8) {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     let server = record();
-    let endpoint = server.endpoint();
+    let endpoint = format!("{}:{}", server.address, server.port);
     let id = if action == 0 {
         0
     } else {
@@ -116,7 +98,7 @@ async fn disconnected_mutation(action: u8) {
         1 => {
             let cached = state.servers.get(&endpoint).unwrap();
             assert!(!cached.enabled);
-            assert_eq!(cached.name, "Sample Server");
+            assert!(cached.name.is_empty());
             assert_eq!(cached.priority, "high");
             assert_eq!(cached.failed_count, 99);
             assert!(state.disabled_servers.contains(&endpoint));
@@ -161,7 +143,7 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
     let id = core.create_server_resource(&server).await.unwrap();
     let mut duplicate = server.clone();
     duplicate.address.make_ascii_uppercase();
-    duplicate.name = "Must Not Replace".into();
+    duplicate.priority = "high".into();
     assert!(
         core.create_server_resource(&duplicate)
             .await
@@ -189,10 +171,10 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
             .lock()
             .await
             .servers
-            .get(&server.endpoint())
+            .get(&format!("{}:{}", server.address, server.port))
             .unwrap()
-            .name,
-        server.name
+            .priority,
+        "normal"
     );
     assert_eq!(
         core.metadata_store
@@ -200,8 +182,8 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
             .unwrap()
             .unwrap()
             .server
-            .name,
-        server.name
+            .server_priority,
+        "normal"
     );
     core.persistence_owner.check_coherent_state().unwrap();
 }
@@ -211,7 +193,7 @@ async fn oversized_server_create_is_refused_before_sql_capture() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let mut server = record();
     for size in [emulebb_metadata::SERVER_READ_MAX_BYTES / 4, MAX_BYTES] {
-        server.name = "x".repeat(size);
+        server.address = "x".repeat(size);
         assert!(matches!(
             core.create_server_resource(&server)
                 .await
@@ -239,7 +221,7 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     let server = record();
-    let endpoint = server.endpoint();
+    let endpoint = format!("{}:{}", server.address, server.port);
     let id = core.create_server_resource(&server).await.unwrap();
     let owner = core
         .persistence_owner
@@ -311,7 +293,7 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
 async fn late_feedback_does_not_recreate_deleted_configured_server() {
     let root = crate::unique_runtime_dir("server-retired-feedback");
     let server = record();
-    let endpoint = server.endpoint();
+    let endpoint = format!("{}:{}", server.address, server.port);
     let mut network = crate::tests::test_network_config_with_store(
         &root,
         crate::KadLocalStoreConfig::default(),

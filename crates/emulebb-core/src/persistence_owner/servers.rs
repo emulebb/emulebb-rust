@@ -1,10 +1,12 @@
 //! Retained ID-addressed server writes and derived connection-plan publication.
 use super::*;
 use crate::{EmulebbCore, server_list::ServerPlanPublisher};
-use emulebb_metadata::{MetadataServer, MetadataServerUpdate, ServerEndpointConflict};
+use emulebb_metadata::{
+    MetadataServer, MetadataServerCreate, MetadataServerUpdate, ServerEndpointConflict,
+};
 
 pub(super) enum SqlCommand {
-    Create(Box<MetadataServer>),
+    Create(MetadataServerCreate),
     Update(i64, MetadataServerUpdate),
     Delete(i64),
 }
@@ -33,28 +35,38 @@ fn readable_record(
     let priority = update
         .and_then(|value| value.priority.as_deref())
         .unwrap_or(&server.server_priority);
-    let text = [
-        server.address.len(),
-        server.name.len(),
-        server.description.len(),
-        server.dynamic_host.len(),
-        priority.len(),
-        server.version.len(),
-    ]
-    .into_iter()
-    .try_fold(0usize, |sum, size| sum.checked_add(size))
-    .and_then(|size| {
-        server
-            .auxiliary_ports
-            .len()
-            .checked_mul(6)
-            .and_then(|ports| size.checked_add(ports))
-    })
-    .and_then(|size| size.checked_mul(4))
-    .and_then(|size| {
-        size.checked_add(16 * 1024 + std::mem::size_of::<emulebb_metadata::MetadataServerRecord>())
-    })
-    .ok_or(PersistenceError::TooLarge)?;
+    readable_payload(
+        [
+            server.address.len(),
+            server.name.len(),
+            server.description.len(),
+            server.dynamic_host.len(),
+            priority.len(),
+            server.version.len(),
+        ],
+        server.auxiliary_ports.len(),
+    )
+}
+
+fn readable_payload(
+    strings: impl IntoIterator<Item = usize>,
+    ports: usize,
+) -> Result<(), PersistenceError> {
+    let text = strings
+        .into_iter()
+        .try_fold(0usize, |sum, size| sum.checked_add(size))
+        .and_then(|size| {
+            ports
+                .checked_mul(6)
+                .and_then(|ports| size.checked_add(ports))
+        })
+        .and_then(|size| size.checked_mul(4))
+        .and_then(|size| {
+            size.checked_add(
+                16 * 1024 + std::mem::size_of::<emulebb_metadata::MetadataServerRecord>(),
+            )
+        })
+        .ok_or(PersistenceError::TooLarge)?;
     // WHY: a successful mutation must not create a resource its bounded point
     // reader cannot return. Check projected text/CSV backing before SQL commits.
     if text > emulebb_metadata::SERVER_READ_MAX_BYTES {
@@ -80,33 +92,23 @@ fn charge(
 }
 
 impl EmulebbCore {
-    /// Persist a canonical server record and publish derived runtime state.
+    /// Create an unobserved server and publish derived runtime state.
     /// Explicit creation never merges into an existing live endpoint.
-    pub async fn create_server_resource(&self, server: &MetadataServer) -> anyhow::Result<i64> {
-        crate::views::validate_server_priority(&server.server_priority)?;
-        readable_record(server, None)?;
-        let bytes = charge(
-            [
-                server.address.len(),
-                server.name.len(),
-                server.description.len(),
-                server.dynamic_host.len(),
-                server.server_priority.len(),
-                server.version.len(),
-            ],
-            server
-                .auxiliary_ports
-                .len()
-                .checked_mul(2)
-                .ok_or(PersistenceError::TooLarge)?,
-        )?;
+    pub async fn create_server_resource(
+        &self,
+        server: &MetadataServerCreate,
+    ) -> anyhow::Result<i64> {
+        crate::views::validate_server_priority(&server.priority)?;
+        let lengths = [server.address.len(), server.priority.len()];
+        readable_payload(lengths, 0)?;
+        let bytes = charge(lengths, 0)?;
         let owner = self
             .persistence_owner
             .owner(&self.metadata_store, &self.state)?;
         match owner
             .submit_reserved(bytes, || {
                 Ok(Command::Servers(ServerCommand {
-                    operation: SqlCommand::Create(Box::new(server.clone())),
+                    operation: SqlCommand::Create(server.clone()),
                     publisher: ServerPlanPublisher::new(self),
                 }))
             })
@@ -174,8 +176,8 @@ pub(super) fn execute(
     operation: SqlCommand,
 ) -> anyhow::Result<Result<ServerWrite, ServerEndpointConflict>> {
     match operation {
-        SqlCommand::Create(server) => match store.create_server_resource(&server) {
-            Ok(id) => Ok(Ok(ServerWrite::Created(id, *server))),
+        SqlCommand::Create(server) => match store.create_server_resource(server) {
+            Ok(record) => Ok(Ok(ServerWrite::Created(record.id, record.server))),
             Err(error) if error.is::<ServerEndpointConflict>() => Ok(Err(ServerEndpointConflict)),
             Err(error) => Err(error),
         },

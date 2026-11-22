@@ -2,7 +2,47 @@
 use anyhow::{Result, ensure};
 use rusqlite::{TransactionBehavior, params};
 
-use crate::{MetadataServer, MetadataStore, store::unix_s};
+use crate::{MetadataServer, MetadataServerRecord, MetadataStore, store::unix_s};
+
+/// Explicit operator creation; reported names and telemetry arrive separately.
+#[derive(Debug, Clone)]
+pub struct MetadataServerCreate {
+    pub address: String,
+    pub port: u16,
+    pub priority: String,
+    pub static_server: bool,
+    pub enabled: bool,
+}
+
+impl MetadataServerCreate {
+    fn into_server(self) -> MetadataServer {
+        MetadataServer {
+            address: self.address,
+            port: self.port,
+            name: String::new(),
+            description: String::new(),
+            dynamic_host: String::new(),
+            auxiliary_ports: Vec::new(),
+            server_priority: self.priority,
+            static_server: self.static_server,
+            enabled: self.enabled,
+            failed_count: 0,
+            ping_ms: None,
+            users: 0,
+            files: 0,
+            max_users: 0,
+            low_id_users: 0,
+            soft_files: 0,
+            hard_files: 0,
+            version: String::new(),
+            obfuscation_tcp_port: None,
+            obfuscation_udp_port: None,
+            udp_flags: None,
+            udp_key: None,
+            udp_key_ip: None,
+        }
+    }
+}
 
 /// Explicit creation cannot modify a resource already owning this live endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +66,11 @@ pub struct MetadataServerUpdate {
 impl MetadataStore {
     /// Create a resource without import's merge semantics. The writer lock spans
     /// duplicate detection, insertion and discovery initialization.
-    pub fn create_server_resource(&self, server: &MetadataServer) -> Result<i64> {
+    pub fn create_server_resource(
+        &self,
+        input: MetadataServerCreate,
+    ) -> Result<MetadataServerRecord> {
+        let server = input.into_server();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // WHY: a duplicate request must not edit or enable the existing server.
@@ -38,10 +82,10 @@ impl MetadataStore {
             |row| row.get(0),
         )?;
         ensure!(!exists, ServerEndpointConflict);
-        let id = crate::profile_store::upsert_server_in_transaction(&transaction, server)?;
+        let id = crate::profile_store::upsert_server_in_transaction(&transaction, &server)?;
         Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
         transaction.commit()?;
-        Ok(id)
+        Ok(MetadataServerRecord { id, server })
     }
 
     /// Apply only selected fields to one live ID. False means no such resource.

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{MetadataServerUpdate, ServerEndpointConflict};
+use crate::{MetadataServerCreate, MetadataServerUpdate, ServerEndpointConflict};
 
 #[test]
 fn explicit_server_creation_conflict_preserves_disabled_resource_and_observations() {
@@ -7,16 +7,15 @@ fn explicit_server_creation_conflict_preserves_disabled_resource_and_observation
     let mut original = server("seed.example");
     original.enabled = false;
     original.failed_count = 3;
-    let id = store.create_server_resource(&original).unwrap();
+    let id = store.upsert_server(&original).unwrap();
     let before = store.server_by_id(id).unwrap().unwrap().server;
-    let mut duplicate = server("SEED.EXAMPLE");
-    duplicate.name = "Must Not Replace".into();
-    duplicate.server_priority = "high".into();
-    let error = store.create_server_resource(&duplicate).unwrap_err();
+    let mut duplicate = creation("SEED.EXAMPLE");
+    duplicate.priority = "high".into();
+    let error = store.create_server_resource(duplicate.clone()).unwrap_err();
     assert!(error.is::<ServerEndpointConflict>());
     assert_eq!(store.server_by_id(id).unwrap().unwrap().server, before);
     assert!(store.delete_server_resource(id).unwrap());
-    let created = store.create_server_resource(&duplicate).unwrap();
+    let created = store.create_server_resource(duplicate).unwrap().id;
     assert!(created > id);
     assert_eq!(
         store.server_page(Default::default()).unwrap().servers.len(),
@@ -31,7 +30,7 @@ fn concurrent_server_creators_have_one_winner_and_one_endpoint_conflict() {
     let outcomes = std::thread::scope(|scope| {
         let create = |address| {
             barrier.wait();
-            store.create_server_resource(&server(address))
+            store.create_server_resource(creation(address))
         };
         let first = scope.spawn(move || create("seed.example"));
         let second = scope.spawn(move || create("SEED.EXAMPLE"));
@@ -60,7 +59,7 @@ fn failed_discovery_initialization_rolls_back_explicit_server_creation() {
     ).unwrap();
     assert!(
         store
-            .create_server_resource(&server("seed.example"))
+            .create_server_resource(creation("seed.example"))
             .is_err()
     );
     assert!(
@@ -172,6 +171,41 @@ fn server_edits_and_repeated_deletion_do_not_create_resources() {
             .update_server_resource(id, &MetadataServerUpdate::default())
             .is_err()
     );
+}
+
+fn creation(address: &str) -> MetadataServerCreate {
+    MetadataServerCreate {
+        address: address.into(),
+        port: 4661,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    }
+}
+
+#[test]
+fn explicit_creation_starts_unobserved_and_import_preserves_its_id() {
+    let store = MetadataStore::in_memory().unwrap();
+    let created = store
+        .create_server_resource(creation("seed.example"))
+        .unwrap();
+    assert!(created.server.name.is_empty());
+    assert!(created.server.description.is_empty());
+    assert_eq!(created.server.failed_count, 0);
+    assert_eq!(created.server.ping_ms, None);
+    assert_eq!(created.server.users, 0);
+    assert_eq!(created.server.files, 0);
+    assert_eq!(
+        store.server_by_id(created.id).unwrap().unwrap().server,
+        created.server
+    );
+    let mut observed = server("seed.example");
+    observed.name = "Observed Server".into();
+    observed.users = 83;
+    assert_eq!(store.upsert_server(&observed).unwrap(), created.id);
+    let saved = store.server_by_id(created.id).unwrap().unwrap().server;
+    assert_eq!(saved.name, "Observed Server");
+    assert_eq!(saved.users, 83);
 }
 
 fn server(address: &str) -> MetadataServer {
