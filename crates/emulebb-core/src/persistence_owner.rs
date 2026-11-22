@@ -818,7 +818,7 @@ impl PersistenceOwner {
                                     &friend.name,
                                     friend.address.as_deref(),
                                     friend.port,
-                                    friend.last_seen.map(|time| time.timestamp_millis()),
+                                    friend.last_seen.map(|time| time.timestamp()),
                                 ),
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)

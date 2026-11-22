@@ -23,9 +23,9 @@ pub struct Ed2kPublishDiagnostics {
     pub no_network_count: usize,
     pub failure_count: usize,
     pub last_error: Option<String>,
-    pub last_attempt_at_ms: i64,
-    pub last_success_at_ms: i64,
-    pub updated_at_ms: i64,
+    pub last_attempt_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    pub updated_at: Option<i64>,
 }
 
 impl Default for Ed2kPublishDiagnostics {
@@ -47,9 +47,9 @@ impl Default for Ed2kPublishDiagnostics {
             no_network_count: 0,
             failure_count: 0,
             last_error: None,
-            last_attempt_at_ms: 0,
-            last_success_at_ms: 0,
-            updated_at_ms: 0,
+            last_attempt_at: None,
+            last_success_at: None,
+            updated_at: None,
         }
     }
 }
@@ -76,5 +76,37 @@ pub(crate) fn record(
         Err(poisoned) => poisoned.into_inner(),
     };
     update(&mut guard);
-    guard.updated_at_ms = Utc::now().timestamp_millis();
+    guard.updated_at = Some(Utc::now().timestamp());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publish_diagnostic_calendar_times_are_nullable_seconds_including_epoch_zero() {
+        let ed2k = new_shared();
+        let initial = serde_json::to_value(snapshot(&ed2k)).unwrap();
+        assert!(initial["lastAttemptAt"].is_null());
+        assert!(initial["lastSuccessAt"].is_null());
+        assert!(initial["updatedAt"].is_null());
+        let before = Utc::now().timestamp();
+        record(&ed2k, |value| {
+            value.last_attempt_at = Some(0);
+            value.last_success_at = Some(0);
+        });
+        let current = serde_json::to_value(snapshot(&ed2k)).unwrap();
+        assert_eq!(current["lastAttemptAt"], 0);
+        assert_eq!(current["lastSuccessAt"], 0);
+        assert!(
+            (before..=Utc::now().timestamp()).contains(&current["updatedAt"].as_i64().unwrap())
+        );
+        let kad = crate::kad_publish_diagnostics::new_shared();
+        assert!(serde_json::to_value(crate::kad_publish_diagnostics::snapshot(&kad)).unwrap()["updatedAt"].is_null());
+        crate::kad_publish_diagnostics::record(&kad, |_| {});
+        let time = crate::kad_publish_diagnostics::snapshot(&kad)
+            .updated_at
+            .unwrap();
+        assert!((before..=Utc::now().timestamp()).contains(&time));
+    }
 }

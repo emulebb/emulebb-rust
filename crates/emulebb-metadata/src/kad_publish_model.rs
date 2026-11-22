@@ -15,7 +15,7 @@ pub struct MetadataKadOutboundPublish {
     pub file_hash: String,
     pub publish_kind: MetadataKadOutboundPublishKind,
     pub keyword: String,
-    pub published_at_ms: i64,
+    pub published_at_s: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub struct MetadataKadKeywordPublish {
     pub file_hash: String,
     pub raw_tags: Vec<u8>,
     pub load: Option<u8>,
-    pub observed_at_ms: i64,
+    pub observed_at_s: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub struct MetadataKadSourcePublish {
     pub source_udp_port: u16,
     pub raw_tags: Vec<u8>,
     pub load: Option<u8>,
-    pub observed_at_ms: i64,
+    pub observed_at_s: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,5 +82,5 @@ pub struct MetadataKadNotePublish {
     pub file_hash: Option<String>,
     pub raw_tags: Vec<u8>,
     pub load: Option<u8>,
-    pub observed_at_ms: i64,
+    pub observed_at_s: i64,
 }

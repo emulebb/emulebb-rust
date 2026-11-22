@@ -12,6 +12,7 @@ use axum::{
     },
 };
 use futures_util::stream;
+use serde::Serialize;
 use serde_json::json;
 use std::convert::Infallible;
 
@@ -135,6 +136,19 @@ pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) ->
     api_ok(json!({"ok": true})).into_response()
 }
 
+/// The capture slot follows encoded backing through body/frame clones, including
+/// a slow receiver; constructing the response does not release its ownership.
+struct DiagnosticBundleBody {
+    bytes: Box<[u8]>,
+    _capture: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for DiagnosticBundleBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 pub(crate) async fn capture_diagnostic_bundle(
     State(state): State<RestState>,
     body: Bytes,
@@ -161,12 +175,25 @@ pub(crate) async fn capture_diagnostic_bundle(
         )
         .into_response();
     }
+    // WHY: a caller can retain a completed body indefinitely. Bound aggregate
+    // capture work and backing until that body is actually dropped, not queued.
+    let Ok(capture) = state.diagnostic_capture.clone().try_acquire_owned() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_BUSY",
+            "a diagnostic capture or its response is already active",
+        )
+        .into_response();
+    };
     match capture_bundle(&state, request.max_bytes).await {
         Ok(bundle) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::CONTENT_LENGTH, bundle.len().to_string())
-            .body(Body::from(bundle))
+            .body(Body::from(Bytes::from_owner(DiagnosticBundleBody {
+                bytes: bundle,
+                _capture: capture,
+            })))
             .expect("diagnostic bundle response must be valid"),
         Err(error) => super::persistence::persistence_error(error),
     }
@@ -299,17 +326,38 @@ pub(crate) async fn snapshot(
         Ok(page) => page,
         Err(error) => return super::persistence::persistence_error(error),
     };
-    api_ok(json!({
-        "app": app_info_response(state.core.app_info()),
-        "status": status,
-        "downloads": &*downloads,
-        "sharedFiles": shared_files,
-        "uploads": &uploads.uploads,
-        "uploadQueue": &upload_queue.uploads,
-        "servers": servers,
-        "kad": kad,
-        "network": network_response(network.as_ref(), &state.core.vpn_guard_status()),
-        "logs": recent_log_values(limit)
-    }))
-    .into_response()
+    // WHY: a JSON value tree would copy both admitted upload pages and release
+    // their charges before a slow receiver drops the encoded body. Borrow the
+    // rows and admit exact wire backing through the existing read registry.
+    super::resource::retained_json(
+        &downloads,
+        &super::resource::item_document(SnapshotResponse {
+            app: app_info_response(state.core.app_info()),
+            status,
+            downloads: &downloads,
+            shared_files,
+            uploads: &uploads.uploads,
+            upload_queue: &upload_queue.uploads,
+            servers,
+            kad,
+            network: network_response(network.as_ref(), &state.core.vpn_guard_status()),
+            logs: recent_log_values(limit),
+        }),
+    )
+}
+
+/// Borrow admitted transfer rows while encoding the dashboard envelope.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotResponse<'a> {
+    app: serde_json::Value,
+    status: serde_json::Value,
+    downloads: &'a emulebb_core::DownloadCounts,
+    shared_files: Vec<crate::dto::SharedFileResponse>,
+    uploads: &'a [emulebb_core::Upload],
+    upload_queue: &'a [emulebb_core::Upload],
+    servers: Vec<serde_json::Value>,
+    kad: serde_json::Value,
+    network: serde_json::Value,
+    logs: Vec<serde_json::Value>,
 }

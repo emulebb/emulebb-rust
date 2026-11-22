@@ -544,17 +544,17 @@ async fn explicit_root_continuation_reconciles_each_removed_root() {
     let tx = conn.transaction().unwrap();
     for (index, root) in roots.iter().enumerate() {
         let hash = [u8::try_from(index + 1).unwrap(); 16];
-        tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES(?1,1,'sample',0,0,0)", [&hash[..]]).unwrap();
+        tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_s,last_seen_at_s,updated_at_s) VALUES(?1,1,'sample',0,0,0)", [&hash[..]]).unwrap();
         let known_id = tx.last_insert_rowid();
         let path =
             emulebb_metadata::NativePath::from(std::path::Path::new(&root.path).join("sample"));
         let display = path.display_path();
         tx.execute("INSERT INTO local_paths(display_path,native_path,search_key,sort_key,file_name_search_key,platform) VALUES(?1,?2,?1,?1,?1,?3)", rusqlite::params![display, path.storage_bytes(), emulebb_metadata::NativePath::platform()]).unwrap();
         let path_id = tx.last_insert_rowid();
-        tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) VALUES(?1,?2,1,x'01',x'01',0)", rusqlite::params![path_id, known_id]).unwrap();
+        tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_s) VALUES(?1,?2,1,x'01',x'01',0)", rusqlite::params![path_id, known_id]).unwrap();
         let root_native = emulebb_metadata::NativePath::from(std::path::Path::new(&root.path));
         let root_id: i64 = tx.query_row("SELECT r.id FROM shared_directory_roots r JOIN local_paths p ON p.id=r.path_id WHERE p.platform=?1 AND p.native_path=?2", rusqlite::params![emulebb_metadata::NativePath::platform(), root_native.storage_bytes()], |row| row.get(0)).unwrap();
-        tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_ms,last_seen_at_ms) VALUES(?1,?2,?3,'sample',0,0)", rusqlite::params![root_id,path_id,known_id]).unwrap();
+        tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_s,last_seen_at_s) VALUES(?1,?2,?3,'sample',0,0)", rusqlite::params![root_id,path_id,known_id]).unwrap();
     }
     tx.commit().unwrap();
     drop(conn);

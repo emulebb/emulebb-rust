@@ -76,7 +76,7 @@ impl MetadataStore {
         }
         tx.execute(
             "UPDATE download_jobs SET md4_hashset_acquired=1,updated_at_s=?2 WHERE id=?1",
-            params![token.job_id, crate::download_job_store::unix_s()],
+            params![token.job_id, crate::store::unix_s()],
         )?;
         tx.commit()?;
         Ok(true)
@@ -169,7 +169,7 @@ impl MetadataStore {
             }
         }
         tx.execute("UPDATE download_jobs SET aich_root=?2,aich_root_origin=?3,aich_trust_generation=?4,aich_hashset_acquired=?5,updated_at_s=?6 WHERE id=?1",
-            params![token.job_id,root,state.identity.origin,i64::try_from(state.identity.generation)?,state.acquired,crate::download_job_store::unix_s()])?;
+            params![token.job_id,root,state.identity.origin,i64::try_from(state.identity.generation)?,state.acquired,crate::store::unix_s()])?;
         tx.commit()?;
         Ok(Some(state))
     }

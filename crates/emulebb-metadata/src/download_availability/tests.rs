@@ -27,14 +27,14 @@ fn root_and_file(store: &MetadataStore) -> (i64, i64) {
     let parent = crate::store::upsert_local_path(&tx, &root).unwrap();
     let path = crate::store::upsert_local_path(&tx, &root.join("sample.bin")).unwrap();
     tx.execute(
-        "INSERT INTO shared_directory_roots(path_id,accessible,created_at_ms) VALUES(?1,0,0)",
+        "INSERT INTO shared_directory_roots(path_id,accessible,created_at_s) VALUES(?1,0,0)",
         [parent],
     )
     .unwrap();
     let root_id = tx.last_insert_rowid();
-    tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms)
+    tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_s)
         SELECT ?1,id,8,?2,?3,0 FROM known_files WHERE ed2k_hash=?4",params![path,fingerprint.identity.storage_bytes(),fingerprint.storage_bytes(),vec![0x51u8;16]]).unwrap();
-    tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_ms,last_seen_at_ms)
+    tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_s,last_seen_at_s)
         SELECT ?1,?2,id,'sample.bin',0,0 FROM known_files WHERE ed2k_hash=?3",params![root_id,path,vec![0x51u8;16]]).unwrap();
     tx.commit().unwrap();
     (root_id, path)

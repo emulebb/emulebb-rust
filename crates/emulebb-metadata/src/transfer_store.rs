@@ -9,7 +9,7 @@ use crate::{
     NativeFileFingerprint, NativeFileIdentity, NativePath,
     download_history_store::{record_completed_download, records_download_completion},
     native_path::{optional_path_from_row, path_from_row},
-    store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
+    store::{bool_to_i64, decode_fixed_hex, unix_s, upsert_local_path},
     transfer_model::{
         MetadataSharedSourceFailure, MetadataTransferAichIdentity, MetadataTransferCatalogEntry,
         MetadataTransferCounts, MetadataTransferDeletionTombstone,
@@ -52,7 +52,7 @@ impl super::MetadataStore {
             crate::download_job_store::validate_job_path(path)?;
         }
         let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
-        let now = crate::download_job_store::unix_s();
+        let now = crate::store::unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = crate::download_job_store::read_job(&tx, manifest.token.job_id)?
@@ -654,7 +654,7 @@ impl super::MetadataStore {
                 media_bitrate_kbps = ?6,
                 media_codec = ?7,
                 media_extractor_version = ?8,
-                updated_at_ms = ?9
+                updated_at_s = ?9
             WHERE ed2k_hash = ?1
             "#,
             params![
@@ -666,7 +666,7 @@ impl super::MetadataStore {
                 i64::from(media.bitrate_kbps),
                 media.codec,
                 i64::from(media.extractor_version),
-                unix_ms(),
+                unix_s(),
             ],
         )?;
         Ok(changed != 0)
@@ -679,7 +679,7 @@ impl super::MetadataStore {
             SELECT local_paths.platform, local_paths.native_path,
                    shared_file_scan_failures.size_bytes,
                    shared_file_scan_failures.source_fingerprint, shared_file_scan_failures.reason,
-                   shared_file_scan_failures.created_at_ms, shared_file_scan_failures.updated_at_ms
+                   shared_file_scan_failures.created_at_s, shared_file_scan_failures.updated_at_s
             FROM shared_file_scan_failures
             JOIN local_paths ON local_paths.id = shared_file_scan_failures.path_id
             ORDER BY local_paths.display_path
@@ -691,8 +691,8 @@ impl super::MetadataStore {
                 file_size: crate::sql_value::unsigned::<u64>(row, 2)?,
                 source_fingerprint: optional_fingerprint_from_row(row, 3)?,
                 reason: row.get(4)?,
-                created_at_ms: row.get(5)?,
-                updated_at_ms: row.get(6)?,
+                created_at_s: row.get(5)?,
+                updated_at_s: row.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -705,7 +705,7 @@ impl super::MetadataStore {
         source_fingerprint: Option<&NativeFileFingerprint>,
         reason: &str,
     ) -> Result<()> {
-        let now = unix_ms();
+        let now = unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let path_id = upsert_local_path(&tx, source_path)?;
@@ -713,14 +713,14 @@ impl super::MetadataStore {
             r#"
             INSERT INTO shared_file_scan_failures(
                 path_id, size_bytes, source_fingerprint, reason,
-                created_at_ms, updated_at_ms
+                created_at_s, updated_at_s
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
             ON CONFLICT(path_id) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
                 source_fingerprint = excluded.source_fingerprint,
                 reason = excluded.reason,
-                updated_at_ms = excluded.updated_at_ms
+                updated_at_s = excluded.updated_at_s
             "#,
             params![
                 path_id,
@@ -859,7 +859,7 @@ impl super::MetadataStore {
             target_path_id != staging_path_id,
             "delivery target and staging paths must have distinct native identities"
         );
-        let now = crate::download_job_store::unix_s();
+        let now = crate::store::unix_s();
         tx.execute(
             r#"
             INSERT INTO download_delivery_attempts(
@@ -936,7 +936,7 @@ impl super::MetadataStore {
         staging_fingerprint: &NativeFileFingerprint,
     ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let id = token.job_id;
-        let now = crate::download_job_store::unix_s();
+        let now = crate::store::unix_s();
         let staging_fingerprint = staging_fingerprint.storage_bytes();
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -991,7 +991,7 @@ impl super::MetadataStore {
         published_fingerprint: &NativeFileFingerprint,
     ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
         let id = token.job_id;
-        let now = crate::download_job_store::unix_s();
+        let now = crate::store::unix_s();
         let published_fingerprint = published_fingerprint.storage_bytes();
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1065,7 +1065,7 @@ impl super::MetadataStore {
                WHERE download_jobs.id = ?2 AND download_jobs.execution_generation=?5 AND download_jobs.intent='started' AND download_jobs.completed != 0
                  AND download_jobs.final_rehash_pending = 0 AND download_jobs.delivery_state = 'pending'
                  AND download_jobs.removed_at_s IS NULL AND download_jobs.delete_requested_at_s IS NULL)",
-            params![id, job_id, fingerprint.storage_bytes(), crate::download_job_store::unix_s(),i64::try_from(token.generation)?],
+            params![id, job_id, fingerprint.storage_bytes(), crate::store::unix_s(),i64::try_from(token.generation)?],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -1205,7 +1205,7 @@ impl super::MetadataStore {
             original_path_id != tombstone_path_id,
             "deletion source and tombstone paths must have distinct native identities"
         );
-        let now = crate::download_job_store::unix_s();
+        let now = crate::store::unix_s();
         tx.execute(
             r#"
             INSERT INTO download_delivery_tombstones(
@@ -1243,7 +1243,7 @@ impl super::MetadataStore {
         tombstone_id: Uuid,
         moved_fingerprint: &NativeFileFingerprint,
     ) -> Result<Option<MetadataTransferDeletionTombstone>> {
-        let now = crate::download_job_store::unix_s();
+        let now = crate::store::unix_s();
         let moved_fingerprint = moved_fingerprint.storage_bytes();
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1390,7 +1390,7 @@ impl super::MetadataStore {
             params![token.job_id,i64::try_from(token.generation)?,NativePath::platform(),native.storage_bytes(),
                 expected_fingerprint.map(NativeFileFingerprint::storage_bytes),
                 delivery_ownership_to_sql(expected_ownership),verified_fingerprint.storage_bytes(),
-                crate::download_job_store::unix_s(),i64::try_from(verified_fingerprint.size_bytes)?],
+                crate::store::unix_s(),i64::try_from(verified_fingerprint.size_bytes)?],
         )?;
         Ok(changed != 0)
     }
@@ -1441,7 +1441,7 @@ impl super::MetadataStore {
         };
         tx.execute(
             "UPDATE download_jobs SET terminal_completed_at_s=coalesce(terminal_completed_at_s,?2), updated_at_s=?2 WHERE id=?1",
-            params![job_id, crate::download_job_store::unix_s()],
+            params![job_id, crate::store::unix_s()],
         )?;
         reserve_internal_retirement(&tx, token.job_id)?;
         tx.commit()?;
@@ -1496,7 +1496,7 @@ impl super::MetadataStore {
         tx.execute("DELETE FROM download_retirements WHERE job_id=?1", [id])?;
         tx.execute(
             "UPDATE download_jobs SET internal_storage_retired=1,updated_at_s=?2 WHERE id=?1",
-            params![id, crate::download_job_store::unix_s()],
+            params![id, crate::store::unix_s()],
         )?;
         tx.commit()?;
         Ok(true)
@@ -1878,7 +1878,7 @@ pub(crate) fn request_job_removal(
         updated_at_s=?2,execution_generation=execution_generation+1
         WHERE id=?1 AND (removed_at_s IS NULL OR (?3 AND delete_requested_at_s IS NULL))
         AND execution_generation<9223372036854775807",
-        params![id,crate::download_job_store::unix_s(),delete_output])? != 0;
+        params![id,crate::store::unix_s(),delete_output])? != 0;
     if changed {
         conn.execute(
             "UPDATE known_files SET latest_download_job_id=NULL WHERE latest_download_job_id=?1",

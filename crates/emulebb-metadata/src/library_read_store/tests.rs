@@ -218,21 +218,21 @@ fn fixture() -> (MetadataStore, Vec<i64>) {
     let store = MetadataStore::in_memory().unwrap();
     let mut conn = store.connection().unwrap();
     let tx = conn.transaction().unwrap();
-    tx.execute_batch("INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
+    tx.execute_batch("INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_s,last_seen_at_s,updated_at_s)
         VALUES(1,x'11111111111111111111111111111111',32,'Sample.bin',0,0,0);
         INSERT INTO verified_local_content(known_file_id,display_name,part_size_bytes,part_count)
         VALUES(1,'Sample.bin',9728000,0);").unwrap();
     let root = std::env::temp_dir().join(format!("library-locations-{}", uuid::Uuid::new_v4()));
     let root_id = crate::store::upsert_local_path(&tx, &root).unwrap();
     tx.execute(
-        "INSERT INTO shared_directory_roots(id,path_id,created_at_ms) VALUES(1,?1,0)",
+        "INSERT INTO shared_directory_roots(id,path_id,created_at_s) VALUES(1,?1,0)",
         [root_id],
     )
     .unwrap();
     let mut paths = Vec::new();
     for n in 1..=3 {
         let id = crate::store::upsert_local_path(&tx, &root.join(format!("Copy-{n}.bin"))).unwrap();
-        tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms)
+        tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_s)
             VALUES(?1,1,32,x'01',x'02',0)", [id]).unwrap();
         tx.execute(
             "INSERT INTO shared_file_memberships VALUES(1,?1,1,'Sample.bin',0,0,NULL)",

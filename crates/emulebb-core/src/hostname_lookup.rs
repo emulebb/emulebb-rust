@@ -416,6 +416,34 @@ mod tests {
     use super::{build_ptr_query, candidate_ips_from_servers, parse_ptr_response};
     use crate::ServerInfo;
 
+    #[test]
+    fn hostname_resolution_serializes_nullable_calendar_seconds() {
+        for seconds in [None, Some(0), Some(1_800_000_000)] {
+            let resolution = crate::HostNameResolution {
+                host_name: None,
+                host_name_status: "unknown".into(),
+                host_name_error: None,
+                host_name_resolved_at: seconds
+                    .and_then(|time| chrono::DateTime::from_timestamp(time, 123_000_000)),
+            };
+            let json = serde_json::to_value(&resolution).unwrap();
+            assert_eq!(
+                json["hostNameResolvedAt"],
+                serde_json::to_value(seconds).unwrap()
+            );
+            let restored: crate::HostNameResolution = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                restored.host_name_resolved_at.map(|time| time.timestamp()),
+                seconds
+            );
+        }
+        let absent: crate::HostNameResolution = serde_json::from_value(serde_json::json!({
+            "hostName":null,"hostNameStatus":"unknown","hostNameError":null
+        }))
+        .unwrap();
+        assert!(absent.host_name_resolved_at.is_none());
+    }
+
     fn server(address: &str, ip: &str, dyn_ip: &str) -> ServerInfo {
         ServerInfo {
             endpoint: format!("{address}:4661"),

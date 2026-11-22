@@ -13,7 +13,7 @@ pub(crate) enum TrackedPublishPhase {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TrackedPublishAttempt {
     pub(crate) phase: TrackedPublishPhase,
-    pub(crate) last_success_at_ms: Option<i64>,
+    pub(crate) last_success_at_s: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,12 +37,12 @@ impl SharedKadFilePublication {
             let previous_success = files
                 .get(file_hash)
                 .and_then(|state| state.keywords.get(keyword))
-                .and_then(|attempt| attempt.last_success_at_ms);
+                .and_then(|attempt| attempt.last_success_at_s);
             files.entry(file_hash.clone()).or_default().keywords.insert(
                 keyword.to_string(),
                 TrackedPublishAttempt {
                     phase: TrackedPublishPhase::Publishing,
-                    last_success_at_ms: previous_success,
+                    last_success_at_s: previous_success,
                 },
             );
         }
@@ -54,10 +54,10 @@ impl SharedKadFilePublication {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = files.entry(file_hash.to_string()).or_default();
-        let previous_success = state.source.and_then(|attempt| attempt.last_success_at_ms);
+        let previous_success = state.source.and_then(|attempt| attempt.last_success_at_s);
         state.source = Some(TrackedPublishAttempt {
             phase: TrackedPublishPhase::Publishing,
-            last_success_at_ms: previous_success,
+            last_success_at_s: previous_success,
         });
     }
 
@@ -65,7 +65,7 @@ impl SharedKadFilePublication {
         &self,
         file_hashes: &[String],
         keyword: &str,
-        succeeded_at_ms: Option<i64>,
+        succeeded_at_s: Option<i64>,
     ) {
         let mut files = self
             .files
@@ -76,35 +76,35 @@ impl SharedKadFilePublication {
             let previous_success = state
                 .keywords
                 .get(keyword)
-                .and_then(|attempt| attempt.last_success_at_ms);
+                .and_then(|attempt| attempt.last_success_at_s);
             state.keywords.insert(
                 keyword.to_string(),
                 TrackedPublishAttempt {
-                    phase: if succeeded_at_ms.is_some() {
+                    phase: if succeeded_at_s.is_some() {
                         TrackedPublishPhase::Published
                     } else {
                         TrackedPublishPhase::Failed
                     },
-                    last_success_at_ms: succeeded_at_ms.or(previous_success),
+                    last_success_at_s: succeeded_at_s.or(previous_success),
                 },
             );
         }
     }
 
-    pub(crate) fn source_finished(&self, file_hash: &str, succeeded_at_ms: Option<i64>) {
+    pub(crate) fn source_finished(&self, file_hash: &str, succeeded_at_s: Option<i64>) {
         let mut files = self
             .files
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = files.entry(file_hash.to_string()).or_default();
-        let previous_success = state.source.and_then(|attempt| attempt.last_success_at_ms);
+        let previous_success = state.source.and_then(|attempt| attempt.last_success_at_s);
         state.source = Some(TrackedPublishAttempt {
-            phase: if succeeded_at_ms.is_some() {
+            phase: if succeeded_at_s.is_some() {
                 TrackedPublishPhase::Published
             } else {
                 TrackedPublishPhase::Failed
             },
-            last_success_at_ms: succeeded_at_ms.or(previous_success),
+            last_success_at_s: succeeded_at_s.or(previous_success),
         });
     }
 
@@ -118,7 +118,7 @@ impl SharedKadFilePublication {
                 let has_previous_success = state
                     .keywords
                     .get(keyword)
-                    .is_some_and(|attempt| attempt.last_success_at_ms.is_some());
+                    .is_some_and(|attempt| attempt.last_success_at_s.is_some());
                 if has_previous_success {
                     if let Some(attempt) = state.keywords.get_mut(keyword) {
                         attempt.phase = TrackedPublishPhase::Published;
@@ -139,7 +139,7 @@ impl SharedKadFilePublication {
         {
             if state
                 .source
-                .is_some_and(|attempt| attempt.last_success_at_ms.is_some())
+                .is_some_and(|attempt| attempt.last_success_at_s.is_some())
             {
                 if let Some(attempt) = state.source.as_mut() {
                     attempt.phase = TrackedPublishPhase::Published;
@@ -183,7 +183,7 @@ mod tests {
 
         let failed = publication.snapshot(&hashes[0]);
         assert_eq!(failed.keywords["shared"].phase, TrackedPublishPhase::Failed);
-        assert_eq!(failed.keywords["shared"].last_success_at_ms, Some(42));
+        assert_eq!(failed.keywords["shared"].last_success_at_s, Some(42));
 
         publication.keyword_started(&hashes, "shared");
         publication.keyword_busy(&hashes, "shared");
@@ -192,7 +192,7 @@ mod tests {
             restored.keywords["shared"].phase,
             TrackedPublishPhase::Published
         );
-        assert_eq!(restored.keywords["shared"].last_success_at_ms, Some(42));
+        assert_eq!(restored.keywords["shared"].last_success_at_s, Some(42));
     }
 
     #[test]
@@ -207,13 +207,13 @@ mod tests {
 
         let failed = publication.snapshot(hash).source.expect("source state");
         assert_eq!(failed.phase, TrackedPublishPhase::Failed);
-        assert_eq!(failed.last_success_at_ms, Some(84));
+        assert_eq!(failed.last_success_at_s, Some(84));
 
         publication.source_started(hash);
         publication.source_busy(hash);
         let restored = publication.snapshot(hash).source.expect("source state");
         assert_eq!(restored.phase, TrackedPublishPhase::Published);
-        assert_eq!(restored.last_success_at_ms, Some(84));
+        assert_eq!(restored.last_success_at_s, Some(84));
     }
 
     #[test]

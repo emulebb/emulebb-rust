@@ -54,7 +54,7 @@ impl super::MetadataStore {
         );
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let mut stmt = conn.prepare_cached(concat!("SELECT i.path_id,length(p.native_path),length(i.verified_fingerprint),i.size_bytes,p.platform,p.native_path,i.verified_fingerprint FROM known_files k JOIN local_file_instances i ON i.known_file_id=k.id JOIN local_paths p ON p.id=i.path_id WHERE k.ed2k_hash=?1 AND i.path_id>?2 AND ", crate::local_catalog::unexcluded_identity_sql!("i"), " AND EXISTS (SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL AND r.accessible=1 AND r.shareable=1) ORDER BY i.path_id LIMIT 1"))?;
+        let mut stmt = conn.prepare_cached(concat!("SELECT i.path_id,length(p.native_path),length(i.verified_fingerprint),i.size_bytes,p.platform,p.native_path,i.verified_fingerprint FROM known_files k JOIN local_file_instances i ON i.known_file_id=k.id JOIN local_paths p ON p.id=i.path_id WHERE k.ed2k_hash=?1 AND i.path_id>?2 AND ", crate::local_catalog::unexcluded_identity_sql!("i"), " AND EXISTS (SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_s IS NULL AND r.enabled=1 AND r.deleted_at_s IS NULL AND r.accessible=1 AND r.shareable=1) ORDER BY i.path_id LIMIT 1"))?;
         let mut rows = stmt.query(params![hash, after_path_id])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
@@ -94,9 +94,9 @@ impl super::MetadataStore {
             JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
             WHERE known_files.ed2k_hash = ?1
               AND "#, crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), r#"
-              AND shared_file_memberships.removed_at_ms IS NULL
+              AND shared_file_memberships.removed_at_s IS NULL
               AND shared_directory_roots.enabled = 1
-              AND shared_directory_roots.deleted_at_ms IS NULL
+              AND shared_directory_roots.deleted_at_s IS NULL
               AND shared_directory_roots.accessible = 1
               AND shared_directory_roots.shareable = 1
             ORDER BY local_paths.native_path

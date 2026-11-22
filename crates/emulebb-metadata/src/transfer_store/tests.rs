@@ -1387,7 +1387,7 @@ fn transfer_manifest_waits_for_existing_writer_before_reading_snapshot() {
         .unwrap();
     writer_tx
         .execute(
-            "UPDATE metadata_schema SET created_at_ms = created_at_ms + 1",
+            "UPDATE metadata_schema SET created_at_s = created_at_s + 1",
             [],
         )
         .unwrap();
@@ -1698,8 +1698,8 @@ fn shared_source_failures_roundtrip_update_and_clear() {
     assert_eq!(updated[0].file_size, 2048);
     assert_eq!(updated[0].source_fingerprint, Some(updated_fingerprint));
     assert_eq!(updated[0].reason, "changed identity failed");
-    assert_eq!(updated[0].created_at_ms, initial[0].created_at_ms);
-    assert!(updated[0].updated_at_ms >= initial[0].updated_at_ms);
+    assert_eq!(updated[0].created_at_s, initial[0].created_at_s);
+    assert!(updated[0].updated_at_s >= initial[0].updated_at_s);
 
     assert!(
         store

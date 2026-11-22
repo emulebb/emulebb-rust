@@ -94,7 +94,7 @@ impl MetadataStore {
                 let mut stmt = tx.prepare("SELECT local_paths.id, local_paths.platform, local_paths.native_path
                     FROM local_file_instances JOIN local_paths ON local_paths.id = local_file_instances.path_id
                     WHERE EXISTS (SELECT 1 FROM shared_file_memberships m
-                                  WHERE m.path_id = local_paths.id AND m.removed_at_ms IS NULL)
+                                  WHERE m.path_id = local_paths.id AND m.removed_at_s IS NULL)
                        OR EXISTS (SELECT 1 FROM temp.session_verified_local_paths v WHERE v.path_id = local_paths.id)")?;
                 let rows = stmt.query_map([], |row| {
                     Ok((
@@ -116,7 +116,7 @@ impl MetadataStore {
                     .as_ref()
                     .is_some_and(|parent| parent.join(name) == normalized)
                 {
-                    tx.execute("UPDATE shared_file_memberships SET removed_at_ms = ?2 WHERE path_id = ?1 AND removed_at_ms IS NULL", params![path_id, crate::store::unix_ms()])?;
+                    tx.execute("UPDATE shared_file_memberships SET removed_at_s = ?2 WHERE path_id = ?1 AND removed_at_s IS NULL", params![path_id, crate::store::unix_s()])?;
                     tx.execute(
                         "DELETE FROM temp.session_verified_local_paths WHERE path_id = ?1",
                         [path_id],
@@ -653,7 +653,7 @@ mod tests {
                 .connection()
                 .unwrap()
                 .query_row(
-                    "SELECT count(*) FROM shared_file_memberships WHERE removed_at_ms IS NULL",
+                    "SELECT count(*) FROM shared_file_memberships WHERE removed_at_s IS NULL",
                     [],
                     |row| row.get::<_, i64>(0)
                 )
@@ -776,7 +776,7 @@ mod tests {
                 .connection()
                 .unwrap()
                 .query_row(
-                    "SELECT count(*) FROM shared_file_memberships WHERE removed_at_ms IS NULL",
+                    "SELECT count(*) FROM shared_file_memberships WHERE removed_at_s IS NULL",
                     [],
                     |r| r.get::<_, i64>(0),
                 )

@@ -262,19 +262,19 @@ fn kad_outbound_publish_schedule_advances_when_store_search_starts() {
         publish.file_hash == keyword_hashes[0]
             && publish.publish_kind == MetadataKadOutboundPublishKind::Keyword
             && publish.keyword == keyword
-            && publish.published_at_ms == published_at_ms
+            && publish.published_at_s == published_at_ms / 1000
     }));
     assert!(persisted.publishes.iter().any(|publish| {
         publish.file_hash == source_hash
             && publish.publish_kind == MetadataKadOutboundPublishKind::Source
             && publish.keyword.is_empty()
-            && publish.published_at_ms == published_at_ms
+            && publish.published_at_s == published_at_ms / 1000
     }));
     assert!(persisted.publishes.iter().any(|publish| {
         publish.file_hash == notes_hash
             && publish.publish_kind == MetadataKadOutboundPublishKind::Notes
             && publish.keyword.is_empty()
-            && publish.published_at_ms == published_at_ms
+            && publish.published_at_s == published_at_ms / 1000
     }));
 }
 
@@ -363,4 +363,16 @@ fn busy_rollback_makes_publish_due_again_while_timeout_keeps_it_advanced() {
         persisted.publishes[0].publish_kind,
         MetadataKadOutboundPublishKind::Source
     );
+}
+
+#[test]
+fn persisted_kad_calendar_seconds_restore_monotonic_elapsed_time() {
+    let now = Instant::now();
+    assert_eq!(
+        instant_from_persisted_wall_s(90, 100, now),
+        now - Duration::from_secs(10)
+    );
+    assert_eq!(instant_from_persisted_wall_s(100, 100, now), now);
+    assert_eq!(instant_from_persisted_wall_s(101, 100, now), now);
+    assert_eq!(instant_from_persisted_wall_s(i64::MAX, 100, now), now);
 }

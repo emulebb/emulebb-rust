@@ -523,7 +523,7 @@ fn mixed_100k_keysets_use_exact_indexes_and_summary_never_scans_jobs() {
             INSERT INTO categories(id,name,comment) VALUES(1,'Alpha',''),(2,'Beta','');
             INSERT INTO local_paths(id,display_path,native_path,search_key,sort_key,file_name_search_key,platform) VALUES(1,'/sample/output',CAST('/sample/output' AS BLOB),'/sample/output','/sample/output','output','unix');
             WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<100000)
-            INSERT INTO known_files(id,ed2k_hash,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
+            INSERT INTO known_files(id,ed2k_hash,display_name,first_seen_at_s,last_seen_at_s,updated_at_s)
                 SELECT id,CAST(printf('%016x',id) AS BLOB),'retained-sample',0,0,0 FROM ids;
             INSERT INTO download_jobs(id,known_file_id,display_name,part_size_bytes,part_count,visible_state,intent,delivery_state,delivery_ownership,delivered_path_id,completed,terminal_completed_at_s,removed_at_s,category_id,created_at_s,updated_at_s)
                 SELECT id,id,'retained-sample',16,0,CASE WHEN id%3=0 THEN 'completed' ELSE 'queued' END,'stopped',

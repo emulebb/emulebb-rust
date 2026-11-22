@@ -84,7 +84,7 @@ mod tests {
             let conn = store.connection().unwrap();
             conn.execute_batch("BEGIN;
                 WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<100000)
-                INSERT INTO known_files(id,ed2k_hash,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
+                INSERT INTO known_files(id,ed2k_hash,display_name,first_seen_at_s,last_seen_at_s,updated_at_s)
                     SELECT id,CAST(printf('%016x',id) AS BLOB),'retained',0,0,0 FROM ids;
                 INSERT INTO download_jobs(id,known_file_id,display_name,part_size_bytes,part_count,visible_state,intent,delivery_state,created_at_s,updated_at_s)
                     SELECT id,id,'retained',16,0,'queued','stopped','pending',0,0 FROM known_files;

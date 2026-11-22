@@ -228,22 +228,24 @@ fn shared_file_publication_states_use_stable_contract_tokens() {
     let value = serde_json::to_value(SharedFilePublicationStatus {
         ed2k: SharedFilePublishLane {
             state: SharedFilePublishState::Queued,
-            last_success_at_ms: None,
+            last_success_at: None,
         },
         kad_keyword: SharedFileKadKeywordPublish {
             state: SharedFilePublishState::Partial,
             published_keywords: 1,
             total_keywords: 2,
-            last_success_at_ms: Some(42),
+            last_success_at: Some(42),
         },
         kad_source: SharedFilePublishLane {
             state: SharedFilePublishState::Unavailable,
-            last_success_at_ms: None,
+            last_success_at: None,
         },
     })
     .unwrap();
 
     assert_eq!(value["ed2k"]["state"], "queued");
     assert_eq!(value["kadKeyword"]["state"], "partial");
+    assert_eq!(value["kadKeyword"]["lastSuccessAt"], 42);
+    assert_eq!(value["ed2k"]["lastSuccessAt"], serde_json::Value::Null);
     assert_eq!(value["kadSource"]["state"], "unavailable");
 }

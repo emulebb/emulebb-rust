@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use crate::{
     profile_model::{MetadataCategory, MetadataFriend, MetadataServer},
     store::{
-        bool_to_i64, decode_fixed_hex, refresh_shared_root_eligibility, unix_ms, upsert_local_path,
+        bool_to_i64, decode_fixed_hex, refresh_shared_root_eligibility, unix_s, upsert_local_path,
     },
 };
 
@@ -33,10 +33,10 @@ pub(crate) fn seed_host_storage_defaults(
             && storage.shared_dir.is_absolute(),
         "host folders must be absolute"
     );
-    let now = unix_ms();
+    let now = unix_s();
     let path_id = upsert_local_path(tx, &storage.shared_dir)?;
     tx.execute(
-            "INSERT INTO shared_directory_roots(path_id, monitor_owned, shareable, accessible, enabled, created_at_ms, deleted_at_ms)
+            "INSERT INTO shared_directory_roots(path_id, monitor_owned, shareable, accessible, enabled, created_at_s, deleted_at_s)
              VALUES (?1, 0, 1, 1, 1, ?2, NULL)",
             params![path_id, now],
         )?;
@@ -64,7 +64,7 @@ impl super::MetadataStore {
     }
 
     pub fn replace_kad_bootstrap_endpoints(&self, endpoints: &[String]) -> Result<()> {
-        let now = unix_ms();
+        let now = unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM kad_bootstrap_endpoints", [])?;
@@ -75,7 +75,7 @@ impl super::MetadataStore {
             );
             tx.execute(
                 r#"
-                INSERT INTO kad_bootstrap_endpoints(position, endpoint, updated_at_ms)
+                INSERT INTO kad_bootstrap_endpoints(position, endpoint, updated_at_s)
                 VALUES (?1, ?2, ?3)
                 "#,
                 params![i64::try_from(position)?, endpoint, now],
@@ -233,9 +233,9 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(user_hash)), name, last_address, last_port, first_seen_at_ms, last_seen_at_ms
+            SELECT lower(hex(user_hash)), name, last_address, last_port, first_seen_at_s, last_seen_at_s
             FROM friends
-            WHERE deleted_at_ms IS NULL
+            WHERE deleted_at_s IS NULL
             ORDER BY name, user_hash
             "#,
         )?;
@@ -245,8 +245,8 @@ impl super::MetadataStore {
                 name: row.get(1)?,
                 last_address: row.get(2)?,
                 last_port: row.get::<_, u16>(3)?,
-                first_seen_ms: row.get(4)?,
-                last_seen_ms: row.get(5)?,
+                first_seen_s: row.get(4)?,
+                last_seen_s: row.get(5)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -259,7 +259,7 @@ impl super::MetadataStore {
 
     /// Write a friend and report connection wait and statement/commit time.
     pub fn upsert_friend_timed(&self, friend: &MetadataFriend) -> Result<FriendWriteTiming> {
-        let now = unix_ms();
+        let now = unix_s();
         let user_hash = decode_fixed_hex(&friend.user_hash, 16, "friend user hash")?;
         let waiting = std::time::Instant::now();
         let conn = self.connection()?;
@@ -267,26 +267,26 @@ impl super::MetadataStore {
         let execution = std::time::Instant::now();
         conn.execute(
             r#"
-            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_ms, last_seen_at_ms, deleted_at_ms)
+            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_s, last_seen_at_s, deleted_at_s)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
             ON CONFLICT(user_hash) DO UPDATE SET
                 name = excluded.name,
                 last_address = excluded.last_address,
                 last_port = excluded.last_port,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                deleted_at_ms = NULL
+                last_seen_at_s = excluded.last_seen_at_s,
+                deleted_at_s = NULL
             "#,
             params![
                 user_hash,
                 friend.name,
                 friend.last_address,
                 i64::from(friend.last_port),
-                if friend.first_seen_ms > 0 {
-                    friend.first_seen_ms
+                if friend.first_seen_s > 0 {
+                    friend.first_seen_s
                 } else {
                     now
                 },
-                friend.last_seen_ms,
+                friend.last_seen_s,
             ],
         )?;
         Ok(FriendWriteTiming {
@@ -299,7 +299,7 @@ impl super::MetadataStore {
     pub fn has_friend(&self, user_hash: &str) -> Result<bool> {
         let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
         self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_s IS NULL)",
             [user_hash],
             |row| row.get(0),
         ).map_err(Into::into)
@@ -312,12 +312,12 @@ impl super::MetadataStore {
         name: &str,
         address: Option<&str>,
         port: u16,
-        last_seen_ms: Option<i64>,
+        last_seen_s: Option<i64>,
     ) -> Result<bool> {
         let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
         self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL AND name = ?2 AND last_address IS ?3 AND last_port = ?4 AND last_seen_at_ms IS ?5)",
-            params![user_hash, name, address, i64::from(port), last_seen_ms],
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_s IS NULL AND name = ?2 AND last_address IS ?3 AND last_port = ?4 AND last_seen_at_s IS ?5)",
+            params![user_hash, name, address, i64::from(port), last_seen_s],
             |row| row.get(0),
         ).map_err(Into::into)
     }
@@ -334,8 +334,8 @@ impl super::MetadataStore {
         let connection_wait = waiting.elapsed();
         let execution = std::time::Instant::now();
         conn.execute(
-            "UPDATE friends SET deleted_at_ms = ?1 WHERE user_hash = ?2",
-            params![unix_ms(), user_hash],
+            "UPDATE friends SET deleted_at_s = ?1 WHERE user_hash = ?2",
+            params![unix_s(), user_hash],
         )?;
         Ok(FriendWriteTiming {
             connection_wait,
@@ -345,49 +345,13 @@ impl super::MetadataStore {
 
     pub fn load_servers(&self) -> Result<Vec<MetadataServer>> {
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT address, port, name, description, dynamic_host, auxiliary_ports,
-                   server_priority, static_server,
-                   enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
-                   soft_files, hard_files, version,
-                   obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key, udp_key_ip
-            FROM servers
-            WHERE deleted_at_ms IS NULL
-            ORDER BY address, port
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(MetadataServer {
-                address: row.get(0)?,
-                port: row.get::<_, u16>(1)?,
-                name: row.get(2)?,
-                description: row.get(3)?,
-                dynamic_host: row.get(4)?,
-                auxiliary_ports: decode_auxiliary_ports(&row.get::<_, String>(5)?),
-                server_priority: row.get(6)?,
-                static_server: row.get::<_, i64>(7)? != 0,
-                enabled: row.get::<_, i64>(8)? != 0,
-                failed_count: row.get::<_, u32>(9)?,
-                ping_ms: row.get::<_, Option<u32>>(10)?,
-                users: crate::sql_value::optional_unsigned::<u64>(row, 11)?.unwrap_or_default(),
-                files: crate::sql_value::optional_unsigned::<u64>(row, 12)?.unwrap_or_default(),
-                max_users: crate::sql_value::optional_unsigned::<u64>(row, 13)?.unwrap_or_default(),
-                low_id_users: crate::sql_value::optional_unsigned::<u64>(row, 14)?
-                    .unwrap_or_default(),
-                soft_files: crate::sql_value::optional_unsigned::<u64>(row, 15)?
-                    .unwrap_or_default(),
-                hard_files: crate::sql_value::optional_unsigned::<u64>(row, 16)?
-                    .unwrap_or_default(),
-                version: row.get(17)?,
-                obfuscation_tcp_port: row.get::<_, Option<u16>>(18)?,
-                obfuscation_udp_port: row.get::<_, Option<u16>>(19)?,
-                udp_flags: row.get::<_, Option<u32>>(20)?,
-                udp_key: row.get::<_, Option<u32>>(21)?,
-                udp_key_ip: row.get::<_, Option<u32>>(22)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
+        let sql = format!(
+            "SELECT {} FROM servers WHERE deleted_at_s IS NULL ORDER BY address,port",
+            crate::server_query::SERVER_COLUMNS
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map([], |row| crate::server_query::server_from_row(row, 0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
@@ -432,7 +396,7 @@ fn upsert_server_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     server: &MetadataServer,
 ) -> Result<()> {
-    let now = unix_ms();
+    let now = unix_s();
     tx.execute(
             r#"
             INSERT INTO servers(
@@ -441,10 +405,10 @@ fn upsert_server_in_transaction(
                 enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
                 soft_files, hard_files,
                 version, obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key,
-                udp_key_ip, first_seen_at_ms, last_seen_at_ms, deleted_at_ms
+                udp_key_ip, first_seen_at_s, last_seen_at_s, deleted_at_s
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24, NULL)
-            ON CONFLICT(address, port) DO UPDATE SET
+            ON CONFLICT(address, port) WHERE deleted_at_s IS NULL DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
                 dynamic_host = excluded.dynamic_host,
@@ -466,8 +430,7 @@ fn upsert_server_in_transaction(
                 udp_flags = excluded.udp_flags,
                 udp_key = excluded.udp_key,
                 udp_key_ip = excluded.udp_key_ip,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                deleted_at_ms = NULL
+                last_seen_at_s = excluded.last_seen_at_s
             "#,
             params![
                 server.address,
@@ -503,13 +466,13 @@ fn upsert_server_in_transaction(
 /// rows. A new root remains unavailable until the existing health owner verifies it.
 fn sync_category_roots(tx: &rusqlite::Transaction<'_>, incoming: &Path) -> Result<()> {
     let incoming_id = upsert_local_path(tx, incoming)?;
-    let now = unix_ms();
+    let now = unix_s();
     tx.execute(
         "DELETE FROM shared_directory_root_origins WHERE origin='implicit'",
         [],
     )?;
-    tx.execute("INSERT INTO shared_directory_roots(path_id,monitor_owned,shareable,accessible,enabled,created_at_ms,deleted_at_ms) SELECT path_id,0,1,0,1,?2,NULL FROM (SELECT ?1 AS path_id UNION SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL) WHERE true ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING", params![incoming_id, now])?;
-    tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) SELECT r.id,'implicit',0,1,r.accessible FROM shared_directory_roots r WHERE r.deleted_at_ms IS NULL AND (r.path_id=?1 OR r.path_id IN (SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL))", [incoming_id])?;
+    tx.execute("INSERT INTO shared_directory_roots(path_id,monitor_owned,shareable,accessible,enabled,created_at_s,deleted_at_s) SELECT path_id,0,1,0,1,?2,NULL FROM (SELECT ?1 AS path_id UNION SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL) WHERE true ON CONFLICT(path_id) WHERE deleted_at_s IS NULL DO NOTHING", params![incoming_id, now])?;
+    tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) SELECT r.id,'implicit',0,1,r.accessible FROM shared_directory_roots r WHERE r.deleted_at_s IS NULL AND (r.path_id=?1 OR r.path_id IN (SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL))", [incoming_id])?;
     refresh_shared_root_eligibility(tx, now)?;
     Ok(())
 }
@@ -579,12 +542,13 @@ fn encode_auxiliary_ports(ports: &[u16]) -> String {
         .join(",")
 }
 
-fn decode_auxiliary_ports(value: &str) -> Vec<u16> {
+pub(super) fn decode_auxiliary_ports(value: &str) -> Vec<u16> {
     let mut ports = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for value in value.split(',') {
         if let Ok(port) = value.parse::<u16>()
             && port != 0
-            && !ports.contains(&port)
+            && seen.insert(port)
         {
             ports.push(port);
         }
@@ -628,8 +592,8 @@ mod tests {
                 name: "Peer".to_string(),
                 last_address: Some("192.0.2.44".to_string()),
                 last_port: 4662,
-                first_seen_ms: 1,
-                last_seen_ms: Some(2),
+                first_seen_s: 1,
+                last_seen_s: Some(2),
             })
             .unwrap();
         assert_eq!(store.load_friends().unwrap()[0].last_port, 4662);

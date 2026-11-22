@@ -48,6 +48,7 @@ pub struct RestState {
     api_key: Arc<String>,
     shutdown: Option<watch::Sender<bool>>,
     process_resources: Arc<process_resources::ProcessResourceMonitor>,
+    diagnostic_capture: Arc<tokio::sync::Semaphore>,
 }
 #[cfg(all(test, feature = "packet-diagnostics"))]
 #[path = "tests/protocol_fixtures.rs"]

@@ -51,7 +51,7 @@ pub struct MetadataLibraryRoot {
     pub managed: bool,
     pub accessible: bool,
     pub shareable: bool,
-    pub last_scanned_at_ms: Option<i64>,
+    pub last_scanned_at_s: Option<i64>,
 }
 
 /// A bounded live page of active roots in immutable ID order.

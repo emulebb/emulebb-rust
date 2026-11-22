@@ -84,7 +84,7 @@ struct TailRead {
     lines: Vec<Vec<u8>>,
 }
 
-pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u8>> {
+pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Box<[u8]>> {
     if !(MIN_DIAGNOSTIC_BUNDLE_BYTES..=MAX_DIAGNOSTIC_BUNDLE_BYTES).contains(&max_bytes) {
         bail!(
             "maxBytes must be in the range {MIN_DIAGNOSTIC_BUNDLE_BYTES}..={MAX_DIAGNOSTIC_BUNDLE_BYTES}"
@@ -116,7 +116,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Vec<u
 
     let payload = json!({
         "schema": DIAGNOSTIC_BUNDLE_SCHEMA,
-        "capturedAt": Utc::now(),
+        "capturedAt": Utc::now().timestamp(),
         "app": app_info_response(state.core.app_info()),
         "status": status,
         "settings": settings,
@@ -319,7 +319,7 @@ fn fit_search_snapshot(
     max_bytes: usize,
 ) -> Result<bool> {
     loop {
-        let bytes = serde_json::to_vec(snapshot)?.len().saturating_add(1);
+        let bytes = json_encoded_len(snapshot)?.saturating_add(1);
         if bytes <= max_bytes.saturating_sub(*retained_bytes) {
             *retained_bytes += bytes;
             return Ok(true);
@@ -687,7 +687,7 @@ fn summarize_artifacts(
     Ok((summary, issue_count))
 }
 
-fn encode_bounded_bundle(mut payload: Value, max_bytes: usize) -> Result<Vec<u8>> {
+fn encode_bounded_bundle(mut payload: Value, max_bytes: usize) -> Result<Box<[u8]>> {
     const SECTIONS: &[&str] = &[
         "operationalSnapshots.searches.results",
         "operationalSnapshots.uploadQueue",
@@ -705,8 +705,14 @@ fn encode_bounded_bundle(mut payload: Value, max_bytes: usize) -> Result<Vec<u8>
     loop {
         payload["budget"]["truncated"] = Value::Bool(!truncated_sections.is_empty());
         payload["budget"]["truncatedSections"] = json!(truncated_sections);
-        let encoded = stabilize_encoded_size(&mut payload)?;
-        if encoded.len() <= max_bytes {
+        let encoded_len = stabilize_encoded_size(&mut payload)?;
+        if encoded_len <= max_bytes {
+            // WHY: counting and trimming must not allocate an oversized wire
+            // buffer. The immutable Value is encoded once, only after it fits.
+            let mut encoded = vec![0u8; encoded_len].into_boxed_slice();
+            let mut remaining = encoded.as_mut();
+            serde_json::to_writer(&mut remaining, &payload)?;
+            anyhow::ensure!(remaining.is_empty(), "diagnostic encoding length changed");
             return Ok(encoded);
         }
 
@@ -723,21 +729,41 @@ fn encode_bounded_bundle(mut payload: Value, max_bytes: usize) -> Result<Vec<u8>
         if !shrunk {
             bail!(
                 "mandatory diagnostic bundle core requires {} bytes, exceeding requested {max_bytes}-byte max",
-                encoded.len()
+                encoded_len
             );
         }
     }
 }
 
-fn stabilize_encoded_size(payload: &mut Value) -> Result<Vec<u8>> {
+fn stabilize_encoded_size(payload: &mut Value) -> Result<usize> {
     loop {
-        let encoded = serde_json::to_vec(payload)?;
+        let encoded_len = json_encoded_len(payload)?;
         let reported = payload["budget"]["encodedBytes"].as_u64().unwrap_or(0) as usize;
-        if reported == encoded.len() {
-            return Ok(encoded);
+        if reported == encoded_len {
+            return Ok(encoded_len);
         }
-        payload["budget"]["encodedBytes"] = Value::from(encoded.len() as u64);
+        payload["budget"]["encodedBytes"] = Value::from(encoded_len as u64);
     }
+}
+
+/// Measure serde's exact UTF-8 and escaping output without constructing backing.
+fn json_encoded_len(value: &Value) -> Result<usize> {
+    struct Length(usize);
+    impl std::io::Write for Length {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("diagnostic JSON size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut length = Length(0);
+    serde_json::to_writer(&mut length, value)?;
+    Ok(length.0)
 }
 
 fn shrink_budget_section(payload: &mut Value, section: &str) -> bool {
@@ -986,6 +1012,27 @@ mod tests {
                 "truncatedSections": [],
             },
         })
+    }
+
+    #[test]
+    fn counting_matches_escaped_utf8_without_allocating_wire_backing() {
+        for text in ["\0".repeat(65_536), "\"\\\n…é".repeat(16_384)] {
+            let value = json!({"text":text,"counter":u64::MAX});
+            assert_eq!(
+                json_encoded_len(&value).unwrap(),
+                serde_json::to_vec(&value).unwrap().len()
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_size_counts_its_own_decimal_width_at_boundaries() {
+        for length in [0, 9, 99, 999, 9_999] {
+            let mut payload = json!({"text":"x".repeat(length),"budget":{"encodedBytes":0}});
+            let measured = stabilize_encoded_size(&mut payload).unwrap();
+            assert_eq!(payload["budget"]["encodedBytes"], measured);
+            assert_eq!(serde_json::to_vec(&payload).unwrap().len(), measured);
+        }
     }
 
     #[test]

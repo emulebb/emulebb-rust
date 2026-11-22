@@ -52,7 +52,7 @@ pub(crate) use unexcluded_identity_sql;
 pub(crate) const VERIFIED_SHARE_EXISTS_SQL: &str = concat!(
     "SELECT EXISTS(SELECT 1 FROM known_files k JOIN verified_local_content c ON c.known_file_id=k.id JOIN local_file_instances i INDEXED BY local_file_instances_content_idx ON i.known_file_id=k.id JOIN temp.session_verified_local_paths v ON v.path_id=i.path_id AND v.verified_fingerprint=i.verified_fingerprint WHERE k.ed2k_hash=?1 AND ",
     crate::local_catalog::unexcluded_identity_sql!("i"),
-    " AND EXISTS(SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL AND r.accessible=1 AND r.shareable=1))"
+    " AND EXISTS(SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_s IS NULL AND r.enabled=1 AND r.deleted_at_s IS NULL AND r.accessible=1 AND r.shareable=1))"
 );
 const PARTIAL_SHARE_OFFER_SQL: &str = "SELECT length(CAST(t.display_name AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.display_name,t.expected_size_bytes,t.upload_priority,t.rating,t.id,t.execution_generation FROM known_files k JOIN download_jobs t ON t.known_file_id=k.id WHERE k.ed2k_hash=?1 AND t.expected_size_bytes IS NOT NULL AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL AND t.delete_requested_at_s IS NULL AND EXISTS(SELECT 1 FROM download_job_verified_ranges r WHERE r.job_id=t.id)";
 
@@ -97,8 +97,8 @@ pub(crate) fn representative_path(verified_only: bool) -> String {
           AND ", crate::local_catalog::unexcluded_identity_sql!("candidate"), "
           AND EXISTS (SELECT 1 FROM shared_file_memberships m
               JOIN shared_directory_roots r ON r.id = m.root_id
-              WHERE m.path_id = candidate.path_id AND m.removed_at_ms IS NULL
-                AND r.enabled = 1 AND r.deleted_at_ms IS NULL AND r.accessible = 1 AND r.shareable = 1)
+              WHERE m.path_id = candidate.path_id AND m.removed_at_s IS NULL
+                AND r.enabled = 1 AND r.deleted_at_s IS NULL AND r.accessible = 1 AND r.shareable = 1)
           {verified}
         ORDER BY candidate_paths.platform, candidate_paths.native_path LIMIT 1"), verified=verified)
 }

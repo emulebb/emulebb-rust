@@ -145,7 +145,7 @@ fn project(conn: &Connection, hash: &str) -> Result<MetadataIngestProjection> {
             "
         AND EXISTS(SELECT 1 FROM shared_file_memberships m
             JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=local_paths.id
-            AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL
+            AND m.removed_at_s IS NULL AND r.enabled=1 AND r.deleted_at_s IS NULL
             AND r.accessible=1 AND r.shareable=1)
         ORDER BY local_file_instances.path_id LIMIT 1"
         ),
@@ -275,7 +275,7 @@ impl MetadataStore {
                     && root_epoch.0.load(Ordering::Acquire) == root_epoch.1,
                 ObservedRootChanged
             );
-            Self::upsert_verified_local_content_tx(&tx, content, crate::store::unix_ms())?;
+            Self::upsert_verified_local_content_tx(&tx, content, crate::store::unix_s())?;
             tracing::debug!(
                 phase = "contentBound",
                 elapsed_ms = started.elapsed().as_millis(),

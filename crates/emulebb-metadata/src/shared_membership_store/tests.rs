@@ -23,7 +23,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         .unwrap()
         .execute(
             "INSERT INTO known_files(ed2k_hash, size_bytes, display_name,
-            first_seen_at_ms, last_seen_at_ms, updated_at_ms)
+            first_seen_at_s, last_seen_at_s, updated_at_s)
          VALUES (?1, 32, 'Sample.bin', 1, 1, 1)",
             params![crate::store::decode_fixed_hex(hash, 16, "ED2K hash").unwrap()],
         )
@@ -153,7 +153,7 @@ fn overlapping_roots_withdraw_independently_and_keep_hash_cache() {
         )
         .unwrap();
     assert_eq!(store.active_shared_content_count().unwrap(), 1);
-    store.connection().unwrap().execute_batch("CREATE TEMP TRIGGER keep_active_membership BEFORE UPDATE OF removed_at_ms ON main.shared_file_memberships WHEN new.removed_at_ms IS NOT NULL BEGIN SELECT RAISE(ABORT,'live member withdrawn during scan'); END;").unwrap();
+    store.connection().unwrap().execute_batch("CREATE TEMP TRIGGER keep_active_membership BEFORE UPDATE OF removed_at_s ON main.shared_file_memberships WHEN new.removed_at_s IS NOT NULL BEGIN SELECT RAISE(ABORT,'live member withdrawn during scan'); END;").unwrap();
     store
         .replace_root_memberships(
             &root,

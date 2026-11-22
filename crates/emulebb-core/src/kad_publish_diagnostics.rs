@@ -64,7 +64,7 @@ pub struct KadPublishDiagnostics {
     pub source_acked_contacts: u32,
     pub notes_acked_contacts: u32,
     pub tick_secs: u64,
-    pub updated_at_ms: i64,
+    pub updated_at: Option<i64>,
 }
 
 impl Default for KadPublishDiagnostics {
@@ -127,7 +127,7 @@ impl Default for KadPublishDiagnostics {
             source_acked_contacts: 0,
             notes_acked_contacts: 0,
             tick_secs: 0,
-            updated_at_ms: 0,
+            updated_at: None,
         }
     }
 }
@@ -154,5 +154,5 @@ pub(crate) fn record(
         Err(poisoned) => poisoned.into_inner(),
     };
     update(&mut guard);
-    guard.updated_at_ms = Utc::now().timestamp_millis();
+    guard.updated_at = Some(Utc::now().timestamp());
 }
