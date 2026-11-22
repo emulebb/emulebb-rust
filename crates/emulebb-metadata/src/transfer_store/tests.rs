@@ -163,8 +163,9 @@ fn local_note_edit_and_durable_notes_clock_reset_are_atomic() {
             store
                 .load_kad_outbound_publish_schedule()
                 .unwrap()
-                .publishes,
-            [publish.clone()]
+                .publishes
+                .as_slice(),
+            std::slice::from_ref(&publish)
         );
     }
     store
