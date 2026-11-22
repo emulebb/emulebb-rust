@@ -106,12 +106,12 @@ test("shows connecting and connected-with-unknown-ID server states explicitly", 
   state.status.servers = {
     connected: false,
     connecting: true,
-    currentServer: state.servers[0],
+    currentServer: state.status.servers.currentServer,
     ed2kIdState: "unknown",
     serverCount: 1
   };
-  state.servers[0].connected = false;
-  state.servers[0].connecting = true;
+  state.status.servers.currentServer.connected = false;
+  state.status.servers.currentServer.connecting = true;
   const fallback = installMockApi(requests);
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
@@ -140,8 +140,8 @@ test("shows connecting and connected-with-unknown-ID server states explicitly", 
     connecting: false,
     ed2kIdState: "unknown"
   };
-  state.servers[0].connected = true;
-  state.servers[0].connecting = false;
+  state.status.servers.currentServer.connected = true;
+  state.status.servers.currentServer.connecting = false;
   await page.reload();
   await expect(statusToolbar.getByRole("button", { name: "Server: Connected" })).toBeVisible();
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
@@ -356,7 +356,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   const requests: RecordedApiRequest[] = [];
   const state: any = mockSnapshotFixture();
   state.status.servers = { connected: false, connecting: false, currentServer: null, ed2kIdState: "unknown", serverCount: 0 };
-  state.servers = [];
+  let serverRows: any[] = [];
   state.kad = { enabled: true, running: false, connected: false, firewalled: null, contactCount: 0 };
   state.searches = [{
     id: "1",
@@ -399,31 +399,36 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await route.fulfill({ json: { data: [...state.searches].reverse(), meta: { apiVersion: "v1", nextCursor: null, hasMore: false } } });
       return;
     }
+    if (method === "GET" && path === "servers") {
+      record();
+      await route.fulfill({ json: { data: serverRows, meta: { apiVersion: "v1", nextCursor: null, hasMore: false } } });
+      return;
+    }
     if (method === "POST" && path === "servers/operations/import-met-url") {
       record();
-      state.servers = [{ endpoint: "192.0.2.10:4661", name: "Imported Server", connected: false, enabled: true }];
+      serverRows = [{ id: "1", endpoint: "192.0.2.10:4661", name: "Imported Server", connected: false, enabled: true }];
       state.status.servers.serverCount = 1;
       await fulfill({ ok: true, imported: true });
       return;
     }
     if (method === "POST" && path === "servers/operations/connect") {
       record();
-      state.status.servers = { connected: true, connecting: false, currentServer: state.servers[0], ed2kIdState: "low", serverCount: 1 };
-      state.servers[0].connected = true;
+      state.status.servers = { connected: true, connecting: false, currentServer: serverRows[0], ed2kIdState: "low", serverCount: 1 };
+      serverRows[0].connected = true;
       await fulfill({ running: true, connected: true, firewalled: true });
       return;
     }
-    if (method === "POST" && path === "servers/192.0.2.10%3A4661/operations/connect") {
+    if (method === "POST" && path === "servers/1/operations/connect") {
       record();
-      state.status.servers = { connected: true, connecting: false, currentServer: state.servers[0], ed2kIdState: "low", serverCount: 1 };
-      state.servers[0].connected = true;
+      state.status.servers = { connected: true, connecting: false, currentServer: serverRows[0], ed2kIdState: "low", serverCount: 1 };
+      serverRows[0].connected = true;
       await fulfill({ running: true, connected: true, firewalled: true });
       return;
     }
     if (method === "POST" && path === "servers/operations/disconnect") {
       record();
       state.status.servers = { ...state.status.servers, connected: false, connecting: false, currentServer: null, ed2kIdState: "unknown" };
-      state.servers[0].connected = false;
+      serverRows[0].connected = false;
       await fulfill({ running: false, connected: false });
       return;
     }
@@ -671,7 +676,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
 
   expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
   expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(1);
-  expect(requests.filter((request) => request.path === "servers/192.0.2.10%3A4661/operations/connect")).toHaveLength(1);
+  expect(requests.filter((request) => request.path === "servers/1/operations/connect")).toHaveLength(1);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches")).toBe(true);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) =>

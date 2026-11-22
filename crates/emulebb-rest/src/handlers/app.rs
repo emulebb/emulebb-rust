@@ -301,7 +301,6 @@ pub(crate) async fn snapshot(
     };
     // WHY: unrelated persistence work must finish before retaining both upload
     // pages, so their response allowances do not compete with metadata workspaces.
-    let servers = server_responses(state.core.servers().await);
     let upload_queue = match state
         .core
         .upload_queue_page(None, limit.min(200), false)
@@ -329,7 +328,6 @@ pub(crate) async fn snapshot(
             downloads: &downloads,
             uploads: &uploads.uploads,
             upload_queue: &upload_queue.uploads,
-            servers,
             kad,
             network: network_response(network.as_ref(), &state.core.vpn_guard_status()),
             logs: recent_log_values(limit),
@@ -346,7 +344,6 @@ struct SnapshotResponse<'a> {
     downloads: &'a emulebb_core::DownloadCounts,
     uploads: &'a [emulebb_core::Upload],
     upload_queue: &'a [emulebb_core::Upload],
-    servers: Vec<serde_json::Value>,
     kad: serde_json::Value,
     network: serde_json::Value,
     logs: Vec<serde_json::Value>,

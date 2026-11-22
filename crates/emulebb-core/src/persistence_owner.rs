@@ -43,7 +43,6 @@ mod tests;
 
 const MAX_SLOTS: usize = 64;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
-const KAD_INGRESS_PREPARATION_BYTES: usize = 2 * crate::NODES_DAT_MAX_BYTES;
 // Charge four copies of variable backing storage for request, worker/SQL
 // conversion, cache publication and response, plus fixed command overhead.
 // Allocator bookkeeping and thread stacks are outside this payload budget.
@@ -236,12 +235,13 @@ struct KadInput {
 }
 
 /// A bounded discovery response reservation, released on cancellation.
-pub(crate) struct KadImportReservation {
+pub(crate) struct DiscoveryImportReservation {
     lease: ByteLease,
+    payload_bytes: usize,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
-impl KadImportReservation {
+impl DiscoveryImportReservation {
     /// Resolve when shutdown cancels pre-enqueue discovery preparation.
     pub(crate) async fn cancelled(&self) {
         self.cancellation.cancelled().await;
@@ -252,7 +252,7 @@ impl KadImportReservation {
         let extra = self
             .lease
             .bytes
-            .checked_sub(crate::NODES_DAT_MAX_BYTES)
+            .checked_sub(self.payload_bytes)
             .ok_or(PersistenceError::Worker)?;
         let mut quota = self
             .lease

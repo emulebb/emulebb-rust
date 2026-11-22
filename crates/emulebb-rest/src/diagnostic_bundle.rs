@@ -28,6 +28,7 @@ const MAX_LOG_RECORDS: usize = 200;
 const MAX_TAIL_BYTES: u64 = 256 * 1024;
 const MAX_TAIL_RECORDS: usize = 64;
 const MAX_SERVER_SNAPSHOTS: usize = 512;
+const MAX_SERVER_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const MAX_LIBRARY_FILE_SNAPSHOTS: usize = 200;
 const MAX_SEARCH_SNAPSHOTS: usize = 64;
 const MAX_SEARCH_RESULTS_PER_SNAPSHOT: usize = 128;
@@ -168,8 +169,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Box<[
 }
 
 async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Value> {
-    let mut servers = state.core.servers().await;
-    servers.sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
+    let servers = server_snapshots(&state.core, max_bytes.min(MAX_SERVER_SNAPSHOT_BYTES)).await?;
     let library = state
         .core
         .library_file_page(emulebb_core::LibraryFileQuery {
@@ -199,12 +199,7 @@ async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Va
         .upload_queue_page(None, MAX_UPLOAD_QUEUE_SNAPSHOTS, true)
         .await?;
     Ok(json!({
-        "servers": bounded_prefix_collection(
-            &servers,
-            servers.len(),
-            MAX_SERVER_SNAPSHOTS,
-            server_response,
-        ),
+        "servers": servers,
         "libraryFiles": bounded_prefix_collection(
             &library.files, usize::try_from(library.total.unwrap_or(0))?,
             MAX_LIBRARY_FILE_SNAPSHOTS, |file| json!(file),
@@ -223,6 +218,51 @@ async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Va
             MAX_UPLOAD_QUEUE_SNAPSHOTS,
             |upload| json!(upload),
         ),
+    }))
+}
+
+/// Materialize only a byte-bounded prefix, releasing each admitted page before
+/// fetching another. The diagnostic capture permit owns the resulting JSON.
+async fn server_snapshots(core: &emulebb_core::EmulebbCore, max_bytes: usize) -> Result<Value> {
+    let mut items = Vec::new();
+    let mut after_id = None;
+    let mut total = 0;
+    let mut retained_bytes = 2usize;
+    let mut budget_exhausted = false;
+    loop {
+        let page = core
+            .server_resource_page(emulebb_metadata::MetadataServerQuery {
+                after_id,
+                limit: (MAX_SERVER_SNAPSHOTS - items.len()).min(200),
+                count_total: after_id.is_none(),
+            })
+            .await?;
+        if let Some(count) = page.total {
+            total = usize::try_from(count)?;
+        }
+        for resource in &page.servers {
+            let value = server_response(&resource.server);
+            let bytes = json_encoded_len(&value)?.saturating_add(1);
+            if bytes > max_bytes.saturating_sub(retained_bytes) {
+                budget_exhausted = true;
+                break;
+            }
+            retained_bytes += bytes;
+            items.push(value);
+        }
+        if budget_exhausted || !page.has_more || items.len() == MAX_SERVER_SNAPSHOTS {
+            break;
+        }
+        after_id = page.next_after_id;
+    }
+    let omitted = total.saturating_sub(items.len());
+    Ok(json!({
+        "total": total,
+        "included": items.len(),
+        "omittedAfterLimit": if budget_exhausted { 0 } else { omitted },
+        "omittedForBudget": if budget_exhausted { omitted } else { 0 },
+        "limit": MAX_SERVER_SNAPSHOTS,
+        "items": items,
     }))
 }
 
@@ -926,6 +966,41 @@ fn encode_hex(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn server_snapshots_page_catalog_and_report_count_and_byte_omissions() {
+        let core = emulebb_core::EmulebbCore::new_in_memory(
+            "test",
+            emulebb_index::FileIndex::in_memory().unwrap(),
+        )
+        .unwrap();
+        for index in 0..513 {
+            core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+                address: format!("server-{index}.example"),
+                port: 4661,
+                name: Some(format!("server-{index}")),
+            })
+            .await
+            .unwrap();
+        }
+        let capture = server_snapshots(&core, MAX_SERVER_SNAPSHOT_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(capture["total"], 513);
+        assert_eq!(capture["included"], 512);
+        assert_eq!(capture["omittedAfterLimit"], 1);
+        assert_eq!(capture["omittedForBudget"], 0);
+        assert_eq!(capture["items"][200]["name"], "server-200");
+        assert_eq!(capture["items"][511]["name"], "server-511");
+
+        let small = server_snapshots(&core, 4096).await.unwrap();
+        let included = small["included"].as_u64().unwrap();
+        assert!(included > 0 && included < 200);
+        assert_eq!(small["total"], 513);
+        assert_eq!(small["omittedAfterLimit"], 0);
+        assert_eq!(small["omittedForBudget"], 513 - included);
+        assert!(json_encoded_len(&small["items"]).unwrap() <= 4096);
+    }
 
     #[test]
     fn search_item_budget_is_shared_and_preserves_omission_counts() {

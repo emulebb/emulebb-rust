@@ -6,9 +6,10 @@ use std::{
 
 use emulebb_core::{
     CategoryCreate, DownloadCreate, DownloadCreateSource, EmulebbCore, FriendCreate,
-    LocalShareCreate, NullableStringField, ServerCreate, ServerUpdate,
+    LocalShareCreate, NullableStringField,
 };
 use emulebb_index::FileIndex;
+use emulebb_metadata::{MetadataServerCreate, MetadataServerUpdate};
 
 #[tokio::test]
 async fn profile_state_survives_core_restart() {
@@ -16,6 +17,7 @@ async fn profile_state_survives_core_restart() {
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
 
+    let server_id;
     {
         let core = open_core(&metadata_path, &transfer_root);
         core.update_settings(
@@ -45,16 +47,16 @@ async fn profile_state_survives_core_restart() {
         })
         .await
         .unwrap();
-        core.add_server(ServerCreate {
-            address: "192.0.2.10".to_string(),
-            port: 4661,
-            name: Some("Server One".to_string()),
-            priority: Some("high".to_string()),
-            static_server: Some(true),
-            connect: Some(false),
-        })
-        .await
-        .unwrap();
+        server_id = core
+            .create_server_resource(&MetadataServerCreate {
+                address: "192.0.2.10".into(),
+                port: 4661,
+                priority: "high".into(),
+                static_server: true,
+                enabled: true,
+            })
+            .await
+            .unwrap();
     }
 
     let reloaded = open_core(&metadata_path, &transfer_root);
@@ -71,16 +73,14 @@ async fn profile_state_survives_core_restart() {
     assert_eq!(friends[0].name, "Peer One");
 
     let server = reloaded.server("192.0.2.10:4661").await.unwrap();
-    assert_eq!(server.name, "Server One");
     assert_eq!(server.priority, "high");
     assert!(server.static_server);
     assert!(server.enabled);
 
     reloaded
-        .update_server(
-            "192.0.2.10:4661",
-            ServerUpdate {
-                name: Some("Server Renamed".to_string()),
+        .update_server_resource(
+            server_id,
+            &MetadataServerUpdate {
                 priority: Some("low".to_string()),
                 static_server: Some(false),
                 enabled: None,
@@ -93,14 +93,47 @@ async fn profile_state_survives_core_restart() {
         .await
         .unwrap();
     reloaded.delete_category(1).await.unwrap();
-    reloaded.remove_server("192.0.2.10:4661").await.unwrap();
+    reloaded
+        .update_server_resource(
+            server_id,
+            &MetadataServerUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     let reloaded_again = open_core(&metadata_path, &transfer_root);
     assert!(reloaded_again.categories().await.unwrap().is_empty());
     assert!(reloaded_again.friends().await.unwrap().is_empty());
     let disabled_server = reloaded_again.server("192.0.2.10:4661").await.unwrap();
     assert!(!disabled_server.enabled);
-    assert_eq!(disabled_server.name, "Server Renamed");
+    assert_eq!(disabled_server.priority, "low");
+    assert!(!disabled_server.static_server);
+    assert_eq!(
+        reloaded_again
+            .server_resource(server_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        server_id.to_string()
+    );
+    assert!(
+        reloaded_again
+            .delete_server_resource(server_id)
+            .await
+            .unwrap()
+    );
+    let after_deletion = open_core(&metadata_path, &transfer_root);
+    assert!(
+        after_deletion
+            .server_by_id(server_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

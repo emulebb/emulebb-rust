@@ -75,10 +75,13 @@ enum NodesDatLayout {
 /// - **Version 3 bootstrap edition**: `[0][3][edition=1][count]` + exact
 ///   25-byte entries
 ///
+/// Complete declared records are visited; a truncated tail is ignored once at
+/// least one complete record exists. Extra bytes after the declared records are
+/// ignored. The header, rather than payload length, identifies the layout.
+///
 /// A non-zero first word is always a legacy count. This is important for
 /// unversioned files containing exactly two or three contacts: treating those
-/// counts as version numbers corrupts the framing. Trailing and truncated data
-/// are rejected rather than using integer division to infer a record layout.
+/// counts as version numbers corrupts the framing.
 pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
     let mut contacts = Vec::new();
     let mut exceeded = false;
@@ -156,15 +159,20 @@ pub fn visit_nodes_dat(
         NodesDatLayout::Legacy | NodesDatLayout::Basic => BASIC_ENTRY_SIZE,
         NodesDatLayout::Extended => EXTENDED_ENTRY_SIZE,
     };
-    let expected_len = (count as usize)
-        .checked_mul(entry_size)
-        .and_then(|entries_len| header_end.checked_add(entries_len))
-        .ok_or(DhtError::NodesDatParse)?;
-    if data.len() != expected_len {
+    let complete = data.len().saturating_sub(header_end) / entry_size;
+    let records = (count as usize).min(complete);
+    if records == 0 && count != 0 {
         return Err(DhtError::NodesDatParse);
     }
+    if records != count as usize || data.len() != header_end + records * entry_size {
+        tracing::warn!(
+            declared = count,
+            complete = records,
+            "nodes.dat contains an incomplete or extra tail"
+        );
+    }
 
-    for _ in 0..count {
+    for _ in 0..records {
         let (node_id, ip, udp_port, tcp_port, version, udp_key, udp_key_ip, verified) = match layout
         {
             NodesDatLayout::Extended => {
@@ -217,7 +225,7 @@ pub fn visit_nodes_dat(
             verified,
         });
     }
-    usize::try_from(count).map_err(|_| DhtError::NodesDatParse)
+    Ok(records)
 }
 
 /// Parse a plain-text node list. Each line: `ip:port` (UDP port).
@@ -415,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_parser_visits_large_source_and_rejects_truncated_tail() {
+    fn visitor_preserves_complete_records_from_large_and_truncated_sources() {
         let data = legacy_file(13_000);
         let mut observed = 0;
         visit_nodes_dat(&data, |_| observed += 1).unwrap();
@@ -424,7 +432,10 @@ mod tests {
             parse_nodes_dat(&data),
             Err(DhtError::RoutingSnapshotTooLarge)
         ));
-        assert!(visit_nodes_dat(&data[..data.len() - 1], |_| {}).is_err());
+        assert_eq!(
+            visit_nodes_dat(&data[..data.len() - 1], |_| {}).unwrap(),
+            12_999
+        );
     }
 
     #[test]
@@ -506,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_record_sizes_reject_truncation_and_trailing_bytes() {
+    fn record_boundaries_preserve_complete_prefixes_and_ignore_trailing_bytes() {
         let basic = modern_file(1, None, &[make_basic_entry(1, [192, 0, 2, 1], 9)]);
         let extended = modern_file(
             2,
@@ -525,15 +536,18 @@ mod tests {
             assert!(parse_nodes_dat(&exact[..exact.len() - 1]).is_err());
             let mut extra = exact;
             extra.push(0);
-            assert!(parse_nodes_dat(&extra).is_err());
+            assert_eq!(parse_nodes_dat(&extra).unwrap().len(), 1);
         }
 
         let legacy = legacy_file(2);
         assert!(parse_nodes_dat(&legacy).is_ok());
-        assert!(parse_nodes_dat(&legacy[..legacy.len() - 1]).is_err());
+        assert_eq!(
+            parse_nodes_dat(&legacy[..legacy.len() - 1]).unwrap().len(),
+            1
+        );
         let mut legacy_extra = legacy;
         legacy_extra.push(0);
-        assert!(parse_nodes_dat(&legacy_extra).is_err());
+        assert_eq!(parse_nodes_dat(&legacy_extra).unwrap().len(), 2);
     }
 
     #[test]

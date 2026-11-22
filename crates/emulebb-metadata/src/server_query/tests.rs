@@ -1,5 +1,54 @@
 use super::*;
-use crate::{MetadataServerUpdate, ServerEndpointConflict};
+use crate::{
+    MetadataServerCreate, MetadataServerImport, MetadataServerUpdate, ServerEndpointConflict,
+};
+
+#[test]
+fn server_summary_counts_live_rows_and_reads_only_the_selected_endpoint() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store
+        .create_server_resource(creation("seed.example"))
+        .unwrap();
+    let second = store
+        .create_server_resource(creation("other.example"))
+        .unwrap();
+    store
+        .update_server_resource(
+            first.id,
+            &MetadataServerUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // An unrelated oversized row must not turn a count/current read into a list read.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE servers SET name=?1 WHERE id=?2",
+            params!["x".repeat(SERVER_READ_MAX_BYTES), second.id],
+        )
+        .unwrap();
+    let summary = store.server_summary(Some(("SEED.EXAMPLE", 4661))).unwrap();
+    assert_eq!(summary.total, 2);
+    let current = summary.current.unwrap();
+    assert_eq!(current.id, first.id);
+    assert!(!current.server.enabled);
+    assert_eq!(store.server_summary(None).unwrap().total, 2);
+    assert!(
+        store
+            .server_summary(Some(("missing.example", 4661)))
+            .unwrap()
+            .current
+            .is_none()
+    );
+    assert!(store.server_summary(Some(("other.example", 4661))).is_err());
+    store.delete_server_resource(first.id).unwrap();
+    let summary = store.server_summary(Some(("seed.example", 4661))).unwrap();
+    assert_eq!(summary.total, 1);
+    assert!(summary.current.is_none());
+}
 
 #[test]
 fn explicit_server_creation_conflict_preserves_disabled_resource_and_observations() {
@@ -7,16 +56,15 @@ fn explicit_server_creation_conflict_preserves_disabled_resource_and_observation
     let mut original = server("seed.example");
     original.enabled = false;
     original.failed_count = 3;
-    let id = store.create_server_resource(&original).unwrap();
+    let id = store.upsert_server(&original).unwrap();
     let before = store.server_by_id(id).unwrap().unwrap().server;
-    let mut duplicate = server("SEED.EXAMPLE");
-    duplicate.name = "Must Not Replace".into();
-    duplicate.server_priority = "high".into();
-    let error = store.create_server_resource(&duplicate).unwrap_err();
+    let mut duplicate = creation("SEED.EXAMPLE");
+    duplicate.priority = "high".into();
+    let error = store.create_server_resource(duplicate.clone()).unwrap_err();
     assert!(error.is::<ServerEndpointConflict>());
     assert_eq!(store.server_by_id(id).unwrap().unwrap().server, before);
     assert!(store.delete_server_resource(id).unwrap());
-    let created = store.create_server_resource(&duplicate).unwrap();
+    let created = store.create_server_resource(duplicate).unwrap().id;
     assert!(created > id);
     assert_eq!(
         store.server_page(Default::default()).unwrap().servers.len(),
@@ -31,7 +79,7 @@ fn concurrent_server_creators_have_one_winner_and_one_endpoint_conflict() {
     let outcomes = std::thread::scope(|scope| {
         let create = |address| {
             barrier.wait();
-            store.create_server_resource(&server(address))
+            store.create_server_resource(creation(address))
         };
         let first = scope.spawn(move || create("seed.example"));
         let second = scope.spawn(move || create("SEED.EXAMPLE"));
@@ -60,7 +108,7 @@ fn failed_discovery_initialization_rolls_back_explicit_server_creation() {
     ).unwrap();
     assert!(
         store
-            .create_server_resource(&server("seed.example"))
+            .create_server_resource(creation("seed.example"))
             .is_err()
     );
     assert!(
@@ -92,13 +140,11 @@ fn operator_server_edits_preserve_endpoint_and_network_observations() {
     let id = store.upsert_server(&entry).unwrap();
     let mut expected = store.server_by_id(id).unwrap().unwrap().server;
     let edit = MetadataServerUpdate {
-        name: Some("Edited Server".into()),
         priority: Some("high".into()),
         static_server: Some(true),
         enabled: Some(false),
     };
     assert!(store.update_server_resource(id, &edit).unwrap());
-    expected.name = "Edited Server".into();
     expected.server_priority = "high".into();
     expected.static_server = true;
     expected.enabled = false;
@@ -132,7 +178,6 @@ fn server_mutation_failure_leaves_saved_resource_unchanged() {
             .update_server_resource(
                 id,
                 &MetadataServerUpdate {
-                    name: Some("Must Roll Back".into()),
                     priority: Some("invalid-priority".into()),
                     ..Default::default()
                 }
@@ -175,6 +220,132 @@ fn server_edits_and_repeated_deletion_do_not_create_resources() {
             .update_server_resource(id, &MetadataServerUpdate::default())
             .is_err()
     );
+}
+
+#[test]
+fn imported_names_preserve_live_identity_controls_and_health() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut original = server("seed.example");
+    original.server_priority = "high".into();
+    original.static_server = true;
+    original.enabled = false;
+    original.failed_count = 7;
+    original.users = 83;
+    original.ping_ms = Some(42);
+    let id = store.upsert_server(&original).unwrap();
+    let mut original = store.server_by_id(id).unwrap().unwrap().server;
+    let imported = MetadataServerImport {
+        address: "SEED.EXAMPLE".into(),
+        port: 4661,
+        name: Some("Observed Server".into()),
+    };
+    let row = store.import_server_resource(&imported).unwrap();
+    assert_eq!(row.id, id);
+    original.name = "Observed Server".into();
+    assert_eq!(row.server, original);
+    assert_eq!(
+        store
+            .import_server_resource(&MetadataServerImport {
+                name: None,
+                ..imported.clone()
+            })
+            .unwrap()
+            .server,
+        original
+    );
+    assert!(store.delete_server_resource(id).unwrap());
+    let replacement = store.import_server_resource(&imported).unwrap();
+    assert!(replacement.id > id);
+    assert!(replacement.server.enabled);
+    assert!(!replacement.server.static_server);
+    assert_eq!(replacement.server.server_priority, "normal");
+    assert_eq!(replacement.server.failed_count, 0);
+}
+
+#[test]
+fn failed_import_rolls_back_name_and_discovery_initialization() {
+    let store = MetadataStore::in_memory().unwrap();
+    let oversized = MetadataServerImport {
+        address: "seed.example".into(),
+        port: 4661,
+        name: Some("x".repeat(SERVER_READ_MAX_BYTES / 4)),
+    };
+    assert!(
+        store
+            .import_server_resource(&oversized)
+            .unwrap_err()
+            .is::<MetadataServerReadError>()
+    );
+    assert!(
+        store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+    let status: String = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM discovery_initialization WHERE domain='servers'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
+    let before = store
+        .create_server_resource(creation("seed.example"))
+        .unwrap();
+    store.connection().unwrap().execute_batch(
+        "CREATE TRIGGER block_server_import BEFORE UPDATE OF name ON servers BEGIN SELECT RAISE(ABORT,'injected import failure'); END;"
+    ).unwrap();
+    assert!(
+        store
+            .import_server_resource(&MetadataServerImport {
+                name: Some("Uncommitted Name".into()),
+                ..oversized
+            })
+            .is_err()
+    );
+    assert_eq!(
+        store.server_by_id(before.id).unwrap().unwrap().server,
+        before.server
+    );
+}
+
+fn creation(address: &str) -> MetadataServerCreate {
+    MetadataServerCreate {
+        address: address.into(),
+        port: 4661,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    }
+}
+
+#[test]
+fn explicit_creation_starts_unobserved_and_import_preserves_its_id() {
+    let store = MetadataStore::in_memory().unwrap();
+    let created = store
+        .create_server_resource(creation("seed.example"))
+        .unwrap();
+    assert!(created.server.name.is_empty());
+    assert!(created.server.description.is_empty());
+    assert_eq!(created.server.failed_count, 0);
+    assert_eq!(created.server.ping_ms, None);
+    assert_eq!(created.server.users, 0);
+    assert_eq!(created.server.files, 0);
+    assert_eq!(
+        store.server_by_id(created.id).unwrap().unwrap().server,
+        created.server
+    );
+    let mut observed = server("seed.example");
+    observed.name = "Observed Server".into();
+    observed.users = 83;
+    assert_eq!(store.upsert_server(&observed).unwrap(), created.id);
+    let saved = store.server_by_id(created.id).unwrap().unwrap().server;
+    assert_eq!(saved.name, "Observed Server");
+    assert_eq!(saved.users, 83);
 }
 
 fn server(address: &str) -> MetadataServer {
@@ -568,4 +739,35 @@ fn late_page_uses_indexed_seek_with_a_large_deleted_cohort() {
         statement.get_status(rusqlite::StatementStatus::VmStep) < 10_000,
         "{plan:?}"
     );
+}
+
+#[test]
+fn document_import_write_failure_rolls_back_the_accepted_set() {
+    let store = MetadataStore::in_memory().unwrap();
+    store.connection().unwrap().execute_batch(
+        "CREATE TRIGGER fail_second_import BEFORE INSERT ON servers WHEN NEW.address='second.example' BEGIN SELECT RAISE(ABORT,'injected second-row failure'); END;"
+    ).unwrap();
+    let entries = ["first.example", "second.example"].map(|address| MetadataServerImport {
+        address: address.into(),
+        port: 4661,
+        name: None,
+    });
+    assert!(store.import_server_resources(entries).is_err());
+    assert!(
+        store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+    let status: String = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM discovery_initialization WHERE domain='servers'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
 }

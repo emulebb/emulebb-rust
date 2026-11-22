@@ -724,13 +724,18 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     })
     .await
     .unwrap();
-    core.add_server(emulebb_core::ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: "192.0.2.20".to_string(),
         port: 4661,
+        priority: "normal".into(),
+        static_server: true,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some("snapshot-server".to_string()),
-        priority: None,
-        static_server: Some(true),
-        connect: None,
     })
     .await
     .unwrap();
@@ -760,7 +765,7 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     assert_eq!(data["app"]["name"], "eMuleBB");
     assert_eq!(data["status"]["lifecycle"]["state"], "running");
     assert_eq!(data["downloads"], json!({"unfinished":0,"completed":0}));
-    assert_eq!(data["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(data["status"]["servers"]["serverCount"], 1);
     assert_eq!(data["uploads"].as_array().unwrap().len(), 0);
     assert_eq!(data["uploadQueue"].as_array().unwrap().len(), 0);
     assert!(data["kad"].is_object());

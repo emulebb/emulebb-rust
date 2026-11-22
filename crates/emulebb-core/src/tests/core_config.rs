@@ -786,7 +786,12 @@ async fn rejected_discovery_url_documents_leave_servers_and_nodes_bytes_unchange
             Reply::raw(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n")
         } else { Reply::body(b"malformed discovery bytes") }).collect();
         let source = server(replies).await;
-        assert!(!core.import_server_met_url(&source.url).await.unwrap());
+        let result = core.import_server_met_url(&source.url).await;
+        if oversized {
+            assert!(matches!(result, Ok(false)));
+        } else {
+            assert!(result.is_err());
+        }
         assert!(!matches!(
             core.import_kad_nodes_url(&source.url).await,
             Ok(true)
@@ -943,13 +948,18 @@ async fn final_kad_capture_survives_timed_out_network_cleanup() {
     // Server bootstrap intentionally rejects an empty list. An operator add
     // initializes that domain through the normal API without connecting.
     let server_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    core.add_server(ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: Ipv4Addr::LOCALHOST.to_string(),
         port: server_listener.local_addr().unwrap().port(),
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some("Local fixture".into()),
-        priority: None,
-        static_server: None,
-        connect: Some(false),
     })
     .await
     .unwrap();

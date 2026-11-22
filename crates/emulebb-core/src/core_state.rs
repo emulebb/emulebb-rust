@@ -7,6 +7,26 @@ use std::{
 
 const MAX_KAD_AICH_VOTES_PER_RESULT: usize = 64;
 
+/// Protocol endpoint identity follows SQLite's ASCII case-insensitive address
+/// rule. Display spelling remains on the server record, outside this set.
+#[derive(Debug, Default)]
+pub(crate) struct ServerEndpointSet(HashSet<String>);
+
+impl ServerEndpointSet {
+    pub(crate) fn insert(&mut self, mut endpoint: String) -> bool {
+        endpoint.make_ascii_lowercase();
+        self.0.insert(endpoint)
+    }
+
+    pub(crate) fn contains(&self, endpoint: &str) -> bool {
+        self.0.contains(&endpoint.to_ascii_lowercase())
+    }
+
+    pub(crate) fn remove(&mut self, endpoint: &str) -> bool {
+        self.0.remove(&endpoint.to_ascii_lowercase())
+    }
+}
+
 /// Live Kad AICH evidence for one search result. The first candidate from each
 /// actual responder wins, matching current aMule and preventing a responder
 /// from multiplying or changing its vote. This state is deliberately absent
@@ -160,7 +180,7 @@ use tokio_util::sync::CancellationToken;
 use emulebb_metadata::NativeFileFingerprint;
 
 use crate::{
-    Category, Friend, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot, Transfer,
+    Category, Friend, Search, ServerInfo, SharedDirectoryRoot, Transfer,
     download_source_registry::DownloadSourceRegistry, ed2k_dead_source_list::DeadSourceList,
 };
 
@@ -189,8 +209,8 @@ pub(crate) struct CoreState {
     pub(crate) categories: BTreeMap<i64, Category>,
     pub(crate) friends: BTreeMap<String, Friend>,
     pub(crate) servers: HashMap<String, ServerInfo>,
-    pub(crate) server_overrides: HashMap<String, ServerUpdate>,
-    pub(crate) disabled_servers: HashSet<String>,
+    pub(crate) server_control_overrides: HashMap<String, emulebb_metadata::MetadataServerUpdate>,
+    pub(crate) disabled_servers: ServerEndpointSet,
     pub(crate) server_fail_counts: HashMap<String, u32>,
 
     pub(crate) active_download_peer_endpoints: HashMap<(Ipv4Addr, u16), emulebb_metadata::JobToken>,

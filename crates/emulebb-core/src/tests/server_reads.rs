@@ -14,13 +14,18 @@ fn server_core(label: &str) -> (EmulebbCore, std::path::PathBuf) {
 }
 
 async fn add(core: &EmulebbCore, address: &str, name: &str) {
-    core.add_server(ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: address.into(),
         port: 4661,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some(name.into()),
-        priority: None,
-        static_server: None,
-        connect: Some(false),
     })
     .await
     .unwrap();
@@ -32,6 +37,17 @@ async fn server_catalog_reads_use_persisted_ids_and_retain_owned_conversion() {
     add(&core, "192.0.2.1", "Sample Server").await;
     add(&core, "192.0.2.2", "Second Server").await;
     core.state.lock().await.servers.clear();
+    let summary = core.server_connection_summary().await.unwrap();
+    assert_eq!(summary.total, 2);
+    assert!(summary.current.is_none());
+    assert!(!summary.connecting);
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .transient_bytes,
+        2 * SERVER_READ_MAX_BYTES
+    );
+    drop(summary);
     let resident = core
         .ed2k_transfers
         .download_resource_snapshot()
@@ -116,7 +132,7 @@ async fn server_catalog_reads_use_persisted_ids_and_retain_owned_conversion() {
 
 #[tokio::test]
 async fn server_reads_preserve_validation_and_oversized_row_errors() {
-    let (core, _) = server_core("server-admitted-row-errors");
+    let (core, database) = server_core("server-admitted-row-errors");
     add(&core, "192.0.2.1", "Sample Server").await;
     let page = core.server_page(Default::default()).await.unwrap();
     let id = page.servers[0].id;
@@ -138,7 +154,14 @@ async fn server_reads_preserve_validation_and_oversized_row_errors() {
         invalid.downcast_ref::<MetadataServerReadError>(),
         Some(&MetadataServerReadError::InvalidQuery)
     );
-    add(&core, "192.0.2.1", &"x".repeat(SERVER_READ_MAX_BYTES)).await;
+    // Inject a stored-row fault outside the admitted mutation boundary.
+    rusqlite::Connection::open(database)
+        .unwrap()
+        .execute(
+            "UPDATE servers SET name=?1 WHERE id=?2",
+            rusqlite::params!["x".repeat(SERVER_READ_MAX_BYTES), id],
+        )
+        .unwrap();
     let error = core.server_by_id(id).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<PersistenceError>(),

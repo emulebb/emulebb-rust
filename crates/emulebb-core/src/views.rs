@@ -13,8 +13,8 @@ use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
-    DownloadFileNameObservation, DownloadSource, LibraryFileUpdate, NetworkStatus, ServerCreate,
-    ServerInfo, ServerUpdate, Transfer,
+    DownloadFileNameObservation, DownloadSource, LibraryFileUpdate, NetworkStatus, ServerInfo,
+    Transfer,
 };
 
 // MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
@@ -398,13 +398,13 @@ pub(crate) fn server_info_from_parts(
     }
 }
 
-pub(crate) fn apply_server_update(server: &mut ServerInfo, update: Option<&ServerUpdate>) {
+pub(crate) fn apply_server_update(
+    server: &mut ServerInfo,
+    update: Option<&emulebb_metadata::MetadataServerUpdate>,
+) {
     let Some(update) = update else {
         return;
     };
-    if let Some(name) = update.name.as_ref() {
-        server.name = name.clone();
-    }
     if let Some(priority) = update.priority.as_ref() {
         server.priority = priority.clone();
     }
@@ -512,27 +512,11 @@ pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLi
     }
 }
 
-pub(crate) fn validate_server_update(update: &ServerUpdate) -> Result<()> {
-    if let Some(priority) = update.priority.as_deref() {
-        let _ = validate_server_priority(priority)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_server_priority(priority: &str) -> Result<&str> {
     match priority {
         "low" | "normal" | "high" => Ok(priority),
         _ => Err(anyhow::anyhow!("priority must be one of low, normal, high")),
     }
-}
-
-pub(crate) fn server_endpoint_from_create(request: &ServerCreate) -> Result<String> {
-    ensure!(!request.address.trim().is_empty(), "address is required");
-    ensure!(request.port != 0, "port must be in the range 1..65535");
-    if let Some(priority) = request.priority.as_deref() {
-        let _ = validate_server_priority(priority)?;
-    }
-    Ok(format!("{}:{}", request.address, request.port))
 }
 
 #[cfg(test)]

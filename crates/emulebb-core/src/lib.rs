@@ -39,11 +39,10 @@ use emulebb_ed2k::{
         Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
         SearchCriteria, ed2k_server_control_channel, ed2k_server_list_event_channel,
         emit_server_source_result_applied, emit_server_udp_source_result_applied,
-        new_ed2k_server_search_channel, parse_server_met,
-        publish_shared_catalog_via_background_session, request_callback_via_background_session,
-        request_callback_via_udp_server, run_ed2k_server_loop, search_keyword_udp_servers,
-        search_keyword_via_background_session, search_source_batch_via_background_session,
-        search_source_udp_server_batches,
+        new_ed2k_server_search_channel, publish_shared_catalog_via_background_session,
+        request_callback_via_background_session, request_callback_via_udp_server,
+        run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
+        search_source_batch_via_background_session, search_source_udp_server_batches,
     },
     ed2k_tcp::{
         Ed2kCallbackSessionHandle, Ed2kEstablishedPeerContext, Ed2kHelloIdentity,
@@ -216,6 +215,7 @@ mod search_state;
 mod server_api;
 mod server_list;
 mod server_read;
+pub use server_read::{ServerConnectionSummary, ServerResource, ServerResourcePage};
 mod shared_catalog_publisher;
 mod shared_dir_monitor;
 mod shared_directories;
@@ -346,18 +346,17 @@ pub use rest_model::{
     DownloadUpdate, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus,
     IpFilterStatus, KadNode, LibraryFileUpdate, LocalShare, LocalShareCreate, NetworkStatus,
     NullableStringField, Search, SearchCreate, SearchProgress, SearchResult,
-    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec,
-    ServerCreate, ServerInfo, ServerUpdate, SharedFileKadKeywordPublish,
-    SharedFilePublicationStatus, SharedFilePublishLane, SharedFilePublishState, Status, Transfer,
-    TransferComment, TransferStats, TransferThroughputStats, Upload, UploadPolicyMetrics,
-    UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec, ServerInfo,
+    SharedFileKadKeywordPublish, SharedFilePublicationStatus, SharedFilePublishLane,
+    SharedFilePublishState, Status, Transfer, TransferComment, TransferStats,
+    TransferThroughputStats, Upload, UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig,
+    VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
-    ServerLiveDetails, apply_download_source_stats, apply_server_update,
-    download_source_from_record, format_ed2k_file_link, kad_status_from_running,
-    preserve_transfer_public_metadata, server_endpoint_from_create, server_info_from_parts,
-    source_friend_name, transfer_from_manifest, validate_server_priority, validate_server_update,
-    validate_source_client_id, validate_url_import,
+    ServerLiveDetails, apply_download_source_stats, download_source_from_record,
+    format_ed2k_file_link, kad_status_from_running, preserve_transfer_public_metadata,
+    server_info_from_parts, source_friend_name, transfer_from_manifest, validate_source_client_id,
+    validate_url_import,
 };
 
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;

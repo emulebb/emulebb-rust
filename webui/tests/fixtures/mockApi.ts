@@ -86,7 +86,6 @@ const snapshot = {
   },
   downloads: { unfinished: 1, completed: 0 },
   searches: [],
-  servers: [{ endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, auxiliaryPorts: [4662, 4663] }],
   kad: { enabled: true, connected: true, firewalled: false },
   uploads: [uploadFixture()],
   uploadQueue: [uploadFixture({ id: "12345678-1234-4234-8234-123456789abd", address: "192.0.2.11",
@@ -149,6 +148,13 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       await route.fulfill({ status: valid ? 200 : 400, contentType: "application/json", body: JSON.stringify(valid
         ? { schema: "emulebb.diagnostic-bundle.v8", capturedAt: 1794657600, summary: { issueCount: 0 } }
         : { error: { code: "BAD_REQUEST", message: "A bounded maxBytes value is required" } }) });
+      return;
+    }
+    if (request.method() === "GET" && path === "servers") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        data: [{ id: "1", endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, auxiliaryPorts: [4662, 4663] }],
+        meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
+      }) });
       return;
     }
     if (request.method() === "GET" && path === "library/roots") {

@@ -762,20 +762,28 @@ async fn retained_kad_replies_apply_shared_byte_backpressure() {
 async fn concurrent_ingress_is_reserved_before_fetch_and_released_on_drop() {
     let (_, _, owner) = setup();
     let mut tickets = Vec::new();
-    for _ in 0..(MAX_BYTES / KAD_INGRESS_PREPARATION_BYTES) {
-        tickets.push(owner.reserve_kad_ingress().unwrap());
+    for _ in 0..(MAX_BYTES / (2 * crate::NODES_DAT_MAX_BYTES)) {
+        tickets.push(
+            owner
+                .reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)
+                .unwrap(),
+        );
     }
     assert_eq!(usage(&owner), (0, MAX_BYTES));
     assert!(matches!(
-        owner.reserve_kad_ingress(),
+        owner.reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES),
         Err(PersistenceError::Busy)
     ));
     drop(tickets.pop());
-    let ticket = owner.reserve_kad_ingress().unwrap();
+    let ticket = owner
+        .reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)
+        .unwrap();
     drop(ticket);
     drop(tickets);
     assert_eq!(usage(&owner), (0, 0));
-    let mut ticket = owner.reserve_kad_ingress().unwrap();
+    let mut ticket = owner
+        .reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)
+        .unwrap();
     let mut bytes = 1u32.to_le_bytes().to_vec();
     bytes.extend_from_slice(&[4; 16]);
     bytes.extend_from_slice(&u32::from_be_bytes([192, 0, 2, 4]).to_le_bytes());
@@ -824,7 +832,9 @@ async fn cancelled_queued_kad_initialization_survives_last_owner_drop() {
         profile_state::load_core_state(&store, vec![]).unwrap(),
     ));
     let owner = PersistenceOwner::start(store.clone(), Arc::clone(&state)).unwrap();
-    let mut ticket = owner.reserve_kad_ingress().unwrap();
+    let mut ticket = owner
+        .reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)
+        .unwrap();
     ticket.finish_preparation().unwrap();
     let mut bytes = 1u32.to_le_bytes().to_vec();
     bytes.extend_from_slice(&[17; 16]);

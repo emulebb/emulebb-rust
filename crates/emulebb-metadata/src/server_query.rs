@@ -38,6 +38,13 @@ pub struct MetadataServerPage {
     pub total: Option<u64>,
 }
 
+/// Catalog summary reads at most one rich row, independent of catalog size.
+#[derive(Debug)]
+pub struct MetadataServerSummary {
+    pub total: u64,
+    pub current: Option<MetadataServerRecord>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataServerReadError {
     InvalidQuery,
@@ -79,6 +86,32 @@ fn row_bytes(row: &Row<'_>) -> Result<usize> {
 }
 
 impl MetadataStore {
+    pub fn server_summary(&self, endpoint: Option<(&str, u16)>) -> Result<MetadataServerSummary> {
+        let mut conn = self.connection()?;
+        let transaction = conn.transaction()?;
+        let total = u64::try_from(transaction.query_row(
+            "SELECT count(*) FROM servers WHERE deleted_at_s IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?)?;
+        let current = if let Some((address, port)) = endpoint {
+            let id = transaction.query_row(
+                "SELECT id FROM servers WHERE address=?1 AND port=?2 AND deleted_at_s IS NULL",
+                params![address, port],
+                |row| row.get::<_, i64>(0),
+            );
+            match id {
+                Ok(id) => server_by_id_connection(&transaction, id)?,
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            None
+        };
+        transaction.commit()?;
+        Ok(MetadataServerSummary { total, current })
+    }
+
     /// Ascending immutable-ID traversal. Disabled servers remain visible;
     /// deleted boundaries need no lookup and never invalidate continuation.
     pub fn server_page(&self, query: MetadataServerQuery) -> Result<MetadataServerPage> {
@@ -141,24 +174,32 @@ impl MetadataStore {
     pub fn server_by_id(&self, id: i64) -> Result<Option<MetadataServerRecord>> {
         anyhow::ensure!(id > 0, MetadataServerReadError::InvalidQuery);
         let conn = self.connection()?;
-        let sql = format!(
-            "SELECT id,{TEXT_BYTES},{SERVER_COLUMNS} FROM servers
-            WHERE id=?1 AND deleted_at_s IS NULL"
-        );
-        let mut statement = conn.prepare_cached(&sql)?;
-        let mut rows = statement.query([id])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        anyhow::ensure!(
-            row_bytes(row)?.saturating_add(16 * 1024) <= SERVER_READ_MAX_BYTES,
-            MetadataServerReadError::RowTooLarge
-        );
-        Ok(Some(MetadataServerRecord {
-            id: row.get(0)?,
-            server: server_from_row(row, 2)?,
-        }))
+        server_by_id_connection(&conn, id)
     }
+}
+
+/// Borrow an existing transaction for bounded post-write projection validation.
+pub(super) fn server_by_id_connection(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> Result<Option<MetadataServerRecord>> {
+    let sql = format!(
+        "SELECT id,{TEXT_BYTES},{SERVER_COLUMNS} FROM servers
+            WHERE id=?1 AND deleted_at_s IS NULL"
+    );
+    let mut statement = conn.prepare_cached(&sql)?;
+    let mut rows = statement.query([id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        row_bytes(row)?.saturating_add(16 * 1024) <= SERVER_READ_MAX_BYTES,
+        MetadataServerReadError::RowTooLarge
+    );
+    Ok(Some(MetadataServerRecord {
+        id: row.get(0)?,
+        server: server_from_row(row, 2)?,
+    }))
 }
 
 pub(super) fn server_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result<MetadataServer> {

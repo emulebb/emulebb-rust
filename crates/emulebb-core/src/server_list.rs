@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use emulebb_ed2k::config::{Ed2kRuntimeConfig, Ed2kServerEntry};
@@ -31,7 +31,7 @@ impl EmulebbCore {
                 );
                 server.priority = entry.normalized_priority().to_string();
                 server.enabled = !state.disabled_servers.contains(&endpoint);
-                apply_server_update(&mut server, state.server_overrides.get(&endpoint));
+                apply_server_update(&mut server, state.server_control_overrides.get(&endpoint));
                 server_map.insert(endpoint, server);
             }
             for endpoint in &network.ed2k.server_endpoints {
@@ -49,7 +49,7 @@ impl EmulebbCore {
                         connection.1.as_deref(),
                     );
                     server.enabled = !state.disabled_servers.contains(endpoint);
-                    apply_server_update(&mut server, state.server_overrides.get(endpoint));
+                    apply_server_update(&mut server, state.server_control_overrides.get(endpoint));
                     server_map.insert(endpoint.clone(), server);
                 }
             }
@@ -57,7 +57,7 @@ impl EmulebbCore {
         for (endpoint, server) in &state.servers {
             let mut server = server.clone();
             server.enabled = !state.disabled_servers.contains(endpoint);
-            apply_server_update(&mut server, state.server_overrides.get(endpoint));
+            apply_server_update(&mut server, state.server_control_overrides.get(endpoint));
             apply_server_connection_flags(
                 &mut server,
                 connection.0.as_deref(),
@@ -137,9 +137,10 @@ impl ServerPlanPublisher {
         let Some(runtime) = runtime_guard.as_ref() else {
             return Ok(());
         };
-        let current = runtime.server_connect_plan.borrow().clone();
-        let next = Ed2kServerConnectPlan::new(config, current.mode().clone());
-        if next != current {
+        let mode = runtime.server_connect_plan.borrow().mode().clone();
+        let next = Ed2kServerConnectPlan::new(config, mode);
+        let unchanged = *runtime.server_connect_plan.borrow() == next;
+        if !unchanged {
             runtime.server_connect_plan.send_replace(next);
         }
         Ok(())
@@ -166,6 +167,14 @@ async fn effective_config(
     config
         .server_endpoints
         .retain(|endpoint| !state.disabled_servers.contains(endpoint));
+    // Index only endpoint identity, not rich server metadata. Repeated linear
+    // searches would make each directory publication quadratic in catalog size.
+    let mut entry_indices = HashMap::with_capacity(config.server_entries.len());
+    for (index, entry) in config.server_entries.iter().enumerate() {
+        entry_indices
+            .entry(format!("{}:{}", entry.host, entry.port).to_ascii_lowercase())
+            .or_insert(index);
+    }
     for (endpoint, server) in &state.servers {
         if state.disabled_servers.contains(endpoint) {
             continue;
@@ -187,11 +196,9 @@ async fn effective_config(
             priority: server.priority.clone(),
             static_server: server.static_server,
         };
-        if let Some(existing) = config
-            .server_entries
-            .iter_mut()
-            .find(|entry| format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint))
-        {
+        let identity = endpoint.to_ascii_lowercase();
+        if let Some(index) = entry_indices.get(&identity) {
+            let existing = &mut config.server_entries[*index];
             // Persisted live metadata supersedes stale static config for the
             // same endpoint while preserving its configured host spelling.
             let host = existing.host.clone();
@@ -201,6 +208,7 @@ async fn effective_config(
             // Carry the full persisted record even when `server_endpoints`
             // already names it: configured_server_entries uses this richer
             // record for key/port selection and offer-file limits.
+            entry_indices.insert(identity, config.server_entries.len());
             config.server_entries.push(persisted);
         }
     }

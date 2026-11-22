@@ -105,10 +105,12 @@ mod profile_ownership;
 mod profile_store;
 mod server_mutation;
 mod server_query;
-pub use server_mutation::{MetadataServerUpdate, ServerEndpointConflict};
+pub use server_mutation::{
+    MetadataServerCreate, MetadataServerImport, MetadataServerUpdate, ServerEndpointConflict,
+};
 pub use server_query::{
     MetadataServerPage, MetadataServerQuery, MetadataServerReadError, MetadataServerRecord,
-    SERVER_READ_MAX_BYTES,
+    MetadataServerSummary, SERVER_READ_MAX_BYTES,
 };
 mod schema;
 mod schema_validation;

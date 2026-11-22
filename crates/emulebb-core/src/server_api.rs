@@ -2,95 +2,63 @@ use super::*;
 
 impl EmulebbCore {
     pub async fn server(&self, endpoint: &str) -> Option<ServerInfo> {
-        self.servers()
-            .await
-            .into_iter()
-            .find(|server| server.endpoint.eq_ignore_ascii_case(endpoint))
-    }
-
-    pub async fn add_server(&self, request: ServerCreate) -> Result<ServerInfo> {
-        let _server_mutation = self.server_mutation_gate.lock().await;
-        let endpoint = server_endpoint_from_create(&request)?;
+        let (address, port) = parse_server_endpoint(endpoint).ok()?;
         let connection = self.ed2k_server_connection_view().await;
-        let mut server = server_info_from_parts(
-            &request.address,
-            request.port,
-            request.name.as_deref(),
-            None,
-            request.static_server.unwrap_or(false),
+        let mut server = {
+            let state = self.state.lock().await;
+            // Common feedback reads clone one row, never the whole directory.
+            let cached = state.servers.get(endpoint).or_else(|| {
+                state
+                    .servers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(endpoint))
+                    .map(|(_, row)| row)
+            });
+            let mut server = if let Some(cached) = cached {
+                cached.clone()
+            } else {
+                let network = self.ed2k_network.as_ref()?;
+                let entry =
+                    network.ed2k.server_entries.iter().find(|entry| {
+                        entry.port == port && entry.host.eq_ignore_ascii_case(&address)
+                    });
+                if let Some(entry) = entry {
+                    let mut server = server_info_from_parts(
+                        &entry.host,
+                        port,
+                        entry.name.as_deref(),
+                        entry.description.as_deref(),
+                        entry.static_server,
+                        None,
+                        None,
+                    );
+                    server.priority = entry.normalized_priority().to_string();
+                    server
+                } else {
+                    let configured = network
+                        .ed2k
+                        .server_endpoints
+                        .iter()
+                        .find(|configured| configured.eq_ignore_ascii_case(endpoint))?;
+                    let (address, port) = parse_server_endpoint(configured).ok()?;
+                    server_info_from_parts(&address, port, None, None, true, None, None)
+                }
+            };
+            server.enabled = !state.disabled_servers.contains(&server.endpoint);
+            let update = state.server_control_overrides.get(&server.endpoint);
+            crate::views::apply_server_update(&mut server, update);
+            server
+        };
+        crate::views::apply_server_connection_flags(
+            &mut server,
             connection.0.as_deref(),
             connection.1.as_deref(),
         );
-        if let Some(priority) = request.priority.as_deref() {
-            server.priority = validate_server_priority(priority)?.to_string();
+        if server.current {
+            crate::views::apply_server_live_details(&mut server, &connection.2);
         }
-        server.enabled = true;
-        profile_state::persist_server(&self.metadata_store, &server, true)?;
-        let mut state = self.state.lock().await;
-        state.disabled_servers.remove(&endpoint);
-        state.servers.insert(endpoint, server.clone());
-        drop(state);
-        self.refresh_ed2k_server_connect_plan().await?;
-        drop(_server_mutation);
-        if request.connect.unwrap_or(false) {
-            let _ = self.connect_ed2k_server(&server.endpoint).await?;
-        }
-        Ok(server)
-    }
-
-    pub async fn update_server(
-        &self,
-        endpoint: &str,
-        request: ServerUpdate,
-    ) -> Result<Option<ServerInfo>> {
-        let _server_mutation = self.server_mutation_gate.lock().await;
-        let Some(mut server) = self.server(endpoint).await else {
-            return Ok(None);
-        };
-        validate_server_update(&request)?;
-        apply_server_update(&mut server, Some(&request));
-        let mut state = self.state.lock().await;
-        let enabled = request
-            .enabled
-            .unwrap_or_else(|| !state.disabled_servers.contains(&server.endpoint));
-        server.enabled = enabled;
-        profile_state::persist_server(&self.metadata_store, &server, enabled)?;
-        if enabled {
-            state.disabled_servers.remove(&server.endpoint);
-        } else {
-            state.disabled_servers.insert(server.endpoint.clone());
-        }
-        state
-            .servers
-            .insert(server.endpoint.clone(), server.clone());
-        state
-            .server_overrides
-            .insert(server.endpoint.clone(), request);
-        drop(state);
-        // WHY: server-list edits must not tear down Kad, peer transfers, or the
-        // shared ED2K runtime. Publishing the complete plan lets the server
-        // scheduler cancel an ineligible current/pending attempt and fail over.
-        self.refresh_ed2k_server_connect_plan().await?;
-        Ok(Some(server))
-    }
-
-    pub async fn remove_server(&self, endpoint: &str) -> Result<Option<ServerInfo>> {
-        let _server_mutation = self.server_mutation_gate.lock().await;
-        let Some(mut server) = self.server(endpoint).await else {
-            return Ok(None);
-        };
-        server.enabled = false;
-        profile_state::persist_server(&self.metadata_store, &server, false)?;
-        {
-            let mut state = self.state.lock().await;
-            state
-                .servers
-                .insert(server.endpoint.clone(), server.clone());
-            state.server_overrides.remove(&server.endpoint);
-            state.disabled_servers.insert(server.endpoint.clone());
-        }
-        self.refresh_ed2k_server_connect_plan().await?;
-        Ok(Some(server))
+        self.apply_hostname_to_server(&mut server);
+        Some(server)
     }
 
     /// Merge servers discovered from an `OP_SERVERLIST` reply into the server
@@ -114,16 +82,6 @@ impl EmulebbCore {
         {
             return;
         }
-        let existing: HashSet<String> = self
-            .servers()
-            .await
-            .into_iter()
-            .map(|server| server.endpoint)
-            .collect();
-        let disabled: HashSet<String> = {
-            let state = self.state.lock().await;
-            state.disabled_servers.clone()
-        };
         let connection = self.ed2k_server_connection_view().await;
         let mut added = 0usize;
         for (ip, port) in servers {
@@ -131,7 +89,8 @@ impl EmulebbCore {
                 continue;
             }
             let endpoint = format!("{ip}:{port}");
-            if existing.contains(&endpoint) || disabled.contains(&endpoint) {
+            let disabled = self.state.lock().await.disabled_servers.contains(&endpoint);
+            if disabled || self.server(&endpoint).await.is_some() {
                 continue;
             }
             let mut server = server_info_from_parts(
@@ -164,34 +123,28 @@ impl EmulebbCore {
     /// Resolve a feedback-event endpoint (which may be the configured host:port
     /// or the resolved ip:port) to the matching stored server endpoint key.
     async fn resolve_server_event_endpoint(&self, endpoint: &str) -> Option<String> {
-        let mut servers = self.servers().await;
-        {
+        if let Some(server) = self.server(endpoint).await {
             let state = self.state.lock().await;
             // WHY: delayed feedback from a removed runtime endpoint must not
             // recreate a resource from the startup connection configuration.
-            servers.retain(|server| {
-                !state.disabled_servers.contains(&server.endpoint)
-                    || state.servers.contains_key(&server.endpoint)
-            });
-        }
-        // Exact endpoint match first.
-        if let Some(server) = servers
-            .iter()
-            .find(|server| server.endpoint.eq_ignore_ascii_case(endpoint))
-        {
-            return Some(server.endpoint.clone());
+            return (!state.disabled_servers.contains(&server.endpoint)
+                || state.servers.contains_key(&server.endpoint))
+            .then_some(server.endpoint);
         }
         // Fall back to matching the resolved host:port against each server's
         // configured address (handles a DNS-named server whose event carries the
         // resolved IP, or vice versa, when the literal forms differ).
         let (event_host, event_port) = parse_server_endpoint(endpoint).ok()?;
-        servers
-            .into_iter()
-            .find(|server| {
+        let state = self.state.lock().await;
+        state
+            .servers
+            .values()
+            .filter(|server| {
                 server.port == event_port
                     && (server.address == event_host || server.ip == event_host)
             })
-            .map(|server| server.endpoint)
+            .min_by(|left, right| left.endpoint.cmp(&right.endpoint))
+            .map(|server| server.endpoint.clone())
     }
 
     /// Apply classified failure policy before touching durable server health.
@@ -268,7 +221,7 @@ impl EmulebbCore {
             let _ = profile_state::persist_server(&self.metadata_store, &server_info, false);
             let mut state = self.state.lock().await;
             state.servers.insert(stored_endpoint.clone(), server_info);
-            state.server_overrides.remove(&stored_endpoint);
+            state.server_control_overrides.remove(&stored_endpoint);
             state.server_fail_counts.remove(&stored_endpoint);
             state.disabled_servers.insert(stored_endpoint.clone());
             drop(state);

@@ -2,7 +2,7 @@
 
 use std::{fs, net::SocketAddr, time::Duration};
 
-use emulebb_core::{EmulebbCore, ServerCreate};
+use emulebb_core::EmulebbCore;
 use emulebb_daemon::{DaemonProfile, RestBootstrapSettings, ShutdownRequest, run_hosted};
 use emulebb_index::FileIndex;
 use emulebb_metadata::{DiscoveryDomain, DiscoveryInitializationStatus, MetadataStore};
@@ -107,13 +107,18 @@ async fn assert_running_shutdown(stop: Stop) {
         profile.transfer_root(),
     )
     .unwrap();
-    core.add_server(ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: "127.0.0.1".to_owned(),
         port: 9,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some("Local fixture".to_owned()),
-        priority: None,
-        static_server: None,
-        connect: Some(false),
     })
     .await
     .unwrap();
