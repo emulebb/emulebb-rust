@@ -2,39 +2,26 @@ use super::*;
 use crate::{LibraryTagRequest, persistence_owner::tests::usage};
 use emulebb_index::FileIndex;
 
-fn record() -> MetadataServer {
-    MetadataServer {
+fn record() -> MetadataServerCreate {
+    MetadataServerCreate {
         address: "seed.example".into(),
         port: 4661,
-        name: "Sample Server".into(),
-        description: String::new(),
-        dynamic_host: String::new(),
-        auxiliary_ports: vec![],
-        server_priority: "normal".into(),
+        priority: "normal".into(),
         static_server: false,
         enabled: true,
-        failed_count: 7,
-        ping_ms: Some(42),
-        users: 83,
-        files: 12,
-        max_users: 0,
-        low_id_users: 0,
-        soft_files: 0,
-        hard_files: 0,
-        version: String::new(),
-        obfuscation_tcp_port: None,
-        obfuscation_udp_port: None,
-        udp_flags: None,
-        udp_key: None,
-        udp_key_ip: None,
     }
 }
 
 async fn disconnected_mutation(action: u8) {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let server = record();
-    let endpoint = server.endpoint();
+    let mut server = record();
+    if action == 3 {
+        server.enabled = false;
+        server.static_server = true;
+        server.priority = "high".into();
+    }
+    let endpoint = format!("{}:{}", server.address, server.port);
     let id = if action == 0 {
         0
     } else {
@@ -55,13 +42,21 @@ async fn disconnected_mutation(action: u8) {
                     core.update_server_resource(
                         id,
                         &MetadataServerUpdate {
-                            name: Some("Edited Server".into()),
+                            priority: Some("high".into()),
                             enabled: Some(false),
                             ..Default::default()
                         },
                     )
                     .await
                 }
+                3 => core
+                    .import_server_resource(&MetadataServerImport {
+                        address: server.address,
+                        port: server.port,
+                        name: Some("Observed Server".into()),
+                    })
+                    .await
+                    .map(|_| true),
                 _ => core.delete_server_resource(id).await,
             }
         })
@@ -94,6 +89,24 @@ async fn disconnected_mutation(action: u8) {
             assert!(cached.enabled);
             cached.failed_count = 99;
         }
+        3 => {
+            assert_eq!(
+                core.metadata_store
+                    .server_by_id(id)
+                    .unwrap()
+                    .unwrap()
+                    .server
+                    .name,
+                "Observed Server"
+            );
+            core.state
+                .lock()
+                .await
+                .servers
+                .get_mut(&endpoint)
+                .unwrap()
+                .failed_count = 99;
+        }
         _ => assert!(core.metadata_store.server_by_id(id).unwrap().is_none()),
     }
     caller.abort();
@@ -116,7 +129,17 @@ async fn disconnected_mutation(action: u8) {
         1 => {
             let cached = state.servers.get(&endpoint).unwrap();
             assert!(!cached.enabled);
-            assert_eq!(cached.name, "Edited Server");
+            assert!(cached.name.is_empty());
+            assert_eq!(cached.priority, "high");
+            assert_eq!(cached.failed_count, 99);
+            assert!(state.disabled_servers.contains(&endpoint));
+        }
+        3 => {
+            let cached = state.servers.get(&endpoint).unwrap();
+            assert_eq!(cached.name, "Observed Server");
+            assert!(!cached.enabled);
+            assert!(cached.static_server);
+            assert_eq!(cached.priority, "high");
             assert_eq!(cached.failed_count, 99);
             assert!(state.disabled_servers.contains(&endpoint));
         }
@@ -144,6 +167,11 @@ async fn disconnected_server_deleter_finishes_cache_publication() {
 }
 
 #[tokio::test]
+async fn disconnected_server_import_preserves_controls_and_newer_health() {
+    disconnected_mutation(3).await;
+}
+
+#[tokio::test]
 async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
     let uri = format!(
         "file:server-failure-{}?mode=memory&cache=shared",
@@ -160,7 +188,7 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
     let id = core.create_server_resource(&server).await.unwrap();
     let mut duplicate = server.clone();
     duplicate.address.make_ascii_uppercase();
-    duplicate.name = "Must Not Replace".into();
+    duplicate.priority = "high".into();
     assert!(
         core.create_server_resource(&duplicate)
             .await
@@ -175,7 +203,7 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
         core.update_server_resource(
             id,
             &MetadataServerUpdate {
-                name: Some("Must Not Publish".into()),
+                priority: Some("high".into()),
                 ..Default::default()
             }
         )
@@ -188,10 +216,10 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
             .lock()
             .await
             .servers
-            .get(&server.endpoint())
+            .get(&format!("{}:{}", server.address, server.port))
             .unwrap()
-            .name,
-        server.name
+            .priority,
+        "normal"
     );
     assert_eq!(
         core.metadata_store
@@ -199,8 +227,8 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
             .unwrap()
             .unwrap()
             .server
-            .name,
-        server.name
+            .server_priority,
+        "normal"
     );
     core.persistence_owner.check_coherent_state().unwrap();
 }
@@ -210,7 +238,7 @@ async fn oversized_server_create_is_refused_before_sql_capture() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let mut server = record();
     for size in [emulebb_metadata::SERVER_READ_MAX_BYTES / 4, MAX_BYTES] {
-        server.name = "x".repeat(size);
+        server.address = "x".repeat(size);
         assert!(matches!(
             core.create_server_resource(&server)
                 .await
@@ -234,52 +262,11 @@ async fn oversized_server_create_is_refused_before_sql_capture() {
 }
 
 #[tokio::test]
-async fn oversized_server_edit_is_refused_without_committing_unreadable_content() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let server = record();
-    let id = core.create_server_resource(&server).await.unwrap();
-    let error = core
-        .update_server_resource(
-            id,
-            &MetadataServerUpdate {
-                name: Some("x".repeat(emulebb_metadata::SERVER_READ_MAX_BYTES / 4)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<PersistenceError>(),
-        Some(PersistenceError::TooLarge)
-    ));
-    assert_eq!(
-        core.metadata_store
-            .server_by_id(id)
-            .unwrap()
-            .unwrap()
-            .server
-            .name,
-        server.name
-    );
-    assert_eq!(
-        core.state
-            .lock()
-            .await
-            .servers
-            .get(&server.endpoint())
-            .unwrap()
-            .name,
-        server.name
-    );
-    core.persistence_owner.check_coherent_state().unwrap();
-}
-
-#[tokio::test]
 async fn network_feedback_waits_for_committed_server_edit_publication() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     let server = record();
-    let endpoint = server.endpoint();
+    let endpoint = format!("{}:{}", server.address, server.port);
     let id = core.create_server_resource(&server).await.unwrap();
     let owner = core
         .persistence_owner
@@ -293,7 +280,6 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
             core.update_server_resource(
                 id,
                 &MetadataServerUpdate {
-                    name: Some("Operator Name".into()),
                     priority: Some("high".into()),
                     ..Default::default()
                 },
@@ -314,7 +300,7 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
         tokio::spawn(async move {
             core.note_ed2k_server_metadata(
                 &endpoint,
-                None,
+                Some("Observed Server".into()),
                 Some("Observed description".into()),
                 None,
                 None,
@@ -339,12 +325,12 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
         .unwrap()
         .unwrap()
         .server;
-    assert_eq!(saved.name, "Operator Name");
+    assert_eq!(saved.name, "Observed Server");
     assert_eq!(saved.server_priority, "high");
     assert_eq!(saved.description, "Observed description");
     assert_eq!(
         core.state.lock().await.servers.get(&endpoint).unwrap().name,
-        "Operator Name"
+        "Observed Server"
     );
 }
 
@@ -352,7 +338,7 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
 async fn late_feedback_does_not_recreate_deleted_configured_server() {
     let root = crate::unique_runtime_dir("server-retired-feedback");
     let server = record();
-    let endpoint = server.endpoint();
+    let endpoint = format!("{}:{}", server.address, server.port);
     let mut network = crate::tests::test_network_config_with_store(
         &root,
         crate::KadLocalStoreConfig::default(),
@@ -389,4 +375,86 @@ async fn late_feedback_does_not_recreate_deleted_configured_server() {
     );
     let next = core.create_server_resource(&server).await.unwrap();
     assert!(next > id);
+}
+
+#[tokio::test]
+async fn disconnected_document_import_finishes_all_committed_rows() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(gate.clone());
+    let mut bytes = vec![0x0e];
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    for last in [1, 2] {
+        bytes.extend_from_slice(&[192, 0, 2, last]);
+        bytes.extend_from_slice(&4661u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    bytes.push(192);
+    let caller = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move { core.import_server_met_bytes(&bytes).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        core.metadata_store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .len(),
+        2
+    );
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(Arc::strong_count(&core), 1);
+    *owner.publication_gate.lock().unwrap() = None;
+    gate.release.notify_one();
+    drop(
+        core.library_tags(&LibraryTagRequest::Get("Missing".into()))
+            .await
+            .unwrap(),
+    );
+    let state = core.state.lock().await;
+    assert!(state.servers.contains_key("192.0.2.1:4661"));
+    assert!(state.servers.contains_key("192.0.2.2:4661"));
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn discovery_document_limits_and_empty_server_imports_release_admission() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    assert_eq!(crate::SERVER_MET_MAX_BYTES, 8192);
+    assert_eq!(crate::NODES_DAT_MAX_BYTES, 8192);
+    assert!(
+        core.import_server_met_bytes(&[0x0e, 0, 0, 0, 0])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no usable records")
+    );
+    assert!(matches!(
+        core.import_server_met_bytes(&vec![0; 8193])
+            .await
+            .unwrap_err()
+            .downcast_ref::<PersistenceError>(),
+        Some(PersistenceError::TooLarge)
+    ));
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    assert_eq!(usage(&owner), (0, 0));
+    assert!(
+        core.metadata_store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
 }

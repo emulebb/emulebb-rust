@@ -713,7 +713,6 @@ export type Snapshot = {
   status?: Status;
   stats?: Stats;
   downloads?: { unfinished: number; completed: number };
-  servers?: ServerItem[];
   kad?: KadStatus;
   uploads?: Upload[];
   uploadQueue?: Upload[];

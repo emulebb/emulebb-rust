@@ -27,30 +27,42 @@ fn build_identity_is_well_formed() {
 #[tokio::test]
 async fn automatic_server_selection_prefers_the_largest_enabled_population() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let mut smaller = core
-        .add_server(emulebb_core::ServerCreate {
-            address: "192.0.2.10".to_string(),
+    let smaller_id = core
+        .create_server_resource(&emulebb_metadata::MetadataServerCreate {
+            address: "192.0.2.10".into(),
             port: 4661,
-            name: Some("smaller".to_string()),
-            priority: None,
-            static_server: None,
-            connect: None,
+            priority: "normal".into(),
+            static_server: false,
+            enabled: true,
         })
         .await
         .unwrap();
+    let mut smaller = core
+        .server_resource(smaller_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .server
+        .clone();
     smaller.users = 10_000;
     smaller.files = 1_000_000;
-    let mut larger = core
-        .add_server(emulebb_core::ServerCreate {
-            address: "192.0.2.20".to_string(),
+    let larger_id = core
+        .create_server_resource(&emulebb_metadata::MetadataServerCreate {
+            address: "192.0.2.20".into(),
             port: 4661,
-            name: Some("larger".to_string()),
-            priority: None,
-            static_server: None,
-            connect: None,
+            priority: "normal".into(),
+            static_server: false,
+            enabled: true,
         })
         .await
         .unwrap();
+    let mut larger = core
+        .server_resource(larger_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .server
+        .clone();
     larger.users = 50_000;
     larger.files = 500_000;
     let mut disabled = larger.clone();

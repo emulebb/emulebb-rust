@@ -219,7 +219,8 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     // read_verified_range returning None (master serves only complete parts).
     if transfer_runtime
         .local_servable_entry(&requested)
-        .await?
+        .await
+        .context("failed to resolve upload request serving entry")?
         .is_none()
     {
         let reply = encode_file_req_ans_nofil(&requested);
@@ -303,7 +304,8 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     let verified_reader_open_start = Instant::now();
     let Some((shared, mut verified_reader)) = upload_queue
         .take_verified_reader(transfer_runtime, &requested)
-        .await?
+        .await
+        .context("failed to admit upload request reader")?
     else {
         request_diag.note_skip("noVerifiedReader");
         emit_upload_request_outcome(
@@ -447,7 +449,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                     fragment_start,
                     fragment_end,
                     read_ahead_bytes,
-                ) => result?,
+                ) => result.context("failed to read verified upload fragment")?,
             };
             request_diag.payload_read_ms = request_diag.payload_read_ms.saturating_add(
                 u64::try_from(payload_read_start.elapsed().as_millis()).unwrap_or(u64::MAX),

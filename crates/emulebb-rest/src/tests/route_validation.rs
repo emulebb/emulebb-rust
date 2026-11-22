@@ -37,7 +37,7 @@ async fn write_routes_use_canonical_json_error_envelope() {
         ("POST", "/api/v1/nat/operations/refresh"),
         ("POST", "/api/v1/vpn-guard/operations/probe"),
         ("POST", "/api/v1/servers"),
-        ("PATCH", "/api/v1/servers/local:4661"),
+        ("PATCH", "/api/v1/servers/1"),
         ("POST", "/api/v1/searches"),
         ("PATCH", "/api/v1/library/roots/1"),
         ("POST", "/api/v1/library/roots"),

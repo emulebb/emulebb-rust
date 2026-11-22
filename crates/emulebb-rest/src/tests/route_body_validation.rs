@@ -454,10 +454,6 @@ async fn server_create_body_uses_canonical_validation() {
             "port must be in the range 1..65535",
         ),
         (
-            r#"{"address":"127.0.0.1","port":4661,"name":1}"#,
-            "name must be a string when provided",
-        ),
-        (
             r#"{"address":"127.0.0.1","port":4661,"priority":1}"#,
             "priority must be a string",
         ),
@@ -470,8 +466,8 @@ async fn server_create_body_uses_canonical_validation() {
             "static must be a boolean",
         ),
         (
-            r#"{"address":"127.0.0.1","port":4661,"connect":"true"}"#,
-            "connect must be a boolean",
+            r#"{"address":"127.0.0.1","port":4661,"enabled":"true"}"#,
+            "enabled must be a boolean",
         ),
     ];
 
@@ -490,13 +486,12 @@ async fn server_create_body_uses_canonical_validation() {
 #[tokio::test]
 async fn server_patch_body_uses_canonical_validation() {
     let app = test_router();
-    let uri = "/api/v1/servers/127.0.0.1:4661";
+    let uri = "/api/v1/servers/1";
     let cases = [
         (
             r#"{}"#,
-            "server PATCH requires name, priority, static, or enabled",
+            "server PATCH requires priority, static, or enabled",
         ),
-        (r#"{"name":1}"#, "name must be a string when provided"),
         (r#"{"priority":1}"#, "priority must be a string"),
         (
             r#"{"priority":"release"}"#,

@@ -2,7 +2,47 @@
 use anyhow::{Result, ensure};
 use rusqlite::{TransactionBehavior, params};
 
-use crate::{MetadataServer, MetadataStore, store::unix_s};
+use crate::{MetadataServer, MetadataServerRecord, MetadataStore, store::unix_s};
+
+/// Explicit operator creation; reported names and telemetry arrive separately.
+#[derive(Debug, Clone)]
+pub struct MetadataServerCreate {
+    pub address: String,
+    pub port: u16,
+    pub priority: String,
+    pub static_server: bool,
+    pub enabled: bool,
+}
+
+impl MetadataServerCreate {
+    fn into_server(self) -> MetadataServer {
+        MetadataServer {
+            address: self.address,
+            port: self.port,
+            name: String::new(),
+            description: String::new(),
+            dynamic_host: String::new(),
+            auxiliary_ports: Vec::new(),
+            server_priority: self.priority,
+            static_server: self.static_server,
+            enabled: self.enabled,
+            failed_count: 0,
+            ping_ms: None,
+            users: 0,
+            files: 0,
+            max_users: 0,
+            low_id_users: 0,
+            soft_files: 0,
+            hard_files: 0,
+            version: String::new(),
+            obfuscation_tcp_port: None,
+            obfuscation_udp_port: None,
+            udp_flags: None,
+            udp_key: None,
+            udp_key_ip: None,
+        }
+    }
+}
 
 /// Explicit creation cannot modify a resource already owning this live endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,19 +55,63 @@ impl std::fmt::Display for ServerEndpointConflict {
 }
 impl std::error::Error for ServerEndpointConflict {}
 
+/// Observed server.met identity and optional reported name, without operator controls.
+#[derive(Debug, Clone)]
+pub struct MetadataServerImport {
+    pub address: String,
+    pub port: u16,
+    pub name: Option<String>,
+}
+
 /// Saved operator fields; network observations and endpoint identity are separate.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataServerUpdate {
-    pub name: Option<String>,
     pub priority: Option<String>,
     pub static_server: Option<bool>,
     pub enabled: Option<bool>,
 }
 
 impl MetadataStore {
+    /// Merge a reported name while preserving live identity, controls and health.
+    /// A deleted endpoint receives a fresh ID and initial operator defaults.
+    pub fn import_server_resource(
+        &self,
+        input: &MetadataServerImport,
+    ) -> Result<MetadataServerRecord> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = import_server_in_transaction(&transaction, input)?;
+        Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    /// Commit an accepted import set together. Callers reserve ID output and
+    /// one bounded row workspace; full rich records are never collected.
+    pub fn import_server_resources(
+        &self,
+        entries: impl IntoIterator<Item = MetadataServerImport>,
+    ) -> Result<Vec<i64>> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut ids = Vec::new();
+        for input in entries {
+            ids.push(import_server_in_transaction(&transaction, &input)?.id);
+        }
+        if !ids.is_empty() {
+            Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
+        }
+        transaction.commit()?;
+        Ok(ids)
+    }
+
     /// Create a resource without import's merge semantics. The writer lock spans
     /// duplicate detection, insertion and discovery initialization.
-    pub fn create_server_resource(&self, server: &MetadataServer) -> Result<i64> {
+    pub fn create_server_resource(
+        &self,
+        input: MetadataServerCreate,
+    ) -> Result<MetadataServerRecord> {
+        let server = input.into_server();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // WHY: a duplicate request must not edit or enable the existing server.
@@ -39,10 +123,10 @@ impl MetadataStore {
             |row| row.get(0),
         )?;
         ensure!(!exists, ServerEndpointConflict);
-        let id = crate::profile_store::upsert_server_in_transaction(&transaction, server)?;
+        let id = crate::profile_store::upsert_server_in_transaction(&transaction, &server)?;
         Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
         transaction.commit()?;
-        Ok(id)
+        Ok(MetadataServerRecord { id, server })
     }
 
     /// Apply only selected fields to one live ID. False means no such resource.
@@ -50,10 +134,7 @@ impl MetadataStore {
     pub fn update_server_resource(&self, id: i64, update: &MetadataServerUpdate) -> Result<bool> {
         ensure!(id > 0, "invalid server ID");
         ensure!(
-            update.name.is_some()
-                || update.priority.is_some()
-                || update.static_server.is_some()
-                || update.enabled.is_some(),
+            update.priority.is_some() || update.static_server.is_some() || update.enabled.is_some(),
             "server update requires at least one field"
         );
         let mut connection = self.connection()?;
@@ -61,10 +142,10 @@ impl MetadataStore {
         // WHY: an operator edit must not overwrite telemetry published since a
         // previous read. Update the selected columns directly under one write.
         let changed = transaction.execute(
-            "UPDATE servers SET name=coalesce(?2,name),server_priority=coalesce(?3,server_priority),
-             static_server=coalesce(?4,static_server),enabled=coalesce(?5,enabled)
+            "UPDATE servers SET server_priority=coalesce(?2,server_priority),
+             static_server=coalesce(?3,static_server),enabled=coalesce(?4,enabled)
              WHERE id=?1 AND deleted_at_s IS NULL",
-            params![id, update.name, update.priority, update.static_server, update.enabled],
+            params![id, update.priority, update.static_server, update.enabled],
         )?;
         transaction.commit()?;
         Ok(changed != 0)
@@ -83,4 +164,24 @@ impl MetadataStore {
         transaction.commit()?;
         Ok(changed != 0)
     }
+}
+
+fn import_server_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    input: &MetadataServerImport,
+) -> Result<MetadataServerRecord> {
+    let id: i64 = transaction.query_row(
+        "INSERT INTO servers(address,port,name,first_seen_at_s,last_seen_at_s)
+             VALUES (?1,?2,coalesce(?3,''),?4,?4)
+             ON CONFLICT(address,port) WHERE deleted_at_s IS NULL DO UPDATE SET
+                 name=coalesce(?3,servers.name),last_seen_at_s=?4
+             RETURNING id",
+        params![input.address, input.port, input.name, unix_s()],
+        |row| row.get(0),
+    )?;
+    // WHY: validate/read the bounded projection before commit, so an import
+    // cannot acknowledge a row its resource reader cannot represent.
+    let record = crate::server_query::server_by_id_connection(transaction, id)?
+        .expect("imported server exists in its writer transaction");
+    Ok(record)
 }

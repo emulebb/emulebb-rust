@@ -88,118 +88,109 @@ async fn download_source_friend_routes_report_closed_persistence() {
 #[tokio::test]
 async fn servers_use_canonical_crud_routes() {
     let app = test_router();
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/servers")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"address":"  192.0.2.20  ","port":4661,"name":"local","priority":"low","static":true}"#,
-                ))
-                .unwrap(),
+    let payload = json!({"address":" 192.0.2.20 ","port":4661,"priority":"low","static":true});
+    let (status, created) = request(&app, "POST", "/api/v1/servers", Some(payload.clone())).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["data"]["id"].as_str().unwrap();
+    let path = format!("/api/v1/servers/{id}");
+    let (status, resource) = request(&app, "GET", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resource["data"]["id"], id);
+    assert_eq!(resource["data"]["address"], "192.0.2.20");
+    assert_eq!(resource["data"]["name"], "");
+    assert_eq!(resource["data"]["priority"], "low");
+    assert_eq!(resource["data"]["static"], true);
+    for enabled in [false, true] {
+        let (status, _) = request(
+            &app,
+            "PATCH",
+            &path,
+            Some(json!({"priority":"high", "enabled": enabled})),
         )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-    let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert!(value["data"].get("endpoint").is_none());
-    assert_eq!(value["data"]["address"], "192.0.2.20");
-    assert_eq!(value["data"]["port"], 4661);
-    assert_eq!(value["data"]["priority"], "low");
-    assert_eq!(value["data"]["static"], true);
-    assert_eq!(value["data"]["enabled"], true);
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, value) = request(&app, "GET", &path, None).await;
+        assert_eq!(value["data"]["enabled"], enabled);
+        assert_eq!(value["data"]["priority"], "high");
+    }
+    let (status, _) = request(&app, "POST", "/api/v1/servers", Some(payload.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (_, unchanged) = request(&app, "GET", &path, None).await;
+    assert_eq!(unchanged["data"]["priority"], "high");
+    let (status, body) = request(&app, "DELETE", &path, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_null());
+    assert_eq!(
+        request(&app, "GET", &path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&app, "DELETE", &path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, recreated) = request(&app, "POST", "/api/v1/servers", Some(payload)).await;
+    assert!(
+        recreated["data"]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            > id.parse::<i64>().unwrap()
+    );
+}
 
-    let update = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/servers/192.0.2.20:4661")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name":"renamed","priority":"high"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(update.status(), StatusCode::OK);
-    let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["name"], "renamed");
-    assert_eq!(value["data"]["priority"], "high");
-
-    let disable = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/servers/192.0.2.20:4661")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"enabled":false}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(disable.status(), StatusCode::OK);
-    let body = to_bytes(disable.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["enabled"], false);
-
-    let enable = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/servers/192.0.2.20:4661")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"enabled":true}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(enable.status(), StatusCode::OK);
-    let body = to_bytes(enable.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["enabled"], true);
-
-    let delete = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/v1/servers/192.0.2.20:4661")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(delete.status(), StatusCode::OK);
-    let body = to_bytes(delete.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["enabled"], false);
-
-    let disabled = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/servers/192.0.2.20:4661")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(disabled.status(), StatusCode::OK);
-    let body = to_bytes(disabled.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["enabled"], false);
-    assert_eq!(value["data"]["name"], "renamed");
+#[tokio::test]
+async fn server_pages_continue_after_deleted_anchor_and_count_only_live_resources() {
+    let app = test_router();
+    for last in 1..=3 {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/v1/servers",
+                Some(json!({"address":format!("192.0.2.{last}"),"port":4661,"enabled":false}))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+    }
+    let (status, first) =
+        request(&app, "GET", "/api/v1/servers?limit=1&countTotal=true", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+    assert_eq!(first["meta"]["total"], 3);
+    assert_eq!(first["meta"]["hasMore"], true);
+    let id = first["data"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        request(&app, "DELETE", &format!("/api/v1/servers/{id}"), None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let cursor = first["meta"]["nextCursor"].as_str().unwrap();
+    let (status, next) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/servers?limit=2&countTotal=true&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(next["data"].as_array().unwrap().len(), 2);
+    assert_eq!(next["meta"]["total"], 2);
+    assert_eq!(next["meta"]["hasMore"], false);
+    assert!(next["meta"]["nextCursor"].is_null());
+    let (_, default) = request(&app, "GET", "/api/v1/servers", None).await;
+    assert!(default["meta"].get("total").is_none());
+    for query in ["limit=0", "limit=201", "cursor=00"] {
+        assert_eq!(
+            request(&app, "GET", &format!("/api/v1/servers?{query}"), None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
 
 #[tokio::test]
@@ -758,13 +749,12 @@ async fn server_connect_frontdoors_report_closed_persistence() {
         )
         .unwrap(),
     );
-    core.add_server(emulebb_core::ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "127.0.0.1".into(),
         port: 1,
-        name: None,
-        priority: None,
-        static_server: None,
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -778,11 +768,8 @@ async fn server_connect_frontdoors_report_closed_persistence() {
     );
     for (uri, body) in [
         ("/api/v1/servers/operations/connect", ""),
-        ("/api/v1/servers/127.0.0.1%3A1/operations/connect", ""),
-        (
-            "/api/v1/servers",
-            r#"{"address":"127.0.0.2","port":1,"connect":true}"#,
-        ),
+        ("/api/v1/servers/1/operations/connect", ""),
+        ("/api/v1/servers", r#"{"address":"127.0.0.2","port":1}"#),
     ] {
         let response = app
             .clone()

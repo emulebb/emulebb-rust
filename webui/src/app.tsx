@@ -681,11 +681,10 @@ export function App({ appearance }: { appearance: Appearance }) {
 
   const stats = snapshot?.stats ?? snapshot?.status?.stats ?? {};
   const transfers = downloadPreview;
-  const servers = snapshot?.servers ?? [];
   const kad: KadStatus = snapshot?.kad ?? {};
   const serverStatus = snapshot?.status?.servers;
-  const serverConnected = serverStatus?.connected ?? servers.some((server) => server.connected);
-  const serverConnecting = serverStatus?.connecting ?? servers.some((server) => server.connecting);
+  const serverConnected = Boolean(serverStatus?.connected);
+  const serverConnecting = Boolean(serverStatus?.connecting);
   const serverIdState = serverConnected ? serverStatus?.ed2kIdState ?? "unknown" : "unknown";
   const serverConnectionLabel = serverConnected
     ? serverIdState === "high"
@@ -867,7 +866,6 @@ export function App({ appearance }: { appearance: Appearance }) {
                 snapshot={snapshot}
                 stats={stats}
                 transfers={transfers}
-                servers={servers}
                 uploads={uploads}
                 uploadQueue={uploadQueue}
                 libraryScan={libraryScan}
@@ -945,7 +943,7 @@ export function App({ appearance }: { appearance: Appearance }) {
             {tab === "uploads" && <UploadsView refreshGeneration={refreshGeneration} client={client} run={run} />}
             {tab === "network" && (
               <NetworkHealthView
-                servers={servers}
+                serverStatus={serverStatus}
                 transfers={transfers}
                 uploads={uploads}
                 uploadQueue={uploadQueue}
@@ -954,7 +952,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 client={client}
               />
             )}
-            {tab === "servers" && <ServersView servers={servers} status={snapshot?.status ?? {}} client={client} run={run} />}
+            {tab === "servers" && <ServersView status={snapshot?.status ?? {}} client={client} run={run} />}
             {tab === "kad" && <KadView kad={kad} client={client} run={run} />}
             {tab === "categories" && <CategoriesView categories={categories} client={client} run={run} />}
             {tab === "friends" && <FriendsView friends={friends} client={client} run={run} />}

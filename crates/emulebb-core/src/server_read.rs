@@ -6,6 +6,29 @@ use emulebb_metadata::{
 
 use crate::{EmulebbCore, LocalMutationError, PersistenceError, RetainedRead};
 
+/// Saved server identity and its current connection presentation.
+#[derive(Debug, serde::Serialize)]
+pub struct ServerResource {
+    pub id: String,
+    #[serde(flatten)]
+    pub server: crate::ServerInfo,
+}
+
+/// One bounded catalog page, independent of configured runtime lists.
+pub struct ServerResourcePage {
+    pub servers: Vec<ServerResource>,
+    pub next_after_id: Option<i64>,
+    pub has_more: bool,
+    pub total: Option<u64>,
+}
+
+/// Current connection presentation and saved catalog count, without a list clone.
+pub struct ServerConnectionSummary {
+    pub total: u64,
+    pub current: Option<crate::ServerInfo>,
+    pub connecting: bool,
+}
+
 fn read_error(error: anyhow::Error) -> anyhow::Error {
     match error.downcast_ref::<MetadataServerReadError>() {
         Some(MetadataServerReadError::InvalidQuery) => return error,
@@ -20,6 +43,112 @@ fn read_error(error: anyhow::Error) -> anyhow::Error {
 }
 
 impl EmulebbCore {
+    pub async fn server_connection_summary(&self) -> Result<RetainedRead<ServerConnectionSummary>> {
+        self.persistence_owner.check_coherent_state()?;
+        let connection = self.ed2k_server_connection_view().await;
+        let endpoint = connection
+            .0
+            .as_deref()
+            .or(connection.1.as_deref())
+            .map(crate::parse_server_endpoint)
+            .transpose()?;
+        let summary = self
+            .ed2k_transfers
+            .server_summary(endpoint)
+            .await
+            .map_err(read_error)?;
+        self.persistence_owner.check_coherent_state()?;
+        summary.try_project(2 * emulebb_metadata::SERVER_READ_MAX_BYTES, |summary| {
+            Ok(ServerConnectionSummary {
+                total: summary.total,
+                connecting: connection.1.is_some(),
+                current: summary.current.map(|record| {
+                    self.present_server_record(
+                        record,
+                        connection.0.as_deref(),
+                        connection.1.as_deref(),
+                        &connection.2,
+                    )
+                    .server
+                }),
+            })
+        })
+    }
+
+    fn present_server_record(
+        &self,
+        record: MetadataServerRecord,
+        connected: Option<&str>,
+        connecting: Option<&str>,
+        details: &crate::views::ServerLiveDetails,
+    ) -> ServerResource {
+        let mut server = crate::profile_state::server_from_metadata(record.server);
+        crate::views::apply_server_connection_flags(&mut server, connected, connecting);
+        if server.current {
+            crate::views::apply_server_live_details(&mut server, details);
+        }
+        self.apply_hostname_to_server(&mut server);
+        ServerResource {
+            id: record.id.to_string(),
+            server,
+        }
+    }
+
+    /// Present only the admitted page; projection backing has its own allowance.
+    pub async fn server_resource_page(
+        &self,
+        query: MetadataServerQuery,
+    ) -> Result<RetainedRead<ServerResourcePage>> {
+        self.server_page(query)
+            .await?
+            .try_project_async(
+                2 * emulebb_metadata::SERVER_READ_MAX_BYTES,
+                |page| async move {
+                    let connection = self.ed2k_server_connection_view().await;
+                    Ok(ServerResourcePage {
+                        servers: page
+                            .servers
+                            .into_iter()
+                            .map(|record| {
+                                self.present_server_record(
+                                    record,
+                                    connection.0.as_deref(),
+                                    connection.1.as_deref(),
+                                    &connection.2,
+                                )
+                            })
+                            .collect(),
+                        next_after_id: page.next_after_id,
+                        has_more: page.has_more,
+                        total: page.total,
+                    })
+                },
+            )
+            .await
+    }
+
+    /// Present one live immutable ID without materializing the whole catalog.
+    pub async fn server_resource(&self, id: i64) -> Result<Option<RetainedRead<ServerResource>>> {
+        let Some(record) = self.server_by_id(id).await? else {
+            return Ok(None);
+        };
+        record
+            .try_project_async(
+                2 * emulebb_metadata::SERVER_READ_MAX_BYTES,
+                |record| async move {
+                    let connection = self.ed2k_server_connection_view().await;
+                    Ok(self.present_server_record(
+                        record,
+                        connection.0.as_deref(),
+                        connection.1.as_deref(),
+                        &connection.2,
+                    ))
+                },
+            )
+            .await
+            .map(Some)
+    }
+
     /// Fetch one persisted page without walking configured or cached server lists.
     /// Backing keeps the Native read allowance until conversion or final drop.
     pub async fn server_page(

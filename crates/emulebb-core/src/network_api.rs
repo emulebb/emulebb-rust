@@ -169,10 +169,11 @@ impl EmulebbCore {
         match fetched {
             Ok(bytes) => {
                 reservation.finish_preparation()?;
-                Ok(self
+                let accepted = self
                     .import_kad_nodes_owned(bytes, false, reservation)
-                    .await?
-                    > 0)
+                    .await?;
+                anyhow::ensure!(accepted != 0, "nodes.dat contains no usable records");
+                Ok(true)
             }
             Err(error) => {
                 tracing::warn!("nodes.dat import fetch failed: {error:#}");
@@ -182,11 +183,11 @@ impl EmulebbCore {
     }
 
     /// Reserve bounded discovery ingress before collecting a response body.
-    fn reserve_kad_import(&self) -> Result<crate::persistence_owner::KadImportReservation> {
+    fn reserve_kad_import(&self) -> Result<crate::persistence_owner::DiscoveryImportReservation> {
         Ok(self
             .persistence_owner
             .owner(&self.metadata_store, &self.state)?
-            .reserve_kad_ingress()?)
+            .reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)?)
     }
 
     /// Parse a `nodes.dat` payload and add its contacts to the running Kad node.
@@ -231,7 +232,7 @@ impl EmulebbCore {
         &self,
         data: Vec<u8>,
         pending_only: bool,
-        reservation: crate::persistence_owner::KadImportReservation,
+        reservation: crate::persistence_owner::DiscoveryImportReservation,
     ) -> Result<usize> {
         self.persistence_owner
             .owner(&self.metadata_store, &self.state)?
@@ -242,33 +243,55 @@ impl EmulebbCore {
 
     pub async fn import_server_met_url(&self, url: &str) -> Result<bool> {
         let url = validate_url_import(url)?;
-        match fetch_url_bytes(&url, crate::SERVER_MET_MAX_BYTES).await {
-            Ok(bytes) => Ok(self.import_server_met_bytes(&bytes).await.unwrap_or(0) > 0),
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        let mut reservation = owner.reserve_discovery_ingress(crate::SERVER_MET_MAX_BYTES)?;
+        let fetched = tokio::select! {
+            biased;
+            _ = reservation.cancelled() => return Err(crate::PersistenceError::Closing.into()),
+            result = fetch_url_bytes(&url, crate::SERVER_MET_MAX_BYTES) => result,
+        };
+        match fetched {
+            Ok(bytes) => {
+                reservation.finish_preparation()?;
+                owner
+                    .import_server_met_owned(
+                        bytes,
+                        reservation,
+                        crate::server_list::ServerPlanPublisher::new(self),
+                    )
+                    .await?
+                    .map_err(anyhow::Error::msg)?;
+                Ok(true)
+            }
             Err(error) => {
-                tracing::warn!("server.met import fetch failed: {error:#}");
+                tracing::warn!(%error, "server.met import fetch failed");
                 Ok(false)
             }
         }
     }
 
-    /// Parse a `server.met` payload and add its servers to the server list.
+    /// Import one bounded document through retained parse/commit/publication.
     pub async fn import_server_met_bytes(&self, data: &[u8]) -> Result<usize> {
-        let servers = parse_server_met(data)?;
-        let mut added = 0usize;
-        for server in servers {
-            let request = ServerCreate {
-                address: server.ip.to_string(),
-                port: server.port,
-                name: server.name,
-                priority: None,
-                static_server: None,
-                connect: None,
-            };
-            if self.add_server(request).await.is_ok() {
-                added += 1;
-            }
+        if data.len() > crate::SERVER_MET_MAX_BYTES {
+            return Err(crate::PersistenceError::TooLarge.into());
         }
-        Ok(added)
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        let mut reservation = owner.reserve_discovery_ingress(crate::SERVER_MET_MAX_BYTES)?;
+        let mut bytes = Vec::with_capacity(crate::SERVER_MET_MAX_BYTES);
+        bytes.extend_from_slice(data);
+        reservation.finish_preparation()?;
+        owner
+            .import_server_met_owned(
+                bytes,
+                reservation,
+                crate::server_list::ServerPlanPublisher::new(self),
+            )
+            .await?
+            .map_err(anyhow::Error::msg)
     }
 
     pub async fn recheck_kad_firewall(&self) -> NetworkStatus {

@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{Result, bail, ensure};
 use reqwest::{Client, ClientBuilder, Url, redirect::Policy};
 
-pub const SERVER_MET_MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const NODES_DAT_MAX_BYTES: usize = 2 * 1024 * 1024;
+pub const SERVER_MET_MAX_BYTES: usize = 8 * 1024;
+pub const NODES_DAT_MAX_BYTES: usize = 8 * 1024;
 
 /// Scheme contract for an operator-selected import or automatic trusted bootstrap.
 #[derive(Clone, Copy)]
@@ -84,8 +84,8 @@ pub async fn fetch_discovery_bytes(
         {
             bail!("discovery response exceeds {max_bytes} bytes");
         }
-        // Kad callers reserve body capacity and one accepted frame. Server
-        // discovery has its own bounded body but is not yet on that owner.
+        // Discovery imports reserve body capacity and one accepted frame before
+        // collection; startup bootstrap uses the same small document ceiling.
         // Transport, TLS and rejected oversized frames remain transport-owned.
         let mut body = Vec::new();
         body.try_reserve_exact(max_bytes)

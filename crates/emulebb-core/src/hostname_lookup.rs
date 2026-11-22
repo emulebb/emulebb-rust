@@ -226,7 +226,26 @@ impl EmulebbCore {
     }
 
     pub(crate) async fn hostname_lookup_candidate_ips(&self) -> Vec<Ipv4Addr> {
-        let mut ips = candidate_ips_from_servers(&self.servers().await);
+        // Borrow rich records; retain only compact IP candidates for DNS work.
+        let mut ips = {
+            let state = self.state.lock().await;
+            let mut ips = candidate_ips_from_servers(state.servers.values());
+            if let Some(network) = self.ed2k_network.as_ref() {
+                for entry in &network.ed2k.server_entries {
+                    push_ip(&mut ips, &entry.host);
+                }
+                for endpoint in &network.ed2k.server_endpoints {
+                    if let Ok((address, _)) = crate::parse_server_endpoint(endpoint) {
+                        push_ip(&mut ips, &address);
+                    }
+                }
+            }
+            ips
+        };
+        let connection = self.ed2k_server_connection_view().await;
+        if let Some(host) = connection.2.dynamic_host.as_deref() {
+            push_ip(&mut ips, host);
+        }
         if let Some(dht) = self.ed2k_dht_node().await {
             ips.extend(
                 dht.routing_contacts_snapshot()
@@ -242,7 +261,9 @@ impl EmulebbCore {
     }
 }
 
-pub(crate) fn candidate_ips_from_servers(servers: &[ServerInfo]) -> Vec<Ipv4Addr> {
+pub(crate) fn candidate_ips_from_servers<'a>(
+    servers: impl IntoIterator<Item = &'a ServerInfo>,
+) -> Vec<Ipv4Addr> {
     let mut ips = Vec::new();
     for server in servers {
         push_ip(&mut ips, &server.address);

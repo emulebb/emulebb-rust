@@ -59,6 +59,7 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
                     || path.starts_with("/api/v1/downloads/")
                     || path.starts_with("/api/v1/library/")
                     || path.starts_with("/api/v1/searches")
+                    || path == "/api/v1/servers"
                 {
                     200
                 } else {
@@ -345,7 +346,7 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         ("GET" | "PATCH" | "DELETE", ["servers", server_id])
         | ("POST", ["servers", server_id, "operations", "connect"]) => {
             let server_id = decode_path_parameter(server_id, "serverId")?;
-            validate_endpoint_path_token(&server_id, "serverId")?
+            validate_positive_decimal_id(&server_id, "serverId")?
         }
         ("GET" | "PATCH", ["library", "files", hash]) => validate_lowercase_md4_hex(hash, "hash")?,
         ("GET" | "PATCH", ["downloads", id])
@@ -543,7 +544,7 @@ fn route_query_fields(
     const DOWNLOADS: &[&str] = &["view", "category", "cursor", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
-    const UPLOAD_QUEUE: &[&str] = &["cursor", "limit", "countTotal"];
+    const CURSOR_PAGE: &[&str] = &["cursor", "limit", "countTotal"];
 
     if matches!(
         path,
@@ -602,7 +603,6 @@ fn route_query_fields(
         | ("POST", "/api/v1/kad/operations/stop")
         | ("POST", "/api/v1/kad/operations/bootstrap")
         | ("POST", "/api/v1/kad/operations/recheck-firewall")
-        | ("GET", "/api/v1/servers")
         | ("POST", "/api/v1/servers")
         | ("POST", "/api/v1/servers/operations/connect")
         | ("POST", "/api/v1/servers/operations/disconnect")
@@ -619,13 +619,14 @@ fn route_query_fields(
         | ("POST", "/api/v1/app/shutdown")
         | ("POST", "/api/v1/diagnostics/bundles")
         | ("POST", "/api/v1/diagnostics/crash-tests") => Some(match path {
-            "/api/v1/upload-queue" if method == "GET" => UPLOAD_QUEUE,
+            "/api/v1/upload-queue" if method == "GET" => CURSOR_PAGE,
             _ => NONE,
         }),
+        ("GET", "/api/v1/servers") => Some(CURSOR_PAGE),
         ("GET", "/api/v1/searches") => Some(SEARCH_PAGE),
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
         ("GET", "/api/v1/library/files") => Some(LIBRARY_FILES),
-        ("GET", "/api/v1/uploads") => Some(UPLOAD_QUEUE),
+        ("GET", "/api/v1/uploads") => Some(CURSOR_PAGE),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
         ("POST", "/api/v1/library/files/sharing") => Some(NONE),
         ("GET", "/api/v1/library/tags") => Some(LIBRARY_TAGS),
