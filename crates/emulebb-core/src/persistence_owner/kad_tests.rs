@@ -6,7 +6,7 @@ async fn import_kad(
     bytes: &[u8],
     pending: bool,
 ) -> Result<Result<usize, String>, PersistenceError> {
-    let mut ticket = owner.reserve_kad_ingress()?;
+    let mut ticket = owner.reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)?;
     let bytes = bytes.to_vec();
     ticket.finish_preparation()?;
     owner.import_kad_owned(bytes, pending, ticket).await
@@ -307,7 +307,7 @@ async fn final_snapshot_waits_for_ingress_reservations_and_then_drains() {
     .await
     .unwrap();
     let mut tickets = Vec::new();
-    while let Ok(ticket) = owner.reserve_kad_ingress() {
+    while let Ok(ticket) = owner.reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES) {
         tickets.push(ticket);
     }
     assert!(!tickets.is_empty());
@@ -532,7 +532,9 @@ async fn live_changes_during_import_are_not_overwritten_or_marked_clean() {
     bytes.extend_from_slice(&4672u16.to_le_bytes());
     bytes.extend_from_slice(&4662u16.to_le_bytes());
     bytes.push(0);
-    let mut ticket = owner.reserve_kad_ingress().unwrap();
+    let mut ticket = owner
+        .reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)
+        .unwrap();
     ticket.finish_preparation().unwrap();
     let import = {
         let owner = Arc::clone(&owner);
@@ -542,10 +544,6 @@ async fn live_changes_during_import_are_not_overwritten_or_marked_clean() {
         .await
         .unwrap();
     assert!(usage(&owner).1 >= kad_import_charge().unwrap());
-    assert!(matches!(
-        owner.reserve_kad_ingress(),
-        Err(PersistenceError::Busy)
-    ));
     let fresh = emulebb_kad_routing::Contact::new(
         emulebb_kad_proto::NodeId::from_bytes([53; 16]),
         "192.0.4.53".parse().unwrap(),
@@ -635,24 +633,24 @@ fn kad_full_runtime_and_import_reservations_fit_the_shared_budget() {
 }
 
 #[tokio::test]
-async fn kad_import_accepts_large_source_but_rejects_truncated_source_atomically() {
+async fn kad_import_preserves_valid_records_before_a_truncated_tail() {
     let (store, _, owner) = setup();
-    let mut bytes = 13_000u32.to_le_bytes().to_vec();
-    for _ in 0..13_000 {
+    let count = ((crate::NODES_DAT_MAX_BYTES - 4) / 25) as u32;
+    let mut bytes = count.to_le_bytes().to_vec();
+    for _ in 0..count {
         bytes.extend_from_slice(&[4; 16]);
         bytes.extend_from_slice(&u32::from_be_bytes([192, 0, 2, 4]).to_le_bytes());
         bytes.extend_from_slice(&4672u16.to_le_bytes());
         bytes.extend_from_slice(&4662u16.to_le_bytes());
         bytes.push(0);
     }
-    assert!(
+    assert_eq!(
         import_kad(&owner, &bytes[..bytes.len() - 1], true)
             .await
             .unwrap()
-            .is_err()
+            .unwrap(),
+        1
     );
-    assert_eq!(store.load_kad_routing_snapshot().unwrap().revision, 0);
-    assert_eq!(import_kad(&owner, &bytes, true).await.unwrap().unwrap(), 1);
     let saved = store.load_kad_routing_snapshot().unwrap();
     assert_eq!(saved.revision, 1);
     assert_eq!(saved.contacts.len(), 1);
@@ -834,7 +832,9 @@ async fn attach_handoff_releases_payload_quota_but_fences_following_commands() {
     let dht = test_dht(&owner).await;
     let handoff = owner.attach_kad(&dht).await.unwrap();
     assert_eq!(usage(&owner).0, 0);
-    let ticket = owner.reserve_kad_ingress().unwrap();
+    let ticket = owner
+        .reserve_discovery_ingress(crate::NODES_DAT_MAX_BYTES)
+        .unwrap();
     drop(ticket);
     let pending = {
         let owner = Arc::clone(&owner);

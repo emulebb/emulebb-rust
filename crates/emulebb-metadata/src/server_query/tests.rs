@@ -693,3 +693,34 @@ fn late_page_uses_indexed_seek_with_a_large_deleted_cohort() {
         "{plan:?}"
     );
 }
+
+#[test]
+fn document_import_write_failure_rolls_back_the_accepted_set() {
+    let store = MetadataStore::in_memory().unwrap();
+    store.connection().unwrap().execute_batch(
+        "CREATE TRIGGER fail_second_import BEFORE INSERT ON servers WHEN NEW.address='second.example' BEGIN SELECT RAISE(ABORT,'injected second-row failure'); END;"
+    ).unwrap();
+    let entries = ["first.example", "second.example"].map(|address| MetadataServerImport {
+        address: address.into(),
+        port: 4661,
+        name: None,
+    });
+    assert!(store.import_server_resources(entries).is_err());
+    assert!(
+        store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+    let status: String = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM discovery_initialization WHERE domain='servers'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
+}

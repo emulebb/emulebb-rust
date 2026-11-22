@@ -154,3 +154,69 @@ async fn retained_snapshot_frames_share_capacity_and_release_after_final_drop() 
     let recovered = app.oneshot(request()).await.unwrap();
     assert_eq!(recovered.status(), StatusCode::OK);
 }
+
+#[path = "../../../emulebb-core/tests/support/discovery_fixture.rs"]
+mod discovery_fixture;
+
+#[tokio::test]
+async fn discovery_import_http_waits_for_completion_and_rejects_zero_usable_records() {
+    use crate::rest_test_support::request;
+    use discovery_fixture::{Reply, server};
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let app = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".into(),
+            web_root_dir: None,
+        },
+    );
+    for (path, bytes) in [
+        (
+            "/api/v1/servers/operations/import-met-url",
+            vec![0x0e, 0, 0, 0, 0],
+        ),
+        ("/api/v1/kad/operations/import-nodes-url", vec![0, 0, 0, 0]),
+    ] {
+        let source = server(vec![Reply::body(&bytes)]).await;
+        let redirect = server(vec![Reply::redirect(&source.url)]).await;
+        let (status, body) = request(
+            &app,
+            "POST",
+            path,
+            Some(serde_json::json!({"url": redirect.url})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no usable records")
+        );
+        assert_eq!(source.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(redirect.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    let mut bytes = vec![0x0e];
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    for ip in [[0; 4], [192, 0, 2, 9]] {
+        bytes.extend_from_slice(&ip);
+        bytes.extend_from_slice(&4661u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    bytes.push(192);
+    let source = server(vec![Reply::body(&bytes)]).await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/servers/operations/import-met-url",
+        Some(serde_json::json!({"url":source.url})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["imported"], true);
+    let (_, page) = request(&app, "GET", "/api/v1/servers", None).await;
+    assert_eq!(page["data"].as_array().unwrap().len(), 1);
+    assert_eq!(page["data"][0]["address"], "192.0.2.9");
+}

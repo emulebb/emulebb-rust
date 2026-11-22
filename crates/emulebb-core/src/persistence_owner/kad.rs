@@ -389,7 +389,14 @@ pub(super) fn merge_in_worker(
 }
 
 impl PersistenceOwner {
-    pub(crate) fn reserve_kad_ingress(&self) -> Result<KadImportReservation, PersistenceError> {
+    pub(crate) fn reserve_discovery_ingress(
+        &self,
+        payload_bytes: usize,
+    ) -> Result<DiscoveryImportReservation, PersistenceError> {
+        let preparation_bytes = payload_bytes
+            .checked_mul(2)
+            .filter(|bytes| *bytes != 0 && *bytes <= MAX_BYTES)
+            .ok_or(PersistenceError::TooLarge)?;
         let admission = self
             .admission
             .lock()
@@ -403,17 +410,18 @@ impl PersistenceOwner {
         }
         let bytes = quota
             .bytes
-            .checked_add(KAD_INGRESS_PREPARATION_BYTES)
+            .checked_add(preparation_bytes)
             .ok_or(PersistenceError::Busy)?;
         if bytes > MAX_BYTES {
             return Err(PersistenceError::Busy);
         }
         quota.bytes = bytes;
-        Ok(KadImportReservation {
+        Ok(DiscoveryImportReservation {
             lease: ByteLease {
                 quota: Arc::clone(&admission.quota),
-                bytes: KAD_INGRESS_PREPARATION_BYTES,
+                bytes: preparation_bytes,
             },
+            payload_bytes,
             cancellation: admission.cancel_ingress.clone(),
         })
     }
@@ -493,7 +501,7 @@ impl PersistenceOwner {
         &self,
         bytes: Vec<u8>,
         pending_only: bool,
-        reservation: KadImportReservation,
+        reservation: DiscoveryImportReservation,
     ) -> Result<Result<usize, String>, PersistenceError> {
         let input = KadInput {
             bytes,

@@ -376,3 +376,85 @@ async fn late_feedback_does_not_recreate_deleted_configured_server() {
     let next = core.create_server_resource(&server).await.unwrap();
     assert!(next > id);
 }
+
+#[tokio::test]
+async fn disconnected_document_import_finishes_all_committed_rows() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(gate.clone());
+    let mut bytes = vec![0x0e];
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    for last in [1, 2] {
+        bytes.extend_from_slice(&[192, 0, 2, last]);
+        bytes.extend_from_slice(&4661u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    bytes.push(192);
+    let caller = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move { core.import_server_met_bytes(&bytes).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        core.metadata_store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .len(),
+        2
+    );
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(Arc::strong_count(&core), 1);
+    *owner.publication_gate.lock().unwrap() = None;
+    gate.release.notify_one();
+    drop(
+        core.library_tags(&LibraryTagRequest::Get("Missing".into()))
+            .await
+            .unwrap(),
+    );
+    let state = core.state.lock().await;
+    assert!(state.servers.contains_key("192.0.2.1:4661"));
+    assert!(state.servers.contains_key("192.0.2.2:4661"));
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn discovery_document_limits_and_empty_server_imports_release_admission() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    assert_eq!(crate::SERVER_MET_MAX_BYTES, 8192);
+    assert_eq!(crate::NODES_DAT_MAX_BYTES, 8192);
+    assert!(
+        core.import_server_met_bytes(&[0x0e, 0, 0, 0, 0])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no usable records")
+    );
+    assert!(matches!(
+        core.import_server_met_bytes(&vec![0; 8193])
+            .await
+            .unwrap_err()
+            .downcast_ref::<PersistenceError>(),
+        Some(PersistenceError::TooLarge)
+    ));
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    assert_eq!(usage(&owner), (0, 0));
+    assert!(
+        core.metadata_store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+}

@@ -80,22 +80,29 @@ impl MetadataStore {
     ) -> Result<MetadataServerRecord> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let id: i64 = transaction.query_row(
-            "INSERT INTO servers(address,port,name,first_seen_at_s,last_seen_at_s)
-             VALUES (?1,?2,coalesce(?3,''),?4,?4)
-             ON CONFLICT(address,port) WHERE deleted_at_s IS NULL DO UPDATE SET
-                 name=coalesce(?3,servers.name),last_seen_at_s=?4
-             RETURNING id",
-            params![input.address, input.port, input.name, unix_s()],
-            |row| row.get(0),
-        )?;
-        // WHY: validate/read the bounded projection before commit, so an import
-        // cannot acknowledge a row its resource reader cannot represent.
-        let record = crate::server_query::server_by_id_connection(&transaction, id)?
-            .expect("imported server exists in its writer transaction");
+        let record = import_server_in_transaction(&transaction, input)?;
         Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
         transaction.commit()?;
         Ok(record)
+    }
+
+    /// Commit an accepted import set together. Callers reserve ID output and
+    /// one bounded row workspace; full rich records are never collected.
+    pub fn import_server_resources(
+        &self,
+        entries: impl IntoIterator<Item = MetadataServerImport>,
+    ) -> Result<Vec<i64>> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut ids = Vec::new();
+        for input in entries {
+            ids.push(import_server_in_transaction(&transaction, &input)?.id);
+        }
+        if !ids.is_empty() {
+            Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
+        }
+        transaction.commit()?;
+        Ok(ids)
     }
 
     /// Create a resource without import's merge semantics. The writer lock spans
@@ -157,4 +164,24 @@ impl MetadataStore {
         transaction.commit()?;
         Ok(changed != 0)
     }
+}
+
+fn import_server_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    input: &MetadataServerImport,
+) -> Result<MetadataServerRecord> {
+    let id: i64 = transaction.query_row(
+        "INSERT INTO servers(address,port,name,first_seen_at_s,last_seen_at_s)
+             VALUES (?1,?2,coalesce(?3,''),?4,?4)
+             ON CONFLICT(address,port) WHERE deleted_at_s IS NULL DO UPDATE SET
+                 name=coalesce(?3,servers.name),last_seen_at_s=?4
+             RETURNING id",
+        params![input.address, input.port, input.name, unix_s()],
+        |row| row.get(0),
+    )?;
+    // WHY: validate/read the bounded projection before commit, so an import
+    // cannot acknowledge a row its resource reader cannot represent.
+    let record = crate::server_query::server_by_id_connection(transaction, id)?
+        .expect("imported server exists in its writer transaction");
+    Ok(record)
 }

@@ -9,6 +9,8 @@ use emulebb_metadata::{
 pub(super) enum SqlCommand {
     Create(MetadataServerCreate),
     Import(MetadataServerImport),
+    ImportMet(Vec<u8>),
+    ReadImported(i64),
     Update(i64, MetadataServerUpdate),
     Delete(i64),
 }
@@ -16,11 +18,14 @@ pub(super) enum SqlCommand {
 pub(super) struct ServerCommand {
     operation: SqlCommand,
     publisher: ServerPlanPublisher,
+    _ingress: Option<ByteLease>,
 }
 
 pub(super) enum ServerWrite {
     Created(i64, MetadataServer),
     Imported(i64, MetadataServer),
+    ImportedMet(Vec<i64>),
+    ImportRejected(String),
     Updated(MetadataServer, MetadataServerUpdate),
     Deleted(String),
     Missing,
@@ -28,6 +33,7 @@ pub(super) enum ServerWrite {
 
 pub(super) enum ServerOutcome {
     Identity(i64),
+    Imported(Result<usize, String>),
     Changed(bool),
 }
 
@@ -113,6 +119,7 @@ impl EmulebbCore {
                 Ok(Command::Servers(ServerCommand {
                     operation: SqlCommand::Create(server.clone()),
                     publisher: ServerPlanPublisher::new(self),
+                    _ingress: None,
                 }))
             })
             .await?
@@ -141,6 +148,7 @@ impl EmulebbCore {
                 Ok(Command::Servers(ServerCommand {
                     operation: SqlCommand::Import(server.clone()),
                     publisher: ServerPlanPublisher::new(self),
+                    _ingress: None,
                 }))
             })
             .await?
@@ -170,6 +178,7 @@ impl EmulebbCore {
                 Ok(Command::Servers(ServerCommand {
                     operation: SqlCommand::Update(id, update.clone()),
                     publisher: ServerPlanPublisher::new(self),
+                    _ingress: None,
                 }))
             })
             .await?
@@ -191,6 +200,7 @@ impl EmulebbCore {
                 Ok(Command::Servers(ServerCommand {
                     operation: SqlCommand::Delete(id),
                     publisher: ServerPlanPublisher::new(self),
+                    _ingress: None,
                 }))
             })
             .await?
@@ -198,6 +208,51 @@ impl EmulebbCore {
             Response::Servers(Ok(ServerOutcome::Changed(found))) => Ok(found),
             Response::Servers(Err(error)) => Err(error.into()),
             _ => Err(PersistenceError::Worker.into()),
+        }
+    }
+}
+
+impl PersistenceOwner {
+    pub(crate) async fn import_server_met_owned(
+        &self,
+        bytes: Vec<u8>,
+        reservation: DiscoveryImportReservation,
+        publisher: ServerPlanPublisher,
+    ) -> Result<Result<usize, String>, PersistenceError> {
+        if bytes.len() > crate::SERVER_MET_MAX_BYTES
+            || bytes.capacity() > crate::SERVER_MET_MAX_BYTES
+        {
+            return Err(PersistenceError::TooLarge);
+        }
+        if reservation.payload_bytes != crate::SERVER_MET_MAX_BYTES
+            || !Arc::ptr_eq(
+                &self
+                    .admission
+                    .lock()
+                    .map_err(|_| PersistenceError::Worker)?
+                    .quota,
+                &reservation.lease.quota,
+            )
+        {
+            return Err(PersistenceError::Worker);
+        }
+        // One rich SQL read/publication pair plus the bounded document's decode
+        // vector, strings and ID result, independent of existing catalog size.
+        let charge = FIXED_CHARGE
+            + 2 * emulebb_metadata::SERVER_READ_MAX_BYTES
+            + 16 * crate::SERVER_MET_MAX_BYTES;
+        match self
+            .submit_reserved(charge, || {
+                Ok(Command::Servers(ServerCommand {
+                    operation: SqlCommand::ImportMet(bytes),
+                    publisher,
+                    _ingress: Some(reservation.lease),
+                }))
+            })
+            .await?
+        {
+            Response::Servers(Ok(ServerOutcome::Imported(result))) => Ok(result),
+            _ => Err(PersistenceError::Worker),
         }
     }
 }
@@ -214,6 +269,32 @@ pub(super) fn execute(
         },
         SqlCommand::Import(input) => {
             let record = store.import_server_resource(&input)?;
+            Ok(Ok(ServerWrite::Imported(record.id, record.server)))
+        }
+        SqlCommand::ImportMet(bytes) => {
+            let entries = match emulebb_ed2k::ed2k_server::parse_server_met(&bytes) {
+                Ok(entries) if !entries.is_empty() => entries,
+                Ok(_) => {
+                    return Ok(Ok(ServerWrite::ImportRejected(
+                        "server.met contains no usable records".into(),
+                    )));
+                }
+                Err(error) => return Ok(Ok(ServerWrite::ImportRejected(error.to_string()))),
+            };
+            let ids = store.import_server_resources(entries.into_iter().map(|entry| {
+                MetadataServerImport {
+                    address: entry.ip.to_string(),
+                    port: entry.port,
+                    name: entry.name,
+                }
+            }))?;
+            tracing::info!(accepted = ids.len(), "server.met import committed");
+            Ok(Ok(ServerWrite::ImportedMet(ids)))
+        }
+        SqlCommand::ReadImported(id) => {
+            let record = store
+                .server_by_id(id)?
+                .ok_or(PersistenceError::CommittedPublicationFailed)?;
             Ok(Ok(ServerWrite::Imported(record.id, record.server)))
         }
         SqlCommand::Update(id, update) => {
@@ -235,6 +316,23 @@ pub(super) fn execute(
             }
             Ok(Ok(ServerWrite::Deleted(record.server.endpoint())))
         }
+    }
+}
+
+fn publish_imported(state: &mut CoreState, snapshot: MetadataServer) {
+    let endpoint = snapshot.endpoint();
+    let name = snapshot.name.clone();
+    let server = state
+        .servers
+        .entry(endpoint.clone())
+        .or_insert_with(|| profile_state::server_from_metadata(snapshot));
+    // Import carries only a reported name; retain current controls
+    // and health rather than publishing a stale whole-row snapshot.
+    server.name = name;
+    if server.enabled {
+        state.disabled_servers.remove(&endpoint);
+    } else {
+        state.disabled_servers.insert(endpoint);
     }
 }
 
@@ -264,6 +362,9 @@ pub(super) async fn process(
         return Err(PersistenceError::Worker);
     };
     let write = match outcome {
+        Ok(ServerWrite::ImportRejected(error)) => {
+            return Ok(Response::Servers(Ok(ServerOutcome::Imported(Err(error)))));
+        }
         Ok(ServerWrite::Missing) => {
             return Ok(Response::Servers(Ok(ServerOutcome::Changed(false))));
         }
@@ -277,6 +378,34 @@ pub(super) async fn process(
         gate.entered.notify_one();
         gate.release.notified().await;
     }
+    let write = match write {
+        ServerWrite::ImportedMet(ids) => {
+            let count = ids.len();
+            for id in ids {
+                let (response, receive) = oneshot::channel();
+                db.send(DbRequest {
+                    command: DbCommand::Servers(SqlCommand::ReadImported(id)),
+                    response,
+                })
+                .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+                let reply = receive
+                    .await
+                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?
+                    .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+                let DbResponse::Servers(Ok(ServerWrite::Imported(_, snapshot))) = reply else {
+                    return Err(PersistenceError::CommittedPublicationFailed);
+                };
+                publish_imported(&mut *state.lock().await, snapshot);
+            }
+            command
+                .publisher
+                .refresh()
+                .await
+                .map_err(|_| PersistenceError::CommittedPublicationFailed)?;
+            return Ok(Response::Servers(Ok(ServerOutcome::Imported(Ok(count)))));
+        }
+        write => write,
+    };
     let outcome = {
         let mut state = state.lock().await;
         match write {
@@ -294,20 +423,7 @@ pub(super) async fn process(
                 ServerOutcome::Identity(id)
             }
             ServerWrite::Imported(id, snapshot) => {
-                let endpoint = snapshot.endpoint();
-                let name = snapshot.name.clone();
-                let server = state
-                    .servers
-                    .entry(endpoint.clone())
-                    .or_insert_with(|| profile_state::server_from_metadata(snapshot));
-                // Import carries only a reported name; retain current controls
-                // and health rather than publishing a stale whole-row snapshot.
-                server.name = name;
-                if server.enabled {
-                    state.disabled_servers.remove(&endpoint);
-                } else {
-                    state.disabled_servers.insert(endpoint);
-                }
+                publish_imported(&mut state, snapshot);
                 ServerOutcome::Identity(id)
             }
             ServerWrite::Updated(snapshot, update) => {
@@ -351,7 +467,9 @@ pub(super) async fn process(
                 state.disabled_servers.insert(endpoint);
                 ServerOutcome::Changed(true)
             }
-            ServerWrite::Missing => unreachable!(),
+            ServerWrite::Missing | ServerWrite::ImportedMet(_) | ServerWrite::ImportRejected(_) => {
+                unreachable!()
+            }
         }
     };
     command
