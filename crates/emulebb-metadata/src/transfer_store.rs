@@ -115,7 +115,7 @@ impl super::MetadataStore {
         // Progress owns payload state, not operator presentation. An explicit
         // metadata update may have committed after this writer took its snapshot.
         let (priority, automatic, comment, rating) = tx.query_row(
-            "SELECT upload_priority,auto_upload_priority,comment,rating FROM download_jobs WHERE id=?1",
+            "SELECT k.upload_priority,k.auto_upload_priority,k.comment,k.rating FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id WHERE j.id=?1",
             [manifest.token.job_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?,
                 row.get::<_, String>(2)?, row.get::<_, u8>(3)?)),
         )?;
@@ -192,9 +192,8 @@ impl super::MetadataStore {
             "UPDATE download_jobs SET expected_size_bytes=?2,display_name=?3,completed=?4,
             md4_hashset_acquired=?5,aich_hashset_acquired=?6,aich_root=?7,aich_root_origin=?8,
             aich_trust_generation=?9,visible_state=?10,final_rehash_pending=?11,
-            part_size_bytes=?12,part_count=?13,upload_priority=?14,auto_upload_priority=?15,
-            comment=?16,rating=?17,delivery_state=?18,delivery_ownership=?19,delivered_path_id=?20,
-            source_fingerprint=?21,payload_fingerprint=?22,updated_at_s=?23,completed_at_s=?24
+            part_size_bytes=?12,part_count=?13,delivery_state=?14,delivery_ownership=?15,delivered_path_id=?16,
+            source_fingerprint=?17,payload_fingerprint=?18,updated_at_s=?19,completed_at_s=?20
             WHERE id=?1",
             params![
                 manifest.token.job_id,
@@ -213,10 +212,6 @@ impl super::MetadataStore {
                 manifest.final_rehash_pending,
                 i64::try_from(manifest.piece_size)?,
                 i64::try_from(manifest.pieces.len())?,
-                manifest.upload_priority,
-                manifest.auto_upload_priority,
-                manifest.comment,
-                manifest.rating,
                 delivery_state_to_sql(manifest.delivery_state),
                 delivery_ownership_to_sql(manifest.delivery_ownership),
                 delivered_path,
@@ -276,7 +271,7 @@ impl super::MetadataStore {
         const MAX_RANGES: i64 = 28_258;
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let header: Option<(i64, i64, i64, i64, u64)> = conn.query_row(
-            "SELECT t.id,length(CAST(t.display_name AS BLOB)),length(CAST(t.comment AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.execution_generation FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.delete_requested_at_s IS NULL",
+            "SELECT t.id,length(CAST(t.display_name AS BLOB)),length(CAST(k.comment AS BLOB)),length(CAST(k.upload_priority AS BLOB)),t.execution_generation FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE k.ed2k_hash=?1 AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.delete_requested_at_s IS NULL",
             [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,crate::sql_value::unsigned::<u64>(row,4)?)),
         ).optional()?;
         let Some((id, name_len, comment_len, priority_len, generation)) = header else {
@@ -301,7 +296,7 @@ impl super::MetadataStore {
             return Ok(None);
         }
         let (display_name,file_size,aich_root,upload_priority,auto_upload_priority,comment,rating) = conn.query_row(
-            "SELECT t.display_name,t.expected_size_bytes,CASE WHEN t.aich_root IS NULL THEN NULL ELSE lower(hex(t.aich_root)) END,t.upload_priority,t.auto_upload_priority,t.comment,t.rating FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE t.id=?1", [id],
+            "SELECT t.display_name,t.expected_size_bytes,CASE WHEN t.aich_root IS NULL THEN NULL ELSE lower(hex(t.aich_root)) END,k.upload_priority,k.auto_upload_priority,k.comment,k.rating FROM download_jobs t JOIN known_files k ON k.id=t.known_file_id WHERE t.id=?1", [id],
             |row| Ok((row.get::<_,String>(0)?,crate::sql_value::unsigned::<u64>(row,1)?,row.get::<_,Option<String>>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)? != 0,row.get::<_,String>(5)?,row.get::<_,u8>(6)?)),
         )?;
         let mut stmt = conn.prepare_cached("SELECT start_offset,end_offset FROM download_job_verified_ranges WHERE job_id=?1 ORDER BY start_offset,end_offset")?;
@@ -356,7 +351,7 @@ impl super::MetadataStore {
         let identity = read_download_job_aich_identity(&conn, token)?
             .ok_or_else(|| anyhow::anyhow!("stale or missing download job AICH identity"))?;
         let state = conn.query_row(
-            "SELECT k.sharing_enabled,j.display_name,j.upload_priority,j.auto_upload_priority,j.comment,j.rating FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id WHERE j.id=?1",
+            "SELECT k.sharing_enabled,j.display_name,k.upload_priority,k.auto_upload_priority,k.comment,k.rating FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id WHERE j.id=?1",
             [token.job_id.get()], |row| Ok(MetadataDownloadJobPublication {
                 identity: identity.clone(),
                 sharing_enabled: row.get(0)?,
@@ -528,8 +523,8 @@ impl super::MetadataStore {
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
-                   CASE WHEN length(CAST(verified_local_content.upload_priority AS BLOB))<=65536 THEN verified_local_content.upload_priority END, verified_local_content.auto_upload_priority,
-                   CASE WHEN length(CAST(verified_local_content.comment AS BLOB))<=65536 THEN verified_local_content.comment END, verified_local_content.rating,
+                   CASE WHEN length(CAST(known_files.upload_priority AS BLOB))<=65536 THEN known_files.upload_priority END, known_files.auto_upload_priority,
+                   CASE WHEN length(CAST(known_files.comment AS BLOB))<=65536 THEN known_files.comment END, known_files.rating,
                    known_files.all_time_uploaded_bytes,
                    known_files.all_time_upload_requests,
                    known_files.all_time_upload_accepts,
@@ -538,7 +533,7 @@ impl super::MetadataStore {
                    CASE WHEN length(CAST(known_files.media_artist AS BLOB))<=65536 THEN known_files.media_artist END, CASE WHEN length(CAST(known_files.media_album AS BLOB))<=65536 THEN known_files.media_album END,
                    CASE WHEN length(CAST(known_files.media_title AS BLOB))<=65536 THEN known_files.media_title END, known_files.media_length_seconds,
                    known_files.media_bitrate_kbps, CASE WHEN length(CAST(known_files.media_codec AS BLOB))<=65536 THEN known_files.media_codec END,
-                   known_files.media_extractor_version, length(CAST(verified_local_content.display_name AS BLOB)),length(CAST(verified_local_content.upload_priority AS BLOB)),length(CAST(verified_local_content.comment AS BLOB)),length(CAST(known_files.media_artist AS BLOB)),length(CAST(known_files.media_album AS BLOB)),length(CAST(known_files.media_title AS BLOB)),length(CAST(known_files.media_codec AS BLOB)),length(CAST(media_paths.native_path AS BLOB))
+                   known_files.media_extractor_version, length(CAST(verified_local_content.display_name AS BLOB)),length(CAST(known_files.upload_priority AS BLOB)),length(CAST(known_files.comment AS BLOB)),length(CAST(known_files.media_artist AS BLOB)),length(CAST(known_files.media_album AS BLOB)),length(CAST(known_files.media_title AS BLOB)),length(CAST(known_files.media_codec AS BLOB)),length(CAST(media_paths.native_path AS BLOB))
             FROM known_files
             JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
             JOIN local_paths media_paths ON media_paths.id = ({representative})
@@ -1633,12 +1628,12 @@ fn publish_entries_after(
         CASE WHEN {complete} THEN c.display_name ELSE t.display_name END name,
         CASE WHEN {complete} THEN known_files.size_bytes ELSE t.expected_size_bytes END size,
         lower(hex(CASE WHEN {complete} THEN c.aich_root ELSE t.aich_root END)) root,
-        CASE WHEN {complete} THEN c.upload_priority ELSE t.upload_priority END priority,
-        CASE WHEN {complete} THEN c.auto_upload_priority ELSE t.auto_upload_priority END auto,
+        known_files.upload_priority priority,
+        known_files.auto_upload_priority auto,
         known_files.all_time_uploaded_bytes uploaded,known_files.all_time_upload_requests requests,
         known_files.all_time_upload_accepts accepts,known_files.last_upload_requested_at_s last_request,
-        CASE WHEN {complete} THEN c.comment ELSE t.comment END comment,
-        CASE WHEN {complete} THEN c.rating ELSE t.rating END rating
+        known_files.comment comment,
+        known_files.rating rating
         FROM known_files LEFT JOIN verified_local_content c ON c.known_file_id=known_files.id
         LEFT JOIN local_file_instances i ON i.path_id=({representative})
         LEFT JOIN download_jobs t ON t.known_file_id=known_files.id AND t.removed_at_s IS NULL
@@ -2585,8 +2580,8 @@ pub(crate) fn read_transfer_row(
                            WHEN download_jobs.aich_root IS NULL THEN NULL
                            ELSE lower(hex(download_jobs.aich_root))
                        END,
-                       download_jobs.upload_priority, download_jobs.auto_upload_priority,
-                       download_jobs.comment, download_jobs.rating,
+                       known_files.upload_priority, known_files.auto_upload_priority,
+                       known_files.comment, known_files.rating,
                        download_jobs.category_id, download_jobs.intent, download_jobs.removed_at_s,
                        delivered_paths.platform, delivered_paths.native_path,
                        download_jobs.source_fingerprint, download_jobs.payload_fingerprint,

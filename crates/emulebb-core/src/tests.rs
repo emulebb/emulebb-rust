@@ -464,7 +464,10 @@ async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
     });
 
     assert_eq!(
-        core.publish_ed2k_shared_catalog().await.unwrap(),
+        shared_catalog_publisher::SharedCatalogPublisher::new(&core)
+            .publish_ed2k_shared_catalog()
+            .await
+            .unwrap(),
         Ed2kSharedCatalogPublishOutcome::NotConnected
     );
     shutdown.store(true, Ordering::SeqCst);
@@ -661,76 +664,6 @@ async fn passive_source_results_are_remembered_for_existing_transfer() {
         sources[0].source.user_hash.as_deref(),
         Some("52525252525252525252525252525252")
     );
-}
-
-#[tokio::test]
-async fn passive_note_results_update_empty_existing_transfer_metadata() {
-    let transfer_root = unique_runtime_dir("emulebb-core-passive-note-memory");
-    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
-    let file_hash = Ed2kHash::from_bytes([0x42; 16]);
-    let token = admit_scheduler_test_job(
-        &transfer_runtime,
-        &transfer_root,
-        file_hash,
-        "passive-note-target.bin".into(),
-        4096,
-    )
-    .await;
-
-    remember_passive_note_results(
-        &transfer_runtime,
-        token,
-        &[KadNoteResult {
-            file_hash,
-            source_id: Ed2kHash::from_bytes([0x53; 16]),
-            rating: Some(4),
-            comment: Some("clean release".to_string()),
-            source_tags: vec![],
-        }],
-    )
-    .await;
-
-    let manifest = transfer_runtime.manifest(token).await.unwrap();
-
-    assert_eq!(manifest.comment, "clean release");
-    assert_eq!(manifest.rating, 4);
-}
-
-#[tokio::test]
-async fn passive_note_results_do_not_replace_local_transfer_metadata() {
-    let transfer_root = unique_runtime_dir("emulebb-core-passive-note-preserve");
-    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
-    let file_hash = Ed2kHash::from_bytes([0x43; 16]);
-    let token = admit_scheduler_test_job(
-        &transfer_runtime,
-        &transfer_root,
-        file_hash,
-        "passive-note-preserve.bin".into(),
-        4096,
-    )
-    .await;
-    transfer_runtime
-        .update_shared_file_metadata(&file_hash.to_string(), None, Some(("local note", 2)))
-        .await
-        .unwrap();
-
-    remember_passive_note_results(
-        &transfer_runtime,
-        token,
-        &[KadNoteResult {
-            file_hash,
-            source_id: Ed2kHash::from_bytes([0x54; 16]),
-            rating: Some(5),
-            comment: Some("remote note".to_string()),
-            source_tags: vec![],
-        }],
-    )
-    .await;
-
-    let manifest = transfer_runtime.manifest(token).await.unwrap();
-
-    assert_eq!(manifest.comment, "local note");
-    assert_eq!(manifest.rating, 2);
 }
 
 pub(crate) async fn admit_scheduler_test_job(

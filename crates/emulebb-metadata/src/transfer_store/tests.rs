@@ -126,6 +126,170 @@ fn progress_snapshot_preserves_explicit_shared_presentation() {
     );
 }
 
+#[test]
+fn local_note_edit_and_durable_notes_clock_reset_are_atomic() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = completed_pending_download_manifest(&store);
+    let publish = crate::MetadataKadOutboundPublish {
+        file_hash: job.file_hash.clone(),
+        publish_kind: crate::MetadataKadOutboundPublishKind::Notes,
+        keyword: String::new(),
+        published_at_s: 100,
+    };
+    store.upsert_kad_outbound_publish(&publish, 100).unwrap();
+    let edit = store
+        .update_shared_content_metadata(&job.file_hash, None, Some(("Local note", 4)))
+        .unwrap()
+        .unwrap();
+    assert!(edit.notes_changed && edit.rating_changed);
+    assert!(!edit.publish_status_changed);
+    assert!(
+        store
+            .load_kad_outbound_publish_schedule()
+            .unwrap()
+            .publishes
+            .is_empty()
+    );
+    store.upsert_kad_outbound_publish(&publish, 100).unwrap();
+    for (priority, comment) in [
+        (Some(("high", false)), None),
+        (None, Some(("Local note", 4))),
+    ] {
+        let edit = store
+            .update_shared_content_metadata(&job.file_hash, priority, comment)
+            .unwrap()
+            .unwrap();
+        assert!(!edit.notes_changed && !edit.rating_changed && !edit.publish_status_changed);
+        assert_eq!(
+            store
+                .load_kad_outbound_publish_schedule()
+                .unwrap()
+                .publishes,
+            [publish.clone()]
+        );
+    }
+    store
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_notes_reset BEFORE DELETE ON kad_outbound_publish_schedule
+         BEGIN SELECT RAISE(ABORT, 'synthetic notes reset failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        store
+            .update_shared_content_metadata(
+                &job.file_hash,
+                Some(("release", false)),
+                Some(("Changed", 5))
+            )
+            .is_err()
+    );
+    let stored = store
+        .download_job_manifest(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            stored.upload_priority.as_str(),
+            stored.comment.as_str(),
+            stored.rating
+        ),
+        ("high", "Local note", 4)
+    );
+    assert_eq!(
+        store
+            .load_kad_outbound_publish_schedule()
+            .unwrap()
+            .publishes,
+        [publish]
+    );
+}
+
+#[test]
+fn hash_presentation_survives_copyless_edit_job_removal_and_reopen() {
+    let path = unique_store_path("hash-presentation");
+    let store = MetadataStore::open(&path).unwrap();
+    let first = completed_pending_download_manifest(&store);
+    let hash = first.file_hash.clone();
+    assert_eq!(
+        store
+            .update_shared_content_metadata(
+                &hash,
+                Some(("high", false)),
+                Some(("First comment", 4))
+            )
+            .unwrap()
+            .map(|edit| edit.token),
+        Some(Some(first.token))
+    );
+    let current = store
+        .download_job_manifest(first.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            current.upload_priority.as_str(),
+            current.comment.as_str(),
+            current.rating
+        ),
+        ("high", "First comment", 4)
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM download_jobs WHERE id=?1",
+            [first.token.job_id],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .update_shared_content_metadata(
+                &hash,
+                Some(("release", false)),
+                Some(("Copyless comment", 5))
+            )
+            .unwrap()
+            .map(|edit| edit.token),
+        Some(None)
+    );
+    assert_eq!(
+        store
+            .update_shared_content_metadata(&"ff".repeat(16), Some(("low", false)), None)
+            .unwrap(),
+        None
+    );
+    drop(store);
+
+    let store = MetadataStore::open(&path).unwrap();
+    let next = store
+        .admit_download_job(&crate::DownloadJobRequest {
+            file_hash: hash,
+            display_name: "Another.bin".into(),
+            expected_size_bytes: Some(16),
+            category_id: None,
+            intent: crate::DownloadIntent::Stopped,
+            piece_size: 16,
+        })
+        .unwrap();
+    let current = store
+        .download_job_manifest(next.job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            current.upload_priority.as_str(),
+            current.comment.as_str(),
+            current.rating
+        ),
+        ("release", "Copyless comment", 5)
+    );
+    assert!(!current.auto_upload_priority);
+    drop(store);
+    remove_store_files(&path);
+}
+
 fn register_shared_test_job(store: &MetadataStore, id: crate::JobId) {
     let manifest = store.download_job_manifest(id).unwrap().unwrap();
     let root = std::env::temp_dir().join("metadata-job-catalog");
@@ -782,7 +946,7 @@ fn failed_partial_projection_rolls_back_shared_path_withdrawal() {
     store
         .connection()
         .unwrap()
-        .execute("UPDATE download_jobs SET comment=?1", ["x".repeat(65_537)])
+        .execute("UPDATE known_files SET comment=?1", ["x".repeat(65_537)])
         .unwrap();
     let root =
         PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR is required"))

@@ -135,16 +135,25 @@ pub struct MetadataVerifiedLocalContent {
     pub rating: u8,
 }
 
+/// Scalar publication receipt computed in the same transaction as an edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetadataContentEdit {
+    pub token: Option<crate::JobToken>,
+    pub notes_changed: bool,
+    pub rating_changed: bool,
+    pub publish_status_changed: bool,
+}
+
 impl MetadataStore {
-    /// Apply content presentation to the eligible complete copy, otherwise to
-    /// the sole unremoved unfinished job. The returned token fences only that
-    /// job's cache patch; historical jobs are never selected by hash order.
+    /// Update the client hash's persistent presentation independently of copies.
+    /// The optional current token fences its active execution cache publication;
+    /// historical jobs never own separate presentation values.
     pub fn update_shared_content_metadata(
         &self,
         file_hash: &str,
         priority: Option<(&str, bool)>,
         comment_rating: Option<(&str, u8)>,
-    ) -> Result<Option<Option<crate::JobToken>>> {
+    ) -> Result<Option<MetadataContentEdit>> {
         ensure!(
             priority.is_none_or(|(value, _)| value.len() <= 64),
             "upload priority exceeds allowance"
@@ -156,62 +165,48 @@ impl MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let complete: bool = tx.query_row(
-            crate::local_catalog::VERIFIED_SHARE_EXISTS_SQL,
-            [&hash],
-            |row| row.get(0),
-        )?;
-        let token = if complete {
-            None
-        } else {
-            let current=tx.query_row("SELECT j.id,j.execution_generation FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id
-                WHERE k.ed2k_hash=?1 AND j.removed_at_s IS NULL AND j.terminal_completed_at_s IS NULL
-                AND j.delete_requested_at_s IS NULL",[&hash],|row|Ok(crate::JobToken {job_id:row.get(0)?,generation:crate::sql_value::unsigned(row,1)?})).optional()?;
-            let Some(current) = current else {
-                return Ok(None);
-            };
-            Some(current)
+        let changed: Option<(i64, bool, bool, bool)> = tx
+            .query_row(
+                "SELECT k.id, ?2 IS NOT NULL AND (k.comment<>?2 OR k.rating<>?3),
+             ?3 IS NOT NULL AND k.rating<>?3,
+             ?4 IS NOT NULL AND ((k.upload_priority='not-published')<>(?4='not-published'))
+             FROM known_files k JOIN library_files l ON l.known_file_id=k.id WHERE k.ed2k_hash=?1",
+                params![
+                    &hash,
+                    comment_rating.map(|v| v.0),
+                    comment_rating.map(|v| v.1),
+                    priority.map(|v| v.0)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((known_id, notes_changed, rating_changed, publish_status_changed)) = changed
+        else {
+            return Ok(None);
         };
-        if let Some(token) = token {
-            tx.execute("UPDATE download_jobs SET upload_priority=coalesce(?2,upload_priority),auto_upload_priority=coalesce(?3,auto_upload_priority),comment=coalesce(?4,comment),rating=coalesce(?5,rating) WHERE id=?1",
-                params![token.job_id,priority.map(|v|v.0),priority.map(|v|v.1),comment_rating.map(|v|v.0),comment_rating.map(|v|v.1)])?;
-        } else {
-            tx.execute("UPDATE verified_local_content SET upload_priority=coalesce(?2,upload_priority),auto_upload_priority=coalesce(?3,auto_upload_priority),comment=coalesce(?4,comment),rating=coalesce(?5,rating) WHERE known_file_id=(SELECT id FROM known_files WHERE ed2k_hash=?1)",
-                params![hash,priority.map(|v|v.0),priority.map(|v|v.1),comment_rating.map(|v|v.0),comment_rating.map(|v|v.1)])?;
+        let token = tx.query_row(
+            "SELECT id,execution_generation FROM download_jobs WHERE known_file_id=?1
+             AND removed_at_s IS NULL AND terminal_completed_at_s IS NULL AND delete_requested_at_s IS NULL",
+            [known_id], |row| Ok(crate::JobToken { job_id: row.get(0)?, generation: crate::sql_value::unsigned(row,1)? }),
+        ).optional()?;
+        tx.execute(
+            "UPDATE known_files SET upload_priority=coalesce(?2,upload_priority),auto_upload_priority=coalesce(?3,auto_upload_priority),
+             comment=coalesce(?4,comment),rating=coalesce(?5,rating) WHERE id=?1",
+            params![known_id,priority.map(|v|v.0),priority.map(|v|v.1),comment_rating.map(|v|v.0),comment_rating.map(|v|v.1)],
+        )?;
+        if notes_changed {
+            tx.execute(
+                "DELETE FROM kad_outbound_publish_schedule WHERE ed2k_hash=?1 AND publish_kind='notes'",
+                [&hash],
+            )?;
         }
         tx.commit()?;
-        Ok(Some(token))
-    }
-
-    /// Change presentation metadata only for a currently eligible complete
-    /// local file. This does not create or mutate a download job.
-    pub fn update_active_local_share_metadata(
-        &self,
-        file_hash: &str,
-        priority: Option<(&str, bool)>,
-        comment_rating: Option<(&str, u8)>,
-    ) -> Result<bool> {
-        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
-        if self.active_local_file_by_hash(file_hash)?.is_none() {
-            return Ok(false);
-        }
-        let conn = self.connection()?;
-        let changed = conn.execute(
-            "UPDATE verified_local_content SET
-                upload_priority = coalesce(?2, upload_priority),
-                auto_upload_priority = coalesce(?3, auto_upload_priority),
-                comment = coalesce(?4, comment),
-                rating = coalesce(?5, rating)
-             WHERE known_file_id = (SELECT id FROM known_files WHERE ed2k_hash = ?1)",
-            params![
-                hash,
-                priority.map(|(value, _)| value),
-                priority.map(|(_, auto)| i64::from(auto)),
-                comment_rating.map(|(value, _)| value),
-                comment_rating.map(|(_, rating)| i64::from(rating)),
-            ],
-        )?;
-        Ok(changed != 0)
+        Ok(Some(MetadataContentEdit {
+            token,
+            notes_changed,
+            rating_changed,
+            publish_status_changed,
+        }))
     }
 
     /// Page complete local files eligible for publication independently of
@@ -480,12 +475,17 @@ impl MetadataStore {
         tx.execute(
             "INSERT INTO known_files(
                 ed2k_hash, size_bytes, display_name, aich_root, aich_root_origin,
-                first_seen_at_s, last_seen_at_s, updated_at_s
-             ) VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5, ?5)
+                first_seen_at_s, last_seen_at_s, updated_at_s,
+                upload_priority, auto_upload_priority, comment, rating
+             ) VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5, ?5, ?7, ?8, ?9, ?10)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
                  display_name = CASE
                     WHEN EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id)
                     THEN known_files.display_name ELSE excluded.display_name END,
+                 upload_priority = CASE WHEN EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id) THEN known_files.upload_priority ELSE excluded.upload_priority END,
+                 auto_upload_priority = CASE WHEN EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id) THEN known_files.auto_upload_priority ELSE excluded.auto_upload_priority END,
+                 comment = CASE WHEN EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id) THEN known_files.comment ELSE excluded.comment END,
+                 rating = CASE WHEN EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id) THEN known_files.rating ELSE excluded.rating END,
                  size_bytes = excluded.size_bytes,
                  aich_root = coalesce(excluded.aich_root, known_files.aich_root),
                  aich_root_origin = CASE
@@ -494,7 +494,7 @@ impl MetadataStore {
                     ELSE excluded.aich_root_origin END,
                 last_seen_at_s = excluded.last_seen_at_s,
                 updated_at_s = excluded.updated_at_s",
-            params![hash, size, content.display_name, aich_root, now, aich_root.as_ref().map(|_| origin)],
+            params![hash, size, content.display_name, aich_root, now, aich_root.as_ref().map(|_| origin), content.upload_priority, content.auto_upload_priority, content.comment, content.rating],
         )?;
         let (known_file_id, stored_size): (i64, i64) = tx.query_row(
             "SELECT id, size_bytes FROM known_files WHERE ed2k_hash = ?1",
@@ -508,9 +508,8 @@ impl MetadataStore {
         crate::transfer_store::reconcile_transfer_aich_authority_tx(tx, known_file_id)?;
         let inserted = tx.execute(
             "INSERT INTO verified_local_content(
-                known_file_id, display_name, part_size_bytes, part_count, aich_root,
-                upload_priority, auto_upload_priority, comment, rating
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                known_file_id, display_name, part_size_bytes, part_count, aich_root
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(known_file_id) DO NOTHING",
             params![
                 known_file_id,
@@ -518,10 +517,6 @@ impl MetadataStore {
                 part_size,
                 part_count,
                 aich_root,
-                content.upload_priority,
-                content.auto_upload_priority,
-                content.comment,
-                content.rating,
             ],
         )?;
         let mut write_aich = inserted != 0;
@@ -923,9 +918,9 @@ impl MetadataStore {
                     verified_local_content.part_size_bytes,
                     CASE WHEN verified_local_content.aich_root IS NULL THEN NULL
                          ELSE lower(hex(verified_local_content.aich_root)) END,
-                    verified_local_content.upload_priority,
-                    verified_local_content.auto_upload_priority,
-                    verified_local_content.comment, verified_local_content.rating
+                    known_files.upload_priority,
+                    known_files.auto_upload_priority,
+                    known_files.comment, known_files.rating
                  FROM known_files
                  JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
                  WHERE known_files.ed2k_hash = ?1",

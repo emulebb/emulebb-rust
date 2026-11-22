@@ -22,6 +22,7 @@ mod download_create;
 pub(crate) use download_create::DownloadCreateCommand;
 mod download_patch;
 mod kad;
+mod library_metadata;
 mod library_roots;
 mod library_sharing;
 mod library_tags;
@@ -121,6 +122,7 @@ enum Command {
     SearchRead(search_read::Query),
     LibraryTags(crate::LibraryTagRequest),
     LibrarySharing(library_sharing::SharingCommand),
+    LibraryMetadata(library_metadata::MetadataCommand),
     Downloads(download::DownloadCommand),
     KadLoad,
     KadIdentity,
@@ -144,6 +146,7 @@ enum Response {
         Result<crate::LibraryReply<crate::LibraryTagValue>, emulebb_metadata::LibraryTagError>,
     ),
     LibrarySharing(crate::LibraryReply<Vec<crate::LibrarySharingOutcome>>),
+    LibraryMetadata(bool),
     Downloads(crate::DownloadControlBatch),
     DownloadPatched(Result<crate::DownloadChange, emulebb_metadata::DownloadPatchError>),
     DownloadCreated(
@@ -1117,6 +1120,7 @@ impl PersistenceOwner {
             | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)
+            | Command::LibraryMetadata(_)
             | Command::Category(_)
             | Command::Downloads(_)
             | Command::KadLoad
@@ -1313,6 +1317,14 @@ async fn process(
         )
         .await;
     }
+    if matches!(&request.command, Command::LibraryMetadata(_)) {
+        return library_metadata::process(
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::ContentObservations(_)) {
         return content_observations::process(
             db,
@@ -1422,6 +1434,7 @@ async fn process(
             | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)
+            | Command::LibraryMetadata(_)
             | Command::Category(_)
             | Command::Downloads(_)
             | Command::KadLoad

@@ -78,6 +78,11 @@ pub struct MetadataContentMetadata {
     pub complete: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Claimed note publisher identity, independent of the responding endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publisher_id: Option<[u8; 16]>,
 }
 
 impl MetadataContentMetadata {
@@ -90,6 +95,7 @@ impl MetadataContentMetadata {
             &self.media_title,
             &self.media_codec,
             &self.directory,
+            &self.comment,
         ]
         .into_iter()
         .try_fold(0usize, |bytes, text| {

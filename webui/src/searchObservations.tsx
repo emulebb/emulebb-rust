@@ -47,6 +47,8 @@ export function SearchObservations(props: {
               <dt>Duration</dt><dd>{row.media.lengthSeconds === null ? "Unreported" : `${row.media.lengthSeconds} seconds`}</dd>
               <dt>Bitrate</dt><dd>{row.media.bitrateKbps === null ? "Unreported" : `${row.media.bitrateKbps} kbps`}</dd>
               <dt>Rating</dt><dd>{row.rating === null ? "Unreported" : `${row.rating}/5`}</dd>
+              <dt>Remote comment</dt><dd>{row.comment ?? "Unreported"}</dd>
+              <dt>Note publisher</dt><dd>{row.publisherId ?? "Unreported"}</dd>
               <dt>AICH</dt><dd>{row.aichHash ?? "Unreported"}</dd>
               <dt>Directory</dt><dd>{row.directory ?? "Unreported"}</dd>
               <dt>Reported complete</dt><dd>{row.complete === null ? "Unreported" : row.complete ? "Yes" : "No"}</dd>

@@ -32,11 +32,11 @@ async fn upload_queue_scores_waiters_with_persisted_file_priority() {
     let normal_file = normal.file_hash.parse::<Ed2kHash>().unwrap();
     let high_file = high.file_hash.parse::<Ed2kHash>().unwrap();
     runtime
-        .update_shared_file_metadata(&normal.file_hash, Some(("normal", false)), None)
+        .update_library_file_metadata(&normal.file_hash, Some(("normal", false)), None)
         .await
         .unwrap();
     runtime
-        .update_shared_file_metadata(&high_file.to_string(), Some(("high", false)), None)
+        .update_library_file_metadata(&high_file.to_string(), Some(("high", false)), None)
         .await
         .unwrap();
 
@@ -112,7 +112,7 @@ async fn upload_queue_refreshes_waiter_score_after_priority_change() {
     assert_eq!(boosted_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
 
     runtime
-        .update_shared_file_metadata(&boosted_file.to_string(), Some(("release", false)), None)
+        .update_library_file_metadata(&boosted_file.to_string(), Some(("release", false)), None)
         .await
         .unwrap();
 

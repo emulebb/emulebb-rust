@@ -1159,6 +1159,79 @@ async fn post_commit_worker_failure_reconciles_or_faults_the_domain() {
 }
 
 #[tokio::test]
+async fn unreconciled_profile_refuses_library_reads_including_absent_hashes() {
+    let index = emulebb_index::FileIndex::in_memory().unwrap();
+    let hash = "61".repeat(16);
+    index
+        .metadata_store()
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: hash.clone(),
+            display_name: "Sample.bin".into(),
+            expected_size_bytes: Some(32),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Stopped,
+            piece_size: 1024,
+        })
+        .unwrap();
+    let core = crate::EmulebbCore::new_in_memory("test", index).unwrap();
+    assert!(core.library_file(&hash).await.unwrap().is_some());
+    assert!(core.library_file_detail(&hash).await.unwrap().is_some());
+    assert!(
+        core.library_locations(&hash, 0, 100)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    owner.fault.store(2, Ordering::SeqCst);
+    assert!(matches!(
+        owner.add("22".repeat(16), "Sample".into()).await,
+        Err(PersistenceError::CommitUnknown)
+    ));
+
+    let page_error = core
+        .library_file_page(crate::LibraryFileQuery::default())
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        page_error.downcast_ref::<PersistenceError>(),
+        Some(PersistenceError::CommitUnknown)
+    ));
+    for candidate in [&hash, &"ff".repeat(16)] {
+        let error = core.library_file(candidate).await.err().unwrap();
+        assert!(matches!(
+            error.downcast_ref::<PersistenceError>(),
+            Some(PersistenceError::CommitUnknown)
+        ));
+        let error = core.library_file_detail(candidate).await.err().unwrap();
+        assert!(matches!(
+            error.downcast_ref::<PersistenceError>(),
+            Some(PersistenceError::CommitUnknown)
+        ));
+        let error = core
+            .library_locations(candidate, 0, 100)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error.downcast_ref::<PersistenceError>(),
+            Some(PersistenceError::CommitUnknown)
+        ));
+    }
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .transient_bytes,
+        0
+    );
+    assert!(owner.close_and_drain().await.is_err());
+}
+
+#[tokio::test]
 async fn drain_releases_worker_profile_lease_before_reopen() {
     use emulebb_metadata::ProfileLeaseGuard;
     use std::{

@@ -41,7 +41,7 @@ enum PayloadRead {
 fn read(conn: &Connection, id: JobId, allowance: usize) -> Result<PayloadRead> {
     let sql = format!("SELECT j.execution_generation,lower(hex(k.ed2k_hash)),j.display_name,
         j.expected_size_bytes,j.part_size_bytes,j.part_count,lower(hex(j.aich_root)),
-        j.upload_priority,j.auto_upload_priority,j.comment,j.rating,
+        k.upload_priority,k.auto_upload_priority,k.comment,k.rating,
         p.platform,p.native_path,j.storage_directory_marker_id,j.storage_directory_identity,j.payload_fingerprint,
         k.all_time_uploaded_bytes,k.all_time_upload_requests,k.all_time_upload_accepts,k.last_upload_requested_at_s,
         k.media_artist,k.media_album,k.media_title,k.media_length_seconds,k.media_bitrate_kbps,k.media_codec,k.media_extractor_version

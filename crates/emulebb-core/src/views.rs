@@ -329,10 +329,15 @@ pub(crate) fn validate_shared_upload_priority(priority: &str) -> Result<(&str, b
 
 pub(crate) fn validate_shared_file_comment_rating(
     request: &SharedFileUpdate,
-) -> Result<Option<(String, u8)>> {
+) -> Result<Option<(&str, u8)>> {
     match (&request.comment, request.rating) {
         (None, None) => Ok(None),
-        (Some(comment), Some(rating)) if rating <= 5 => Ok(Some((comment.clone(), rating))),
+        (Some(comment), Some(rating)) if rating <= 5 && comment.len() <= 65_536 => {
+            Ok(Some((comment.as_str(), rating)))
+        }
+        (Some(comment), Some(_)) if comment.len() > 65_536 => {
+            anyhow::bail!("comment exceeds 65536 bytes")
+        }
         (None, Some(_)) => anyhow::bail!("comment must be a string"),
         (Some(_), Some(_)) | (Some(_), None) => {
             anyhow::bail!("rating must be an integer between 0 and 5")
