@@ -1,5 +1,46 @@
 use crate::rest_test_support::*;
 
+#[test]
+fn observation_projection_preserves_remote_note_and_claimed_publisher() {
+    use emulebb_metadata::*;
+    let observation = MetadataContentObservation {
+        receipt: MetadataContentObservationReceipt {
+            claim_id: 1,
+            observation_id: 2,
+            first_seen_at_s: 3,
+            last_seen_at_s: 4,
+            observation_count: 1,
+        },
+        event: MetadataContentObservationEvent {
+            claim: MetadataContentClaim {
+                hash: [0x41; 16],
+                size_bytes: None,
+            },
+            origin: MetadataObservationOrigin::Kad,
+            reporter_endpoint: None,
+            observed_at_s: 4,
+            metadata: MetadataContentMetadata {
+                comment: Some("Remote note".into()),
+                publisher_id: Some([0x53; 16]),
+                rating: Some(4),
+                ..Default::default()
+            },
+        },
+    };
+    let row = MetadataSearchResultObservation {
+        observation,
+        first_seen_at_s: 3,
+        last_seen_at_s: 4,
+        observation_count: 1,
+    };
+    let value = super::observation_response(&row);
+    assert_eq!(value["comment"], "Remote note");
+    assert_eq!(value["publisherId"], "53".repeat(16));
+    assert_eq!(value["rating"], 4);
+    assert!(value["reporterEndpoint"].is_null());
+    assert!(value["sizeBytes"].is_null());
+}
+
 async fn fixture() -> (Arc<EmulebbCore>, Router, String, String) {
     let mut a = IndexedFile {
         ed2k_hash: "00112233445566778899aabbccddeeff".into(),

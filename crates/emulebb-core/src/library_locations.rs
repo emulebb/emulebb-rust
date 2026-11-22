@@ -32,11 +32,16 @@ impl EmulebbCore {
         after: i64,
         limit: usize,
     ) -> Result<Option<RetainedRead<LibraryLocationPage>>> {
-        let Some(page) = self
+        self.persistence_owner.check_coherent_state()?;
+        let page = self
             .ed2k_transfers
             .library_locations(hash, after, limit)
-            .await?
-        else {
+            .await?;
+        // WHY: an unrelated profile commit can fault while this worker reads.
+        // Preserve the common fault outcome even for an absent hash, rather
+        // than presenting an unreconciled profile as authoritative library data.
+        self.persistence_owner.check_coherent_state()?;
+        let Some(page) = page else {
             return Ok(None);
         };
         page.try_project(LIBRARY_LOCATION_PAGE_BYTES, |page| {

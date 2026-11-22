@@ -5,6 +5,7 @@ import { SearchObservations } from "../../src/searchObservations";
 
 function row(id: string, name: string): SearchObservation {
   return { id, rawName: name, normalizedName: name, origin: "server", reporterEndpoint: null,
+    publisherId: null, comment: null,
     sizeBytes: null, sources: 0, completeSources: null, sourceClientId: null, sourceClientPort: null,
     fileType: null, media: { artist: null, album: null, title: null, lengthSeconds: null, bitrateKbps: null, codec: null },
     rating: null, aichHash: null, complete: null, directory: null,
@@ -16,12 +17,14 @@ describe("SearchObservations", () => {
   it("replaces each bounded page and preserves the difference between zero and unknown", async () => {
     const client = new RestClient();
     const get = vi.spyOn(client, "getPage")
-      .mockResolvedValueOnce({ data: [row("1", "Alpha.bin")], meta: meta("next") })
+      .mockResolvedValueOnce({ data: [{ ...row("1", "Alpha.bin"), origin: "kad", publisherId: "53".repeat(16), comment: "Remote note" }], meta: meta("next") })
       .mockResolvedValueOnce({ data: [row("2", "Beta.bin")], meta: meta(null) })
       .mockResolvedValueOnce({ data: [row("1", "Alpha.bin")], meta: meta("next") });
     const close = vi.fn();
     render(<SearchObservations client={client} session="7" claim="11" close={close} />);
     await screen.findByText("Alpha.bin");
+    expect(screen.getByText("Remote note")).toBeInTheDocument();
+    expect(screen.getByText("53".repeat(16))).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
     expect(screen.getAllByText("Unknown").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Next observations page" }));

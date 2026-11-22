@@ -22,6 +22,41 @@ fn event(size_bytes: Option<u64>) -> MetadataContentObservationEvent {
 }
 
 #[test]
+fn note_text_and_publisher_roundtrip_as_distinct_semantic_evidence() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut first = event(None);
+    first.metadata.comment = Some("Exact remote note".into());
+    first.metadata.publisher_id = Some([0x31; 16]);
+    let mut other = first.clone();
+    other.metadata.publisher_id = Some([0x32; 16]);
+    let mut changed = first.clone();
+    changed.metadata.comment = Some("Changed remote note".into());
+    let receipts = store
+        .ingest_content_observations(&[
+            first.clone(),
+            other.clone(),
+            changed.clone(),
+            first.clone(),
+        ])
+        .unwrap();
+    assert_ne!(receipts[0].observation_id, receipts[1].observation_id);
+    assert_ne!(receipts[0].observation_id, receipts[2].observation_id);
+    assert_eq!(receipts[0].observation_id, receipts[3].observation_id);
+    let page = store
+        .content_observations_page(receipts[0].claim_id, 0, 100)
+        .unwrap();
+    assert_eq!(page.items.len(), 3);
+    for (stored, expected) in page.items.iter().zip([first, other, changed]) {
+        assert_eq!(stored.event.metadata, expected.metadata);
+    }
+    assert_eq!(page.items[0].receipt.observation_count, 2);
+    let mut oversized = event(None);
+    oversized.metadata.comment = Some("x".repeat(65_536));
+    assert!(store.ingest_content_observations(&[oversized]).is_err());
+    assert_eq!(store.table_count("content_claim_observations").unwrap(), 3);
+}
+
+#[test]
 fn unknown_zero_conflicting_and_full_unsigned_sizes_have_distinct_stable_claims() {
     let store = MetadataStore::in_memory().unwrap();
     let events: Vec<_> = [None, Some(0), Some(1024), Some(u64::MAX)]

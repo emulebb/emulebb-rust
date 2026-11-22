@@ -84,7 +84,7 @@ use emulebb_kad_dht::{
     ReceivedKadPacket, RpcClassBudgetConfig, RpcWorkClass,
 };
 #[cfg(test)]
-use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
+use emulebb_kad_dht::{SearchResult as KadSearchResult, SourceResult};
 use emulebb_kad_proto::tag_name;
 use emulebb_kad_proto::{
     CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes, HelloResAck, KAD_VERSION, KadPacket,
@@ -132,8 +132,9 @@ mod download_controls;
 mod library_files;
 mod library_locations;
 pub use library_files::{
-    LIBRARY_FILE_PAGE_BYTES, LibraryFile, LibraryFilePage, LibraryFileQuery, LibraryFileSort,
-    LibraryFileView, MetadataLibraryCursorExpired,
+    LIBRARY_FILE_DETAIL_BYTES, LIBRARY_FILE_PAGE_BYTES, LibraryFile, LibraryFileDetail,
+    LibraryFilePage, LibraryFileQuery, LibraryFileSort, LibraryFileView,
+    MetadataLibraryCursorExpired,
 };
 mod library_policy;
 pub use library_locations::{LIBRARY_LOCATION_PAGE_BYTES, LibraryLocation, LibraryLocationPage};
@@ -216,6 +217,7 @@ mod search_state;
 mod server_api;
 mod server_list;
 mod server_read;
+mod shared_catalog_publisher;
 mod shared_dir_monitor;
 mod shared_directories;
 mod shared_file_api;
@@ -294,9 +296,9 @@ use kad_hello::{
 #[cfg(test)]
 use kad_passive_replay::{
     PassiveReplayFamily, index_passive_keyword_result, preferred_passive_replay_families,
-    remember_passive_note_results, remember_passive_source_results,
+    remember_passive_source_results,
 };
-use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
+use kad_passive_replay::{PassiveReplayRuntime, PassiveReplayWorker, run_kad_passive_replay_loop};
 pub use kad_publish_diagnostics::KadPublishDiagnostics;
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
@@ -357,7 +359,6 @@ use views::{
     download_source_from_record, format_ed2k_file_link, kad_status_from_running,
     preserve_transfer_public_metadata, server_endpoint_from_create, server_info_from_parts,
     source_friend_name, transfer_from_manifest, validate_server_priority, validate_server_update,
-    validate_shared_file_comment_rating, validate_shared_upload_priority,
     validate_source_client_id, validate_url_import,
 };
 
@@ -2915,222 +2916,8 @@ impl EmulebbCore {
         pending
     }
 
-    async fn publish_ed2k_shared_catalog(&self) -> Result<Ed2kSharedCatalogPublishOutcome> {
-        let Some(network) = self.ed2k_network.as_ref() else {
-            return Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork);
-        };
-        let (handle, server_state) = {
-            let runtime_guard = self.ed2k_runtime.lock().await;
-            let Some(runtime) = runtime_guard.as_ref() else {
-                return Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork);
-            };
-            (
-                runtime.search_handle.clone(),
-                Arc::clone(&runtime.server_state),
-            )
-        };
-        if !server_state.read().await.connected {
-            return Ok(Ed2kSharedCatalogPublishOutcome::NotConnected);
-        }
-        let timeout = Duration::from_secs(network.ed2k.connect_timeout_secs.max(10));
-        let stats = publish_shared_catalog_via_background_session(
-            &handle,
-            timeout,
-            &CancellationToken::new(),
-        )
-        .await?;
-        Ok(Ed2kSharedCatalogPublishOutcome::Published(stats))
-    }
-
     fn queue_ed2k_shared_catalog_publish(&self) {
-        self.shared_catalog_publish_dirty
-            .store(true, Ordering::Release);
-        ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
-            if !diagnostics.running {
-                diagnostics.phase = "queued".to_string();
-            }
-            diagnostics.running = true;
-            diagnostics.dirty = true;
-            diagnostics.queued_count = diagnostics.queued_count.saturating_add(1);
-        });
-        if self
-            .shared_catalog_publish_worker
-            .swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-        let core = self.clone();
-        tokio::spawn(async move {
-            core.run_queued_ed2k_shared_catalog_publisher().await;
-        });
-    }
-
-    async fn run_queued_ed2k_shared_catalog_publisher(self) {
-        const ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE: Duration = Duration::from_secs(2);
-        const ED2K_SHARED_CATALOG_PUBLISH_MIN_INTERVAL: Duration = Duration::from_secs(60);
-        const ED2K_SHARED_CATALOG_PUBLISH_NOT_CONNECTED_RETRY: Duration = Duration::from_secs(10);
-
-        loop {
-            ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
-                diagnostics.phase = "debouncing".to_string();
-                diagnostics.running = true;
-                diagnostics.dirty = self.shared_catalog_publish_dirty.load(Ordering::Acquire);
-            });
-            tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE).await;
-            let current_entries = self.ed2k_transfers.shared_catalog_count().await;
-            let previous_entries =
-                ed2k_publish_diagnostics::snapshot(&self.ed2k_publish_diagnostics).total_entries;
-            // An empty startup offer must not hold back the first real file.
-            // A shrinking catalog must withdraw stale server offers promptly.
-            let wait = if previous_entries > 0 && current_entries >= previous_entries {
-                let last = self.shared_catalog_publish_last.lock().await;
-                last.and_then(|last| {
-                    ED2K_SHARED_CATALOG_PUBLISH_MIN_INTERVAL.checked_sub(last.elapsed())
-                })
-            } else {
-                None
-            };
-            if let Some(wait) = wait {
-                ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
-                    diagnostics.phase = "waitingInterval".to_string();
-                    diagnostics.running = true;
-                    diagnostics.dirty = self.shared_catalog_publish_dirty.load(Ordering::Acquire);
-                });
-                tokio::time::sleep(wait).await;
-            }
-            // Clear before the network publish. If hashing completes another
-            // shared file while the advertisement is in flight, queueing sets
-            // dirty again and this loop performs a follow-up publish.
-            self.shared_catalog_publish_dirty
-                .store(false, Ordering::Release);
-            ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
-                diagnostics.phase = "publishing".to_string();
-                diagnostics.running = true;
-                diagnostics.dirty = false;
-                diagnostics.last_attempt_at = Some(Utc::now().timestamp());
-            });
-            match self.publish_ed2k_shared_catalog().await {
-                Ok(Ed2kSharedCatalogPublishOutcome::Published(stats)) => {
-                    *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
-                    ed2k_publish_diagnostics::record(
-                        &self.ed2k_publish_diagnostics,
-                        |diagnostics| {
-                            diagnostics.phase = "published".to_string();
-                            diagnostics.running = true;
-                            diagnostics.dirty =
-                                self.shared_catalog_publish_dirty.load(Ordering::Acquire);
-                            diagnostics.entries_sent = stats.entries_sent;
-                            diagnostics.total_entries = stats.total_entries;
-                            diagnostics.published_entries = stats.published_entries;
-                            diagnostics.pending_entries = stats.pending_entries;
-                            diagnostics.next_cursor = stats.next_cursor;
-                            diagnostics.wrapped = stats.wrapped;
-                            diagnostics.skipped_duplicate_batch = stats.skipped_duplicate_batch;
-                            diagnostics.session_pump_active = stats.session_pump_active;
-                            diagnostics.last_error = None;
-                            diagnostics.last_success_at = Some(Utc::now().timestamp());
-                        },
-                    );
-                    tracing::debug!(
-                        entries_sent = stats.entries_sent,
-                        total_entries = stats.total_entries,
-                        published_entries = stats.published_entries,
-                        pending_entries = stats.pending_entries,
-                        next_cursor = stats.next_cursor,
-                        wrapped = stats.wrapped,
-                        skipped_duplicate_batch = stats.skipped_duplicate_batch,
-                        session_pump_active = stats.session_pump_active,
-                        "refreshed ED2K shared catalog advertisement"
-                    );
-                    if !stats.wrapped
-                        && !stats.skipped_duplicate_batch
-                        && !stats.session_pump_active
-                    {
-                        self.shared_catalog_publish_dirty
-                            .store(true, Ordering::Release);
-                        ed2k_publish_diagnostics::record(
-                            &self.ed2k_publish_diagnostics,
-                            |diagnostics| {
-                                diagnostics.dirty = true;
-                            },
-                        );
-                    }
-                }
-                Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork) => {
-                    ed2k_publish_diagnostics::record(
-                        &self.ed2k_publish_diagnostics,
-                        |diagnostics| {
-                            diagnostics.phase = "noNetwork".to_string();
-                            diagnostics.running = true;
-                            diagnostics.dirty =
-                                self.shared_catalog_publish_dirty.load(Ordering::Acquire);
-                            diagnostics.no_network_count =
-                                diagnostics.no_network_count.saturating_add(1);
-                        },
-                    );
-                }
-                Ok(Ed2kSharedCatalogPublishOutcome::NotConnected) => {
-                    self.shared_catalog_publish_dirty
-                        .store(true, Ordering::Release);
-                    ed2k_publish_diagnostics::record(
-                        &self.ed2k_publish_diagnostics,
-                        |diagnostics| {
-                            diagnostics.phase = "notConnected".to_string();
-                            diagnostics.running = true;
-                            diagnostics.dirty = true;
-                            diagnostics.not_connected_count =
-                                diagnostics.not_connected_count.saturating_add(1);
-                        },
-                    );
-                    tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_NOT_CONNECTED_RETRY).await;
-                    continue;
-                }
-                Err(error) => {
-                    *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
-                    self.shared_catalog_publish_dirty
-                        .store(true, Ordering::Release);
-                    ed2k_publish_diagnostics::record(
-                        &self.ed2k_publish_diagnostics,
-                        |diagnostics| {
-                            diagnostics.phase = "failed".to_string();
-                            diagnostics.running = true;
-                            diagnostics.dirty = true;
-                            diagnostics.failure_count = diagnostics.failure_count.saturating_add(1);
-                            diagnostics.last_error = Some(error.to_string());
-                        },
-                    );
-                    tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
-                }
-            }
-            if !self.shared_catalog_publish_dirty.load(Ordering::Acquire) {
-                self.shared_catalog_publish_worker
-                    .store(false, Ordering::Release);
-                if !self.shared_catalog_publish_dirty.load(Ordering::Acquire) {
-                    ed2k_publish_diagnostics::record(
-                        &self.ed2k_publish_diagnostics,
-                        |diagnostics| {
-                            diagnostics.phase = "idle".to_string();
-                            diagnostics.running = false;
-                            diagnostics.dirty = false;
-                        },
-                    );
-                    break;
-                }
-                if self
-                    .shared_catalog_publish_worker
-                    .swap(true, Ordering::AcqRel)
-                {
-                    ed2k_publish_diagnostics::record(
-                        &self.ed2k_publish_diagnostics,
-                        |diagnostics| {
-                            diagnostics.running = true;
-                            diagnostics.dirty = true;
-                        },
-                    );
-                    break;
-                }
-            }
-        }
+        shared_catalog_publisher::SharedCatalogPublisher::new(self).queue();
     }
 
     async fn run_ed2k_shared_catalog_demand_publish_loop(
@@ -3633,35 +3420,6 @@ async fn run_kad_shared_file_publish_loop(
         diagnostics.phase = "stopped".to_string();
         diagnostics.running = false;
     });
-}
-
-/// Whether a shared-file PATCH changed the Kad notes-relevant fields
-/// (comment/rating) versus the current values. A priority-only PATCH passes
-/// `comment_rating = None` and is never a notes change — the oracle resets the
-/// notes clock only from `SetFileComment`/`SetFileRating` (KnownFile.cpp:1337-
-/// 1355,1357-1375), each gated on the value actually differing.
-fn shared_file_notes_changed(
-    current_comment: &str,
-    current_rating: u8,
-    comment_rating: Option<(&str, u8)>,
-) -> bool {
-    comment_rating
-        .is_some_and(|(comment, rating)| comment != current_comment || rating != current_rating)
-}
-
-/// Whether a shared-file mutation changed a field that alters the eD2k
-/// OP_OFFERFILES set or per-file offer content, and therefore warrants re-running
-/// the rate-limited shared-catalog offer session. The set, completion sentinel,
-/// non-zero rating tag, and not-published status affect the packet. A regular
-/// priority PATCH only reorders a future full offer (oracle
-/// `CKnownFile::SetUpPriority` emits no re-offer, KnownFile.cpp:1395-1402).
-fn shared_file_change_requires_ed2k_reoffer(
-    share_status_changed: bool,
-    completion_changed: bool,
-    publish_status_changed: bool,
-    rating_changed: bool,
-) -> bool {
-    share_status_changed || completion_changed || publish_status_changed || rating_changed
 }
 
 /// Drain the pending NOTES-reset queue into the loop-local schedule, resetting

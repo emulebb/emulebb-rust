@@ -73,7 +73,7 @@ mod library_projection;
 mod library_query;
 pub use library_query::{
     LibraryFileQuery, LibraryFileSort, LibraryFileView, MetadataLibraryCursorExpired,
-    MetadataLibraryFile, MetadataLibraryFilePage,
+    MetadataLibraryFile, MetadataLibraryFileDetail, MetadataLibraryFilePage,
 };
 mod library_read_store;
 pub use library_policy_store::{LibraryTagError, MetadataLibraryTag, MetadataLibraryTagPage};
@@ -138,9 +138,9 @@ pub use kad_routing_store::{
     KAD_ROUTING_MAX_CONTACTS, KadRoutingContact, KadRoutingContactType, KadRoutingSnapshot,
 };
 pub use local_file_store::{
-    MetadataContentConflict, MetadataLocalFileInstance, MetadataLocalReloadEntry,
-    MetadataLocalShareEntry, MetadataSharedFileCursor, MetadataSharedFilePage,
-    MetadataSharedFileQuery, MetadataVerifiedLocalContent,
+    MetadataContentConflict, MetadataContentEdit, MetadataLocalFileInstance,
+    MetadataLocalReloadEntry, MetadataLocalShareEntry, MetadataSharedFileCursor,
+    MetadataSharedFilePage, MetadataSharedFileQuery, MetadataVerifiedLocalContent,
 };
 pub use model::{
     MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataLibraryRoot, MetadataLibraryRootDelete,

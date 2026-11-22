@@ -5,6 +5,153 @@ use transfer::test_support::admit_download_job;
 
 const BYTES: &[u8] = b"sample verified upload request payload";
 
+#[tokio::test]
+async fn copyless_library_metadata_remains_editable_after_job_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = transfer::Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+    let hash = Ed2kHash::from_bytes([0x61; 16]);
+    let job = admit_download_job(&runtime, hash, "Sample.bin".into(), 32);
+    assert!(
+        runtime
+            .update_library_file_metadata(
+                &hash.to_string(),
+                Some(("high", false)),
+                Some(("Local note", 4))
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let stored = runtime
+        .metadata
+        .download_job_manifest(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            stored.upload_priority.as_str(),
+            stored.comment.as_str(),
+            stored.rating
+        ),
+        ("high", "Local note", 4)
+    );
+    assert!(
+        runtime
+            .remove_download_job(job.token.job_id, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .update_library_file_metadata(
+                &hash.to_string(),
+                Some(("release", false)),
+                Some(("Retained note", 5))
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let next = admit_download_job(&runtime, hash, "Another.bin".into(), 32);
+    let stored = runtime
+        .metadata
+        .download_job_manifest(next.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            stored.upload_priority.as_str(),
+            stored.comment.as_str(),
+            stored.rating
+        ),
+        ("release", "Retained note", 5)
+    );
+    let unknown = Ed2kHash::from_bytes([0xff; 16]);
+    assert!(
+        runtime
+            .update_library_file_metadata(&unknown.to_string(), Some(("low", false)), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime
+            .metadata
+            .library_sharing_enabled(&unknown.to_string())
+            .unwrap(),
+        None
+    );
+    assert!(
+        runtime
+            .admit_upload_reader(&hash, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    runtime.drain_local_mutations().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_metadata_writer_finishes_cache_and_catalog_publication() {
+    let (_root, runtime, hash) = payload().await;
+    let (started, ready) = oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    runtime
+        .local_mutations
+        .install_publication_gate(started, gate);
+    let caller = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            runtime
+                .update_library_file_metadata(
+                    &hash.to_string(),
+                    Some(("release", false)),
+                    Some(("Edited note", 5)),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    let pending = runtime.local_mutations.signal_next_pending_drain();
+    let drain = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.drain_local_mutations().await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!drain.is_finished());
+    release.send(()).unwrap();
+    drain.await.unwrap().unwrap();
+    let cache = runtime.manifest_cache.lock().await;
+    let cached = cache.values().next().unwrap();
+    assert_eq!(
+        (
+            cached.upload_priority.as_str(),
+            cached.comment.as_str(),
+            cached.rating
+        ),
+        ("release", "Edited note", 5)
+    );
+    drop(cache);
+    let catalog = runtime.shared_catalog.read().await;
+    let published = catalog.entry_by_hash(&hash).unwrap();
+    assert_eq!(
+        (
+            published.upload_priority.as_str(),
+            published.comment.as_str(),
+            published.rating
+        ),
+        ("release", "Edited note", 5)
+    );
+}
+
 async fn payload() -> (
     tempfile::TempDir,
     Arc<transfer::Ed2kTransferRuntime>,

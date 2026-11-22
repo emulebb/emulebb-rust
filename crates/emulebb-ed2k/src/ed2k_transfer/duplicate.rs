@@ -361,7 +361,7 @@ mod tests {
         );
         assert_eq!(servable.display_name, "shared-redownload.bin");
         runtime
-            .update_shared_file_metadata(
+            .update_library_file_metadata(
                 &shared.file_hash,
                 Some(("release", false)),
                 Some(("local copy", 4)),

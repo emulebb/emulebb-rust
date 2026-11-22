@@ -17,7 +17,7 @@ pub(crate) const COLUMNS: &str =
     o.origin,o.reporter_endpoint,c.ed2k_hash,c.size_bytes,o.name,o.source_count,
     o.complete_source_count,o.source_client_id,o.source_client_port,o.file_type,
     o.media_artist,o.media_album,o.media_title,o.media_length_seconds,
-    o.media_bitrate_kbps,o.media_codec,o.rating,o.aich_root,o.complete,o.directory";
+    o.media_bitrate_kbps,o.media_codec,o.rating,o.aich_root,o.complete,o.directory,o.comment,o.publisher_id";
 
 impl MetadataStore {
     /// Commit an ordered batch of newly decoded occurrences atomically.
@@ -165,9 +165,9 @@ impl MetadataStore {
                     complete_source_count,source_client_id,source_client_port,file_type,
                     media_artist,media_album,media_title,media_length_seconds,media_bitrate_kbps,
                     media_codec,rating,aich_root,complete,directory,first_seen_at_s,last_seen_at_s,
-                    observation_count)
+                    observation_count,comment,publisher_id)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
-                    ?17,?18,?19,?20,?21,?21,1)
+                    ?17,?18,?19,?20,?21,?21,1,?22,?23)
                  ON CONFLICT(claim_id,fingerprint) DO UPDATE SET
                     first_seen_at_s=min(first_seen_at_s,excluded.first_seen_at_s),
                     last_seen_at_s=max(last_seen_at_s,excluded.last_seen_at_s),
@@ -196,6 +196,8 @@ impl MetadataStore {
                     m.complete,
                     m.directory,
                     event.observed_at_s,
+                    m.comment,
+                    m.publisher_id.as_ref().map(|id| id.as_slice()),
                 ],
                 |row| {
                     Ok(MetadataContentObservationReceipt {
@@ -254,7 +256,7 @@ impl MetadataStore {
             }
             // Charge SQLite's borrowed text before allocating owned strings.
             let mut charge = 2048usize;
-            for column in [9, 14, 15, 16, 17, 20, 24] {
+            for column in [9, 14, 15, 16, 17, 20, 24, 25] {
                 let value = row.get_ref(column)?;
                 if !matches!(value, rusqlite::types::ValueRef::Null) {
                     charge = charge
@@ -358,6 +360,15 @@ pub(crate) fn observation_from_row(row: &rusqlite::Row<'_>) -> Result<MetadataCo
                     .transpose()?,
                 complete: row.get(23)?,
                 directory: row.get(24)?,
+                comment: row.get(25)?,
+                publisher_id: row
+                    .get::<_, Option<Vec<u8>>>(26)?
+                    .map(|id| {
+                        id.try_into()
+                            .ok()
+                            .context("invalid note publisher identity")
+                    })
+                    .transpose()?,
             },
         },
     })

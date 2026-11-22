@@ -72,6 +72,11 @@ CREATE TABLE known_files (
     display_name TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
     sharing_enabled INTEGER NOT NULL DEFAULT 1 CHECK(sharing_enabled IN (0, 1)),
+    upload_priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
+    auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
+    comment TEXT NOT NULL DEFAULT '',
+    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     aich_root_origin TEXT CHECK(aich_root_origin IN
         ('local_computed', 'operator_link', 'stock_import')),
@@ -219,12 +224,7 @@ CREATE TABLE verified_local_content (
     display_name TEXT NOT NULL,
     part_size_bytes INTEGER NOT NULL CHECK(part_size_bytes > 0),
     part_count INTEGER NOT NULL CHECK(part_count BETWEEN 0 AND 4294967295),
-    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
-    upload_priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
-    auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
-    comment TEXT NOT NULL DEFAULT '',
-    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5)
+    aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20)
 ) STRICT;
 
 CREATE TABLE verified_local_md4_hashes (
@@ -399,11 +399,6 @@ CREATE TABLE download_jobs (
     display_name TEXT NOT NULL,
     part_size_bytes INTEGER NOT NULL CHECK(part_size_bytes > 0),
     part_count INTEGER NOT NULL CHECK(part_count BETWEEN 0 AND 4294967295),
-    upload_priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
-    auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
-    comment TEXT NOT NULL DEFAULT '',
-    rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
     completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
     md4_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(md4_hashset_acquired IN (0, 1)),
     aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
@@ -987,6 +982,8 @@ CREATE TABLE content_claim_observations (
     fingerprint BLOB NOT NULL CHECK(length(fingerprint) = 32),
     origin TEXT NOT NULL CHECK(origin IN ('server', 'global', 'kad')),
     reporter_endpoint TEXT,
+    publisher_id BLOB CHECK(publisher_id IS NULL OR length(publisher_id) = 16),
+    comment TEXT,
     name TEXT,
     source_count INTEGER CHECK(source_count IS NULL OR source_count BETWEEN 0 AND 4294967295),
     complete_source_count INTEGER CHECK(complete_source_count IS NULL OR complete_source_count BETWEEN 0 AND 4294967295),

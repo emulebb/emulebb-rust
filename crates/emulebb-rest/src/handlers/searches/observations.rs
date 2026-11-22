@@ -76,6 +76,7 @@ fn observation_response(member: &MetadataSearchResultObservation) -> serde_json:
             "lengthSeconds":m.media_length_seconds,"bitrateKbps":m.media_bitrate_kbps,"codec":m.media_codec},
         "rating":m.rating,"aichHash":m.aich_root.as_ref().map(|value|data_encoding::BASE32_NOPAD.encode(value)),
         "complete":m.complete,"directory":m.directory,
+        "comment":m.comment,"publisherId":m.publisher_id.as_ref().map(hex::encode),
         "firstSeenAt":member.first_seen_at_s,"lastSeenAt":member.last_seen_at_s,"observationCount":member.observation_count
     })
 }
