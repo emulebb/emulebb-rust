@@ -948,13 +948,18 @@ async fn final_kad_capture_survives_timed_out_network_cleanup() {
     // Server bootstrap intentionally rejects an empty list. An operator add
     // initializes that domain through the normal API without connecting.
     let server_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    core.add_server(ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: Ipv4Addr::LOCALHOST.to_string(),
         port: server_listener.local_addr().unwrap().port(),
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some("Local fixture".into()),
-        priority: None,
-        static_server: None,
-        connect: Some(false),
     })
     .await
     .unwrap();

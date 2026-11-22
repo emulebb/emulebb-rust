@@ -105,10 +105,7 @@ fn seed_servers_from_bytes(metadata: &MetadataStore, bytes: &[u8]) -> Result<usi
         .map(|server| MetadataServer {
             address: server.ip.to_string(),
             port: server.port,
-            name: server
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("{}:{}", server.ip, server.port)),
+            name: server.name.unwrap_or_default(),
             description: String::new(),
             server_priority: "normal".to_string(),
             static_server: false,
@@ -232,6 +229,7 @@ mod tests {
         let servers = metadata.load_servers().unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].endpoint(), "203.0.113.8:4661");
+        assert!(servers[0].name.is_empty());
         assert!(servers[0].enabled);
     }
 

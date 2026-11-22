@@ -867,13 +867,12 @@ async fn effective_ed2k_config_includes_runtime_servers() {
         server_endpoints: vec!["203.0.113.10:4661".to_string()],
         ..Ed2kRuntimeConfig::default()
     };
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.20".to_string(),
         port: 4661,
-        name: None,
-        priority: Some("high".to_string()),
-        static_server: Some(true),
-        connect: None,
+        priority: "high".to_string(),
+        static_server: true,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -898,13 +897,12 @@ async fn effective_ed2k_config_includes_runtime_servers() {
 #[tokio::test]
 async fn effective_ed2k_config_excludes_disabled_runtime_servers() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.20".to_string(),
         port: 4661,
-        name: None,
-        priority: None,
-        static_server: Some(false),
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -936,13 +934,12 @@ async fn effective_ed2k_config_excludes_disabled_runtime_servers() {
 #[tokio::test]
 async fn server_update_reenables_disabled_runtime_servers() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.21".to_string(),
         port: 4661,
-        name: None,
-        priority: None,
-        static_server: Some(false),
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -1008,13 +1005,18 @@ async fn effective_ed2k_config_preserves_ed2k_owned_server_policy() {
 #[tokio::test]
 async fn udp_server_description_metadata_updates_the_persisted_server() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_server(ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: "192.0.2.44".to_string(),
         port: 4661,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some("Old Name".to_string()),
-        priority: None,
-        static_server: None,
-        connect: None,
     })
     .await
     .unwrap();
@@ -1075,13 +1077,18 @@ async fn server_udp_status_persists_and_stale_keys_are_not_reused() {
         &transfer_root,
     )
     .unwrap();
-    core.add_server(ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: "192.0.2.45".to_string(),
         port: 4661,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some("UDP metadata server".to_string()),
-        priority: None,
-        static_server: None,
-        connect: None,
     })
     .await
     .unwrap();
@@ -1237,13 +1244,18 @@ async fn server_add_publishes_a_live_plan_generation() {
     )
     .await;
 
-    core.add_server(ServerCreate {
+    let definition = emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.70".to_string(),
         port: 4661,
+        priority: "high".to_string(),
+        static_server: true,
+        enabled: true,
+    };
+    core.create_server_resource(&definition).await.unwrap();
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: definition.address,
+        port: definition.port,
         name: Some("Live Add".to_string()),
-        priority: Some("high".to_string()),
-        static_server: Some(true),
-        connect: None,
     })
     .await
     .unwrap();
@@ -1646,13 +1658,12 @@ async fn merge_discovered_servers_adds_new_dedups_existing() {
         Some(network),
     )
     .unwrap();
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "45.82.80.155".to_string(),
         port: 5687,
-        name: None,
-        priority: None,
-        static_server: Some(true),
-        connect: None,
+        priority: "normal".into(),
+        static_server: true,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -1709,13 +1720,12 @@ async fn merge_discovered_servers_respects_ed2k_owned_add_servers_policy() {
 #[tokio::test]
 async fn connect_failed_drops_non_static_dead_server_at_threshold() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.5".to_string(),
         port: 4661,
-        name: None,
-        priority: None,
-        static_server: Some(false),
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -1776,13 +1786,12 @@ async fn classified_non_remote_failures_never_mutate_server_health() {
             let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
             let address = format!("203.0.113.{}", index + 20);
             let endpoint = format!("{address}:4661");
-            core.add_server(ServerCreate {
-                address,
+            core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
+                address: address,
                 port: 4661,
-                name: None,
-                priority: None,
-                static_server: Some(false),
-                connect: None,
+                priority: "normal".into(),
+                static_server: false,
+                enabled: true,
             })
             .await
             .unwrap();
@@ -1808,13 +1817,12 @@ async fn classified_non_remote_failures_never_mutate_server_health() {
 async fn classified_refusal_obeys_multi_failure_threshold() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let endpoint = "203.0.113.40:4661";
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.40".to_string(),
         port: 4661,
-        name: None,
-        priority: None,
-        static_server: Some(false),
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -1841,13 +1849,12 @@ async fn classified_refusal_obeys_multi_failure_threshold() {
 #[tokio::test]
 async fn explicit_server_connect_ignores_disabled_servers() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.8".to_string(),
         port: 4661,
-        name: None,
-        priority: None,
-        static_server: Some(false),
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -1869,13 +1876,12 @@ async fn explicit_server_connect_ignores_disabled_servers() {
 #[tokio::test]
 async fn connect_failed_never_drops_static_server() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.6".to_string(),
         port: 4661,
-        name: None,
-        priority: None,
-        static_server: Some(true),
-        connect: None,
+        priority: "normal".into(),
+        static_server: true,
+        enabled: true,
     })
     .await
     .unwrap();
@@ -1893,13 +1899,12 @@ async fn connect_failed_never_drops_static_server() {
 #[tokio::test]
 async fn connect_succeeded_clears_fail_count() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.add_server(ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.7".to_string(),
         port: 4661,
-        name: None,
-        priority: None,
-        static_server: Some(false),
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();

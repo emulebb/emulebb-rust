@@ -749,13 +749,12 @@ async fn server_connect_frontdoors_report_closed_persistence() {
         )
         .unwrap(),
     );
-    core.add_server(emulebb_core::ServerCreate {
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "127.0.0.1".into(),
         port: 1,
-        name: None,
-        priority: None,
-        static_server: None,
-        connect: None,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
     })
     .await
     .unwrap();

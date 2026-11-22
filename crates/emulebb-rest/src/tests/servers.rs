@@ -4,7 +4,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use emulebb_core::{EmulebbCore, ServerCreate};
+use emulebb_core::EmulebbCore;
 use emulebb_index::FileIndex;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -51,13 +51,18 @@ async fn snapshot_limit_does_not_truncate_servers() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     for index in 1..=2 {
-        core.add_server(ServerCreate {
+        let definition = emulebb_metadata::MetadataServerCreate {
             address: format!("192.0.2.{index}"),
             port: 4661,
+            priority: "normal".into(),
+            static_server: true,
+            enabled: true,
+        };
+        core.create_server_resource(&definition).await.unwrap();
+        core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+            address: definition.address,
+            port: definition.port,
             name: Some(format!("snapshot-server-{index}")),
-            priority: None,
-            static_server: Some(true),
-            connect: None,
         })
         .await
         .unwrap();
@@ -94,16 +99,15 @@ async fn retained_snapshot_frames_share_capacity_and_release_after_final_drop() 
 
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    core.add_server(ServerCreate {
-        address: "192.0.2.30".to_owned(),
-        port: 4661,
-        name: Some("x".repeat(1024 * 1024)),
-        priority: None,
-        static_server: Some(true),
-        connect: None,
-    })
-    .await
-    .unwrap();
+    for index in 0..16 {
+        core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+            address: format!("192.0.2.{}", index + 30),
+            port: 4661,
+            name: Some("x".repeat(65_535)),
+        })
+        .await
+        .unwrap();
+    }
     let app = router(
         core,
         RestServerSettings {

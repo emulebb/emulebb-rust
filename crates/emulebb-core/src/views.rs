@@ -13,8 +13,8 @@ use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
-    DownloadFileNameObservation, DownloadSource, LibraryFileUpdate, NetworkStatus, ServerCreate,
-    ServerInfo, Transfer,
+    DownloadFileNameObservation, DownloadSource, LibraryFileUpdate, NetworkStatus, ServerInfo,
+    Transfer,
 };
 
 // MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
@@ -517,15 +517,6 @@ pub(crate) fn validate_server_priority(priority: &str) -> Result<&str> {
         "low" | "normal" | "high" => Ok(priority),
         _ => Err(anyhow::anyhow!("priority must be one of low, normal, high")),
     }
-}
-
-pub(crate) fn server_endpoint_from_create(request: &ServerCreate) -> Result<String> {
-    ensure!(!request.address.trim().is_empty(), "address is required");
-    ensure!(request.port != 0, "port must be in the range 1..65535");
-    if let Some(priority) = request.priority.as_deref() {
-        let _ = validate_server_priority(priority)?;
-    }
-    Ok(format!("{}:{}", request.address, request.port))
 }
 
 #[cfg(test)]

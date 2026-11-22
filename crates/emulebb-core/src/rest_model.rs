@@ -176,21 +176,6 @@ pub struct KadNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ServerCreate {
-    pub address: String,
-    pub port: u16,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub priority: Option<String>,
-    #[serde(default, rename = "static")]
-    pub static_server: Option<bool>,
-    #[serde(default)]
-    pub connect: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexingStatus {
     pub enabled: bool,

@@ -347,17 +347,16 @@ pub use rest_model::{
     DownloadUpdate, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus,
     IpFilterStatus, KadNode, LibraryFileUpdate, LocalShare, LocalShareCreate, NetworkStatus,
     NullableStringField, Search, SearchCreate, SearchProgress, SearchResult,
-    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec,
-    ServerCreate, ServerInfo, SharedFileKadKeywordPublish, SharedFilePublicationStatus,
-    SharedFilePublishLane, SharedFilePublishState, Status, Transfer, TransferComment,
-    TransferStats, TransferThroughputStats, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
-    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec, ServerInfo,
+    SharedFileKadKeywordPublish, SharedFilePublicationStatus, SharedFilePublishLane,
+    SharedFilePublishState, Status, Transfer, TransferComment, TransferStats,
+    TransferThroughputStats, Upload, UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig,
+    VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_download_source_stats, download_source_from_record,
     format_ed2k_file_link, kad_status_from_running, preserve_transfer_public_metadata,
-    server_endpoint_from_create, server_info_from_parts, source_friend_name,
-    transfer_from_manifest, validate_server_priority, validate_source_client_id,
+    server_info_from_parts, source_friend_name, transfer_from_manifest, validate_source_client_id,
     validate_url_import,
 };
 

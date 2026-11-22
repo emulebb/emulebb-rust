@@ -8,36 +8,6 @@ impl EmulebbCore {
             .find(|server| server.endpoint.eq_ignore_ascii_case(endpoint))
     }
 
-    pub async fn add_server(&self, request: ServerCreate) -> Result<ServerInfo> {
-        let _server_mutation = self.server_mutation_gate.lock().await;
-        let endpoint = server_endpoint_from_create(&request)?;
-        let connection = self.ed2k_server_connection_view().await;
-        let mut server = server_info_from_parts(
-            &request.address,
-            request.port,
-            request.name.as_deref(),
-            None,
-            request.static_server.unwrap_or(false),
-            connection.0.as_deref(),
-            connection.1.as_deref(),
-        );
-        if let Some(priority) = request.priority.as_deref() {
-            server.priority = validate_server_priority(priority)?.to_string();
-        }
-        server.enabled = true;
-        profile_state::persist_server(&self.metadata_store, &server, true)?;
-        let mut state = self.state.lock().await;
-        state.disabled_servers.remove(&endpoint);
-        state.servers.insert(endpoint, server.clone());
-        drop(state);
-        self.refresh_ed2k_server_connect_plan().await?;
-        drop(_server_mutation);
-        if request.connect.unwrap_or(false) {
-            let _ = self.connect_ed2k_server(&server.endpoint).await?;
-        }
-        Ok(server)
-    }
-
     /// Merge servers discovered from an `OP_SERVERLIST` reply into the server
     /// store (eMule `CServerSocket::ProcessPacket` OP_SERVERLIST -> AddServer).
     /// New `(ip, port)` servers are added at low priority; existing ones (by
