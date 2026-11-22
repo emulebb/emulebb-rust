@@ -109,6 +109,8 @@ pub(crate) fn ed2k(
             }),
             complete: None,
             directory: raw.directory.clone(),
+            comment: None,
+            publisher_id: None,
         },
         observed_at_s: Utc::now().timestamp(),
     };

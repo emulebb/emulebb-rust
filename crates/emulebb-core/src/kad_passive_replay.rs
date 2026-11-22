@@ -1,14 +1,5 @@
-//! Kad passive-replay (snoop-queue) runtime drivers.
-//!
-//! The background workers that replay snooped keyword/source/notes requests
-//! against the live DHT to harvest the local index and remember learned
-//! sources/notes: the two-flavour `run_kad_passive_replay_loop` (general +
-//! source workers), the family-prioritized request selection, the per-family
-//! replay runners, and the result-remembering/indexing helpers. Moved verbatim
-//! out of `lib.rs` during the maintainability restructuring; they carry no
-//! behavior beyond what they had inline. Re-exported `pub(crate)` from the
-//! crate root so the network-startup spawn site and the test module reach them
-//! by their bare names.
+//! Bounded Kad replay drivers for remote claims and learned source hints.
+//! Remote notes use the existing observation owner and never set local notes.
 
 use std::{
     collections::HashSet,
@@ -20,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Result;
 use chrono::Utc;
 use emulebb_ed2k::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime};
 use emulebb_index::{
@@ -54,42 +46,40 @@ enum PassiveReplaySelection {
     Notes(ScheduledSnoopRequest<SearchNotesReq>),
 }
 
+#[derive(Clone)]
+pub(crate) struct PassiveReplayRuntime {
+    pub dht: DhtNode,
+    pub snoop_queue: Arc<Mutex<SnoopQueue>>,
+    pub index: Arc<Mutex<FileIndex>>,
+    pub transfer_runtime: Arc<Ed2kTransferRuntime>,
+    pub shutdown: Arc<AtomicBool>,
+    pub attempts: Arc<crate::download_attempts::DownloadAttemptControl>,
+    pub observations: Arc<crate::persistence_owner::PersistenceOwner>,
+}
+
 pub(crate) async fn run_kad_passive_replay_loop(
-    dht: DhtNode,
-    snoop_queue: Arc<Mutex<SnoopQueue>>,
-    index: Arc<Mutex<FileIndex>>,
-    transfer_runtime: Arc<Ed2kTransferRuntime>,
-    shutdown: Arc<AtomicBool>,
+    runtime: PassiveReplayRuntime,
     worker: PassiveReplayWorker,
-    attempts: Arc<crate::download_attempts::DownloadAttemptControl>,
 ) {
     let interval = match worker {
         PassiveReplayWorker::General => Duration::from_secs(PASSIVE_GENERAL_CRAWL_SECS),
         PassiveReplayWorker::Source => Duration::from_secs(PASSIVE_SOURCE_CRAWL_SECS),
     };
-    while !shutdown.load(Ordering::SeqCst) {
+    while !runtime.shutdown.load(Ordering::SeqCst) {
         tokio::time::sleep(interval).await;
-        if shutdown.load(Ordering::SeqCst) || !dht.is_bootstrapped() {
+        if runtime.shutdown.load(Ordering::SeqCst) || !runtime.dht.is_bootstrapped() {
             continue;
         }
         let selected = match worker {
-            PassiveReplayWorker::General => next_passive_replay_request(&snoop_queue).await,
-            PassiveReplayWorker::Source => next_passive_replay_source_request(&snoop_queue)
+            PassiveReplayWorker::General => next_passive_replay_request(&runtime.snoop_queue).await,
+            PassiveReplayWorker::Source => next_passive_replay_source_request(&runtime.snoop_queue)
                 .await
                 .map(PassiveReplaySelection::Source),
         };
         let Some(selected) = selected else {
             continue;
         };
-        run_selected_passive_replay(
-            &dht,
-            &snoop_queue,
-            &index,
-            &transfer_runtime,
-            &attempts,
-            selected,
-        )
-        .await;
+        run_selected_passive_replay(&runtime, selected).await;
     }
 }
 
@@ -127,13 +117,17 @@ async fn next_passive_replay_source_request(
 }
 
 async fn run_selected_passive_replay(
-    dht: &DhtNode,
-    snoop_queue: &Arc<Mutex<SnoopQueue>>,
-    index: &Arc<Mutex<FileIndex>>,
-    transfer_runtime: &Arc<Ed2kTransferRuntime>,
-    attempts: &crate::download_attempts::DownloadAttemptControl,
+    runtime: &PassiveReplayRuntime,
     selected: PassiveReplaySelection,
 ) {
+    let PassiveReplayRuntime {
+        dht,
+        snoop_queue,
+        index,
+        transfer_runtime,
+        attempts,
+        ..
+    } = runtime;
     let outcome = match selected {
         PassiveReplaySelection::Keyword(selected) => {
             let logical_key = selected.logical_key;
@@ -164,11 +158,12 @@ async fn run_selected_passive_replay(
         }
         PassiveReplaySelection::Notes(selected) => {
             let logical_key = selected.logical_key;
-            let token = attempts.selected_token(selected.request.target.0);
             let note_results = run_passive_notes_replay(dht, selected.request).await;
             if let Some(note_results) = note_results {
-                if let Some(token) = token {
-                    remember_passive_note_results(transfer_runtime, token, &note_results).await;
+                if let Err(error) =
+                    observe_passive_note_results(&runtime.observations, &note_results).await
+                {
+                    tracing::warn!(%error, "passive Kad note evidence was not retained");
                 }
                 Some((logical_key, note_results.len()))
             } else {
@@ -354,39 +349,33 @@ async fn run_passive_notes_replay(
     Some(results)
 }
 
-pub(crate) async fn remember_passive_note_results(
-    transfer_runtime: &Arc<Ed2kTransferRuntime>,
-    token: emulebb_metadata::JobToken,
+/// Retain exact remote note facts without client/session membership or local edits.
+pub(crate) async fn observe_passive_note_results(
+    owner: &crate::persistence_owner::PersistenceOwner,
     results: &[KadNoteResult],
-) {
+) -> Result<()> {
     for result in results {
-        let file_hash = result.file_hash.to_string();
-        let Ok(manifest) = transfer_runtime.manifest(token).await else {
-            tracing::debug!(
-                file_hash,
-                "skipping passive Kad note memory for unknown transfer"
-            );
-            continue;
+        let event = emulebb_metadata::MetadataContentObservationEvent {
+            claim: emulebb_metadata::MetadataContentClaim {
+                hash: result.file_hash.0,
+                // A query's size filter is not reported evidence of content size.
+                size_bytes: None,
+            },
+            origin: emulebb_metadata::MetadataObservationOrigin::Kad,
+            reporter_endpoint: None,
+            observed_at_s: Utc::now().timestamp(),
+            metadata: emulebb_metadata::MetadataContentMetadata {
+                publisher_id: Some(result.source_id.0),
+                comment: result.comment.clone(),
+                rating: result.rating,
+                ..Default::default()
+            },
         };
-        if !manifest.comment.is_empty() || manifest.rating != 0 {
-            continue;
-        }
-        let comment = result.comment.clone().unwrap_or_default();
-        let rating = result.rating.unwrap_or(0).min(5);
-        if comment.is_empty() && rating == 0 {
-            continue;
-        }
-        if let Err(error) = transfer_runtime
-            .update_library_file_metadata(&file_hash, None, Some((&comment, rating)))
-            .await
-        {
-            tracing::debug!(
-                file_hash,
-                source_id = %result.source_id,
-                "skipping passive Kad note memory: {error:#}"
-            );
-        }
+        owner
+            .observe_content(std::slice::from_ref(&event), None)
+            .await?;
     }
+    Ok(())
 }
 
 pub(crate) async fn index_passive_keyword_result(
@@ -451,3 +440,6 @@ pub(crate) fn preferred_passive_replay_families(
     families.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
     [families[0].0, families[1].0, families[2].0]
 }
+
+#[cfg(test)]
+mod tests;

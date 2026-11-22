@@ -84,7 +84,7 @@ use emulebb_kad_dht::{
     ReceivedKadPacket, RpcClassBudgetConfig, RpcWorkClass,
 };
 #[cfg(test)]
-use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
+use emulebb_kad_dht::{SearchResult as KadSearchResult, SourceResult};
 use emulebb_kad_proto::tag_name;
 use emulebb_kad_proto::{
     CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes, HelloResAck, KAD_VERSION, KadPacket,
@@ -294,9 +294,9 @@ use kad_hello::{
 #[cfg(test)]
 use kad_passive_replay::{
     PassiveReplayFamily, index_passive_keyword_result, preferred_passive_replay_families,
-    remember_passive_note_results, remember_passive_source_results,
+    remember_passive_source_results,
 };
-use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
+use kad_passive_replay::{PassiveReplayRuntime, PassiveReplayWorker, run_kad_passive_replay_loop};
 pub use kad_publish_diagnostics::KadPublishDiagnostics;
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,

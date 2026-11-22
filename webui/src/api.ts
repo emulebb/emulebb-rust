@@ -238,6 +238,8 @@ export type SearchObservation = {
   id: string;
   origin: "server" | "global" | "kad";
   reporterEndpoint: string | null;
+  publisherId: string | null;
+  comment: string | null;
   rawName: string | null;
   normalizedName: string | null;
   sizeBytes: number | null;

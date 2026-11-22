@@ -694,23 +694,24 @@ impl EmulebbCore {
                 Arc::clone(&shutdown),
             )));
             if let Some(kad_snoop_queue) = kad_snoop_queue {
+                let replay = PassiveReplayRuntime {
+                    dht: dht.clone(),
+                    snoop_queue: kad_snoop_queue,
+                    index: Arc::clone(&self.index),
+                    transfer_runtime: Arc::clone(&self.ed2k_transfers),
+                    shutdown: Arc::clone(&shutdown),
+                    attempts: Arc::clone(&self.download_attempts),
+                    observations: self
+                        .persistence_owner
+                        .owner(&self.metadata_store, &self.state)?,
+                };
                 tasks.push(tokio::spawn(run_kad_passive_replay_loop(
-                    dht.clone(),
-                    Arc::clone(&kad_snoop_queue),
-                    Arc::clone(&self.index),
-                    Arc::clone(&self.ed2k_transfers),
-                    Arc::clone(&shutdown),
+                    replay.clone(),
                     PassiveReplayWorker::Source,
-                    Arc::clone(&self.download_attempts),
                 )));
                 tasks.push(tokio::spawn(run_kad_passive_replay_loop(
-                    dht.clone(),
-                    kad_snoop_queue,
-                    Arc::clone(&self.index),
-                    Arc::clone(&self.ed2k_transfers),
-                    Arc::clone(&shutdown),
+                    replay,
                     PassiveReplayWorker::General,
-                    Arc::clone(&self.download_attempts),
                 )));
             }
         }

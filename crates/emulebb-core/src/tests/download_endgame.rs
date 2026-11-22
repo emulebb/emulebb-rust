@@ -416,7 +416,9 @@ async fn qualify(winner: Role, geometry: Geometry) {
         report.file_outcomes[0].outcome,
         Ed2kPeerDownloadOutcome::AcceptedButIncomplete
     );
-    prefix_server.await.unwrap();
+    prefix_server.await.unwrap_or_else(|error| {
+        panic!("prefix relay failed ({error}); downloader report: {report:?}")
+    });
     eprintln!("endgame prefix received");
     runtime.checkpoint_dirty_download_progress().await.unwrap();
     assert_eq!(

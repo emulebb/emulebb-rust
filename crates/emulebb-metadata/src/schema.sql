@@ -982,6 +982,8 @@ CREATE TABLE content_claim_observations (
     fingerprint BLOB NOT NULL CHECK(length(fingerprint) = 32),
     origin TEXT NOT NULL CHECK(origin IN ('server', 'global', 'kad')),
     reporter_endpoint TEXT,
+    publisher_id BLOB CHECK(publisher_id IS NULL OR length(publisher_id) = 16),
+    comment TEXT,
     name TEXT,
     source_count INTEGER CHECK(source_count IS NULL OR source_count BETWEEN 0 AND 4294967295),
     complete_source_count INTEGER CHECK(complete_source_count IS NULL OR complete_source_count BETWEEN 0 AND 4294967295),

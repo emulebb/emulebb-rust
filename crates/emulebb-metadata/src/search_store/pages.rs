@@ -257,14 +257,14 @@ impl super::super::MetadataStore {
         Ok(Some(collect_page(
             &mut rows,
             limit,
-            &[9, 14, 15, 16, 17, 20, 24],
+            &[9, 14, 15, 16, 17, 20, 24, 25],
             SMALL_BOUNDS,
             |row| {
                 Ok(MetadataSearchResultObservation {
                     observation: crate::content_observation_store::observation_from_row(row)?,
-                    first_seen_at_s: row.get(25)?,
-                    last_seen_at_s: row.get(26)?,
-                    observation_count: row.get(27)?,
+                    first_seen_at_s: row.get(27)?,
+                    last_seen_at_s: row.get(28)?,
+                    observation_count: row.get(29)?,
                 })
             },
         )?))

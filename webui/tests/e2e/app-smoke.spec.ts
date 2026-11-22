@@ -493,6 +493,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
         data: ["server", "global"].map((origin, index) => ({
           id: String(index + 1), origin, reporterEndpoint: index ? "192.0.2.10:4661" : null,
+          publisherId: null, comment: null,
           rawName: index ? "Linux Manual.pdf" : "Linux Guide.pdf",
           normalizedName: index ? "Linux Manual.pdf" : "Linux Guide.pdf",
           sizeBytes: 1_048_576, sources: index ? 5 : 3, completeSources: index ? 2 : 1,
