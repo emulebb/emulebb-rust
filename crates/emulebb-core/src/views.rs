@@ -151,7 +151,7 @@ pub(crate) fn kad_status_from_running(running: bool) -> NetworkStatus {
         peer_count: 0,
         firewalled: None,
         bootstrapping: Some(running),
-        bootstrap_progress: Some(0),
+        bootstrap_progress: (!running).then_some(0.0),
         contact_count: if running { Some(0) } else { None },
         lan_mode: Some(false),
         users: None,

@@ -53,7 +53,7 @@ pub struct NetworkStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrapping: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bootstrap_progress: Option<u32>,
+    pub bootstrap_progress: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

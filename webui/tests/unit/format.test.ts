@@ -41,10 +41,10 @@ describe("format helpers", () => {
     expect(formatProgress({ progress: null })).toBe("Unknown");
   });
 
-  it("normalizes lifecycle values", () => {
-    expect(lifecycleLabel("running")).toBe("running");
+  it("formats lifecycle state", () => {
+    expect(lifecycleLabel({ state: "running" })).toBe("running");
     expect(lifecycleLabel({ state: "starting" })).toBe("starting");
-    expect(lifecycleLabel({ state: 1 })).toBe("unknown");
+    expect(lifecycleLabel(undefined)).toBe("unknown");
   });
 
   it("normalizes optional strings and numeric form values", () => {

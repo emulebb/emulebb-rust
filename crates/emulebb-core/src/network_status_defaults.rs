@@ -29,7 +29,7 @@ pub(super) fn ed2k_starting_status() -> NetworkStatus {
         peer_count: 0,
         firewalled: None,
         bootstrapping: Some(true),
-        bootstrap_progress: Some(0),
+        bootstrap_progress: None,
         contact_count: None,
         lan_mode: None,
         users: None,

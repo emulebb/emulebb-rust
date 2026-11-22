@@ -76,16 +76,9 @@ export type Stats = {
 };
 
 export type Status = {
-  lifecycle?: string | { state?: string; [key: string]: unknown };
-  connected?: boolean;
+  lifecycle?: { state?: string; [key: string]: unknown };
   servers?: ServerStatus;
   stats?: Stats;
-  sharedStartupCache?: {
-    hashingCount?: number;
-    deferredHashingActive?: boolean;
-    reloadProgress?: SharedDirectoryReloadProgress;
-    [key: string]: unknown;
-  };
   runtimeDiagnostics?: RuntimeDiagnostics;
   [key: string]: unknown;
 };
@@ -365,7 +358,7 @@ export type KadStatus = {
   connected?: boolean;
   firewalled?: boolean | null;
   bootstrapping?: boolean;
-  bootstrapProgress?: number;
+  bootstrapProgress?: number | null;
   contactCount?: number;
   users?: number;
   files?: number;

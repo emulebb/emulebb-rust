@@ -63,15 +63,8 @@ export function firewallLabel(value: boolean | null | undefined): string {
   return "unknown";
 }
 
-export function lifecycleLabel(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (value && typeof value === "object" && "state" in value) {
-    const state = (value as { state?: unknown }).state;
-    return typeof state === "string" ? state : "unknown";
-  }
-  return "unknown";
+export function lifecycleLabel(value: { state?: string } | null | undefined): string {
+  return value?.state ?? "unknown";
 }
 
 export function numberField(object: Record<string, unknown> | undefined, key: string): number | undefined {

@@ -28,21 +28,7 @@ export function uploadFixture(overrides: Partial<Upload> = {}): Upload {
 const snapshot = {
   app: { version: "0.1.0-beta.2" },
   status: {
-    lifecycle: "running",
-    sharedStartupCache: {
-      hashingCount: 1,
-      deferredHashingActive: true,
-      reloadProgress: {
-        phase: "hashing",
-        running: true,
-        plannedHashCount: 3,
-        activeHashCount: 1,
-        hashedCount: 1,
-        plannedReadBytes: 24576,
-        completedReadBytes: 12288,
-        readRateBytesPerSec: 4096
-      }
-    },
+    lifecycle: { state: "running" },
     runtimeDiagnostics: {
       sharedFileCount: 1,
       sharedHashingCount: 1,

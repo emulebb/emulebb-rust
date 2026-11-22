@@ -108,7 +108,7 @@ export function Overview(props: {
 }) {
   const connectedServers = props.snapshot?.status?.servers?.connected ? 1 : 0;
   const resources = props.stats.downloadResources;
-  const reload = props.libraryScan?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? props.snapshot?.status?.sharedStartupCache?.reloadProgress ?? {};
+  const reload = props.libraryScan?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? {};
   const startupStages = startupStageRows(props.snapshot, props.libraryScan, props.kad, connectedServers);
   return (
     <section class="view-grid">
@@ -189,7 +189,7 @@ function startupStageRows(
 ) {
   const status = snapshot?.status;
   const lifecycle = lifecycleLabel(status?.lifecycle);
-  const reload = directories?.reloadProgress ?? status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? status?.sharedStartupCache?.reloadProgress ?? {};
+  const reload = directories?.reloadProgress ?? status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? {};
   const ed2kPublish = status?.runtimeDiagnostics?.ed2kPublish;
   const kadPublish = status?.runtimeDiagnostics?.kadPublish;
   const ed2kPhase = stringField(ed2kPublish, "phase") || (connectedServers > 0 ? "connected" : "waiting");

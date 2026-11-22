@@ -543,9 +543,9 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
     let body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["runtimeDiagnostics"]["downloadFileCount"], 2);
-    assert_eq!(value["data"]["sharedStartupCache"]["hashingCount"], 0);
+    assert_eq!(value["data"]["runtimeDiagnostics"]["sharedHashingCount"], 0);
     assert_eq!(
-        value["data"]["sharedStartupCache"]["reloadProgress"]["phase"],
+        value["data"]["runtimeDiagnostics"]["sharedDirectoryReloadProgress"]["phase"],
         "idle"
     );
     assert_eq!(
@@ -568,10 +568,7 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
         value["data"]["runtimeDiagnostics"]["kadPublish"]["running"],
         false
     );
-    assert_eq!(
-        value["data"]["sharedStartupCache"]["deferredHashingActive"],
-        false
-    );
+    assert_eq!(value["data"]["stats"]["sharedHashingActive"], false);
     assert_eq!(value["data"]["runtimeDiagnostics"]["sharedHashingCount"], 0);
 }
 
