@@ -143,7 +143,7 @@ fn friend_from_metadata(friend: MetadataFriend) -> Friend {
     }
 }
 
-fn server_from_metadata(server: MetadataServer) -> ServerInfo {
+pub(crate) fn server_from_metadata(server: MetadataServer) -> ServerInfo {
     let endpoint = server.endpoint();
     ServerInfo {
         address: server.address,
