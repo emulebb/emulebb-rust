@@ -119,7 +119,7 @@ export type RuntimeDiagnostics = {
 };
 
 export type ProcessResources = {
-  sampledAtMs: number | null;
+  sampledAt: number | null;
   residentMemoryBytes: number | null;
   cpuUsagePercent: number | null;
   cpuSampleIntervalMs: number | null;
@@ -470,7 +470,7 @@ export type SharedFilePublishState =
 
 export type SharedFilePublishLane = {
   state: SharedFilePublishState;
-  lastSuccessAtMs?: number | null;
+  lastSuccessAt?: number | null;
 };
 
 export type SharedFileKadKeywordPublish = SharedFilePublishLane & {

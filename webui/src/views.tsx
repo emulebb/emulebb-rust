@@ -1448,11 +1448,11 @@ function kadKeywordLabel(file: SharedFile): string {
 }
 
 function publicationTitle(
-  publication?: { lastSuccessAtMs?: number | null },
+  publication?: { lastSuccessAt?: number | null },
   prefix = ""
 ): string {
-  const lastSuccess = publication?.lastSuccessAtMs
-    ? `Last confirmed success: ${new Date(publication.lastSuccessAtMs).toLocaleString()}`
+  const lastSuccess = publication?.lastSuccessAt != null
+    ? `Last confirmed success: ${new Date(publication.lastSuccessAt * 1000).toLocaleString()}`
     : "No confirmed success in this runtime";
   return prefix ? `${prefix} ${lastSuccess}` : lastSuccess;
 }
@@ -2844,9 +2844,9 @@ export function DiagnosticsView(props: {
         </div>
         <p class="hint">Memory is the daemon's resident RAM. CPU: 100% means one fully occupied core; multiple cores can exceed 100%.</p>
         <p class="hint">
-          {resources?.sampledAtMs == null
+          {resources?.sampledAt == null
             ? "Resource metrics are unavailable."
-            : `Sampled ${new Date(resources.sampledAtMs).toLocaleTimeString()}. ${resources.cpuSampleIntervalMs == null
+            : `Sampled ${new Date(resources.sampledAt * 1000).toLocaleTimeString()}. ${resources.cpuSampleIntervalMs == null
               ? "CPU usage needs two samples at least one second apart; unavailable counters show n/a."
               : `CPU average over ${(resources.cpuSampleIntervalMs / 1000).toFixed(1)} s.`}`}
         </p>

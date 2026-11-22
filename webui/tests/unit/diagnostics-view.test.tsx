@@ -20,7 +20,7 @@ describe("DiagnosticsView", () => {
         app={{}}
         capabilities={{}}
         runtimeDiagnostics={{ processResources: {
-          sampledAtMs: 1_000,
+          sampledAt: 0,
           residentMemoryBytes: memory,
           cpuUsagePercent: cpu,
           cpuSampleIntervalMs: interval
@@ -35,6 +35,7 @@ describe("DiagnosticsView", () => {
     );
     expect(screen.getByText("Resident memory").parentElement).toHaveTextContent(memoryText);
     expect(screen.getByText("CPU usage").parentElement).toHaveTextContent(cpuText);
+    expect(screen.getByText(/Sampled /)).toHaveTextContent(new Date(0).toLocaleTimeString());
     expect(screen.getByText(/100% means one fully occupied core/)).toBeInTheDocument();
     if (interval === null) {
       expect(screen.getByText(/CPU usage needs two samples/)).toBeInTheDocument();

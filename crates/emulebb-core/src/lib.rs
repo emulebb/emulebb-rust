@@ -4585,7 +4585,7 @@ async fn drain_completed_kad_publish_tasks(
                         runtime.file_publication.keyword_finished(
                             &outcome.file_hashes,
                             keyword,
-                            (stats.acked_contacts > 0).then(|| Utc::now().timestamp_millis()),
+                            (stats.acked_contacts > 0).then(|| Utc::now().timestamp()),
                         );
                     }
                     record_kad_publish_completion(
@@ -4620,7 +4620,7 @@ async fn drain_completed_kad_publish_tasks(
                 KadSharedPublishKind::Source => {
                     runtime.file_publication.source_finished(
                         &primary_file_hash,
-                        (stats.acked_contacts > 0).then(|| Utc::now().timestamp_millis()),
+                        (stats.acked_contacts > 0).then(|| Utc::now().timestamp()),
                     );
                     record_kad_publish_completion(runtime, outcome.kind, 1, stats);
                     accumulate_publish_stats(source_totals, stats);

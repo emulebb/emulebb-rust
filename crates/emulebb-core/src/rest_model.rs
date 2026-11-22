@@ -1034,7 +1034,7 @@ pub enum SharedFilePublishState {
 #[serde(rename_all = "camelCase")]
 pub struct SharedFilePublishLane {
     pub state: SharedFilePublishState,
-    pub last_success_at_ms: Option<i64>,
+    pub last_success_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1043,7 +1043,7 @@ pub struct SharedFileKadKeywordPublish {
     pub state: SharedFilePublishState,
     pub published_keywords: usize,
     pub total_keywords: usize,
-    pub last_success_at_ms: Option<i64>,
+    pub last_success_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

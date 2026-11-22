@@ -230,12 +230,12 @@ impl EmulebbCore {
         let ed2k = if !shared_file_publish_enabled(&share.priority) {
             SharedFilePublishLane {
                 state: SharedFilePublishState::Unavailable,
-                last_success_at_ms: None,
+                last_success_at: None,
             }
         } else if !context.ed2k_connected {
             SharedFilePublishLane {
                 state: SharedFilePublishState::Waiting,
-                last_success_at_ms: None,
+                last_success_at: None,
             }
         } else {
             let tracked = share.hash.parse::<Ed2kHash>().ok().and_then(|hash| {
@@ -247,7 +247,7 @@ impl EmulebbCore {
             tracked.map_or_else(
                 || SharedFilePublishLane {
                     state: SharedFilePublishState::Queued,
-                    last_success_at_ms: None,
+                    last_success_at: None,
                 },
                 |tracked| SharedFilePublishLane {
                     state: match tracked.phase {
@@ -256,7 +256,7 @@ impl EmulebbCore {
                         Ed2kOfferFilePublishPhase::Published => SharedFilePublishState::Published,
                         Ed2kOfferFilePublishPhase::Failed => SharedFilePublishState::Failed,
                     },
-                    last_success_at_ms: tracked.last_success_at_ms,
+                    last_success_at: tracked.last_success_at_ms.map(|value| value / 1000),
                 },
             )
         };
@@ -613,7 +613,7 @@ fn kad_keyword_publication_status(
             state: SharedFilePublishState::Unavailable,
             published_keywords: 0,
             total_keywords: keyword_terms.len(),
-            last_success_at_ms: None,
+            last_success_at: None,
         };
     }
     let attempts = keyword_terms
@@ -622,11 +622,11 @@ fn kad_keyword_publication_status(
         .collect::<Vec<_>>();
     let published_keywords = attempts
         .iter()
-        .filter(|attempt| attempt.last_success_at_ms.is_some())
+        .filter(|attempt| attempt.last_success_at_s.is_some())
         .count();
-    let last_success_at_ms = attempts
+    let last_success_at = attempts
         .iter()
-        .filter_map(|attempt| attempt.last_success_at_ms)
+        .filter_map(|attempt| attempt.last_success_at_s)
         .max();
     let state = if attempts
         .iter()
@@ -651,7 +651,7 @@ fn kad_keyword_publication_status(
         state,
         published_keywords,
         total_keywords: keyword_terms.len(),
-        last_success_at_ms,
+        last_success_at,
     }
 }
 
@@ -663,7 +663,7 @@ fn kad_source_publication_status(
     if !kad_enabled {
         return SharedFilePublishLane {
             state: SharedFilePublishState::Unavailable,
-            last_success_at_ms: None,
+            last_success_at: None,
         };
     }
     match tracked.source {
@@ -673,17 +673,17 @@ fn kad_source_publication_status(
                 TrackedPublishPhase::Published => SharedFilePublishState::Published,
                 TrackedPublishPhase::Failed => SharedFilePublishState::Failed,
             },
-            last_success_at_ms: attempt.last_success_at_ms,
+            last_success_at: attempt.last_success_at_s,
         },
         None if !diagnostics.running || !diagnostics.bootstrapped || !diagnostics.gate_allowed => {
             SharedFilePublishLane {
                 state: SharedFilePublishState::Waiting,
-                last_success_at_ms: None,
+                last_success_at: None,
             }
         }
         None => SharedFilePublishLane {
             state: SharedFilePublishState::Queued,
-            last_success_at_ms: None,
+            last_success_at: None,
         },
     }
 }
@@ -697,4 +697,31 @@ pub(crate) fn canonical_shared_directory_root(path: &str) -> Result<String> {
         .with_context(|| format!("failed to inspect {}", canonical.display()))?;
     ensure!(metadata.is_dir(), "path is not a directory");
     Ok(normal_path_display(canonical.display().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_seconds_preserve_epoch_zero_and_last_success_after_failure() {
+        let publication = shared_file_publication::SharedKadFilePublication::default();
+        let hash = "11".repeat(16);
+        let hashes = vec![hash.clone()];
+        publication.keyword_started(&hashes, "sample");
+        publication.keyword_finished(&hashes, "sample", Some(0));
+        publication.source_started(&hash);
+        publication.source_finished(&hash, Some(0));
+        publication.keyword_finished(&hashes, "sample", None);
+        publication.source_finished(&hash, None);
+        let tracked = publication.snapshot(&hash);
+        let diagnostics = KadPublishDiagnostics::default();
+        let keyword =
+            kad_keyword_publication_status(&["sample".into()], &tracked, true, &diagnostics);
+        let source = kad_source_publication_status(&tracked, true, &diagnostics);
+        assert_eq!(keyword.state, SharedFilePublishState::Failed);
+        assert_eq!(source.state, SharedFilePublishState::Failed);
+        assert_eq!(serde_json::to_value(keyword).unwrap()["lastSuccessAt"], 0);
+        assert_eq!(serde_json::to_value(source).unwrap()["lastSuccessAt"], 0);
+    }
 }

@@ -1011,6 +1011,11 @@ test("shared file metadata form validates rating and priority contract", async (
   const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
   await expect(sharedFilesPanel.getByText("Published", { exact: true })).toBeVisible();
   await expect(sharedFilesPanel.getByText("1/2 Partial", { exact: true })).toBeVisible();
+  const epoch = await page.evaluate(() => new Date(0).toLocaleString());
+  const success = await page.evaluate(() => new Date(1_700_000_000 * 1000).toLocaleString());
+  await expect(sharedFilesPanel.getByRole("cell", { name: "1/2 Partial", exact: true })).toHaveAttribute("title", `Last confirmed success: ${epoch}`);
+  await expect(sharedFilesPanel.getByRole("cell", { name: "Published", exact: true })).toHaveAttribute("title", `Sent to the connected server; eD2K servers do not acknowledge individual files. Last confirmed success: ${success}`);
+
   await expect(sharedFilesPanel.getByText("Publishing", { exact: true })).toBeVisible();
   const metadataPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) });
   await expect(metadataPanel.getByText("Shared Sample.bin")).toBeVisible();

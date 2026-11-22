@@ -740,7 +740,7 @@ async fn process_resources_are_exposed_on_every_runtime_diagnostics_surface() {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         let resources = value.pointer(pointer).unwrap();
-        assert!(resources["sampledAtMs"].as_i64().unwrap() > 0);
+        assert!(resources["sampledAt"].as_i64().unwrap() > 0);
         assert!(resources["residentMemoryBytes"].as_u64().unwrap() > 0);
         assert!(resources.get("cpuUsagePercent").is_some());
         assert!(resources.get("cpuSampleIntervalMs").is_some());

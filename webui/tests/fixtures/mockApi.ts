@@ -99,9 +99,9 @@ const snapshot = {
     sizeBytes: 4096,
     priority: "normal",
     publication: {
-      ed2k: { state: "published", lastSuccessAtMs: 1_700_000_000_000 },
-      kadKeyword: { state: "partial", publishedKeywords: 1, totalKeywords: 2, lastSuccessAtMs: 1_700_000_000_000 },
-      kadSource: { state: "publishing", lastSuccessAtMs: null }
+      ed2k: { state: "published", lastSuccessAt: 1_700_000_000 },
+      kadKeyword: { state: "partial", publishedKeywords: 1, totalKeywords: 2, lastSuccessAt: 0 },
+      kadSource: { state: "publishing", lastSuccessAt: null }
     }
   }]
 };
