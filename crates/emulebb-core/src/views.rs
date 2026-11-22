@@ -13,8 +13,8 @@ use emulebb_ed2k::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
-    DownloadFileNameObservation, DownloadSource, NetworkStatus, ServerCreate, ServerInfo,
-    ServerUpdate, SharedFileUpdate, Transfer,
+    DownloadFileNameObservation, DownloadSource, LibraryFileUpdate, NetworkStatus, ServerCreate,
+    ServerInfo, ServerUpdate, Transfer,
 };
 
 // MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
@@ -315,20 +315,18 @@ pub(crate) fn validate_url_import(url: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-pub(crate) fn validate_shared_upload_priority(priority: &str) -> Result<(&str, bool)> {
+pub(crate) fn validate_library_upload_priority(priority: &str) -> Result<(&str, bool)> {
     match priority {
         "auto" => Ok((priority, true)),
-        "not-published" | "verylow" | "low" | "normal" | "high" | "release" => {
-            Ok((priority, false))
-        }
+        "verylow" | "low" | "normal" | "high" | "release" => Ok((priority, false)),
         _ => Err(anyhow::anyhow!(
-            "priority must be one of auto, not-published, verylow, low, normal, high, release"
+            "priority must be one of auto, verylow, low, normal, high, release"
         )),
     }
 }
 
 pub(crate) fn validate_shared_file_comment_rating(
-    request: &SharedFileUpdate,
+    request: &LibraryFileUpdate,
 ) -> Result<Option<(&str, u8)>> {
     match (&request.comment, request.rating) {
         (None, None) => Ok(None),

@@ -6,7 +6,7 @@ describe("WebUI routes", () => {
   it("maps primary views to stable paths", () => {
     expect(routeFromPathname("/")).toEqual({ tab: "overview" });
     expect(routeFromPathname("/transfers")).toEqual({ tab: "transfers" });
-    expect(routeFromPathname("/shared-files/")).toEqual({ tab: "shared-files" });
+    expect(routeFromPathname("/library/")).toEqual({ tab: "library" });
     expect(pathForTab("settings")).toBe("/settings");
   });
 

@@ -392,7 +392,7 @@ export type Category = {
 };
 
 export type DiagnosticBundle = Record<string, unknown> & {
-  schema: "emulebb.diagnostic-bundle.v7";
+  schema: "emulebb.diagnostic-bundle.v8";
   capturedAt: number;
 };
 
@@ -441,27 +441,18 @@ export type Upload = {
 
 export type LibraryLocation = { path: string; present: boolean };
 
-export type SharedFile = {
-  hash: string;
-  name?: string;
-  sizeBytes?: number;
-  path: string;
-  priority?: string;
-  autoUploadPriority?: boolean;
-  allTimeUploadedBytes?: number;
-  allTimeUploadRequests?: number;
-  allTimeUploadAccepts?: number;
-  requests?: number;
-  acceptedRequests?: number;
-  transferredBytes?: number;
-  comment?: string;
-  rating?: number;
-  ed2kLink?: string;
-  publication?: SharedFilePublication | null;
-  [key: string]: unknown;
+export type LibraryFile = {
+  hash: string; displayName: string; sizeBytes: number | null; present: boolean; sharingEnabled: boolean;
+  sessionUploadedBytes: number; sessionUploadRequests: number; sessionAcceptedUploads: number;
+  lifetimeUploadedBytes: number; lifetimeUploadRequests: number; lifetimeAcceptedUploads: number;
+  lastUploadRequestedAt: number | null; lastUploadedAt: number | null;
+};
+export type LibraryFileDetail = LibraryFile & {
+  uploadPriority: string; comment: string; rating: number;
+  ed2kLink: string | null; publication: LibraryFilePublication;
 };
 
-export type SharedFilePublishState =
+export type LibraryFilePublishState =
   | "unavailable"
   | "waiting"
   | "queued"
@@ -470,20 +461,20 @@ export type SharedFilePublishState =
   | "published"
   | "failed";
 
-export type SharedFilePublishLane = {
-  state: SharedFilePublishState;
-  lastSuccessAt?: number | null;
+export type LibraryFilePublishLane = {
+  state: LibraryFilePublishState;
+  lastSuccessAt: number | null;
 };
 
-export type SharedFileKadKeywordPublish = SharedFilePublishLane & {
+export type LibraryFileKadKeywordPublish = LibraryFilePublishLane & {
   publishedKeywords: number;
   totalKeywords: number;
 };
 
-export type SharedFilePublication = {
-  ed2k: SharedFilePublishLane;
-  kadKeyword: SharedFileKadKeywordPublish;
-  kadSource: SharedFilePublishLane;
+export type LibraryFilePublication = {
+  ed2k: LibraryFilePublishLane;
+  kadKeyword: LibraryFileKadKeywordPublish;
+  kadSource: LibraryFilePublishLane;
 };
 
 export type LibraryRoot = {
@@ -726,7 +717,6 @@ export type Snapshot = {
   kad?: KadStatus;
   uploads?: Upload[];
   uploadQueue?: Upload[];
-  sharedFiles?: SharedFile[];
   network?: NetworkStatus;
   logs?: LogRecord[];
   [key: string]: unknown;
@@ -814,7 +804,7 @@ export class RestClient {
     const bundle = await this.request<Record<string, unknown>>(
       "POST", "diagnostics/bundles", { confirmCapture: true, maxBytes }, "json"
     );
-    if (!isRecord(bundle) || bundle.schema !== "emulebb.diagnostic-bundle.v7" || typeof bundle.capturedAt !== "number" || !Number.isSafeInteger(bundle.capturedAt) || bundle.capturedAt < 0) {
+    if (!isRecord(bundle) || bundle.schema !== "emulebb.diagnostic-bundle.v8" || typeof bundle.capturedAt !== "number" || !Number.isSafeInteger(bundle.capturedAt) || bundle.capturedAt < 0) {
       throw new Error("Diagnostic bundle returned an unexpected response");
     }
     return bundle as DiagnosticBundle;

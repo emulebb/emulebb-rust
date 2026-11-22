@@ -86,7 +86,12 @@ async fn upload_page(state: RestState, raw: Option<String>, waiting: bool) -> Re
         .map(|id| super::resource::encode_cursor(scope, &id.to_string()));
     super::resource::retained_json(
         &page,
-        &super::resource::page_document(&page.uploads, next, page.has_more, page.total),
+        &super::resource::page_document(
+            &page.uploads,
+            next,
+            page.has_more,
+            page.total.map(|n| n as u64),
+        ),
     )
 }
 

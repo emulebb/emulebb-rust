@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use axum::{
     body::{Body, HttpBody},
+    extract::MatchedPath,
     http::{Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -23,7 +24,11 @@ use crate::{
 pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response {
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
-    let Some(allowed_query_fields) = route_query_fields(&method, &path) else {
+    let parameterized = request
+        .extensions()
+        .get::<MatchedPath>()
+        .is_none_or(|matched| matched.as_str().contains('{'));
+    let Some(allowed_query_fields) = route_query_fields(&method, &path, parameterized) else {
         return next.run(request).await;
     };
     if let Err(response) = validate_path_parameters(&method, &path) {
@@ -77,7 +82,8 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
             )
             .into_response();
         }
-        if name == "sort" && !is_search_result_sort(value) {
+        if name == "sort" && path.starts_with("/api/v1/searches/") && !is_search_result_sort(value)
+        {
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "INVALID_ARGUMENT",
@@ -341,9 +347,7 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             let server_id = decode_path_parameter(server_id, "serverId")?;
             validate_endpoint_path_token(&server_id, "serverId")?
         }
-        ("GET" | "PATCH", ["shared-files", hash])
-        | ("GET", ["shared-files", hash, "ed2k-link"])
-        | ("GET", ["shared-files", hash, "comments"]) => validate_lowercase_md4_hex(hash, "hash")?,
+        ("GET" | "PATCH", ["library", "files", hash]) => validate_lowercase_md4_hex(hash, "hash")?,
         ("GET" | "PATCH", ["downloads", id])
         | ("GET", ["downloads", id, "parts" | "sources" | "comments"]) => {
             let id = decode_path_parameter(id, "id")?;
@@ -514,12 +518,27 @@ fn is_endpoint_path_token(value: &str) -> bool {
     (1..=u16::MAX as u64).contains(&port)
 }
 
-fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {
+fn route_query_fields(
+    method: &str,
+    path: &str,
+    parameterized: bool,
+) -> Option<&'static [&'static str]> {
     const SEARCH_PAGE: &[&str] = &["limit", "cursor"];
     const NONE: &[&str] = &[];
     const SNAPSHOT: &[&str] = &["limit"];
     const PAGE: &[&str] = &["offset", "limit"];
-    const SHARED_FILES: &[&str] = &["limit", "cursor", "q", "priority"];
+    const LIBRARY_FILES: &[&str] = &[
+        "limit",
+        "cursor",
+        "q",
+        "view",
+        "sort",
+        "order",
+        "rootId",
+        "tag",
+        "sharingEnabled",
+        "countTotal",
+    ];
     const LIBRARY_TAGS: &[&str] = &["limit", "cursor"];
     const DOWNLOADS: &[&str] = &["view", "category", "cursor", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
@@ -605,7 +624,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         }),
         ("GET", "/api/v1/searches") => Some(SEARCH_PAGE),
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
-        ("GET", "/api/v1/shared-files") => Some(SHARED_FILES),
+        ("GET", "/api/v1/library/files") => Some(LIBRARY_FILES),
         ("GET", "/api/v1/uploads") => Some(UPLOAD_QUEUE),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
         ("POST", "/api/v1/library/files/sharing") => Some(NONE),
@@ -616,7 +635,8 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),
         ("DELETE", "/api/v1/library/ignores") => Some(SHARED_FILE_IGNORE_PATTERN),
-        _ => route_query_fields_for_parameterized(method, path),
+        _ if parameterized => route_query_fields_for_parameterized(method, path),
+        _ => None,
     }
 }
 
@@ -646,11 +666,9 @@ fn route_query_fields_for_parameterized(
         | ("PATCH", ["servers", _])
         | ("DELETE", ["servers", _])
         | ("DELETE", ["searches", _])
-        | ("GET", ["shared-files", _])
-        | ("PATCH", ["shared-files", _])
+        | ("GET", ["library", "files", _])
+        | ("PATCH", ["library", "files", _])
         | ("PATCH", ["library", "ignores", "defaults", _])
-        | ("GET", ["shared-files", _, "ed2k-link"])
-        | ("GET", ["shared-files", _, "comments"])
         | ("GET", ["downloads", _])
         | ("PATCH", ["downloads", _])
         | ("GET", ["downloads", _, "sources", _])

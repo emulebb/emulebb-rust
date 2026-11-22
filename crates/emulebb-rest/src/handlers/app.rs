@@ -295,14 +295,6 @@ pub(crate) async fn snapshot(
         network.as_ref(),
         &state.core.vpn_guard_status(),
     );
-    let shared_files = state
-        .core
-        .shares_page(0, limit)
-        .await
-        .0
-        .iter()
-        .map(shared_file_response)
-        .collect::<Vec<_>>();
     let downloads = match state.core.download_counts().await {
         Ok(downloads) => downloads,
         Err(error) => return super::persistence::persistence_error(error),
@@ -335,7 +327,6 @@ pub(crate) async fn snapshot(
             app: app_info_response(state.core.app_info()),
             status,
             downloads: &downloads,
-            shared_files,
             uploads: &uploads.uploads,
             upload_queue: &upload_queue.uploads,
             servers,
@@ -353,7 +344,6 @@ struct SnapshotResponse<'a> {
     app: serde_json::Value,
     status: serde_json::Value,
     downloads: &'a emulebb_core::DownloadCounts,
-    shared_files: Vec<crate::dto::SharedFileResponse>,
     uploads: &'a [emulebb_core::Upload],
     upload_queue: &'a [emulebb_core::Upload],
     servers: Vec<serde_json::Value>,

@@ -1,4 +1,4 @@
-import type { Upload } from "../../src/api";
+import type { Upload, LibraryFileDetail } from "../../src/api";
 import { settingsFixture, settingsSurfaceFixture, applySettingsFixture } from "./settings";
 import type { Route } from "@playwright/test";
 
@@ -92,25 +92,24 @@ const snapshot = {
   uploadQueue: [uploadFixture({ id: "12345678-1234-4234-8234-123456789abd", address: "192.0.2.11",
     uploadState: "queued", uploadRateBytesPerSec: 0, sessionUploadedBytes: 0,
     uploadDurationSeconds: null, connected: false, queueRank: 1 })],
-  sharedFiles: [{
-    hash: sharedFileHash,
-    name: "Shared Sample.bin",
-    path: "F:\\Sample\\Shared Sample.bin",
-    sizeBytes: 4096,
-    priority: "normal",
-    publication: {
-      ed2k: { state: "published", lastSuccessAt: 1_700_000_000 },
-      kadKeyword: { state: "partial", publishedKeywords: 1, totalKeywords: 2, lastSuccessAt: 0 },
-      kadSource: { state: "publishing", lastSuccessAt: null }
-    }
-  }]
 };
 
-const secondSharedFile = {
-  ...snapshot.sharedFiles[0],
-  hash: secondSharedFileHash,
-  name: "Second Shared Sample.bin",
-  path: "F:\\Sample\\Second Shared Sample.bin"
+const firstLibraryFile: LibraryFileDetail = {
+  hash: sharedFileHash, displayName: "Shared Sample.bin", sizeBytes: 4096,
+  present: true, sharingEnabled: true, sessionUploadedBytes: 0, sessionUploadRequests: 0,
+  sessionAcceptedUploads: 0, lifetimeUploadedBytes: 4096, lifetimeUploadRequests: 2,
+  lifetimeAcceptedUploads: 1, lastUploadRequestedAt: null, lastUploadedAt: null,
+  uploadPriority: "normal", comment: "", rating: 0,
+  ed2kLink: "ed2k://|file|Shared%20Sample.bin|4096|ffeeddccbbaa99887766554433221100|/",
+  publication: {
+    ed2k: { state: "published", lastSuccessAt: 1_700_000_000 },
+    kadKeyword: { state: "partial", publishedKeywords: 1, totalKeywords: 2, lastSuccessAt: 0 },
+    kadSource: { state: "publishing", lastSuccessAt: null }
+  }
+};
+const secondLibraryFile: LibraryFileDetail = {
+  ...firstLibraryFile, hash: secondSharedFileHash, displayName: "Second Shared Sample.bin",
+  ed2kLink: "ed2k://|file|Second%20Shared%20Sample.bin|4096|0123456789abcdeffedcba9876543210|/"
 };
 
 export function mockDownloadFixture() {
@@ -125,6 +124,7 @@ export function mockSnapshotFixture(): typeof snapshot {
 
 export function installMockApi(requests: RecordedApiRequest[]) {
   let currentSettings = settingsFixture();
+  const library = [structuredClone(firstLibraryFile), structuredClone(secondLibraryFile)];
   let nextRootId = 3;
   let roots = [
     { id: "1", path: "C:\\Sample\\Shared", watchEnabled: false, managed: false, shareable: true, accessible: true, scanRequired: false, lastScannedAt: null },
@@ -147,7 +147,7 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       const valid = body.confirmCapture === true && Number.isInteger(body.maxBytes)
         && body.maxBytes >= 65_536 && body.maxBytes <= 67_108_864;
       await route.fulfill({ status: valid ? 200 : 400, contentType: "application/json", body: JSON.stringify(valid
-        ? { schema: "emulebb.diagnostic-bundle.v7", capturedAt: 1794657600, summary: { issueCount: 0 } }
+        ? { schema: "emulebb.diagnostic-bundle.v8", capturedAt: 1794657600, summary: { issueCount: 0 } }
         : { error: { code: "BAD_REQUEST", message: "A bounded maxBytes value is required" } }) });
       return;
     }
@@ -225,11 +225,31 @@ export function installMockApi(requests: RecordedApiRequest[]) {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(currentSettings) });
       return;
     }
-    const data = request.method() === "GET" && path === "shared-files"
-      ? url.searchParams.has("cursor")
-        ? { items: [secondSharedFile], total: 2, nextCursor: null }
-        : { items: snapshot.sharedFiles, total: 2, nextCursor: "second-page" }
-      : dataFor(request.method(), path);
+    if (request.method() === "GET" && path === "library/files") {
+      const row = library[url.searchParams.has("cursor") ? 1 : 0];
+      const { uploadPriority, comment, rating, ed2kLink, publication, ...summary } = row;
+      const more = !url.searchParams.has("cursor");
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [summary],
+        meta: { apiVersion: "v1", nextCursor: more ? "second-page" : null, hasMore: more, total: library.length } }) });
+      return;
+    }
+    if (path === "library/files/sharing" && request.method() === "POST") {
+      const body = request.postDataJSON();
+      const data = body.hashes.map((hash: string) => { const file = library.find((file) => file.hash === hash); if (file) file.sharingEnabled = body.enabled;
+        return { hash, status: file ? "accepted" : "failed", httpStatus: file ? 200 : 404 }; });
+      await route.fulfill({ status: 207, contentType: "application/json", body: JSON.stringify({ data }) });
+      return;
+    }
+    const file = library.find((file) => path === `library/files/${file.hash}`);
+    if (file) {
+      if (request.method() === "PATCH") {
+        const body = request.postDataJSON();
+        Object.assign(file,body);
+        await route.fulfill({ status: 204, body: "" });
+      } else await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: file, meta: { apiVersion: "v1" } }) });
+      return;
+    }
+    const data = dataFor(request.method(), path);
     if (data === eventStream) {
       await route.fulfill({
         status: 200,
@@ -382,16 +402,6 @@ function dataFor(method: string, path: string): unknown {
           }
         ]
       };
-    case "shared-files":
-      return { items: snapshot.sharedFiles, total: snapshot.sharedFiles.length, nextCursor: null };
-    case `shared-files/${sharedFileHash}/ed2k-link`:
-      return { hash: sharedFileHash, link: "ed2k://|file|Shared%20Sample.bin|4096|ffeeddccbbaa99887766554433221100|/" };
-    case `shared-files/${sharedFileHash}/comments`:
-      return { items: [] };
-    case `shared-files/${secondSharedFileHash}/ed2k-link`:
-      return { hash: secondSharedFileHash, link: "ed2k://|file|Second%20Shared%20Sample.bin|4096|0123456789abcdeffedcba9876543210|/" };
-    case `shared-files/${secondSharedFileHash}/comments`:
-      return { items: [] };
     case "categories":
       return { items: [{ name: "Sample-Category", tempDir: null, destinationDir: null, comment: "" }] };
     case "friends":

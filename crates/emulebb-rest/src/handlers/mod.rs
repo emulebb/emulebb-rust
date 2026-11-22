@@ -22,6 +22,8 @@ pub(crate) mod downloads;
 pub(crate) mod friends;
 pub(crate) mod ip_filter;
 pub(crate) mod kad;
+mod library_files;
+pub(crate) use library_files::{library_file, library_files, update_library_file};
 mod library_locations;
 mod library_roots;
 mod library_sharing;
@@ -75,9 +77,8 @@ pub(crate) use servers::{
     servers_disconnect, servers_import_met_url, update_server,
 };
 pub(crate) use shared_files::{
-    add_shared_file_ignore_pattern, remove_shared_file_ignore_pattern, shared_file,
-    shared_file_comments, shared_file_ed2k_link, shared_file_ignores, shared_files,
-    update_shared_file, update_shared_file_ignore_rule,
+    add_shared_file_ignore_pattern, remove_shared_file_ignore_pattern, shared_file_ignores,
+    update_shared_file_ignore_rule,
 };
 pub(crate) use uploads::{
     upload, upload_add_friend, upload_ban, upload_queue, upload_queue_client, upload_release_slot,

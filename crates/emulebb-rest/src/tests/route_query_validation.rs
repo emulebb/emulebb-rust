@@ -1,5 +1,4 @@
 use crate::rest_test_support::*;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 async fn query_error_value(uri: &str) -> (StatusCode, Value) {
     let response = test_router()
@@ -106,55 +105,26 @@ async fn search_result_sort_query_is_strict() {
 
 #[tokio::test]
 async fn all_limited_routes_reject_out_of_range_limit_with_canonical_bounds() {
-    for uri in [
-        "/api/v1/snapshot?limit=0",
-        "/api/v1/logs?limit=5000",
-        "/api/v1/shared-files?limit=0",
-        "/api/v1/upload-queue?limit=5000",
-        "/api/v1/kad/nodes?limit=0",
+    for (uri, bounds) in [
+        ("/api/v1/snapshot?limit=0", "1..1000"),
+        ("/api/v1/logs?limit=5000", "1..1000"),
+        ("/api/v1/library/files?limit=0", "1..200"),
+        ("/api/v1/upload-queue?limit=5000", "1..1000"),
+        ("/api/v1/kad/nodes?limit=0", "1..1000"),
     ] {
         let (status, value) = query_error_value(uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
         assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
         assert_eq!(value["error"]["message"], "limit is out of range");
         assert_eq!(value["error"]["details"]["field"], "limit");
-        assert_eq!(value["error"]["details"]["constraint"], "1..1000");
+        assert_eq!(value["error"]["details"]["constraint"], bounds);
     }
-}
-
-#[tokio::test]
-async fn shared_files_keyset_cursor_and_priority_are_validated() {
-    let (status, value) = query_error_value("/api/v1/shared-files?cursor=not-json").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"]["message"], "cursor is invalid");
-
-    let invalid_semantic_cursor = utf8_percent_encode(
-        r#"{"sortPath":"sample","hash":"not-a-hash"}"#,
-        NON_ALPHANUMERIC,
-    );
-    let (status, value) = query_error_value(&format!(
-        "/api/v1/shared-files?cursor={invalid_semantic_cursor}"
-    ))
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"]["message"], "cursor is invalid");
-
-    let (status, value) = query_error_value("/api/v1/shared-files?priority=urgent").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        value["error"]["message"],
-        "priority has an unsupported value"
-    );
-
-    let (status, value) = query_error_value("/api/v1/shared-files?offset=1").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"]["message"], "unknown query parameter: offset");
 }
 
 #[tokio::test]
 async fn library_filename_search_requires_three_characters() {
     for query in ["", "ab", "%C3%A9%F0%9F%99%82", "%C4%B0A"] {
-        let (status, value) = query_error_value(&format!("/api/v1/shared-files?q={query}")).await;
+        let (status, value) = query_error_value(&format!("/api/v1/library/files?q={query}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
         assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
         assert_eq!(

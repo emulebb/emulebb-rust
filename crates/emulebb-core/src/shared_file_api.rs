@@ -161,39 +161,6 @@ impl EmulebbCore {
         ))
     }
 
-    pub async fn query_shared_files(
-        &self,
-        query: SharedFileListQuery,
-    ) -> Result<SharedFileListPage> {
-        tracing::debug!(phase = "publicationContextWait", "shared-file read");
-        let context = self.shared_file_publication_context().await;
-        tracing::debug!(phase = "metadataWait", "shared-file read");
-        let page = self
-            .ed2k_transfers
-            .query_share_entries(MetadataSharedFileQuery {
-                search: query.search,
-                priority: query.priority,
-                after: query.after.map(metadata_shared_file_cursor),
-                limit: query.limit,
-                count_total: true,
-            })
-            .await?;
-        tracing::debug!(phase = "metadataReady", "shared-file read");
-        Ok(SharedFileListPage {
-            items: page
-                .entries
-                .into_iter()
-                .map(|entry| {
-                    let share = self.local_share_from_entry(entry);
-                    let publication = self.shared_file_publication_status(&share, &context);
-                    SharedFileListItem { share, publication }
-                })
-                .collect(),
-            total: page.total,
-            next_cursor: page.next_cursor.map(shared_file_list_cursor),
-        })
-    }
-
     async fn shared_file_publication_context(&self) -> SharedFilePublicationContext {
         let server_state = {
             let runtime = self.ed2k_runtime.lock().await;
@@ -222,23 +189,45 @@ impl EmulebbCore {
         }
     }
 
-    fn shared_file_publication_status(
+    pub(crate) async fn library_file_publication(
         &self,
-        share: &LocalShare,
-        context: &SharedFilePublicationContext,
+        hash: &str,
+        name: &str,
+        eligible: bool,
     ) -> SharedFilePublicationStatus {
-        let ed2k = if !shared_file_publish_enabled(&share.priority) {
-            SharedFilePublishLane {
+        if !eligible {
+            let lane = SharedFilePublishLane {
                 state: SharedFilePublishState::Unavailable,
                 last_success_at: None,
-            }
-        } else if !context.ed2k_connected {
+            };
+            return SharedFilePublicationStatus {
+                ed2k: lane.clone(),
+                kad_source: lane,
+                kad_keyword: SharedFileKadKeywordPublish {
+                    state: SharedFilePublishState::Unavailable,
+                    published_keywords: 0,
+                    total_keywords: 0,
+                    last_success_at: None,
+                },
+            };
+        }
+        let context = self.shared_file_publication_context().await;
+        self.shared_file_publication_status(hash, name, &context)
+    }
+
+    fn shared_file_publication_status(
+        &self,
+        hash: &str,
+        name: &str,
+        context: &SharedFilePublicationContext,
+    ) -> SharedFilePublicationStatus {
+        let ed2k = if !context.ed2k_connected {
             SharedFilePublishLane {
                 state: SharedFilePublishState::Waiting,
                 last_success_at: None,
             }
         } else {
-            let tracked = share.hash.parse::<Ed2kHash>().ok().and_then(|hash| {
+            let tracked = hash.parse::<Ed2kHash>().ok().and_then(|hash| {
                 context
                     .ed2k_publication
                     .as_ref()
@@ -261,8 +250,8 @@ impl EmulebbCore {
             )
         };
 
-        let keyword_terms = significant_keyword_words_unique(&share.name);
-        let tracked = self.kad_file_publication.snapshot(&share.hash);
+        let keyword_terms = significant_keyword_words_unique(name);
+        let tracked = self.kad_file_publication.snapshot(hash);
         let kad_keyword = kad_keyword_publication_status(
             &keyword_terms,
             &tracked,
@@ -341,18 +330,6 @@ impl EmulebbCore {
                 None
             }
         }
-    }
-
-    pub async fn update_shared_file(
-        &self,
-        hash: &str,
-        request: SharedFileUpdate,
-    ) -> Result<Option<LocalShare>> {
-        if self.share(hash).await.is_none() {
-            return Ok(None);
-        }
-        self.edit_library_file_metadata(hash, &request).await?;
-        Ok(self.share(hash).await)
     }
 
     /// Return the last health observations published by the monitor or scan.
@@ -501,20 +478,6 @@ impl EmulebbCore {
     /// Stop the live shared-directory monitor (if running). Idempotent.
     pub async fn stop_shared_directory_monitor(&self) -> Result<()> {
         shared_dir_monitor::stop_shared_directory_monitor(self).await
-    }
-}
-
-fn metadata_shared_file_cursor(cursor: SharedFileListCursor) -> MetadataSharedFileCursor {
-    MetadataSharedFileCursor {
-        sort_path: cursor.sort_path,
-        file_hash: cursor.hash,
-    }
-}
-
-fn shared_file_list_cursor(cursor: MetadataSharedFileCursor) -> SharedFileListCursor {
-    SharedFileListCursor {
-        sort_path: cursor.sort_path,
-        hash: cursor.file_hash,
     }
 }
 

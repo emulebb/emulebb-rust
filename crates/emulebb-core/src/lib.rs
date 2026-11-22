@@ -67,8 +67,7 @@ use emulebb_ed2k::{
     },
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
     shared_publish_rank::{
-        SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank,
-        shared_file_publish_enabled, shared_publish_rank,
+        SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
     },
 };
 #[cfg(test)]
@@ -96,7 +95,7 @@ use emulebb_kad_proto::{
 };
 use emulebb_metadata::{
     MetadataKadOutboundPublish, MetadataKadOutboundPublishKind, MetadataLocalShareEntry,
-    MetadataSharedFileCursor, MetadataSharedFileQuery, MetadataStore, MetadataTransferPublishEntry,
+    MetadataStore, MetadataTransferPublishEntry,
 };
 pub use http_client::http_client_builder;
 pub use persistence_owner::PersistenceError;
@@ -345,14 +344,13 @@ pub use rest_model::{
     DownloadConcurrencyMode, DownloadCreate, DownloadCreateSource, DownloadFileNameObservation,
     DownloadResidentMemory, DownloadResources, DownloadSource, DownloadSourceMetrics,
     DownloadUpdate, Ed2kNetworkConfig, Friend, FriendCreate, HostNameResolution, IndexingStatus,
-    IpFilterStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
-    Search, SearchCreate, SearchProgress, SearchResult, SearchResultDownloadCreate,
-    SearchResultMedia, SearchResultObservation, SearchSpec, ServerCreate, ServerInfo, ServerUpdate,
-    SharedFileKadKeywordPublish, SharedFileListCursor, SharedFileListItem, SharedFileListPage,
-    SharedFileListQuery, SharedFilePublicationStatus, SharedFilePublishLane,
-    SharedFilePublishState, SharedFileUpdate, Status, Transfer, TransferComment, TransferStats,
-    TransferThroughputStats, Upload, UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig,
-    VpnGuardProbeStatus, VpnGuardStatus,
+    IpFilterStatus, KadNode, LibraryFileUpdate, LocalShare, LocalShareCreate, NetworkStatus,
+    NullableStringField, Search, SearchCreate, SearchProgress, SearchResult,
+    SearchResultDownloadCreate, SearchResultMedia, SearchResultObservation, SearchSpec,
+    ServerCreate, ServerInfo, ServerUpdate, SharedFileKadKeywordPublish,
+    SharedFilePublicationStatus, SharedFilePublishLane, SharedFilePublishState, Status, Transfer,
+    TransferComment, TransferStats, TransferThroughputStats, Upload, UploadPolicyMetrics,
+    UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_download_source_stats, apply_server_update,
@@ -4714,18 +4712,14 @@ fn kad_keyword_publish_candidate_from_shared_entry(
 /// excluded. Mirrors the oracle SOURCE loop admitting partfiles (no
 /// `IsPartFile()` filter, SharedFileList.cpp:3371-3388).
 fn kad_source_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
-    !entry.compatibility_hint
-        && shared_file_publish_enabled(&entry.upload_priority)
-        && entry.is_servable()
+    !entry.compatibility_hint && entry.is_servable()
 }
 
 /// Whether a shared-catalog entry may be published under a Kad KEYWORD: a
 /// completed file only (oracle `!IsPartFile()`, SharedFileList.cpp:3313), never
 /// an in-progress partfile.
 fn kad_keyword_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
-    !entry.compatibility_hint
-        && shared_file_publish_enabled(&entry.upload_priority)
-        && entry.verified_complete
+    !entry.compatibility_hint && entry.verified_complete
 }
 
 /// Cheap per-tick read of the SOURCE-publishable file hashes (servable files that

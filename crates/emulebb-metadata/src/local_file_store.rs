@@ -141,7 +141,6 @@ pub struct MetadataContentEdit {
     pub token: Option<crate::JobToken>,
     pub notes_changed: bool,
     pub rating_changed: bool,
-    pub publish_status_changed: bool,
 }
 
 impl MetadataStore {
@@ -165,23 +164,20 @@ impl MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let changed: Option<(i64, bool, bool, bool)> = tx
+        let changed: Option<(i64, bool, bool)> = tx
             .query_row(
                 "SELECT k.id, ?2 IS NOT NULL AND (k.comment<>?2 OR k.rating<>?3),
-             ?3 IS NOT NULL AND k.rating<>?3,
-             ?4 IS NOT NULL AND ((k.upload_priority='not-published')<>(?4='not-published'))
+             ?3 IS NOT NULL AND k.rating<>?3
              FROM known_files k JOIN library_files l ON l.known_file_id=k.id WHERE k.ed2k_hash=?1",
                 params![
                     &hash,
                     comment_rating.map(|v| v.0),
-                    comment_rating.map(|v| v.1),
-                    priority.map(|v| v.0)
+                    comment_rating.map(|v| v.1)
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((known_id, notes_changed, rating_changed, publish_status_changed)) = changed
-        else {
+        let Some((known_id, notes_changed, rating_changed)) = changed else {
             return Ok(None);
         };
         let token = tx.query_row(
@@ -205,7 +201,6 @@ impl MetadataStore {
             token,
             notes_changed,
             rating_changed,
-            publish_status_changed,
         }))
     }
 

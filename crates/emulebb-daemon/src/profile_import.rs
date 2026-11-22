@@ -33,15 +33,7 @@ struct ExchangeMerge<'a> {
 
 const MANIFEST_SCHEMA: &str = "emulebb.profile-exchange.v2";
 const ED2K_PART_SIZE: u64 = 9_728_000;
-const UPLOAD_PRIORITIES: &[&str] = &[
-    "auto",
-    "not-published",
-    "verylow",
-    "low",
-    "normal",
-    "high",
-    "release",
-];
+const UPLOAD_PRIORITIES: &[&str] = &["auto", "verylow", "low", "normal", "high", "release"];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

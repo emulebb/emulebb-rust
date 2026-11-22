@@ -15,8 +15,7 @@ use crate::{
     ed2k_tcp::Ed2kHelloIdentity,
     ed2k_transfer::{Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry},
     shared_publish_rank::{
-        SharedPublishRankInput, compare_shared_publish_rank, shared_file_publish_enabled,
-        shared_publish_rank,
+        SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
     },
 };
 
@@ -601,9 +600,6 @@ pub(super) fn ranked_offer_files(
         .iter()
         .enumerate()
         .filter_map(|(sequence, entry)| {
-            if !shared_file_publish_enabled(&entry.upload_priority) {
-                return None;
-            }
             // Stock SharedFileList.cpp:2649 excludes a large file (>4GB, high
             // dword != 0) from the offer candidate set entirely when the server
             // lacks large-file TCP support (`!IsLargeFile() ||
@@ -808,9 +804,6 @@ pub(super) async fn send_offer_files_advertisement(
                 let Some(partial) = partial.as_ref() else {
                     return false;
                 };
-                if !shared_file_publish_enabled(&partial.priority) {
-                    return false;
-                }
                 entry.1.clone_from(&partial.name);
                 entry.2 = partial.size;
                 entry.3 = ed2k_offer_file_type(&partial.name);

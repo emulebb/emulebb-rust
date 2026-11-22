@@ -28,19 +28,19 @@ pub(super) fn validate_optional_boolean_body_field(
     Ok(())
 }
 
-pub(super) fn validate_shared_file_patch_body_fields(
+pub(super) fn validate_library_file_patch_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
-    if !object.contains_key("priority")
+    if !object.contains_key("uploadPriority")
         && !object.contains_key("comment")
         && !object.contains_key("rating")
     {
         return Err(invalid_body_error(
-            "shared-file PATCH requires priority, comment, or rating",
+            "library file PATCH requires uploadPriority, comment, or rating",
         ));
     }
-    if let Some(priority) = object.get("priority") {
-        validate_shared_upload_priority_body_field(priority)?;
+    if let Some(priority) = object.get("uploadPriority") {
+        validate_library_upload_priority_body_field(priority)?;
     }
     if object.contains_key("comment") || object.contains_key("rating") {
         validate_shared_file_comment_rating_body_fields(object)?;
@@ -48,18 +48,18 @@ pub(super) fn validate_shared_file_patch_body_fields(
     Ok(())
 }
 
-fn validate_shared_upload_priority_body_field(
+fn validate_library_upload_priority_body_field(
     value: &serde_json::Value,
 ) -> Result<(), Box<Response>> {
     let Some(priority) = value.as_str() else {
-        return Err(invalid_body_error("priority must be a string"));
+        return Err(invalid_body_error("uploadPriority must be a string"));
     };
     if !matches!(
         priority,
-        "auto" | "not-published" | "verylow" | "low" | "normal" | "high" | "release"
+        "auto" | "verylow" | "low" | "normal" | "high" | "release"
     ) {
         return Err(invalid_body_error(
-            "priority must be one of auto, not-published, verylow, low, normal, high, release",
+            "uploadPriority must be one of auto, verylow, low, normal, high, release",
         ));
     }
     Ok(())

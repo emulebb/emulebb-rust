@@ -3,7 +3,7 @@ export type Tab =
   | "transfers"
   | "search"
   | "sharing"
-  | "shared-files"
+  | "library"
   | "uploads"
   | "network"
   | "servers"
@@ -24,7 +24,7 @@ const TAB_PATHS: Record<Tab, string> = {
   transfers: "/transfers",
   search: "/searches",
   sharing: "/sharing",
-  "shared-files": "/shared-files",
+  "library": "/library",
   uploads: "/uploads",
   network: "/network",
   servers: "/servers",

@@ -73,7 +73,7 @@ CREATE TABLE known_files (
     content_type TEXT NOT NULL DEFAULT '',
     sharing_enabled INTEGER NOT NULL DEFAULT 1 CHECK(sharing_enabled IN (0, 1)),
     upload_priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
+        CHECK(upload_priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'release')),
     auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
     comment TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),

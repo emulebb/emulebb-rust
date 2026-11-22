@@ -1,6 +1,6 @@
 //! One retained owner spans durable metadata and both network publications.
 use super::*;
-use crate::{Ed2kRuntime, EmulebbCore, SharedFileUpdate};
+use crate::{Ed2kRuntime, EmulebbCore, LibraryFileUpdate};
 use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
 use std::collections::HashSet;
 
@@ -24,13 +24,13 @@ impl EmulebbCore {
     pub async fn edit_library_file_metadata(
         &self,
         hash: &str,
-        request: &SharedFileUpdate,
+        request: &LibraryFileUpdate,
     ) -> anyhow::Result<bool> {
         crate::library_policy::validate_hash(hash)?;
         let priority = request
-            .priority
+            .upload_priority
             .as_deref()
-            .map(crate::views::validate_shared_upload_priority)
+            .map(crate::views::validate_library_upload_priority)
             .transpose()?;
         let comment_rating = crate::views::validate_shared_file_comment_rating(request)?;
         anyhow::ensure!(
@@ -120,7 +120,7 @@ pub(super) async fn process(
             .unwrap_or_else(|error| error.into_inner())
             .insert(command.hash.clone());
     }
-    if edit.rating_changed || edit.publish_status_changed {
+    if edit.rating_changed {
         let state = command
             .runtime
             .ed2k
