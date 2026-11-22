@@ -379,7 +379,7 @@ impl EmulebbCore {
             .as_ref()
             .is_some_and(|(_, rating)| *rating != share.rating);
         self.ed2k_transfers
-            .update_shared_file_metadata(
+            .update_library_file_metadata(
                 hash,
                 priority
                     .as_ref()

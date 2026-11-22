@@ -708,6 +708,22 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     })
     .await
     .unwrap();
+    // The root creates an independent scan. This shape test needs a settled
+    // fixture; retained-capacity refusal has its own response-level regression.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let scan = core.library_scan();
+            if !scan.reload_progress.running
+                && !scan.reload_progress.pending
+                && scan.hashing_count == 0
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     core.add_server(emulebb_core::ServerCreate {
         address: "192.0.2.20".to_string(),
         port: 4661,

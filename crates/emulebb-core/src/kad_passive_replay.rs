@@ -377,7 +377,7 @@ pub(crate) async fn remember_passive_note_results(
             continue;
         }
         if let Err(error) = transfer_runtime
-            .update_shared_file_metadata(&file_hash, None, Some((&comment, rating)))
+            .update_library_file_metadata(&file_hash, None, Some((&comment, rating)))
             .await
         {
             tracing::debug!(

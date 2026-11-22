@@ -482,18 +482,6 @@ impl Ed2kTransferRuntime {
         .await
     }
 
-    /// Persist shared-file metadata exposed through the eMuleBB REST contract.
-    pub async fn update_shared_file_metadata(
-        &self,
-        file_hash: &str,
-        priority: Option<(&str, bool)>,
-        comment_rating: Option<(&str, u8)>,
-    ) -> Result<super::Ed2kFileServingView> {
-        self.persist_content_metadata(file_hash.parse()?, priority, comment_rating)
-            .await?;
-        self.serving_view(file_hash).await
-    }
-
     /// Persist the user-facing transfer control state across process restarts.
     /// Resolve the current assignment at the start of a delivery decision.
     pub async fn current_category_id(&self, token: JobToken) -> Result<Option<i64>> {

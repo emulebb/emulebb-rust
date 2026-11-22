@@ -710,7 +710,7 @@ async fn passive_note_results_do_not_replace_local_transfer_metadata() {
     )
     .await;
     transfer_runtime
-        .update_shared_file_metadata(&file_hash.to_string(), None, Some(("local note", 2)))
+        .update_library_file_metadata(&file_hash.to_string(), None, Some(("local note", 2)))
         .await
         .unwrap();
 
