@@ -3080,13 +3080,8 @@ impl EmulebbCore {
             peer_count: contact_count,
             firewalled: Some(firewalled),
             bootstrapping: Some(bootstrapping),
-            bootstrap_progress: Some(if connected {
-                100
-            } else if bootstrapping {
-                50
-            } else {
-                0
-            }),
+            // Joining a changing network has no measurable completion fraction.
+            bootstrap_progress: connected.then_some(1.0),
             contact_count: Some(contact_count),
             lan_mode: Some(false),
             users: connected.then_some(kad_users),

@@ -925,6 +925,11 @@ fn ed2k_network_config_requires_a_direct_default_route_or_explicit_bind() {
         .ed2k_network_config_from_interfaces(&metadata_store(&profile), &[first, second])
         .unwrap_err();
     assert!(ambiguous.to_string().contains("multiple default-route"));
+    assert!(
+        ambiguous.to_string().contains(
+            "emulebb-rust --profile <PATH> settings set network.p2p.bindInterface <NAME>"
+        )
+    );
     assert!(ambiguous.downcast_ref::<NetworkStartupError>().is_none());
 }
 
@@ -1269,7 +1274,7 @@ fn p2p_bind_interface_requires_matching_ipv4_interface() {
         .unwrap_err()
         .to_string();
 
-    assert!(error.contains("p2pBindInterface"));
+    assert!(error.contains("network.p2p.bindInterface"));
     assert!(error.contains("did not resolve"));
 }
 
