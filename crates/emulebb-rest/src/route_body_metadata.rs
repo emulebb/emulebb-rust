@@ -13,11 +13,11 @@ use axum::{
 use validators::{
     validate_category_create_body_fields, validate_category_patch_body_fields,
     validate_destructive_confirmation_body_field, validate_friend_create_body_fields,
-    validate_kad_bootstrap_body_fields, validate_library_root_create_body_fields,
-    validate_library_root_patch_body_fields, validate_search_create_body_fields,
-    validate_server_create_body_fields, validate_server_patch_body_fields,
-    validate_shared_file_ignore_pattern_body_fields, validate_shared_file_ignore_rule_body_fields,
-    validate_shared_file_patch_body_fields, validate_url_import_body_fields,
+    validate_kad_bootstrap_body_fields, validate_library_file_patch_body_fields,
+    validate_library_root_create_body_fields, validate_library_root_patch_body_fields,
+    validate_search_create_body_fields, validate_server_create_body_fields,
+    validate_server_patch_body_fields, validate_shared_file_ignore_pattern_body_fields,
+    validate_shared_file_ignore_rule_body_fields, validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -88,8 +88,8 @@ fn validate_route_specific_body_fields(
     path: &str,
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
-    if method == "PATCH" && path_matches_shared_file(path) {
-        return validate_shared_file_patch_body_fields(object);
+    if method == "PATCH" && path_matches_library_file(path) {
+        return validate_library_file_patch_body_fields(object);
     }
     if method == "POST" && path == "/api/v1/library/roots" {
         return validate_library_root_create_body_fields(object);
@@ -142,7 +142,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const DOWNLOAD_REMOVE: &[&str] = &["ids", "deleteData"];
     const DOWNLOAD_PATCH: &[&str] = &["name", "category", "sizeBytes"];
     const SEARCH_RESULT_DOWNLOAD: &[&str] = &["category", "intent", "redownload"];
-    const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
+    const LIBRARY_FILE_PATCH: &[&str] = &["uploadPriority", "comment", "rating"];
     const LIBRARY_ROOT_CREATE: &[&str] = &["path", "watchEnabled"];
     const LIBRARY_ROOT_PATCH: &[&str] = &["watchEnabled"];
     const SHARED_FILE_IGNORE_PATTERN: &[&str] = &["pattern"];
@@ -304,7 +304,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         ("POST", ["library", "scan"]) => Some(EMPTY),
         ("PATCH", ["downloads", _]) => Some(DOWNLOAD_PATCH),
         ("POST", ["downloads", _, "sources", _, "operations", _]) => Some(EMPTY),
-        ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
+        ("PATCH", ["library", "files", _]) => Some(LIBRARY_FILE_PATCH),
         ("PATCH", ["library", "ignores", "defaults", _]) => Some(SHARED_FILE_IGNORE_RULE),
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
         ("PATCH", ["categories", _]) => Some(CATEGORY_PATCH),
@@ -314,8 +314,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
 }
 
-fn path_matches_shared_file(path: &str) -> bool {
-    api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["shared-files", _]))
+fn path_matches_library_file(path: &str) -> bool {
+    api_segments(path)
+        .is_some_and(|segments| matches!(segments.as_slice(), ["library", "files", _]))
 }
 
 fn path_matches_shared_file_ignore_rule(path: &str) -> bool {

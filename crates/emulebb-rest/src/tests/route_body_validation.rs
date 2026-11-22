@@ -235,18 +235,18 @@ async fn settings_patch_requires_the_current_revision_and_typed_document_shape()
 }
 
 #[tokio::test]
-async fn shared_file_patch_body_uses_canonical_priority_validation() {
+async fn library_file_patch_body_uses_canonical_priority_validation() {
     let app = test_router();
-    let uri = "/api/v1/shared-files/00112233445566778899aabbccddeeff";
+    let uri = "/api/v1/library/files/00112233445566778899aabbccddeeff";
     let cases = [
         (
             r#"{}"#,
-            "shared-file PATCH requires priority, comment, or rating",
+            "library file PATCH requires uploadPriority, comment, or rating",
         ),
-        (r#"{"priority":1}"#, "priority must be a string"),
+        (r#"{"uploadPriority":1}"#, "uploadPriority must be a string"),
         (
-            r#"{"priority":"veryhigh"}"#,
-            "priority must be one of auto, not-published, verylow, low, normal, high, release",
+            r#"{"uploadPriority":"urgent"}"#,
+            "uploadPriority must be one of auto, verylow, low, normal, high, release",
         ),
     ];
 
@@ -263,9 +263,9 @@ async fn shared_file_patch_body_uses_canonical_priority_validation() {
 }
 
 #[tokio::test]
-async fn shared_file_patch_body_uses_canonical_comment_rating_validation() {
+async fn library_file_patch_body_uses_canonical_comment_rating_validation() {
     let app = test_router();
-    let uri = "/api/v1/shared-files/00112233445566778899aabbccddeeff";
+    let uri = "/api/v1/library/files/00112233445566778899aabbccddeeff";
     let cases = [
         (r#"{"rating":5}"#, "comment must be a string"),
         (r#"{"comment":1,"rating":5}"#, "comment must be a string"),
@@ -462,7 +462,7 @@ async fn server_create_body_uses_canonical_validation() {
             "priority must be a string",
         ),
         (
-            r#"{"address":"127.0.0.1","port":4661,"priority":"veryhigh"}"#,
+            r#"{"address":"127.0.0.1","port":4661,"priority":"urgent"}"#,
             "priority must be one of low, normal, high",
         ),
         (

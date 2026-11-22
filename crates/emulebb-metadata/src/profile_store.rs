@@ -355,13 +355,14 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
-    pub fn upsert_server(&self, server: &MetadataServer) -> Result<()> {
+    /// Upsert a live endpoint and return its stable ID only after commit.
+    pub fn upsert_server(&self, server: &MetadataServer) -> Result<i64> {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        upsert_server_in_transaction(&tx, server)?;
+        let id = upsert_server_in_transaction(&tx, server)?;
         Self::mark_discovery_initialized(&tx, crate::DiscoveryDomain::Servers)?;
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
 
     /// Initialize servers only if no other operation has claimed the list.
@@ -392,12 +393,12 @@ impl super::MetadataStore {
     }
 }
 
-fn upsert_server_in_transaction(
+pub(super) fn upsert_server_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     server: &MetadataServer,
-) -> Result<()> {
+) -> Result<i64> {
     let now = unix_s();
-    tx.execute(
+    let id: i64 = tx.query_row(
             r#"
             INSERT INTO servers(
                 address, port, name, description, dynamic_host, auxiliary_ports,
@@ -431,6 +432,7 @@ fn upsert_server_in_transaction(
                 udp_key = excluded.udp_key,
                 udp_key_ip = excluded.udp_key_ip,
                 last_seen_at_s = excluded.last_seen_at_s
+            RETURNING id
             "#,
             params![
                 server.address,
@@ -458,8 +460,10 @@ fn upsert_server_in_transaction(
                 server.udp_key_ip.map(i64::from),
                 now,
             ],
+            |row| row.get(0),
         )?;
-    Ok(())
+    ensure!(id > 0, "server ID exhausted");
+    Ok(id)
 }
 
 /// Rebuild implicit root origins within the category transaction, using only SQL

@@ -1054,39 +1054,11 @@ pub struct SharedFilePublicationStatus {
     pub kad_source: SharedFilePublishLane,
 }
 
-#[derive(Debug, Clone)]
-pub struct SharedFileListItem {
-    pub share: LocalShare,
-    pub publication: SharedFilePublicationStatus,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SharedFileListCursor {
-    pub sort_path: String,
-    pub hash: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct SharedFileListQuery {
-    pub search: Option<String>,
-    pub priority: Option<String>,
-    pub after: Option<SharedFileListCursor>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct SharedFileListPage {
-    pub items: Vec<SharedFileListItem>,
-    pub total: usize,
-    pub next_cursor: Option<SharedFileListCursor>,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SharedFileUpdate {
+pub struct LibraryFileUpdate {
     #[serde(default)]
-    pub priority: Option<String>,
+    pub upload_priority: Option<String>,
     #[serde(default)]
     pub comment: Option<String>,
     #[serde(default)]

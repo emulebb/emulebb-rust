@@ -1,0 +1,392 @@
+use super::*;
+use crate::{LibraryTagRequest, persistence_owner::tests::usage};
+use emulebb_index::FileIndex;
+
+fn record() -> MetadataServer {
+    MetadataServer {
+        address: "seed.example".into(),
+        port: 4661,
+        name: "Sample Server".into(),
+        description: String::new(),
+        dynamic_host: String::new(),
+        auxiliary_ports: vec![],
+        server_priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+        failed_count: 7,
+        ping_ms: Some(42),
+        users: 83,
+        files: 12,
+        max_users: 0,
+        low_id_users: 0,
+        soft_files: 0,
+        hard_files: 0,
+        version: String::new(),
+        obfuscation_tcp_port: None,
+        obfuscation_udp_port: None,
+        udp_flags: None,
+        udp_key: None,
+        udp_key_ip: None,
+    }
+}
+
+async fn disconnected_mutation(action: u8) {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let server = record();
+    let endpoint = server.endpoint();
+    let id = if action == 0 {
+        0
+    } else {
+        core.create_server_resource(&server).await.unwrap()
+    };
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(gate.clone());
+    let caller = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            match action {
+                0 => core.create_server_resource(&server).await.map(|_| true),
+                1 => {
+                    core.update_server_resource(
+                        id,
+                        &MetadataServerUpdate {
+                            name: Some("Edited Server".into()),
+                            enabled: Some(false),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                }
+                _ => core.delete_server_resource(id).await,
+            }
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    assert!(usage(&owner).0 > 0 && usage(&owner).1 > 0);
+    match action {
+        0 => assert_eq!(
+            core.metadata_store
+                .server_page(Default::default())
+                .unwrap()
+                .servers
+                .len(),
+            1
+        ),
+        1 => {
+            assert!(
+                !core
+                    .metadata_store
+                    .server_by_id(id)
+                    .unwrap()
+                    .unwrap()
+                    .server
+                    .enabled
+            );
+            let mut state = core.state.lock().await;
+            let cached = state.servers.get_mut(&endpoint).unwrap();
+            assert!(cached.enabled);
+            cached.failed_count = 99;
+        }
+        _ => assert!(core.metadata_store.server_by_id(id).unwrap().is_none()),
+    }
+    caller.abort();
+    assert!(caller.await.is_err_and(|error| error.is_cancelled()));
+    assert_eq!(
+        Arc::strong_count(&core),
+        1,
+        "retained command must not own the full Core"
+    );
+    *owner.publication_gate.lock().unwrap() = None;
+    gate.release.notify_one();
+    drop(
+        core.library_tags(&LibraryTagRequest::Get("Missing".into()))
+            .await
+            .unwrap(),
+    );
+    let state = core.state.lock().await;
+    match action {
+        0 => assert!(state.servers.get(&endpoint).unwrap().enabled),
+        1 => {
+            let cached = state.servers.get(&endpoint).unwrap();
+            assert!(!cached.enabled);
+            assert_eq!(cached.name, "Edited Server");
+            assert_eq!(cached.failed_count, 99);
+            assert!(state.disabled_servers.contains(&endpoint));
+        }
+        _ => {
+            assert!(!state.servers.contains_key(&endpoint));
+            assert!(state.disabled_servers.contains(&endpoint));
+        }
+    }
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn disconnected_server_creator_finishes_cache_publication() {
+    disconnected_mutation(0).await;
+}
+
+#[tokio::test]
+async fn disconnected_server_editor_preserves_newer_health_observations() {
+    disconnected_mutation(1).await;
+}
+
+#[tokio::test]
+async fn disconnected_server_deleter_finishes_cache_publication() {
+    disconnected_mutation(2).await;
+}
+
+#[tokio::test]
+async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
+    let uri = format!(
+        "file:server-failure-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let store =
+        MetadataStore::from_connection(rusqlite::Connection::open_with_flags(&uri, flags).unwrap())
+            .unwrap();
+    let core = EmulebbCore::new_in_memory("test", FileIndex::from_metadata_store(store)).unwrap();
+    let server = record();
+    let id = core.create_server_resource(&server).await.unwrap();
+    let mut duplicate = server.clone();
+    duplicate.address.make_ascii_uppercase();
+    duplicate.name = "Must Not Replace".into();
+    assert!(
+        core.create_server_resource(&duplicate)
+            .await
+            .unwrap_err()
+            .is::<ServerEndpointConflict>()
+    );
+    let fault = rusqlite::Connection::open_with_flags(&uri, flags).unwrap();
+    fault.execute_batch(
+        "CREATE TRIGGER block_server_edit BEFORE UPDATE ON servers BEGIN SELECT RAISE(ABORT,'injected server write failure'); END;"
+    ).unwrap();
+    assert!(
+        core.update_server_resource(
+            id,
+            &MetadataServerUpdate {
+                name: Some("Must Not Publish".into()),
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap_err()
+        .is::<PersistenceError>()
+    );
+    assert_eq!(
+        core.state
+            .lock()
+            .await
+            .servers
+            .get(&server.endpoint())
+            .unwrap()
+            .name,
+        server.name
+    );
+    assert_eq!(
+        core.metadata_store
+            .server_by_id(id)
+            .unwrap()
+            .unwrap()
+            .server
+            .name,
+        server.name
+    );
+    core.persistence_owner.check_coherent_state().unwrap();
+}
+
+#[tokio::test]
+async fn oversized_server_create_is_refused_before_sql_capture() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let mut server = record();
+    for size in [emulebb_metadata::SERVER_READ_MAX_BYTES / 4, MAX_BYTES] {
+        server.name = "x".repeat(size);
+        assert!(matches!(
+            core.create_server_resource(&server)
+                .await
+                .unwrap_err()
+                .downcast_ref::<PersistenceError>(),
+            Some(PersistenceError::TooLarge)
+        ));
+    }
+    assert!(
+        core.metadata_store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    assert_eq!(usage(&owner), (0, 0));
+}
+
+#[tokio::test]
+async fn oversized_server_edit_is_refused_without_committing_unreadable_content() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let server = record();
+    let id = core.create_server_resource(&server).await.unwrap();
+    let error = core
+        .update_server_resource(
+            id,
+            &MetadataServerUpdate {
+                name: Some("x".repeat(emulebb_metadata::SERVER_READ_MAX_BYTES / 4)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<PersistenceError>(),
+        Some(PersistenceError::TooLarge)
+    ));
+    assert_eq!(
+        core.metadata_store
+            .server_by_id(id)
+            .unwrap()
+            .unwrap()
+            .server
+            .name,
+        server.name
+    );
+    assert_eq!(
+        core.state
+            .lock()
+            .await
+            .servers
+            .get(&server.endpoint())
+            .unwrap()
+            .name,
+        server.name
+    );
+    core.persistence_owner.check_coherent_state().unwrap();
+}
+
+#[tokio::test]
+async fn network_feedback_waits_for_committed_server_edit_publication() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let server = record();
+    let endpoint = server.endpoint();
+    let id = core.create_server_resource(&server).await.unwrap();
+    let owner = core
+        .persistence_owner
+        .owner(&core.metadata_store, &core.state)
+        .unwrap();
+    let gate = Arc::new(PublicationGate::default());
+    *owner.publication_gate.lock().unwrap() = Some(gate.clone());
+    let editor = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            core.update_server_resource(
+                id,
+                &MetadataServerUpdate {
+                    name: Some("Operator Name".into()),
+                    priority: Some("high".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        core.server_mutation_gate.try_lock().is_err(),
+        "SQL-to-publication window must exclude feedback writes"
+    );
+    let feedback = {
+        let core = core.clone();
+        let endpoint = endpoint.clone();
+        tokio::spawn(async move {
+            core.note_ed2k_server_metadata(
+                &endpoint,
+                None,
+                Some("Observed description".into()),
+                None,
+                None,
+                vec![],
+            )
+            .await
+        })
+    };
+    editor.abort();
+    assert!(editor.await.unwrap_err().is_cancelled());
+    *owner.publication_gate.lock().unwrap() = None;
+    gate.release.notify_one();
+    assert_eq!(feedback.await.unwrap(), Some(endpoint.clone()));
+    drop(
+        core.library_tags(&LibraryTagRequest::Get("Missing".into()))
+            .await
+            .unwrap(),
+    );
+    let saved = core
+        .metadata_store
+        .server_by_id(id)
+        .unwrap()
+        .unwrap()
+        .server;
+    assert_eq!(saved.name, "Operator Name");
+    assert_eq!(saved.server_priority, "high");
+    assert_eq!(saved.description, "Observed description");
+    assert_eq!(
+        core.state.lock().await.servers.get(&endpoint).unwrap().name,
+        "Operator Name"
+    );
+}
+
+#[tokio::test]
+async fn late_feedback_does_not_recreate_deleted_configured_server() {
+    let root = crate::unique_runtime_dir("server-retired-feedback");
+    let server = record();
+    let endpoint = server.endpoint();
+    let mut network = crate::tests::test_network_config_with_store(
+        &root,
+        crate::KadLocalStoreConfig::default(),
+        crate::SnoopQueueConfig::default(),
+    );
+    network.ed2k.server_endpoints = vec![endpoint.clone()];
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &root,
+        Some(network),
+    )
+    .unwrap();
+    let id = core.create_server_resource(&server).await.unwrap();
+    assert!(core.delete_server_resource(id).await.unwrap());
+    assert_eq!(
+        core.note_ed2k_server_metadata(
+            &endpoint,
+            Some("Late name".into()),
+            None,
+            None,
+            None,
+            vec![]
+        )
+        .await,
+        None
+    );
+    assert!(
+        core.metadata_store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+    let next = core.create_server_resource(&server).await.unwrap();
+    assert!(next > id);
+}

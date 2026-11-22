@@ -1,3 +1,4 @@
+import { LibraryView } from "./libraryFiles";
 import type { ComponentChildren } from "preact";
 import { AppIdentity } from "./AppIdentity";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
@@ -40,7 +41,6 @@ import {
   CursorPage,
   LibraryScan,
   SharedFileIgnores,
-  SharedFile,
   SettingsSurface,
   Snapshot,
   DownloadSummary,
@@ -67,7 +67,6 @@ import {
   Overview,
   SearchView,
   ServersView,
-  SharedFilesView,
   SharingView,
   TransfersView,
   UploadsView,
@@ -174,7 +173,6 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [libraryScan, setLibraryScan] = useState<LibraryScan | null>(null);
   const [sharedFileIgnores, setSharedFileIgnores] = useState<SharedFileIgnores | null>(null);
-  const [sharedFiles, setSharedFiles] = useState<SharedFile[]>([]);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [uploadQueue, setUploadQueue] = useState<Upload[]>([]);
   const [logs, setLogs] = useState<LogRecord[]>([]);
@@ -209,7 +207,6 @@ export function App({ appearance }: { appearance: Appearance }) {
     setFriends([]);
     setLibraryScan(null);
     setSharedFileIgnores(null);
-    setSharedFiles([]);
     setUploads([]);
     setUploadQueue([]);
     setLogs([]);
@@ -306,7 +303,6 @@ export function App({ appearance }: { appearance: Appearance }) {
       setSnapshot(nextSnapshot);
       setAppInfo((current) => current ?? nextSnapshot.app ?? null);
       setLogs(nextSnapshot.logs ?? []);
-      setSharedFiles(nextSnapshot.sharedFiles ?? []);
       setUploads(nextSnapshot.uploads ?? []);
       setUploadQueue(nextSnapshot.uploadQueue ?? []);
       setRefreshGeneration((value) => value + 1);
@@ -790,14 +786,14 @@ export function App({ appearance }: { appearance: Appearance }) {
               <button class="btn btn-outline-secondary" type="button" ref={menuButton}
                 aria-expanded={mobileMenuExpanded} aria-controls="primary-views"
                 onClick={() => setMobileMenuExpanded((expanded) => !expanded)}>Menu</button>
-              <strong>{tab === "shared-files" ? "Shared Files" : tab === "network" ? "Network" : tab[0].toUpperCase() + tab.slice(1)}</strong>
+              <strong>{tab === "library" ? "Library" : tab === "network" ? "Network" : tab[0].toUpperCase() + tab.slice(1)}</strong>
             </div>
             <nav id="primary-views" class={`tabs topbar-tabs nav nav-pills${mobileMenuExpanded ? " mobile-expanded" : ""}`} aria-label="Primary views">
               <TabButton tab="overview" active={tab} navigate={navigateToTab} icon={<Activity size={16} />} label="Overview" />
               <TabButton tab="transfers" active={tab} navigate={navigateToTab} icon={<Download size={16} />} label="Transfers" />
               <TabButton tab="search" active={tab} navigate={navigateToTab} icon={<Search size={16} />} label="Search" />
               <TabButton tab="sharing" active={tab} navigate={navigateToTab} icon={<FolderTree size={16} />} label="Sharing" />
-              <TabButton tab="shared-files" active={tab} navigate={navigateToTab} icon={<Share2 size={16} />} label="Shared Files" />
+              <TabButton tab="library" active={tab} navigate={navigateToTab} icon={<Share2 size={16} />} label="Library" />
               <TabButton tab="uploads" active={tab} navigate={navigateToTab} icon={<UploadCloud size={16} />} label="Uploads" />
               <TabButton tab="network" active={tab} navigate={navigateToTab} icon={<Network size={16} />} label="Network" />
               <TabButton tab="servers" active={tab} navigate={navigateToTab} icon={<Server size={16} />} label="Servers" />
@@ -874,7 +870,6 @@ export function App({ appearance }: { appearance: Appearance }) {
                 servers={servers}
                 uploads={uploads}
                 uploadQueue={uploadQueue}
-                sharedFiles={sharedFiles}
                 libraryScan={libraryScan}
                 kad={kad}
               />
@@ -933,7 +928,6 @@ export function App({ appearance }: { appearance: Appearance }) {
                 directories={libraryScan}
                 ignores={sharedFileIgnores}
                 stats={stats}
-                sharedFiles={sharedFiles}
                 sharedFileCount={snapshot?.status?.runtimeDiagnostics?.sharedFileCount}
                 uploads={uploads}
                 uploadQueue={uploadQueue}
@@ -941,8 +935,8 @@ export function App({ appearance }: { appearance: Appearance }) {
                 run={run}
               />
             )}
-            {tab === "shared-files" && (
-              <SharedFilesView
+            {tab === "library" && (
+              <LibraryView
                 client={client}
                 run={run}
                 refreshGeneration={manualRefreshGeneration}

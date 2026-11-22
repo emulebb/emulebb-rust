@@ -77,7 +77,7 @@ async fn relay_to_seed(
 ) -> (
     tokio::net::tcp::OwnedWriteHalf,
     FramedRead<tokio::net::tcp::OwnedReadHalf, LengthDelimitedCodec>,
-    tokio::task::JoinHandle<std::io::Result<()>>,
+    tokio::task::JoinHandle<std::io::Result<&'static str>>,
 ) {
     let seed = TcpStream::connect(backend).await.unwrap();
     let (mut client_read, client_write) = client.into_split();
@@ -88,7 +88,7 @@ async fn relay_to_seed(
             // WHY: a failed upstream write does not prove the receiver closed.
             // Only EOF/reset on the receiver's read side satisfies this barrier.
             let length = match client_read.read(&mut buffer).await {
-                Ok(0) => return Ok(()),
+                Ok(0) => return Ok("receiver EOF"),
                 Ok(length) => length,
                 Err(error)
                     if matches!(
@@ -96,17 +96,30 @@ async fn relay_to_seed(
                         std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
                     ) =>
                 {
-                    return Ok(());
+                    return Ok(match error.kind() {
+                        std::io::ErrorKind::ConnectionReset => "receiver reset",
+                        _ => "receiver aborted",
+                    });
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("receiver read failed: {error}"),
+                    ));
+                }
             };
-            seed_write.write_all(&buffer[..length]).await?;
+            seed_write
+                .write_all(&buffer[..length])
+                .await
+                .map_err(|error| {
+                    std::io::Error::new(error.kind(), format!("seed write failed: {error}"))
+                })?;
         }
     });
     (client_write, frames(seed_read), forward)
 }
 
-async fn assert_peer_closed(forward: tokio::task::JoinHandle<std::io::Result<()>>) {
+async fn assert_peer_closed(forward: tokio::task::JoinHandle<std::io::Result<&'static str>>) {
     forward
         .await
         .unwrap()
@@ -121,7 +134,9 @@ async fn prefix_relay(listener: TcpListener, backend: SocketAddr, prefix: usize)
     let mut forwarded = 0;
     let mut next_progress = 0;
     while let Some(frame) = incoming.next().await {
-        let mut frame = frame.unwrap();
+        let mut frame = frame.unwrap_or_else(|error| {
+            panic!("seed frame failed after {forwarded}/{prefix} bytes: {error}")
+        });
         if let Some((start, end)) = payload_range(&frame) {
             if end >= next_progress {
                 eprintln!("endgame prefix reached {end}, target={prefix}");
@@ -148,7 +163,15 @@ async fn prefix_relay(listener: TcpListener, backend: SocketAddr, prefix: usize)
         }
         writer.write_all(&frame).await.unwrap();
     }
-    panic!("seed closed before the prefix was sent");
+    // WHY: upstream EOF can follow receiver shutdown. Preserve the exact byte
+    // boundary and forwarding result instead of mistaking the last progress log
+    // for the close offset or assuming the seed initiated the close.
+    let receiver = if forward.is_finished() {
+        format!("{:?}", forward.await)
+    } else {
+        "forwarding task still pending when seed EOF was observed".into()
+    };
+    panic!("seed EOF after {forwarded}/{prefix} bytes; receiver forwarding: {receiver}");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +310,18 @@ async fn nonterminal_original_copy_drains_replacement_endgame_peer() {
 }
 
 async fn qualify(winner: Role, geometry: Geometry) {
+    // WHY: these loopback failures cross spawned seed/receiver tasks. A test-only
+    // subscriber preserves their close reasons in libtest's captured output;
+    // production tracing setup and transfer timing remain unchanged.
+    static TRACING: std::sync::Once = std::sync::Once::new();
+    TRACING.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("emulebb_ed2k::ed2k_tcp::listener=debug,emulebb_ed2k::ed2k_tcp::download::session=debug")
+            .without_time()
+            .with_ansi(false)
+            .with_test_writer()
+            .try_init();
+    });
     let Geometry {
         size,
         prefix,

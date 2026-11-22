@@ -1311,7 +1311,7 @@ td {
   }
 }
 
-.shared-files-toolbar {
+.library-files-toolbar {
   align-items: end;
   display: grid;
   gap: 12px;
@@ -1319,12 +1319,12 @@ td {
   margin-bottom: 16px;
 }
 
-.shared-files-toolbar label {
+.library-files-toolbar label {
   display: grid;
   gap: 6px;
 }
 
-.shared-file-path {
+.library-file-path {
   color: var(--tblr-secondary);
   display: block;
   margin-top: 4px;
@@ -1334,7 +1334,7 @@ td {
   white-space: nowrap;
 }
 
-.shared-files-pagination {
+.library-files-pagination {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
@@ -1342,11 +1342,11 @@ td {
 }
 
 @media (max-width: 1200px) {
-  .shared-files-toolbar {
+  .library-files-toolbar {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .shared-files-search {
+  .library-files-search {
     grid-column: span 3;
   }
 }
@@ -1419,11 +1419,11 @@ td {
     flex-direction: column;
   }
 
-  .shared-files-toolbar {
+  .library-files-toolbar {
     grid-template-columns: 1fr;
   }
 
-  .shared-files-search {
+  .library-files-search {
     grid-column: span 1;
   }
 }
@@ -1523,7 +1523,7 @@ td {
   .progress-head,
   .progress-foot,
   .hash-card-title,
-  .shared-files-pagination {
+  .library-files-pagination {
     flex-wrap: wrap;
   }
 
@@ -1533,7 +1533,7 @@ td {
 
   .toolbar-copy strong,
   .brand-version,
-  .shared-file-path,
+  .library-file-path,
   .stage-row strong,
   .compact-row span:first-child,
   .hash-card-title strong,

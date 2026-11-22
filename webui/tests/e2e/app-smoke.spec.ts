@@ -164,7 +164,7 @@ test("keeps the unified toolbar usable at a narrow viewport", async ({ page }) =
   await menu.click();
   await expect(primaryViews.getByRole("link")).toHaveCount(14);
   await expect(primaryViews.locator("a svg")).toHaveCount(14);
-  await expect(primaryViews.getByRole("link", { name: "Shared Files", exact: true })).toBeVisible();
+  await expect(primaryViews.getByRole("link", { name: "Library", exact: true })).toBeVisible();
   await expect(primaryViews.getByRole("link", { name: "Logs", exact: true })).toBeVisible();
   await expect(page.locator(".page-header")).toHaveCount(0);
   await expect.poll(async () => topbar.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
@@ -736,8 +736,8 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await expect(page.getByText("Reload queued")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "library/scan")).toBe(true);
 
-  await page.getByRole("link", { name: "Shared Files", exact: true }).click();
-  const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
+  await page.getByRole("link", { name: "Library", exact: true }).click();
+  const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Library", exact: true }) });
   const sharedFileRow = sharedFilesPanel.locator("tbody tr").filter({ hasText: "Shared Sample.bin" });
   await expect(sharedFileRow).toHaveCount(1);
   await expect(sharedFileRow).toContainText("4.0 KiB");
@@ -1008,64 +1008,63 @@ test("shared file metadata form validates rating and priority contract", async (
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("link", { name: "Shared Files" }).click();
-  const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
-  await expect(sharedFilesPanel.getByText("Published", { exact: true })).toBeVisible();
-  await expect(sharedFilesPanel.getByText("1/2 Partial", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Library" }).click();
+  const metadataPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) });
+  await expect(metadataPanel.getByText("Published", { exact: true })).toBeVisible();
+  await expect(metadataPanel.getByText("Partial", { exact: true })).toBeVisible();
   const epoch = await page.evaluate(() => new Date(0).toLocaleString());
   const success = await page.evaluate(() => new Date(1_700_000_000 * 1000).toLocaleString());
-  await expect(sharedFilesPanel.getByRole("cell", { name: "1/2 Partial", exact: true })).toHaveAttribute("title", `Last confirmed success: ${epoch}`);
-  await expect(sharedFilesPanel.getByRole("cell", { name: "Published", exact: true })).toHaveAttribute("title", `Sent to the connected server; eD2K servers do not acknowledge individual files. Last confirmed success: ${success}`);
+  await expect(metadataPanel.locator("dd").filter({ hasText: "1/2 keywords" })).toHaveAttribute("title", `Last confirmed success: ${epoch}`);
+  await expect(metadataPanel.locator("dd").filter({ hasText: "Published" })).toHaveAttribute("title", `Sent to the connected server; eD2K servers do not acknowledge individual files. Last confirmed success: ${success}`);
 
-  await expect(sharedFilesPanel.getByText("Publishing", { exact: true })).toBeVisible();
-  const metadataPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) });
+  await expect(metadataPanel.getByText("Publishing", { exact: true })).toBeVisible();
   await expect(metadataPanel.getByText("Shared Sample.bin")).toBeVisible();
-  await expect(metadataPanel.getByRole("option", { name: "Very high" })).toHaveCount(0);
+  await expect(metadataPanel.getByLabel("Upload priority").locator("option")).toHaveText(["Automatic", "Very low", "Low", "Normal", "High", "Release"]);
   const save = metadataPanel.getByRole("button", { name: "Save" });
-  const initialSharedFilePatches = requests.filter((request) => request.method === "PATCH" && request.path.startsWith("shared-files/")).length;
+  const initialSharedFilePatches = requests.filter((request) => request.method === "PATCH" && request.path.startsWith("library/files/")).length;
 
   await metadataPanel.getByLabel("Rating").fill("6");
-  await expect(metadataPanel.getByText("Shared file rating must be an integer between 0 and 5.")).toBeVisible();
+  await expect(metadataPanel.getByText("Library file rating must be an integer between 0 and 5.")).toBeVisible();
   await expect(save).toBeDisabled();
-  expect(requests.filter((request) => request.method === "PATCH" && request.path.startsWith("shared-files/")).length).toBe(initialSharedFilePatches);
+  expect(requests.filter((request) => request.method === "PATCH" && request.path.startsWith("library/files/")).length).toBe(initialSharedFilePatches);
 
-  await metadataPanel.getByLabel("Priority").selectOption("release");
+  await metadataPanel.getByLabel("Upload priority").selectOption("release");
   await metadataPanel.getByLabel("Rating").fill("5");
   await metadataPanel.getByLabel("Comment").fill("Verified release");
-  await expect(metadataPanel.getByText("Shared file rating must be an integer between 0 and 5.")).toHaveCount(0);
+  await expect(metadataPanel.getByText("Library file rating must be an integer between 0 and 5.")).toHaveCount(0);
   await save.click();
-  await expect(page.getByText("Shared file metadata saved")).toBeVisible();
-  const sharedFilePatch = requests.find((request) => request.method === "PATCH" && request.path.startsWith("shared-files/"));
+  await expect(page.getByText("Library file metadata saved")).toBeVisible();
+  const sharedFilePatch = requests.find((request) => request.method === "PATCH" && request.path.startsWith("library/files/"));
   expect(sharedFilePatch).toBeDefined();
-  expect(JSON.parse(sharedFilePatch?.body ?? "{}")).toEqual({ priority: "release", comment: "Verified release", rating: 5 });
+  expect(JSON.parse(sharedFilePatch?.body ?? "{}")).toEqual({ uploadPriority: "release", comment: "Verified release", rating: 5 });
 });
 
-test("top refresh preserves the shared-files query, page, and selection", async ({ page }) => {
+test("top refresh preserves the library/files query, page, and selection", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("link", { name: "Shared Files" }).click();
-  const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
+  await page.getByRole("link", { name: "Library" }).click();
+  const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Library", exact: true }) });
   const filenameSearch = panel.getByLabel("Search filename");
   await filenameSearch.fill("é🙂");
   await expect(panel.getByRole("button", { name: "Search" })).toBeDisabled();
   await expect(panel.getByText("Enter at least 3 characters to search filenames.")).toBeVisible();
   await filenameSearch.fill("Shared Sample");
   await panel.getByRole("button", { name: "Search" }).click();
-  await panel.getByLabel("Priority").selectOption("normal");
+  await panel.getByLabel("View").selectOption("shared");
   await panel.getByRole("button", { name: "Next" }).click();
   await expect(panel.getByText("Second Shared Sample.bin", { exact: true })).toBeVisible();
 
-  const requestCount = requests.filter((request) => request.path === "shared-files").length;
+  const requestCount = requests.filter((request) => request.path === "library/files").length;
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect.poll(() => requests.filter((request) => request.path === "shared-files").length).toBeGreaterThan(requestCount);
+  await expect.poll(() => requests.filter((request) => request.path === "library/files").length).toBeGreaterThan(requestCount);
 
-  const latest = requests.filter((request) => request.path === "shared-files").at(-1);
+  const latest = requests.filter((request) => request.path === "library/files").at(-1);
   const params = new URLSearchParams(latest?.query ?? "");
   expect(params.get("cursor")).toBe("second-page");
   expect(params.get("q")).toBe("Shared Sample");
-  expect(params.get("priority")).toBe("normal");
+  expect(params.get("view")).toBe("shared");
   await expect(panel.getByText("Second Shared Sample.bin", { exact: true })).toBeVisible();
   await expect(page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) }).getByText("Second Shared Sample.bin")).toBeVisible();
 });
@@ -1074,7 +1073,7 @@ test("library locations browse one cached copy page at a time", async ({ page })
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
   await page.goto("/");
-  await page.getByRole("link", { name: "Shared Files" }).click();
+  await page.getByRole("link", { name: "Library" }).click();
   const locations = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Locations", exact: true }) });
   await expect(locations.getByText("/library/Cached-First.bin")).toBeVisible();
   await locations.getByRole("button", { name: "Next page" }).click();

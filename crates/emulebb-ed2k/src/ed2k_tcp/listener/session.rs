@@ -469,13 +469,17 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             .await?
                         {
                             ListenerQueuePoll::Continue => continue,
-                            ListenerQueuePoll::Close => break Ok(()),
+                            ListenerQueuePoll::Close => {
+                                debug!(%peer_addr, "closing eD2k peer after upload queue timeout poll");
+                                break Ok(());
+                            },
                         },
                     }
                 }
             }
         };
         let Some(packet) = packet else {
+            debug!(%peer_addr, "eD2k listener peer reached EOF");
             break Ok(());
         };
         last_packet_at = tokio::time::Instant::now();

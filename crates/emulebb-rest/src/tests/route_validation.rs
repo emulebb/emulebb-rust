@@ -45,7 +45,7 @@ async fn write_routes_use_canonical_json_error_envelope() {
         ("PATCH", "/api/v1/library/ignores/defaults/temporary-file"),
         (
             "PATCH",
-            "/api/v1/shared-files/00112233445566778899aabbccddeeff",
+            "/api/v1/library/files/00112233445566778899aabbccddeeff",
         ),
         ("POST", "/api/v1/downloads"),
         ("POST", "/api/v1/downloads/remove"),
@@ -294,7 +294,7 @@ async fn query_routes_use_canonical_error_envelope() {
         ("GET", "/api/v1/snapshot?unsupportedQuery=true"),
         ("GET", "/api/v1/searches/1?unsupportedQuery=true"),
         ("DELETE", "/api/v1/searches?unsupportedQuery=true"),
-        ("GET", "/api/v1/shared-files?unsupportedQuery=true"),
+        ("GET", "/api/v1/library/files?unsupportedQuery=true"),
         ("DELETE", "/api/v1/library/roots/1?unsupportedQuery=true"),
         ("DELETE", "/api/v1/library/ignores?unsupportedQuery=true"),
         ("GET", "/api/v1/downloads?unsupportedQuery=true"),

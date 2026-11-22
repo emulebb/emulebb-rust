@@ -23,7 +23,7 @@ struct PageMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     settings_revision: Option<emulebb_settings::product::SettingsRevision>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    total: Option<usize>,
+    total: Option<u64>,
 }
 pub(super) fn item<T: Serialize>(status: StatusCode, data: T) -> Response {
     (status, Json(item_document(data))).into_response()
@@ -100,7 +100,7 @@ pub(super) fn page_document<T: Serialize>(
     data: T,
     next_cursor: Option<String>,
     has_more: bool,
-    total: Option<usize>,
+    total: Option<u64>,
 ) -> Success<T> {
     Success {
         data,

@@ -46,7 +46,7 @@ describe("DiagnosticsView", () => {
 
   it("downloads caller-owned inline diagnostic bundles", async () => {
     const bundle = {
-      schema: "emulebb.diagnostic-bundle.v7" as const,
+      schema: "emulebb.diagnostic-bundle.v8" as const,
       capturedAt: 1792931696,
       summary: { artifactFileCount: 1, missingArtifactFamilies: [], issueCount: 0 }
     };

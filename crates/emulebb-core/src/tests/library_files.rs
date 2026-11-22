@@ -2,6 +2,33 @@ use super::*;
 use crate::{LIBRARY_FILE_PAGE_BYTES, LibraryFileQuery, LibraryFileView};
 
 #[tokio::test]
+async fn automatic_upload_priority_roundtrips_through_the_one_public_mode() {
+    let (core, hash) = core_with_copyless_library();
+    core.ed2k_transfers
+        .update_library_file_metadata(&hash, Some(("high", true)), None)
+        .await
+        .unwrap()
+        .unwrap();
+    let detail = core.library_file_detail(&hash).await.unwrap().unwrap();
+    assert_eq!(detail.upload_priority, "auto");
+    let request = LibraryFileUpdate {
+        upload_priority: Some(detail.upload_priority.clone()),
+        ..Default::default()
+    };
+    drop(detail);
+    assert!(
+        core.edit_library_file_metadata(&hash, &request)
+            .await
+            .unwrap()
+    );
+    let detail = core.library_file_detail(&hash).await.unwrap().unwrap();
+    assert_eq!(detail.upload_priority, "auto");
+    drop(detail);
+    core.persistence_owner.close_and_drain().await.unwrap();
+    core.ed2k_transfers.drain_local_mutations().await.unwrap();
+}
+
+#[tokio::test]
 async fn known_hash_detail_uses_accepted_size_and_delimiter_safe_link() {
     let root = unique_runtime_dir("library-hash-detail-link");
     let library = root.join("library");
@@ -40,8 +67,8 @@ async fn copyless_detail_keeps_explicit_metadata_and_charges_conversion_until_dr
     assert!(
         core.edit_library_file_metadata(
             &hash,
-            &SharedFileUpdate {
-                priority: Some("high".into()),
+            &LibraryFileUpdate {
+                upload_priority: Some("high".into()),
                 comment: Some("Explicit note".into()),
                 rating: Some(4),
             }
@@ -57,11 +84,10 @@ async fn copyless_detail_keeps_explicit_metadata_and_charges_conversion_until_dr
     assert_eq!(
         (
             detail.upload_priority.as_str(),
-            detail.auto_upload_priority,
             detail.comment.as_str(),
             detail.rating
         ),
-        ("high", false, "Explicit note", 4)
+        ("high", "Explicit note", 4)
     );
     assert!(
         detail.ed2k_link.is_none(),

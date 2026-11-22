@@ -255,7 +255,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                             &transfer_runtime,
                             tcp_error_flooder_interval,
                         );
-                        debug!("eD2k connection handling failed from {peer_addr}: {error}");
+                        debug!("eD2k connection handling failed from {peer_addr}: {error:#}");
                     }
                 });
             }

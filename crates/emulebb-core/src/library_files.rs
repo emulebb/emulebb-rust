@@ -59,18 +59,18 @@ pub struct LibraryFilePage {
     pub total: Option<u64>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryFileDetail {
     #[serde(flatten)]
     pub file: LibraryFile,
     pub upload_priority: String,
-    pub auto_upload_priority: bool,
     pub comment: String,
     pub rating: u8,
     /// A link requires an accepted content size; provisional job sizes do not
     /// become identity merely because the user browses the library.
     pub ed2k_link: Option<String>,
+    pub publication: crate::SharedFilePublicationStatus,
 }
 
 fn read_error(error: anyhow::Error) -> anyhow::Error {
@@ -105,8 +105,15 @@ impl EmulebbCore {
         let Some(detail) = detail else {
             return Ok(None);
         };
-        detail
-            .try_project(LIBRARY_FILE_DETAIL_BYTES, |detail| {
+        let detail = detail
+            .try_project_async(LIBRARY_FILE_DETAIL_BYTES, |detail| async move {
+                let publication = self
+                    .library_file_publication(
+                        &detail.file.file_hash,
+                        &detail.file.display_name,
+                        detail.file.present && detail.file.sharing_enabled,
+                    )
+                    .await;
                 let ed2k_link = detail.file.size_bytes.map(|size| {
                     let root = detail.aich_root.map(hex::encode);
                     crate::views::format_ed2k_file_link(
@@ -118,15 +125,21 @@ impl EmulebbCore {
                 });
                 Ok(LibraryFileDetail {
                     file: detail.file.into(),
-                    upload_priority: detail.upload_priority,
-                    auto_upload_priority: detail.auto_upload_priority,
+                    upload_priority: if detail.auto_upload_priority {
+                        "auto".to_owned()
+                    } else {
+                        detail.upload_priority
+                    },
                     comment: detail.comment,
                     rating: detail.rating,
                     ed2k_link,
+                    publication,
                 })
             })
-            .map(Some)
-            .map_err(read_error)
+            .await
+            .map_err(read_error)?;
+        self.persistence_owner.check_coherent_state()?;
+        Ok(Some(detail))
     }
 
     /// Convert one bounded page while retaining source and conversion backing.

@@ -46,6 +46,13 @@ pub(in crate::ed2k_tcp) enum UploadPayloadOutcome {
     Close,
 }
 
+fn close_payload(peer_addr: SocketAddr, reason: &'static str) -> UploadPayloadOutcome {
+    // WHY: a policy/cancellation close returns success to the connection owner.
+    // Keep its reason before that return so diagnostics distinguish it from EOF.
+    tracing::debug!(%peer_addr, reason, "closing upload payload session");
+    UploadPayloadOutcome::Close
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum UploadRangePlan {
     Accepted,
@@ -280,7 +287,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             let outcome = "queueStaleAfterRequest";
             request_diag.note_skip(outcome);
             emit_upload_request_outcome(&peer_upload_identity, &requested, outcome, &request_diag);
-            return Ok(UploadPayloadOutcome::Close);
+            return Ok(close_payload(peer_addr, "queueStaleAfterRequest"));
         }
     }
     let Some(work_guard) = upload_queue.begin_work(transfer_runtime).await else {
@@ -291,7 +298,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             "queueLeaseStale",
             &request_diag,
         );
-        return Ok(UploadPayloadOutcome::Close);
+        return Ok(close_payload(peer_addr, "queueLeaseStale"));
     };
     let verified_reader_open_start = Instant::now();
     let Some((shared, mut verified_reader)) = upload_queue
@@ -415,7 +422,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         let mut range_served = false;
         while fragment_start < end {
             if work_guard.is_cancelled() {
-                return Ok(UploadPayloadOutcome::Close);
+                return Ok(close_payload(peer_addr, "cancelledBeforeRead"));
             }
             let fragment_end = fragment_start.saturating_add(ED2K_EMBLOCK_SIZE).min(end);
             let next_range_is_contiguous_accepted = ranges
@@ -433,7 +440,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             let payload_read_start = Instant::now();
             let read_result = tokio::select! {
                 _ = work_guard.cancelled() => {
-                    return Ok(UploadPayloadOutcome::Close);
+                    return Ok(close_payload(peer_addr, "cancelledDuringRead"));
                 }
                 result = transfer_runtime.read_verified_range_with_reader(
                     &mut verified_reader,
@@ -491,14 +498,14 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                             request_diag.throttle_delay_ms.saturating_add(delay_ms);
                         tokio::select! {
                             _ = work_guard.cancelled() => {
-                                return Ok(UploadPayloadOutcome::Close);
+                                return Ok(close_payload(peer_addr, "cancelledDuringThrottle"));
                             }
                             () = tokio::time::sleep(reservation.delay) => {}
                         }
                     }
                     tokio::select! {
                         _ = work_guard.cancelled() => {
-                            return Ok(UploadPayloadOutcome::Close);
+                            return Ok(close_payload(peer_addr, "cancelledDuringWrite"));
                         }
                         result = frame_writer.write_chunk(chunk) => {
                             result.with_context(|| {
@@ -533,7 +540,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 .await
                 != ListenerQueueDecision::Granted
             {
-                return Ok(UploadPayloadOutcome::Close);
+                return Ok(close_payload(peer_addr, "queueGrantLostAfterPayload"));
             }
             fragment_start = fragment_end;
         }
