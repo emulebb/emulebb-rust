@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     MetadataContentConflict, MetadataFileImportRecord, MetadataStore, MetadataVerifiedLocalContent,
     NativeFileFingerprint,
-    store::{decode_fixed_hex, unix_ms, upsert_local_path},
+    store::{decode_fixed_hex, unix_s, upsert_local_path},
 };
 
 struct LiveImportBinding {
@@ -77,7 +77,7 @@ impl MetadataStore {
                 comment: String::new(),
                 rating: 0,
             },
-            unix_ms(),
+            unix_s(),
             "stock_import",
         )?;
         tx.execute(
@@ -105,7 +105,7 @@ impl MetadataStore {
         }
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        let now = unix_ms();
+        let now = unix_s();
         for (entry, path, fingerprint, evidence) in files {
             evidence.validate_fingerprint(fingerprint)?;
             anyhow::ensure!(

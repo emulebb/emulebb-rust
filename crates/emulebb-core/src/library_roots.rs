@@ -27,7 +27,7 @@ impl From<emulebb_metadata::MetadataLibraryRoot> for LibraryRoot {
             managed: root.managed,
             accessible: root.accessible,
             shareable: root.shareable,
-            last_scanned_at: root.last_scanned_at_ms.map(|value| value / 1000),
+            last_scanned_at: root.last_scanned_at_s,
         }
     }
 }

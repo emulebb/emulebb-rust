@@ -169,8 +169,8 @@ fn source_and_filters(query: &LibraryFileQuery, search: Option<&str>) -> (String
             query.root_id.map(Value::Integer),
             "EXISTS(SELECT 1 FROM shared_file_memberships m
             CROSS JOIN shared_directory_roots r ON r.id=m.root_id
-            WHERE m.root_id=? AND m.known_file_id=f.known_file_id AND m.removed_at_ms IS NULL
-                AND r.enabled=1 AND r.deleted_at_ms IS NULL)",
+            WHERE m.root_id=? AND m.known_file_id=f.known_file_id AND m.removed_at_s IS NULL
+                AND r.enabled=1 AND r.deleted_at_s IS NULL)",
         ),
         (
             query.tag.as_ref().map(|name|Value::Text(name.clone())),

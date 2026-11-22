@@ -3,14 +3,10 @@ use crate::{
     DownloadIntent, DownloadJobAdmission, DownloadJobRecord, DownloadJobRequest, JobId, JobToken,
     MetadataContentConflict, MetadataStore,
     native_path::optional_path_from_row,
-    store::{decode_fixed_hex, unix_ms, upsert_local_path},
+    store::{decode_fixed_hex, unix_s, upsert_local_path},
 };
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
-
-pub(crate) fn unix_s() -> i64 {
-    unix_ms() / 1000
-}
 
 pub(crate) const MAX_JOB_TEXT_BYTES: usize = 65_536;
 pub(crate) const MAX_JOB_PATH_BYTES: usize = 65_536;
@@ -317,10 +313,10 @@ impl MetadataStore {
         // WHY: passive knowledge must not choose the client's library label.
         // Select it before the job trigger establishes retained membership;
         // later jobs and observations preserve that first accepted label.
-        tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
+        tx.execute("INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_s,last_seen_at_s,updated_at_s)
             VALUES(?1,NULL,?2,?3,?3,?3) ON CONFLICT(ed2k_hash) DO UPDATE SET display_name=excluded.display_name
             WHERE NOT EXISTS(SELECT 1 FROM library_files WHERE known_file_id=known_files.id)",
-            params![hash, request.display_name, unix_ms()])?;
+            params![hash, request.display_name, unix_s()])?;
         let (known, accepted): (i64, Option<i64>) = tx.query_row(
             "SELECT id,size_bytes FROM known_files WHERE ed2k_hash=?1",
             [&hash],

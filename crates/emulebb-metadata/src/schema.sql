@@ -91,9 +91,9 @@ CREATE TABLE known_files (
     all_time_upload_accepts INTEGER NOT NULL DEFAULT 0 CHECK(all_time_upload_accepts >= 0),
     last_upload_requested_at_s INTEGER CHECK(last_upload_requested_at_s IS NULL OR last_upload_requested_at_s >= 0),
     last_uploaded_at_s INTEGER CHECK(last_uploaded_at_s IS NULL OR last_uploaded_at_s >= 0),
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     CHECK((aich_root IS NULL) = (aich_root_origin IS NULL))
 ) STRICT;
 
@@ -129,13 +129,13 @@ CREATE TABLE known_file_origins (
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     content_type TEXT NOT NULL DEFAULT '',
     availability_score INTEGER NOT NULL DEFAULT 0 CHECK(availability_score >= 0),
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
     PRIMARY KEY(known_file_id, origin)
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX known_file_origins_origin_idx
-    ON known_file_origins(origin, availability_score DESC, last_seen_at_ms DESC);
+    ON known_file_origins(origin, availability_score DESC, last_seen_at_s DESC);
 
 -- Durable content identity for successful downloads. This intentionally has
 -- no foreign key to current known-file, transfer, share, or path rows: cleanup,
@@ -156,21 +156,21 @@ CREATE TABLE file_names (
     name TEXT NOT NULL,
     normalized_name TEXT NOT NULL,
     seen_count INTEGER NOT NULL DEFAULT 1 CHECK(seen_count >= 1),
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
     UNIQUE(known_file_id, normalized_name)
 ) STRICT;
 
 CREATE TABLE file_name_origins (
     file_name_id INTEGER NOT NULL REFERENCES file_names(id) ON DELETE CASCADE,
     origin TEXT NOT NULL CHECK(origin IN ('local_share', 'transfer', 'passive_cache')),
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
     PRIMARY KEY(file_name_id, origin)
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX file_name_origins_origin_idx
-    ON file_name_origins(origin, last_seen_at_ms DESC);
+    ON file_name_origins(origin, last_seen_at_s DESC);
 
 CREATE VIRTUAL TABLE file_name_fts USING fts5(
     name,
@@ -292,7 +292,7 @@ CREATE TABLE local_file_instances (
     native_identity BLOB NOT NULL CHECK(length(native_identity) > 0),
     secondary_identity BLOB CHECK(secondary_identity IS NULL OR length(secondary_identity)<=64),
     verified_fingerprint BLOB NOT NULL CHECK(length(verified_fingerprint) > 0),
-    verified_at_ms INTEGER NOT NULL CHECK(verified_at_ms >= 0)
+    verified_at_s INTEGER NOT NULL CHECK(verified_at_s >= 0)
 ) STRICT;
 
 CREATE INDEX local_file_instances_content_idx
@@ -312,19 +312,20 @@ CREATE TABLE shared_directory_roots (
     watch_enabled INTEGER NOT NULL DEFAULT 0 CHECK(watch_enabled IN (0, 1)),
     scan_required INTEGER NOT NULL DEFAULT 0 CHECK(scan_required IN (0, 1)),
     watch_loss_revision INTEGER NOT NULL DEFAULT 0 CHECK(watch_loss_revision >= 0),
+    scan_revision INTEGER NOT NULL DEFAULT 0 CHECK(scan_revision >= 0),
     shareable INTEGER NOT NULL DEFAULT 1 CHECK(shareable IN (0, 1)),
     accessible INTEGER NOT NULL DEFAULT 1 CHECK(accessible IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
-    last_scanned_at_ms INTEGER CHECK(last_scanned_at_ms IS NULL OR last_scanned_at_ms >= 0),
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
+    last_scanned_at_s INTEGER CHECK(last_scanned_at_s IS NULL OR last_scanned_at_s >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    deleted_at_s INTEGER CHECK(deleted_at_s IS NULL OR deleted_at_s >= 0)
 ) STRICT;
 
 CREATE UNIQUE INDEX shared_directory_roots_active_path_idx
-    ON shared_directory_roots(path_id) WHERE deleted_at_ms IS NULL;
+    ON shared_directory_roots(path_id) WHERE deleted_at_s IS NULL;
 CREATE INDEX shared_directory_roots_path_idx ON shared_directory_roots(path_id);
 CREATE INDEX shared_directory_roots_active_id_idx
-    ON shared_directory_roots(id) WHERE enabled = 1 AND deleted_at_ms IS NULL;
+    ON shared_directory_roots(id) WHERE enabled = 1 AND deleted_at_s IS NULL;
 
 -- A physical directory can be both user-selected and a mandatory Incoming or
 -- category root. Replacing explicit roots must not withdraw implicit membership.
@@ -339,13 +340,13 @@ CREATE TABLE shared_directory_root_origins (
 
 CREATE TABLE shared_file_ignore_patterns (
     pattern TEXT NOT NULL PRIMARY KEY CHECK(length(pattern) BETWEEN 1 AND 255),
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0)
 ) STRICT;
 
 CREATE TABLE shared_default_ignore_overrides (
     rule_key TEXT NOT NULL PRIMARY KEY,
     enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     CHECK(length(trim(rule_key)) > 0)
 ) STRICT;
 
@@ -354,9 +355,9 @@ CREATE TABLE shared_file_memberships (
     path_id INTEGER NOT NULL,
     known_file_id INTEGER NOT NULL,
     relative_path TEXT NOT NULL,
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
-    removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
+    removed_at_s INTEGER CHECK(removed_at_s IS NULL OR removed_at_s >= 0),
     PRIMARY KEY(root_id, path_id),
     FOREIGN KEY(path_id, known_file_id) REFERENCES local_file_instances(path_id, known_file_id)
         ON UPDATE CASCADE ON DELETE CASCADE
@@ -703,8 +704,8 @@ CREATE TABLE shared_file_scan_failures (
     size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     source_fingerprint BLOB,
     reason TEXT NOT NULL DEFAULT '',
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     UNIQUE(path_id)
 ) STRICT;
 
@@ -1267,8 +1268,8 @@ BEGIN
 END;
 
 CREATE TRIGGER library_catalog_shared_file_memberships_update
-AFTER UPDATE OF root_id, path_id, removed_at_ms ON shared_file_memberships
-WHEN old.root_id IS NOT new.root_id OR old.path_id IS NOT new.path_id OR old.removed_at_ms IS NOT new.removed_at_ms
+AFTER UPDATE OF root_id, path_id, removed_at_s ON shared_file_memberships
+WHEN old.root_id IS NOT new.root_id OR old.path_id IS NOT new.path_id OR old.removed_at_s IS NOT new.removed_at_s
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
     INSERT INTO library_catalog_changes(known_file_id, revision)
@@ -1278,8 +1279,8 @@ BEGIN
 END;
 
 CREATE TRIGGER library_catalog_shared_directory_roots_update
-AFTER UPDATE OF enabled, accessible, shareable, deleted_at_ms ON shared_directory_roots
-WHEN old.enabled IS NOT new.enabled OR old.accessible IS NOT new.accessible OR old.shareable IS NOT new.shareable OR old.deleted_at_ms IS NOT new.deleted_at_ms
+AFTER UPDATE OF enabled, accessible, shareable, deleted_at_s ON shared_directory_roots
+WHEN old.enabled IS NOT new.enabled OR old.accessible IS NOT new.accessible OR old.shareable IS NOT new.shareable OR old.deleted_at_s IS NOT new.deleted_at_s
 BEGIN
     UPDATE library_catalog_revision SET revision = CASE WHEN revision = 9223372036854775807 THEN 0 ELSE revision + 1 END WHERE id = 1;
     INSERT INTO library_catalog_changes(known_file_id, revision)

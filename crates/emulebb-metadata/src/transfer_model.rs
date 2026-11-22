@@ -260,8 +260,8 @@ pub struct MetadataSharedSourceFailure {
     pub file_size: u64,
     pub source_fingerprint: Option<NativeFileFingerprint>,
     pub reason: String,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
+    pub created_at_s: i64,
+    pub updated_at_s: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

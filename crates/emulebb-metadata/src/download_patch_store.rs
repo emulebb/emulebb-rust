@@ -1,8 +1,9 @@
 //! Atomic scalar edits, independent of payload allocation and progress writes.
+use crate::store::unix_s;
 use crate::{
     JobToken, MetadataStore,
     content_identity::check_accepted_identity,
-    download_job_store::{MAX_JOB_TEXT_BYTES, bounded_row_bytes, unix_s},
+    download_job_store::{MAX_JOB_TEXT_BYTES, bounded_row_bytes},
     store::decode_fixed_hex,
 };
 use anyhow::Result;

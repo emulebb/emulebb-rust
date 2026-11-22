@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{MetadataStore, NativePath};
 
@@ -19,13 +19,29 @@ pub struct MetadataRootScanWatermark {
 mod tests;
 
 impl MetadataStore {
+    /// Read the active root incarnation and its committed scan revision.
+    /// Calendar time is presentation only: scans can complete in the same second.
+    pub fn shared_root_scan_completion(&self, root: &Path) -> Result<Option<(i64, i64)>> {
+        let native = NativePath::from(root);
+        self.connection()?
+            .query_row(
+                "SELECT r.id,r.scan_revision FROM shared_directory_roots r
+             JOIN local_paths p ON p.id=r.path_id
+             WHERE p.platform=?1 AND p.native_path=?2 AND r.enabled=1 AND r.deleted_at_s IS NULL",
+                params![NativePath::platform(), native.storage_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Capture the active root's identity and loss revision before scanning it.
     pub fn shared_root_scan_watermark(&self, root: &Path) -> Result<MetadataRootScanWatermark> {
         let native = NativePath::from(root);
         Ok(self.connection()?.query_row(
             "SELECT r.id,r.watch_loss_revision FROM shared_directory_roots r
              JOIN local_paths p ON p.id=r.path_id
-             WHERE p.platform=?1 AND p.native_path=?2 AND r.enabled=1 AND r.deleted_at_ms IS NULL",
+             WHERE p.platform=?1 AND p.native_path=?2 AND r.enabled=1 AND r.deleted_at_s IS NULL",
             params![NativePath::platform(), native.storage_bytes()],
             |row| {
                 Ok(MetadataRootScanWatermark {
@@ -43,7 +59,7 @@ impl MetadataStore {
             "UPDATE shared_directory_roots SET scan_required=1,
              watch_loss_revision=CASE WHEN watch_loss_revision<9223372036854775807
                 THEN watch_loss_revision+1 ELSE watch_loss_revision END
-             WHERE id=?1 AND enabled=1 AND deleted_at_ms IS NULL",
+             WHERE id=?1 AND enabled=1 AND deleted_at_s IS NULL",
             [id],
         )? == 1)
     }

@@ -825,7 +825,7 @@ async fn run_shared_root_health_worker(
 async fn reconcile_root_health(
     core: &EmulebbCore,
     previous: &mut HashMap<PathBuf, bool>,
-    pending_rejoin: &mut HashMap<PathBuf, Option<i64>>,
+    pending_rejoin: &mut HashMap<PathBuf, Option<(i64, i64)>>,
     change: Option<bool>,
 ) -> anyhow::Result<()> {
     if change.is_some() {
@@ -996,7 +996,7 @@ pub(crate) async fn drain_root_sql(core: &EmulebbCore) -> anyhow::Result<()> {
 async fn reconcile_root_availability(
     core: &EmulebbCore,
     previous: &mut HashMap<PathBuf, bool>,
-    pending_rejoin: &mut HashMap<PathBuf, Option<i64>>,
+    pending_rejoin: &mut HashMap<PathBuf, Option<(i64, i64)>>,
     allow_recovery_scan: bool,
 ) -> anyhow::Result<()> {
     let current = root_availability_snapshot(core).await?;
@@ -1017,7 +1017,7 @@ async fn reconcile_root_availability(
         if *accessible {
             pending_rejoin.insert(
                 path.clone(),
-                core.metadata_store.shared_root_last_scan_ms(path)?,
+                core.metadata_store.shared_root_scan_completion(path)?,
             );
         } else {
             pending_rejoin.remove(path);
@@ -1103,8 +1103,9 @@ async fn reconcile_root_availability(
     if !core.shared_reload_running.load(Ordering::Acquire) {
         let mut scanned = Vec::new();
         for (path, baseline) in pending_rejoin.iter() {
-            let last_scan = core.metadata_store.shared_root_last_scan_ms(path)?;
-            if last_scan.is_some() && last_scan != *baseline {
+            let completion = core.metadata_store.shared_root_scan_completion(path)?;
+            if matches!(completion, Some((_, revision)) if revision > 0) && completion != *baseline
+            {
                 scanned.push(path.clone());
             }
         }

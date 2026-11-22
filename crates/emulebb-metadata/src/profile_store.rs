@@ -34,10 +34,10 @@ pub(crate) fn seed_host_storage_defaults(
             && storage.shared_dir.is_absolute(),
         "host folders must be absolute"
     );
-    let now = unix_ms();
+    let now = unix_s();
     let path_id = upsert_local_path(tx, &storage.shared_dir)?;
     tx.execute(
-            "INSERT INTO shared_directory_roots(path_id, monitor_owned, shareable, accessible, enabled, created_at_ms, deleted_at_ms)
+            "INSERT INTO shared_directory_roots(path_id, monitor_owned, shareable, accessible, enabled, created_at_s, deleted_at_s)
              VALUES (?1, 0, 1, 1, 1, ?2, NULL)",
             params![path_id, now],
         )?;
@@ -467,13 +467,13 @@ fn upsert_server_in_transaction(
 /// rows. A new root remains unavailable until the existing health owner verifies it.
 fn sync_category_roots(tx: &rusqlite::Transaction<'_>, incoming: &Path) -> Result<()> {
     let incoming_id = upsert_local_path(tx, incoming)?;
-    let now = unix_ms();
+    let now = unix_s();
     tx.execute(
         "DELETE FROM shared_directory_root_origins WHERE origin='implicit'",
         [],
     )?;
-    tx.execute("INSERT INTO shared_directory_roots(path_id,monitor_owned,shareable,accessible,enabled,created_at_ms,deleted_at_ms) SELECT path_id,0,1,0,1,?2,NULL FROM (SELECT ?1 AS path_id UNION SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL) WHERE true ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING", params![incoming_id, now])?;
-    tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) SELECT r.id,'implicit',0,1,r.accessible FROM shared_directory_roots r WHERE r.deleted_at_ms IS NULL AND (r.path_id=?1 OR r.path_id IN (SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL))", [incoming_id])?;
+    tx.execute("INSERT INTO shared_directory_roots(path_id,monitor_owned,shareable,accessible,enabled,created_at_s,deleted_at_s) SELECT path_id,0,1,0,1,?2,NULL FROM (SELECT ?1 AS path_id UNION SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL) WHERE true ON CONFLICT(path_id) WHERE deleted_at_s IS NULL DO NOTHING", params![incoming_id, now])?;
+    tx.execute("INSERT INTO shared_directory_root_origins(root_id,origin,monitor_owned,shareable,accessible) SELECT r.id,'implicit',0,1,r.accessible FROM shared_directory_roots r WHERE r.deleted_at_s IS NULL AND (r.path_id=?1 OR r.path_id IN (SELECT destination_path_id FROM categories WHERE destination_path_id IS NOT NULL))", [incoming_id])?;
     refresh_shared_root_eligibility(tx, now)?;
     Ok(())
 }

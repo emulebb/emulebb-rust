@@ -183,14 +183,13 @@ impl MetadataStore {
     /// Bound the `download_job_sources` table on startup. Source rows accumulate per
     /// transfer with no age cap of their own; this drops the rows that can no
     /// longer be useful: those belonging to a transfer that has been removed
-    /// (`removed_at_ms` set), and those last seen beyond
+    /// (`removed_at_s` set), and those last seen beyond
     /// [`TRANSFER_SOURCE_TTL_MS`]. Removed-transfer rows would otherwise survive
     /// (a removed transfer's row is soft-kept) and stale rows describe peers that
     /// almost certainly no longer have the file. Correctness-neutral: a live
     /// transfer re-learns current sources from the network and rewrites them.
     fn prune_download_job_sources(&self) -> Result<()> {
-        let cutoff =
-            crate::download_job_store::unix_s().saturating_sub(TRANSFER_SOURCE_TTL_MS / 1000);
+        let cutoff = crate::store::unix_s().saturating_sub(TRANSFER_SOURCE_TTL_MS / 1000);
         let conn = self.connection()?;
         conn.execute(
             r#"
@@ -286,7 +285,7 @@ impl MetadataStore {
     ) -> Result<()> {
         let hash = decode_fixed_hex(&file.ed2k_hash, 16, "ED2K hash")?;
         let normalized = normalize_search_text(&file.name);
-        let now = unix_ms();
+        let now = unix_s();
         crate::content_identity::check_accepted_identity(
             tx,
             &hash,
@@ -323,8 +322,8 @@ impl MetadataStore {
                             THEN display_name ELSE ?2 END,
                         content_type = ?3,
                         availability_score = max(availability_score, ?4),
-                        last_seen_at_ms = ?5,
-                        updated_at_ms = ?5
+                        last_seen_at_s = ?5,
+                        updated_at_s = ?5
                     WHERE id = ?1
                     "#,
                     params![
@@ -340,8 +339,8 @@ impl MetadataStore {
                     r#"
                     UPDATE known_files
                     SET availability_score = max(availability_score, ?2),
-                        last_seen_at_ms = ?3,
-                        updated_at_ms = ?3
+                        last_seen_at_s = ?3,
+                        updated_at_s = ?3
                     WHERE id = ?1
                     "#,
                     params![known_file_id, file.availability_score, now],
@@ -353,7 +352,7 @@ impl MetadataStore {
                 r#"
                 INSERT INTO known_files(
                     ed2k_hash, size_bytes, display_name,
-                    content_type, availability_score, first_seen_at_ms, last_seen_at_ms, updated_at_ms
+                    content_type, availability_score, first_seen_at_s, last_seen_at_s, updated_at_s
                 )
                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?5, ?5)
                 "#,
@@ -372,14 +371,14 @@ impl MetadataStore {
             r#"
             INSERT INTO known_file_origins(
                 known_file_id, origin, size_bytes, content_type,
-                availability_score, first_seen_at_ms, last_seen_at_ms
+                availability_score, first_seen_at_s, last_seen_at_s
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
             ON CONFLICT(known_file_id, origin) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
                 content_type = excluded.content_type,
                 availability_score = max(known_file_origins.availability_score, excluded.availability_score),
-                last_seen_at_ms = excluded.last_seen_at_ms
+                last_seen_at_s = excluded.last_seen_at_s
             "#,
             params![
                 known_file_id,
@@ -393,12 +392,12 @@ impl MetadataStore {
 
         tx.execute(
             r#"
-            INSERT INTO file_names(known_file_id, name, normalized_name, seen_count, first_seen_at_ms, last_seen_at_ms)
+            INSERT INTO file_names(known_file_id, name, normalized_name, seen_count, first_seen_at_s, last_seen_at_s)
             VALUES (?1, ?2, ?3, 1, ?4, ?4)
             ON CONFLICT(known_file_id, normalized_name) DO UPDATE SET
                 name = excluded.name,
                 seen_count = file_names.seen_count + 1,
-                last_seen_at_ms = excluded.last_seen_at_ms
+                last_seen_at_s = excluded.last_seen_at_s
             "#,
             params![known_file_id, file.name, normalized, now],
         )?;
@@ -409,10 +408,10 @@ impl MetadataStore {
         )?;
         tx.execute(
             r#"
-            INSERT INTO file_name_origins(file_name_id, origin, first_seen_at_ms, last_seen_at_ms)
+            INSERT INTO file_name_origins(file_name_id, origin, first_seen_at_s, last_seen_at_s)
             VALUES (?1, ?2, ?3, ?3)
             ON CONFLICT(file_name_id, origin) DO UPDATE SET
-                last_seen_at_ms = excluded.last_seen_at_ms
+                last_seen_at_s = excluded.last_seen_at_s
             "#,
             params![file_name_id, origin.as_str(), now],
         )?;
@@ -545,7 +544,7 @@ impl MetadataStore {
         roots: &[MetadataSharedDirectoryRoot],
         origin: &str,
     ) -> Result<()> {
-        let now = unix_ms();
+        let now = unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         Self::replace_root_origins_in_transaction(&tx, roots, origin, now)?;
@@ -569,10 +568,10 @@ impl MetadataStore {
                 r#"
                 INSERT INTO shared_directory_roots(
                     path_id, monitor_owned, shareable, accessible, watch_enabled,
-                    enabled, created_at_ms, deleted_at_ms
+                    enabled, created_at_s, deleted_at_s
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, NULL)
-                ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING
+                ON CONFLICT(path_id) WHERE deleted_at_s IS NULL DO NOTHING
                 "#,
                 params![
                     path_id,
@@ -587,7 +586,7 @@ impl MetadataStore {
             // Incoming/category membership must not reset an operator choice.
             if origin == "explicit" {
                 tx.execute(
-                    "UPDATE shared_directory_roots SET watch_enabled=?2 WHERE path_id=?1 AND deleted_at_ms IS NULL",
+                    "UPDATE shared_directory_roots SET watch_enabled=?2 WHERE path_id=?1 AND deleted_at_s IS NULL",
                     params![path_id, bool_to_i64(root.watch_enabled)],
                 )?;
             }
@@ -595,7 +594,7 @@ impl MetadataStore {
                 "INSERT INTO shared_directory_root_origins(
                     root_id, origin, monitor_owned, shareable, accessible
                  ) VALUES (
-                    (SELECT id FROM shared_directory_roots WHERE path_id = ?1 AND deleted_at_ms IS NULL),
+                    (SELECT id FROM shared_directory_roots WHERE path_id = ?1 AND deleted_at_s IS NULL),
                     ?2, ?3, ?4, ?5
                  ) ON CONFLICT(root_id, origin) DO UPDATE SET
                     monitor_owned = excluded.monitor_owned,
@@ -627,7 +626,7 @@ impl MetadataStore {
             JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
             JOIN shared_directory_root_origins ON shared_directory_root_origins.root_id = shared_directory_roots.id
             WHERE shared_directory_roots.enabled = 1
-              AND shared_directory_roots.deleted_at_ms IS NULL
+              AND shared_directory_roots.deleted_at_s IS NULL
               AND shared_directory_root_origins.origin = 'explicit'
             ORDER BY shared_directory_roots.id
             "#,
@@ -659,7 +658,7 @@ impl MetadataStore {
              FROM shared_directory_roots r
              JOIN local_paths p ON p.id=r.path_id
              JOIN shared_directory_root_origins o ON o.root_id=r.id
-             WHERE o.origin='implicit' AND r.enabled=1 AND r.deleted_at_ms IS NULL
+             WHERE o.origin='implicit' AND r.enabled=1 AND r.deleted_at_s IS NULL
              ORDER BY r.id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -678,8 +677,8 @@ impl MetadataStore {
     pub fn add_shared_file_ignore_pattern(&self, pattern: &str) -> Result<()> {
         let conn = self.connection()?;
         conn.execute(
-            "INSERT OR IGNORE INTO shared_file_ignore_patterns(pattern, created_at_ms) VALUES (?1, ?2)",
-            params![pattern, unix_ms()],
+            "INSERT OR IGNORE INTO shared_file_ignore_patterns(pattern, created_at_s) VALUES (?1, ?2)",
+            params![pattern, unix_s()],
         )?;
         Ok(())
     }
@@ -716,11 +715,11 @@ impl MetadataStore {
         } else {
             conn.execute(
                 r#"
-                INSERT INTO shared_default_ignore_overrides(rule_key, enabled, updated_at_ms)
+                INSERT INTO shared_default_ignore_overrides(rule_key, enabled, updated_at_s)
                 VALUES (?1, 0, ?2)
-                ON CONFLICT(rule_key) DO UPDATE SET enabled = 0, updated_at_ms = excluded.updated_at_ms
+                ON CONFLICT(rule_key) DO UPDATE SET enabled = 0, updated_at_s = excluded.updated_at_s
                 "#,
-                params![rule_key, unix_ms()],
+                params![rule_key, unix_s()],
             )?;
         }
         Ok(())
@@ -762,12 +761,12 @@ pub(crate) fn refresh_shared_root_eligibility(
                 shareable = coalesce((SELECT max(shareable) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
                 accessible = coalesce((SELECT max(shareable * accessible) FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id), 0),
                 enabled = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN 1 ELSE 0 END,
-                deleted_at_ms = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE coalesce(deleted_at_ms, ?1) END",
+                deleted_at_s = CASE WHEN EXISTS(SELECT 1 FROM shared_directory_root_origins WHERE root_id = shared_directory_roots.id) THEN NULL ELSE coalesce(deleted_at_s, ?1) END",
         params![now],
     )?;
     tx.execute(
-        "UPDATE shared_file_memberships SET removed_at_ms = ?1
-             WHERE removed_at_ms IS NULL
+        "UPDATE shared_file_memberships SET removed_at_s = ?1
+             WHERE removed_at_s IS NULL
                AND root_id IN (
                    SELECT id FROM shared_directory_roots
                    WHERE accessible = 0 OR shareable = 0 OR enabled = 0
@@ -1148,12 +1147,12 @@ mod tests {
     #[test]
     fn prune_download_job_sources_drops_removed_transfer_and_stale_rows() {
         let store = MetadataStore::in_memory().unwrap();
-        let now = crate::download_job_store::unix_s();
+        let now = crate::store::unix_s();
         {
             let conn = store.connection().unwrap();
             // Two known files + download_jobs: one live, one removed.
             conn.execute(
-                "INSERT INTO known_files(id, ed2k_hash, size_bytes, display_name, first_seen_at_ms, last_seen_at_ms, updated_at_ms)
+                "INSERT INTO known_files(id, ed2k_hash, size_bytes, display_name, first_seen_at_s, last_seen_at_s, updated_at_s)
                  VALUES (1, ?1, 1, 'a.bin', 0, 0, 0), (2, ?2, 1, 'b.bin', 0, 0, 0)",
                 params![vec![0x11u8; 16], vec![0x22u8; 16]],
             )
@@ -1451,9 +1450,9 @@ mod tests {
                     modified: crate::NativeFileTimestamp::new(1, 0).unwrap(),
                     changed: None,
                 };
-                tx.execute("INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES(?1,?2,1,'sample.bin',0,0,0)", params![n, vec![n;16]]).unwrap();
-                tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) VALUES(?1,?2,1,?3,?4,0)", params![file,n,fingerprint.identity.storage_bytes(),fingerprint.storage_bytes()]).unwrap();
-                tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_ms,last_seen_at_ms,removed_at_ms) VALUES(?1,?2,?3,'sample.bin',0,0,0)", params![root,file,n]).unwrap();
+                tx.execute("INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_s,last_seen_at_s,updated_at_s) VALUES(?1,?2,1,'sample.bin',0,0,0)", params![n, vec![n;16]]).unwrap();
+                tx.execute("INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_s) VALUES(?1,?2,1,?3,?4,0)", params![file,n,fingerprint.identity.storage_bytes(),fingerprint.storage_bytes()]).unwrap();
+                tx.execute("INSERT INTO shared_file_memberships(root_id,path_id,known_file_id,relative_path,first_seen_at_s,last_seen_at_s,removed_at_s) VALUES(?1,?2,?3,'sample.bin',0,0,0)", params![root,file,n]).unwrap();
             }
             tx.commit().unwrap();
         }
@@ -1517,7 +1516,7 @@ mod tests {
             .connection()
             .unwrap()
             .execute(
-                "UPDATE shared_directory_roots SET last_scanned_at_ms=123 WHERE id=?1",
+                "UPDATE shared_directory_roots SET last_scanned_at_s=123 WHERE id=?1",
                 [first.id],
             )
             .unwrap();
@@ -1558,9 +1557,9 @@ mod tests {
             store.library_root(replacement.id).unwrap(),
             Some(replacement)
         );
-        assert_eq!(store.shared_root_last_scan_ms(&path).unwrap(), None);
+        assert_eq!(store.shared_root_last_scan_s(&path).unwrap(), None);
         let retained: (i64, i64) = store.connection().unwrap().query_row(
-            "SELECT (SELECT count(*) FROM local_paths),(SELECT last_scanned_at_ms FROM shared_directory_roots WHERE id=?1)",
+            "SELECT (SELECT count(*) FROM local_paths),(SELECT last_scanned_at_s FROM shared_directory_roots WHERE id=?1)",
             [first.id], |row| Ok((row.get(0)?,row.get(1)?)),
         ).unwrap();
         assert_eq!(retained, (1, 123));
@@ -1710,7 +1709,7 @@ mod tests {
             .connection()
             .unwrap()
             .query_row(
-                "SELECT enabled, deleted_at_ms FROM shared_directory_roots",
+                "SELECT enabled, deleted_at_s FROM shared_directory_roots",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1721,7 +1720,7 @@ mod tests {
             .connection()
             .unwrap()
             .query_row(
-                "SELECT enabled, deleted_at_ms FROM shared_directory_roots",
+                "SELECT enabled, deleted_at_s FROM shared_directory_roots",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

@@ -97,7 +97,7 @@ async fn observed_delivery_restores_only_its_path_and_keeps_independent_copy() {
     configure_roots(&runtime, &[&root, &other]);
     assert!(admit(&runtime, &root, &old).await.unwrap());
     assert!(admit(&runtime, &other, &independent).await.unwrap());
-    let prior_scan = runtime.metadata.shared_root_last_scan_ms(&root).unwrap();
+    let prior_scan = runtime.metadata.shared_root_last_scan_s(&root).unwrap();
     runtime
         .metadata
         .set_shared_root_accessible(&root, false)
@@ -161,7 +161,7 @@ async fn observed_delivery_restores_only_its_path_and_keeps_independent_copy() {
             .is_none()
     );
     assert_eq!(
-        runtime.metadata.shared_root_last_scan_ms(&root).unwrap(),
+        runtime.metadata.shared_root_last_scan_s(&root).unwrap(),
         prior_scan
     );
     assert!(
