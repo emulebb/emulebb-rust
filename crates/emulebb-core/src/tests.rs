@@ -464,7 +464,10 @@ async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
     });
 
     assert_eq!(
-        core.publish_ed2k_shared_catalog().await.unwrap(),
+        shared_catalog_publisher::SharedCatalogPublisher::new(&core)
+            .publish_ed2k_shared_catalog()
+            .await
+            .unwrap(),
         Ed2kSharedCatalogPublishOutcome::NotConnected
     );
     shutdown.store(true, Ordering::SeqCst);

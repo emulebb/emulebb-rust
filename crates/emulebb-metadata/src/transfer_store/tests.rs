@@ -127,6 +127,86 @@ fn progress_snapshot_preserves_explicit_shared_presentation() {
 }
 
 #[test]
+fn local_note_edit_and_durable_notes_clock_reset_are_atomic() {
+    let store = MetadataStore::in_memory().unwrap();
+    let job = completed_pending_download_manifest(&store);
+    let publish = crate::MetadataKadOutboundPublish {
+        file_hash: job.file_hash.clone(),
+        publish_kind: crate::MetadataKadOutboundPublishKind::Notes,
+        keyword: String::new(),
+        published_at_s: 100,
+    };
+    store.upsert_kad_outbound_publish(&publish, 100).unwrap();
+    let edit = store
+        .update_shared_content_metadata(&job.file_hash, None, Some(("Local note", 4)))
+        .unwrap()
+        .unwrap();
+    assert!(edit.notes_changed && edit.rating_changed);
+    assert!(!edit.publish_status_changed);
+    assert!(
+        store
+            .load_kad_outbound_publish_schedule()
+            .unwrap()
+            .publishes
+            .is_empty()
+    );
+    store.upsert_kad_outbound_publish(&publish, 100).unwrap();
+    for (priority, comment) in [
+        (Some(("high", false)), None),
+        (None, Some(("Local note", 4))),
+    ] {
+        let edit = store
+            .update_shared_content_metadata(&job.file_hash, priority, comment)
+            .unwrap()
+            .unwrap();
+        assert!(!edit.notes_changed && !edit.rating_changed && !edit.publish_status_changed);
+        assert_eq!(
+            store
+                .load_kad_outbound_publish_schedule()
+                .unwrap()
+                .publishes,
+            [publish.clone()]
+        );
+    }
+    store
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_notes_reset BEFORE DELETE ON kad_outbound_publish_schedule
+         BEGIN SELECT RAISE(ABORT, 'synthetic notes reset failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        store
+            .update_shared_content_metadata(
+                &job.file_hash,
+                Some(("release", false)),
+                Some(("Changed", 5))
+            )
+            .is_err()
+    );
+    let stored = store
+        .download_job_manifest(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            stored.upload_priority.as_str(),
+            stored.comment.as_str(),
+            stored.rating
+        ),
+        ("high", "Local note", 4)
+    );
+    assert_eq!(
+        store
+            .load_kad_outbound_publish_schedule()
+            .unwrap()
+            .publishes,
+        [publish]
+    );
+}
+
+#[test]
 fn hash_presentation_survives_copyless_edit_job_removal_and_reopen() {
     let path = unique_store_path("hash-presentation");
     let store = MetadataStore::open(&path).unwrap();
@@ -139,7 +219,8 @@ fn hash_presentation_survives_copyless_edit_job_removal_and_reopen() {
                 Some(("high", false)),
                 Some(("First comment", 4))
             )
-            .unwrap(),
+            .unwrap()
+            .map(|edit| edit.token),
         Some(Some(first.token))
     );
     let current = store
@@ -169,7 +250,8 @@ fn hash_presentation_survives_copyless_edit_job_removal_and_reopen() {
                 Some(("release", false)),
                 Some(("Copyless comment", 5))
             )
-            .unwrap(),
+            .unwrap()
+            .map(|edit| edit.token),
         Some(None)
     );
     assert_eq!(

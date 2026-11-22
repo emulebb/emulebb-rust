@@ -711,41 +711,6 @@ fn windowed_candidate_build_selects_identically_to_full_clone_build() {
 }
 
 #[test]
-fn comment_edit_marks_notes_dirty_but_priority_only_edit_does_not() {
-    // A comment change edits the notes-relevant fields -> notes clock resets.
-    assert!(shared_file_notes_changed("old", 3, Some(("new", 3))));
-    // A rating change is also a notes change.
-    assert!(shared_file_notes_changed("same", 3, Some(("same", 5))));
-    // Re-submitting identical comment/rating is NOT a change.
-    assert!(!shared_file_notes_changed("same", 3, Some(("same", 3))));
-    // A priority-only PATCH carries no comment/rating and must not reset notes.
-    assert!(!shared_file_notes_changed("same", 3, None));
-}
-
-#[test]
-fn only_offer_relevant_changes_queue_the_ed2k_reoffer() {
-    // A regular priority/comment PATCH changes neither the offered SET nor a
-    // file's offer content.
-    assert!(!shared_file_change_requires_ed2k_reoffer(
-        false, false, false, false
-    ));
-    // A genuinely offer-relevant change (share/unshare, completion,
-    // not-published, or the server-published rating) does.
-    assert!(shared_file_change_requires_ed2k_reoffer(
-        true, false, false, false
-    ));
-    assert!(shared_file_change_requires_ed2k_reoffer(
-        false, true, false, false
-    ));
-    assert!(shared_file_change_requires_ed2k_reoffer(
-        false, false, true, false
-    ));
-    assert!(shared_file_change_requires_ed2k_reoffer(
-        false, false, false, true
-    ));
-}
-
-#[test]
 fn draining_notes_dirty_queue_resets_the_notes_clock() {
     // The edit path enqueues the file hash; the publish loop drains it and
     // resets the in-memory notes clock so the file is notes-due next tick.

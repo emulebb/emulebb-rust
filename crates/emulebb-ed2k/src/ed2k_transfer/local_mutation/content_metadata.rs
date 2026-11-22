@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 const WORKSPACE: usize = PUBLICATION_WORKSPACE + 768 * 1024;
 struct ContentMetadataOutcome {
     accepted: bool,
-    metadata_found: bool,
+    edit: Option<emulebb_metadata::MetadataContentEdit>,
     sharing_change: Option<bool>,
 }
 impl LocalMutationRegistry {
@@ -54,7 +54,7 @@ impl LocalMutationRegistry {
                 if sharing.is_some() && sharing_change.is_none() {
                     return Ok(ContentMetadataOutcome {
                         accepted: false,
-                        metadata_found: false,
+                        edit: None,
                         sharing_change: None,
                     });
                 }
@@ -75,23 +75,24 @@ impl LocalMutationRegistry {
                 } else {
                     None
                 };
-                let token = if mutation {
+                let edit = if mutation {
                     let updated = metadata.update_shared_content_metadata(
                         &hash_text,
                         priority.as_ref().map(|v| (v.0.as_str(), v.1)),
                         comment.as_ref().map(|v| (v.0.as_str(), v.1)),
                     )?;
-                    let Some(token) = updated else {
+                    let Some(edit) = updated else {
                         return Ok(ContentMetadataOutcome {
                             accepted: false,
-                            metadata_found: false,
+                            edit: None,
                             sharing_change,
                         });
                     };
-                    token
+                    Some(edit)
                 } else {
-                    observed
+                    None
                 };
+                let token = edit.map_or(observed, |edit| edit.token);
                 committed |= mutation;
                 #[cfg(test)]
                 if let Some((reached, release)) = gate {
@@ -140,7 +141,7 @@ impl LocalMutationRegistry {
                 )?;
                 Ok(ContentMetadataOutcome {
                     accepted: publication.watch_accepted(),
-                    metadata_found: true,
+                    edit,
                     sharing_change,
                 })
             }));
@@ -165,20 +166,20 @@ impl LocalMutationRegistry {
 impl transfer::Ed2kTransferRuntime {
     /// Edit a client hash without requiring an available payload or a job.
     /// Admitted SQL/cache publication finishes independently of the caller.
-    /// False identifies a hash outside the client library; no content is created.
+    /// None identifies a hash outside the client library; no content is created.
     pub async fn update_library_file_metadata(
         &self,
         file_hash: &str,
         priority: Option<(&str, bool)>,
         comment: Option<(&str, u8)>,
-    ) -> Result<bool> {
+    ) -> Result<Option<emulebb_metadata::MetadataContentEdit>> {
         ensure!(
             priority.is_some() || comment.is_some(),
             "metadata edit is empty"
         );
         self.publish_content_command(file_hash.parse()?, priority, comment, None, None)
             .await
-            .map(|outcome| outcome.metadata_found)
+            .map(|outcome| outcome.edit)
     }
 
     pub(in crate::ed2k_transfer) async fn persist_content_metadata(
@@ -191,7 +192,7 @@ impl transfer::Ed2kTransferRuntime {
             .publish_content_command(hash, priority, comment, None, None)
             .await?;
         ensure!(
-            priority.is_none() && comment.is_none() || outcome.metadata_found,
+            priority.is_none() && comment.is_none() || outcome.edit.is_some(),
             "client library content is missing"
         );
         Ok(())

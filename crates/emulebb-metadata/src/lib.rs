@@ -138,9 +138,9 @@ pub use kad_routing_store::{
     KAD_ROUTING_MAX_CONTACTS, KadRoutingContact, KadRoutingContactType, KadRoutingSnapshot,
 };
 pub use local_file_store::{
-    MetadataContentConflict, MetadataLocalFileInstance, MetadataLocalReloadEntry,
-    MetadataLocalShareEntry, MetadataSharedFileCursor, MetadataSharedFilePage,
-    MetadataSharedFileQuery, MetadataVerifiedLocalContent,
+    MetadataContentConflict, MetadataContentEdit, MetadataLocalFileInstance,
+    MetadataLocalReloadEntry, MetadataLocalShareEntry, MetadataSharedFileCursor,
+    MetadataSharedFilePage, MetadataSharedFileQuery, MetadataVerifiedLocalContent,
 };
 pub use model::{
     MetadataIndexedFile, MetadataIndexedFileOrigin, MetadataLibraryRoot, MetadataLibraryRootDelete,

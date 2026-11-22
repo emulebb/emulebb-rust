@@ -348,94 +348,10 @@ impl EmulebbCore {
         hash: &str,
         request: SharedFileUpdate,
     ) -> Result<Option<LocalShare>> {
-        let Some(share) = self.share(hash).await else {
+        if self.share(hash).await.is_none() {
             return Ok(None);
-        };
-        let priority = request
-            .priority
-            .as_deref()
-            .map(validate_shared_upload_priority)
-            .transpose()?
-            .map(|priority| (priority.0.to_string(), priority.1));
-        let comment_rating = validate_shared_file_comment_rating(&request)?;
-        if priority.is_none() && comment_rating.is_none() {
-            anyhow::bail!("shared-file PATCH requires priority, comment, or rating");
         }
-        let publish_status_changed = priority.as_ref().is_some_and(|(priority, _)| {
-            shared_file_publish_enabled(priority) != shared_file_publish_enabled(&share.priority)
-        });
-        // A comment/rating change resets the Kad NOTES clock (oracle
-        // `SetLastPublishTimeKadNotes(0)`, KnownFile.cpp:1340,1360) so the edited
-        // note republishes promptly; a priority-only PATCH does NOT. Detect an
-        // actual change against the current values, not merely a present field.
-        let notes_changed = shared_file_notes_changed(
-            &share.comment,
-            share.rating,
-            comment_rating
-                .as_ref()
-                .map(|(comment, rating)| (comment.as_str(), *rating)),
-        );
-        let rating_changed = comment_rating
-            .as_ref()
-            .is_some_and(|(_, rating)| *rating != share.rating);
-        self.ed2k_transfers
-            .update_library_file_metadata(
-                hash,
-                priority
-                    .as_ref()
-                    .map(|(priority, auto)| (priority.as_str(), *auto)),
-                comment_rating
-                    .as_ref()
-                    .map(|(comment, rating)| (comment.as_str(), *rating)),
-            )
-            .await?;
-        if notes_changed {
-            // Clear the persisted notes row first so a restart before the loop
-            // drains the queue cannot re-hydrate the stale 24h clock, then flag
-            // the live loop-local schedule.
-            if let Err(error) = self
-                .metadata_store
-                .delete_kad_outbound_publish(&share.hash, MetadataKadOutboundPublishKind::Notes)
-            {
-                tracing::warn!(
-                    file_hash = %share.hash,
-                    "failed to clear persisted Kad notes publish row after edit: {error:#}"
-                );
-            }
-            match self.kad_notes_dirty.lock() {
-                Ok(mut dirty) => {
-                    dirty.insert(share.hash.clone());
-                }
-                Err(poisoned) => {
-                    poisoned.into_inner().insert(share.hash.clone());
-                }
-            }
-        }
-        // A regular priority/comment-only PATCH leaves the server offer intact;
-        // toggling not-published or changing the published rating does not.
-        if shared_file_change_requires_ed2k_reoffer(
-            false,
-            false,
-            publish_status_changed,
-            rating_changed,
-        ) {
-            if let Ok(file_hash) = share.hash.parse::<Ed2kHash>() {
-                let server_state = {
-                    let runtime = self.ed2k_runtime.lock().await;
-                    runtime
-                        .as_ref()
-                        .map(|runtime| Arc::clone(&runtime.server_state))
-                };
-                if let Some(server_state) = server_state {
-                    server_state
-                        .read()
-                        .await
-                        .offer_files_publication
-                        .mark_queued(file_hash);
-                }
-            }
-            self.queue_ed2k_shared_catalog_publish();
-        }
+        self.edit_library_file_metadata(hash, &request).await?;
         Ok(self.share(hash).await)
     }
 

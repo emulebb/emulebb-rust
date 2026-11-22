@@ -20,6 +20,7 @@ async fn copyless_library_metadata_remains_editable_after_job_removal() {
             )
             .await
             .unwrap()
+            .is_some()
     );
     let stored = runtime
         .metadata
@@ -49,6 +50,7 @@ async fn copyless_library_metadata_remains_editable_after_job_removal() {
             )
             .await
             .unwrap()
+            .is_some()
     );
     let next = admit_download_job(&runtime, hash, "Another.bin".into(), 32);
     let stored = runtime
@@ -66,10 +68,11 @@ async fn copyless_library_metadata_remains_editable_after_job_removal() {
     );
     let unknown = Ed2kHash::from_bytes([0xff; 16]);
     assert!(
-        !runtime
+        runtime
             .update_library_file_metadata(&unknown.to_string(), Some(("low", false)), None)
             .await
             .unwrap()
+            .is_none()
     );
     assert_eq!(
         runtime

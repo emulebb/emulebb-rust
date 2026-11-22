@@ -27,6 +27,7 @@ async fn passive_notes_remain_remote_evidence_independent_of_local_metadata() {
                     .update_library_file_metadata(&hash.to_string(), None, Some(note))
                     .await
                     .unwrap()
+                    .is_some()
             );
         }
         let owner = core
