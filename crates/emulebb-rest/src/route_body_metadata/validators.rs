@@ -164,20 +164,19 @@ fn validate_path_text_body_field(
 pub(super) fn validate_server_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
     validate_non_empty_text_body_field(object.get("address"), "address")?;
     validate_port_body_field(object.get("port"), "port")?;
-    validate_optional_server_body_fields(object, true)
+    validate_optional_server_body_fields(object)
 }
 
 pub(super) fn validate_server_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
-    if !object.contains_key("name")
-        && !object.contains_key("priority")
+    if !object.contains_key("priority")
         && !object.contains_key("static")
         && !object.contains_key("enabled")
     {
         return Err(invalid_body_error(
-            "server PATCH requires name, priority, static, or enabled",
+            "server PATCH requires priority, static, or enabled",
         ));
     }
-    validate_optional_server_body_fields(object, false)
+    validate_optional_server_body_fields(object)
 }
 
 pub(super) fn validate_url_import_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
@@ -277,13 +276,7 @@ fn validate_friend_name_body_field(value: &serde_json::Value) -> Result<(), Box<
     Ok(())
 }
 
-fn validate_optional_server_body_fields(
-    object: &JsonObject,
-    allow_connect: bool,
-) -> Result<(), Box<Response>> {
-    if object.get("name").is_some_and(|value| !value.is_string()) {
-        return Err(invalid_body_error("name must be a string when provided"));
-    }
+fn validate_optional_server_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
     if let Some(priority) = object.get("priority") {
         validate_server_priority_body_field(priority)?;
     }
@@ -298,13 +291,6 @@ fn validate_optional_server_body_fields(
         .is_some_and(|value| !value.is_boolean())
     {
         return Err(invalid_body_error("enabled must be a boolean"));
-    }
-    if allow_connect
-        && object
-            .get("connect")
-            .is_some_and(|value| !value.is_boolean())
-    {
-        return Err(invalid_body_error("connect must be a boolean"));
     }
     Ok(())
 }

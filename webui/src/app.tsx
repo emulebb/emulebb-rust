@@ -954,7 +954,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 client={client}
               />
             )}
-            {tab === "servers" && <ServersView servers={servers} status={snapshot?.status ?? {}} client={client} run={run} />}
+            {tab === "servers" && <ServersView status={snapshot?.status ?? {}} client={client} run={run} />}
             {tab === "kad" && <KadView kad={kad} client={client} run={run} />}
             {tab === "categories" && <CategoriesView categories={categories} client={client} run={run} />}
             {tab === "friends" && <FriendsView friends={friends} client={client} run={run} />}

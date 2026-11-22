@@ -129,14 +129,16 @@ describe("canonical view mappings", () => {
     expect(screen.queryByText("999")).not.toBeInTheDocument();
   });
 
-  it("offers one truthful server Disable action instead of pretending DELETE removes a retained row", async () => {
+  it("disables a server through its immutable ID", async () => {
     const client = new RestClient();
     const patch = vi.spyOn(client, "patch").mockResolvedValue({ enabled: false });
-    render(<ServersView servers={[{ endpoint: "192.0.2.1:4661", name: "Sample Server", enabled: true }]} status={{}} client={client} run={run} />);
+    vi.spyOn(client, "getPage").mockResolvedValue({ data: [{ id: "17", address: "192.0.2.1", port: 4661, name: "Sample Server", enabled: true }], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
+    render(<ServersView status={{}} client={client} run={run} />);
+    await screen.findByTitle("Disable");
     expect(screen.getAllByTitle("Disable")).toHaveLength(1);
     expect(screen.queryByTitle("Delete")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTitle("Disable"));
     await waitFor(() => expect(patch).toHaveBeenCalledOnce());
-    expect(patch).toHaveBeenCalledWith("servers/192.0.2.1%3A4661", { enabled: false });
+    expect(patch).toHaveBeenCalledWith("servers/17", { enabled: false });
   });
 });

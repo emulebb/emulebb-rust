@@ -401,7 +401,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     }
     if (method === "POST" && path === "servers/operations/import-met-url") {
       record();
-      state.servers = [{ endpoint: "192.0.2.10:4661", name: "Imported Server", connected: false, enabled: true }];
+      state.servers = [{ id: "1", endpoint: "192.0.2.10:4661", name: "Imported Server", connected: false, enabled: true }];
       state.status.servers.serverCount = 1;
       await fulfill({ ok: true, imported: true });
       return;
@@ -413,7 +413,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
       await fulfill({ running: true, connected: true, firewalled: true });
       return;
     }
-    if (method === "POST" && path === "servers/192.0.2.10%3A4661/operations/connect") {
+    if (method === "POST" && path === "servers/1/operations/connect") {
       record();
       state.status.servers = { connected: true, connecting: false, currentServer: state.servers[0], ed2kIdState: "low", serverCount: 1 };
       state.servers[0].connected = true;
@@ -671,7 +671,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
 
   expect(requests.some((request) => request.path === "servers/operations/disconnect")).toBe(true);
   expect(requests.filter((request) => request.path === "servers/operations/connect")).toHaveLength(1);
-  expect(requests.filter((request) => request.path === "servers/192.0.2.10%3A4661/operations/connect")).toHaveLength(1);
+  expect(requests.filter((request) => request.path === "servers/1/operations/connect")).toHaveLength(1);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches")).toBe(true);
   expect(requests.some((request) => request.method === "GET" && request.path === "searches/2")).toBe(true);
   expect(requests.some((request) =>

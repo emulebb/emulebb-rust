@@ -1701,20 +1701,33 @@ export function NetworkHealthView(props: {
   );
 }
 
-export function ServersView(props: { servers: ServerItem[]; status: Status; client: RestClient; run: RunFunction }) {
+export function ServersView(props: { status: Status; client: RestClient; run: RunFunction }) {
   const [address, setAddress] = useState("");
   const [port, setPort] = useState("4661");
-  const [name, setName] = useState("");
   const [importUrl, setImportUrl] = useState("https://upd.emule-security.org/server.met");
   const [filter, setFilter] = useState("");
-  const [selectedEndpoint, setSelectedEndpoint] = useState("");
+  const [selectedId, setSelectedId] = useState("");
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [page, setPage] = useState<{ data: (ServerItem & { id: string })[]; meta: { nextCursor: string | null } } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [readError, setReadError] = useState("");
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    void props.client.getPage<ServerItem & { id: string }>(`servers?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)
+      .then((value) => { if (current) { setPage(value); setReadError(""); } })
+      .catch((error) => { if (current) { setPage(null); setReadError(errorMessage(error)); } })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [props.client, props.status, cursor]);
+  const servers = page?.data ?? [];
   const serverAddress = address.trim();
   const serverAddressError = endpointAddressError(address, "Address");
   const serverPortError = endpointPortError(port, "Port");
   const serverImportUrlError = urlImportError(importUrl, "server.met URL");
   const serverStatus = props.status.servers;
-  const connected = Boolean(serverStatus?.connected ?? props.servers.some((server) => server.connected));
-  const connecting = Boolean(serverStatus?.connecting ?? props.servers.some((server) => server.connecting));
+  const connected = Boolean(serverStatus?.connected ?? servers.some((server) => server.connected));
+  const connecting = Boolean(serverStatus?.connecting ?? servers.some((server) => server.connecting));
   const ed2kIdState = connected ? serverStatus?.ed2kIdState ?? "unknown" : "unknown";
   const connectionLabel = connected
     ? ed2kIdState === "high"
@@ -1734,9 +1747,9 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
   const filteredServers = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     if (!needle) {
-      return props.servers;
+      return servers;
     }
-    return props.servers.filter((server) => [
+    return servers.filter((server) => [
       serverEndpoint(server),
       server.name,
       server.address,
@@ -1745,13 +1758,13 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
       server.hostName,
       server.description
     ].some((value) => String(value ?? "").toLowerCase().includes(needle)));
-  }, [filter, props.servers]);
+  }, [filter, servers]);
   const selected = useMemo(() => {
-    if (!props.servers.length) {
+    if (!servers.length) {
       return undefined;
     }
-    return props.servers.find((server) => serverEndpoint(server) === selectedEndpoint) ?? props.servers[0];
-  }, [props.servers, selectedEndpoint]);
+    return servers.find((server) => server.id === selectedId) ?? servers[0];
+  }, [servers, selectedId]);
   const selectedIsCurrent = selected != null && (
     selected.connected === true
     || selected.current === true
@@ -1769,7 +1782,6 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
     return props.client.post("servers", {
       address: serverAddress,
       port: parsedPort,
-      name: name || undefined,
       priority: "normal",
       static: true
     });
@@ -1780,7 +1792,7 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
       <div class="section-title">
         <h2>Servers</h2>
         <div class="row-actions">
-          <button class="btn" type="button" disabled={connected || connecting || props.servers.length === 0} onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connection started")}><Plug size={15} />Connect</button>
+          <button class="btn" type="button" disabled={connected || connecting || servers.length === 0} onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connection started")}><Plug size={15} />Connect</button>
           <button class="btn" type="button" disabled={!connected && !connecting} onClick={() => void props.run(() => props.client.post("servers/operations/disconnect"), "Server disconnected; Kad remains available")}><Ban size={15} />Disconnect</button>
         </div>
       </div>
@@ -1789,7 +1801,7 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
         {connected && ed2kIdState === "low" && " Connected, but inbound TCP is not reachable; downloads and searches still work, while callbacks may be slower. Enable UPnP in Settings or forward the shown TCP/UDP ports to try for HighID."}
         {connected && ed2kIdState === "high" && " Inbound TCP reachability is confirmed."}
         {connected && ed2kIdState === "unknown" && " The server has not supplied a usable eD2K ID state."}
-        {!connected && props.servers.length === 0 && " Import server.met or add a server before connecting."}
+        {!connected && servers.length === 0 && " Import server.met or add a server before connecting."}
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
@@ -1799,7 +1811,6 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
       }}>
         <input class="form-control" value={address} placeholder="Address" aria-invalid={serverAddressError ? "true" : "false"} onInput={(event) => setAddress(event.currentTarget.value)} />
         <input class="form-control" value={port} placeholder="Port" inputMode="numeric" aria-invalid={serverPortError ? "true" : "false"} onInput={(event) => setPort(event.currentTarget.value)} />
-        <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
         <button class="btn" type="submit" disabled={!serverAddress || Boolean(serverAddressError) || Boolean(serverPortError)}><Server size={16} />Add</button>
       </form>
       {serverAddressError && <p class="field-error">{serverAddressError}</p>}
@@ -1818,6 +1829,9 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
       <div class="form-row">
         <input class="form-control" value={filter} placeholder="Filter endpoint, host, IP, name" onInput={(event) => setFilter(event.currentTarget.value)} />
       </div>
+      <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading} change={(value) => { setPage(null); setCursor(value); }} />
+      <p class="hint">Filter applies to this page. Names are reported by servers.</p>
+      {readError && <p role="alert">{readError}</p>}
       <TableScroll label="Servers">
         <table class="table table-vcenter card-table">
           <thead>
@@ -1836,9 +1850,9 @@ export function ServersView(props: { servers: ServerItem[]; status: Status; clie
           <tbody>
             {filteredServers.map((server) => {
               const endpoint = serverEndpoint(server);
-              const encoded = encodeSegment(endpoint);
+              const encoded = encodeSegment(server.id);
               return (
-                <tr key={endpoint} class={selected && serverEndpoint(selected) === endpoint ? "selected-row" : ""} onClick={() => setSelectedEndpoint(endpoint)}>
+                <tr key={server.id} class={selected?.id === server.id ? "selected-row" : ""} onClick={() => setSelectedId(server.id)}>
                   <td>{endpoint}</td>
                   <td>{hostNameLabel(server)}</td>
                   <td>{server.ip || server.dynIp || ""}</td>

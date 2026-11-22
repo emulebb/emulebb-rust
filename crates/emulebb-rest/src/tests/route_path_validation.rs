@@ -119,17 +119,17 @@ async fn hash_path_parameters_use_canonical_lowercase_hex_validation() {
 }
 
 #[tokio::test]
-async fn endpoint_path_parameters_use_canonical_address_port_validation() {
+async fn resource_path_parameters_use_canonical_identity_validation() {
     let cases = [
         (
             "GET",
-            "/api/v1/servers/local",
-            "serverId must use address:port with a port in the range 1..65535",
+            "/api/v1/servers/01",
+            "serverId must be a positive decimal i64 string",
         ),
         (
             "GET",
-            "/api/v1/servers/local:0",
-            "serverId must use address:port with a port in the range 1..65535",
+            "/api/v1/servers/0",
+            "serverId must be a positive decimal i64 string",
         ),
         (
             "GET",
@@ -155,12 +155,8 @@ async fn valid_path_parameters_still_reach_handlers() {
     let accepted_routes = [
         ("GET", "/api/v1/categories/Media"),
         ("GET", "/api/v1/searches/1"),
-        ("GET", "/api/v1/servers/local:4661"),
-        ("GET", "/api/v1/servers/local%3A4661"),
-        (
-            "POST",
-            "/api/v1/servers/192.0.2.1%3A4661/operations/connect",
-        ),
+        ("GET", "/api/v1/servers/9223372036854775807"),
+        ("POST", "/api/v1/servers/1/operations/connect"),
         (
             "GET",
             "/api/v1/uploads/12345678-1234-4234-8234-123456789abc",

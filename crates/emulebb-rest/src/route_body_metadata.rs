@@ -152,8 +152,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
     const SETTINGS_PATCH: &[&str] = &["expectedRevision", "set", "reset"];
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
-    const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
-    const SERVER_PATCH: &[&str] = &["name", "priority", "static", "enabled"];
+    const SERVER_CREATE: &[&str] = &["address", "port", "priority", "static", "enabled"];
+    const SERVER_PATCH: &[&str] = &["priority", "static", "enabled"];
     const CATEGORY: &[&str] = &["name", "tempDir", "destinationDir", "comment"];
     const CATEGORY_PATCH: &[&str] = &["tempDir", "destinationDir", "comment"];
     const FRIEND_CREATE: &[&str] = &["userHash", "name"];

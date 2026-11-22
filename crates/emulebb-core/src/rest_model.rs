@@ -92,7 +92,7 @@ pub struct ServerInfo {
     pub current: bool,
     pub description: String,
     pub dyn_ip: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub auxiliary_ports: Vec<u16>,
     pub failed_count: u32,
     pub hard_files: u64,
