@@ -141,24 +141,32 @@ impl MetadataStore {
     pub fn server_by_id(&self, id: i64) -> Result<Option<MetadataServerRecord>> {
         anyhow::ensure!(id > 0, MetadataServerReadError::InvalidQuery);
         let conn = self.connection()?;
-        let sql = format!(
-            "SELECT id,{TEXT_BYTES},{SERVER_COLUMNS} FROM servers
-            WHERE id=?1 AND deleted_at_s IS NULL"
-        );
-        let mut statement = conn.prepare_cached(&sql)?;
-        let mut rows = statement.query([id])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        anyhow::ensure!(
-            row_bytes(row)?.saturating_add(16 * 1024) <= SERVER_READ_MAX_BYTES,
-            MetadataServerReadError::RowTooLarge
-        );
-        Ok(Some(MetadataServerRecord {
-            id: row.get(0)?,
-            server: server_from_row(row, 2)?,
-        }))
+        server_by_id_connection(&conn, id)
     }
+}
+
+/// Borrow an existing transaction for bounded post-write projection validation.
+pub(super) fn server_by_id_connection(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> Result<Option<MetadataServerRecord>> {
+    let sql = format!(
+        "SELECT id,{TEXT_BYTES},{SERVER_COLUMNS} FROM servers
+            WHERE id=?1 AND deleted_at_s IS NULL"
+    );
+    let mut statement = conn.prepare_cached(&sql)?;
+    let mut rows = statement.query([id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        row_bytes(row)?.saturating_add(16 * 1024) <= SERVER_READ_MAX_BYTES,
+        MetadataServerReadError::RowTooLarge
+    );
+    Ok(Some(MetadataServerRecord {
+        id: row.get(0)?,
+        server: server_from_row(row, 2)?,
+    }))
 }
 
 pub(super) fn server_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result<MetadataServer> {

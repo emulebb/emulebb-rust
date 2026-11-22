@@ -1,5 +1,7 @@
 use super::*;
-use crate::{MetadataServerCreate, MetadataServerUpdate, ServerEndpointConflict};
+use crate::{
+    MetadataServerCreate, MetadataServerImport, MetadataServerUpdate, ServerEndpointConflict,
+};
 
 #[test]
 fn explicit_server_creation_conflict_preserves_disabled_resource_and_observations() {
@@ -170,6 +172,97 @@ fn server_edits_and_repeated_deletion_do_not_create_resources() {
         store
             .update_server_resource(id, &MetadataServerUpdate::default())
             .is_err()
+    );
+}
+
+#[test]
+fn imported_names_preserve_live_identity_controls_and_health() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut original = server("seed.example");
+    original.server_priority = "high".into();
+    original.static_server = true;
+    original.enabled = false;
+    original.failed_count = 7;
+    original.users = 83;
+    original.ping_ms = Some(42);
+    let id = store.upsert_server(&original).unwrap();
+    let mut original = store.server_by_id(id).unwrap().unwrap().server;
+    let imported = MetadataServerImport {
+        address: "SEED.EXAMPLE".into(),
+        port: 4661,
+        name: Some("Observed Server".into()),
+    };
+    let row = store.import_server_resource(&imported).unwrap();
+    assert_eq!(row.id, id);
+    original.name = "Observed Server".into();
+    assert_eq!(row.server, original);
+    assert_eq!(
+        store
+            .import_server_resource(&MetadataServerImport {
+                name: None,
+                ..imported.clone()
+            })
+            .unwrap()
+            .server,
+        original
+    );
+    assert!(store.delete_server_resource(id).unwrap());
+    let replacement = store.import_server_resource(&imported).unwrap();
+    assert!(replacement.id > id);
+    assert!(replacement.server.enabled);
+    assert!(!replacement.server.static_server);
+    assert_eq!(replacement.server.server_priority, "normal");
+    assert_eq!(replacement.server.failed_count, 0);
+}
+
+#[test]
+fn failed_import_rolls_back_name_and_discovery_initialization() {
+    let store = MetadataStore::in_memory().unwrap();
+    let oversized = MetadataServerImport {
+        address: "seed.example".into(),
+        port: 4661,
+        name: Some("x".repeat(SERVER_READ_MAX_BYTES / 4)),
+    };
+    assert!(
+        store
+            .import_server_resource(&oversized)
+            .unwrap_err()
+            .is::<MetadataServerReadError>()
+    );
+    assert!(
+        store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+    let status: String = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM discovery_initialization WHERE domain='servers'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
+    let before = store
+        .create_server_resource(creation("seed.example"))
+        .unwrap();
+    store.connection().unwrap().execute_batch(
+        "CREATE TRIGGER block_server_import BEFORE UPDATE OF name ON servers BEGIN SELECT RAISE(ABORT,'injected import failure'); END;"
+    ).unwrap();
+    assert!(
+        store
+            .import_server_resource(&MetadataServerImport {
+                name: Some("Uncommitted Name".into()),
+                ..oversized
+            })
+            .is_err()
+    );
+    assert_eq!(
+        store.server_by_id(before.id).unwrap().unwrap().server,
+        before.server
     );
 }
 

@@ -55,6 +55,14 @@ impl std::fmt::Display for ServerEndpointConflict {
 }
 impl std::error::Error for ServerEndpointConflict {}
 
+/// Observed server.met identity and optional reported name, without operator controls.
+#[derive(Debug, Clone)]
+pub struct MetadataServerImport {
+    pub address: String,
+    pub port: u16,
+    pub name: Option<String>,
+}
+
 /// Saved operator fields; network observations and endpoint identity are separate.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataServerUpdate {
@@ -64,6 +72,32 @@ pub struct MetadataServerUpdate {
 }
 
 impl MetadataStore {
+    /// Merge a reported name while preserving live identity, controls and health.
+    /// A deleted endpoint receives a fresh ID and initial operator defaults.
+    pub fn import_server_resource(
+        &self,
+        input: &MetadataServerImport,
+    ) -> Result<MetadataServerRecord> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id: i64 = transaction.query_row(
+            "INSERT INTO servers(address,port,name,first_seen_at_s,last_seen_at_s)
+             VALUES (?1,?2,coalesce(?3,''),?4,?4)
+             ON CONFLICT(address,port) WHERE deleted_at_s IS NULL DO UPDATE SET
+                 name=coalesce(?3,servers.name),last_seen_at_s=?4
+             RETURNING id",
+            params![input.address, input.port, input.name, unix_s()],
+            |row| row.get(0),
+        )?;
+        // WHY: validate/read the bounded projection before commit, so an import
+        // cannot acknowledge a row its resource reader cannot represent.
+        let record = crate::server_query::server_by_id_connection(&transaction, id)?
+            .expect("imported server exists in its writer transaction");
+        Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
     /// Create a resource without import's merge semantics. The writer lock spans
     /// duplicate detection, insertion and discovery initialization.
     pub fn create_server_resource(

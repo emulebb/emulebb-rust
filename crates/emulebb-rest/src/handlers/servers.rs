@@ -172,12 +172,7 @@ pub(crate) async fn servers_import_met_url(
             "failed to update server.met from URL",
         )
         .into_response(),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            error.to_string(),
-        )
-        .into_response(),
+        Err(error) => super::persistence::persistence_error(error),
     }
 }
 

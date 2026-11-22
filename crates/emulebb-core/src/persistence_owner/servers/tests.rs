@@ -15,7 +15,12 @@ fn record() -> MetadataServerCreate {
 async fn disconnected_mutation(action: u8) {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
-    let server = record();
+    let mut server = record();
+    if action == 3 {
+        server.enabled = false;
+        server.static_server = true;
+        server.priority = "high".into();
+    }
     let endpoint = format!("{}:{}", server.address, server.port);
     let id = if action == 0 {
         0
@@ -44,6 +49,14 @@ async fn disconnected_mutation(action: u8) {
                     )
                     .await
                 }
+                3 => core
+                    .import_server_resource(&MetadataServerImport {
+                        address: server.address,
+                        port: server.port,
+                        name: Some("Observed Server".into()),
+                    })
+                    .await
+                    .map(|_| true),
                 _ => core.delete_server_resource(id).await,
             }
         })
@@ -76,6 +89,24 @@ async fn disconnected_mutation(action: u8) {
             assert!(cached.enabled);
             cached.failed_count = 99;
         }
+        3 => {
+            assert_eq!(
+                core.metadata_store
+                    .server_by_id(id)
+                    .unwrap()
+                    .unwrap()
+                    .server
+                    .name,
+                "Observed Server"
+            );
+            core.state
+                .lock()
+                .await
+                .servers
+                .get_mut(&endpoint)
+                .unwrap()
+                .failed_count = 99;
+        }
         _ => assert!(core.metadata_store.server_by_id(id).unwrap().is_none()),
     }
     caller.abort();
@@ -103,6 +134,15 @@ async fn disconnected_mutation(action: u8) {
             assert_eq!(cached.failed_count, 99);
             assert!(state.disabled_servers.contains(&endpoint));
         }
+        3 => {
+            let cached = state.servers.get(&endpoint).unwrap();
+            assert_eq!(cached.name, "Observed Server");
+            assert!(!cached.enabled);
+            assert!(cached.static_server);
+            assert_eq!(cached.priority, "high");
+            assert_eq!(cached.failed_count, 99);
+            assert!(state.disabled_servers.contains(&endpoint));
+        }
         _ => {
             assert!(!state.servers.contains_key(&endpoint));
             assert!(state.disabled_servers.contains(&endpoint));
@@ -124,6 +164,11 @@ async fn disconnected_server_editor_preserves_newer_health_observations() {
 #[tokio::test]
 async fn disconnected_server_deleter_finishes_cache_publication() {
     disconnected_mutation(2).await;
+}
+
+#[tokio::test]
+async fn disconnected_server_import_preserves_controls_and_newer_health() {
+    disconnected_mutation(3).await;
 }
 
 #[tokio::test]

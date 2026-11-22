@@ -2,11 +2,13 @@
 use super::*;
 use crate::{EmulebbCore, server_list::ServerPlanPublisher};
 use emulebb_metadata::{
-    MetadataServer, MetadataServerCreate, MetadataServerUpdate, ServerEndpointConflict,
+    MetadataServer, MetadataServerCreate, MetadataServerImport, MetadataServerUpdate,
+    ServerEndpointConflict,
 };
 
 pub(super) enum SqlCommand {
     Create(MetadataServerCreate),
+    Import(MetadataServerImport),
     Update(i64, MetadataServerUpdate),
     Delete(i64),
 }
@@ -18,13 +20,14 @@ pub(super) struct ServerCommand {
 
 pub(super) enum ServerWrite {
     Created(i64, MetadataServer),
+    Imported(i64, MetadataServer),
     Updated(MetadataServer, MetadataServerUpdate),
     Deleted(String),
     Missing,
 }
 
 pub(super) enum ServerOutcome {
-    Created(i64),
+    Identity(i64),
     Changed(bool),
 }
 
@@ -114,7 +117,35 @@ impl EmulebbCore {
             })
             .await?
         {
-            Response::Servers(Ok(ServerOutcome::Created(id))) => Ok(id),
+            Response::Servers(Ok(ServerOutcome::Identity(id))) => Ok(id),
+            Response::Servers(Err(error)) => Err(error.into()),
+            _ => Err(PersistenceError::Worker.into()),
+        }
+    }
+
+    /// Merge one import observation under the same retained publication fence.
+    pub async fn import_server_resource(
+        &self,
+        server: &MetadataServerImport,
+    ) -> anyhow::Result<i64> {
+        let lengths = [
+            server.address.len(),
+            server.name.as_ref().map_or(0, String::len),
+        ];
+        readable_payload(lengths, 0)?;
+        let owner = self
+            .persistence_owner
+            .owner(&self.metadata_store, &self.state)?;
+        match owner
+            .submit_reserved(charge(lengths, 0)?, || {
+                Ok(Command::Servers(ServerCommand {
+                    operation: SqlCommand::Import(server.clone()),
+                    publisher: ServerPlanPublisher::new(self),
+                }))
+            })
+            .await?
+        {
+            Response::Servers(Ok(ServerOutcome::Identity(id))) => Ok(id),
             Response::Servers(Err(error)) => Err(error.into()),
             _ => Err(PersistenceError::Worker.into()),
         }
@@ -181,6 +212,10 @@ pub(super) fn execute(
             Err(error) if error.is::<ServerEndpointConflict>() => Ok(Err(ServerEndpointConflict)),
             Err(error) => Err(error),
         },
+        SqlCommand::Import(input) => {
+            let record = store.import_server_resource(&input)?;
+            Ok(Ok(ServerWrite::Imported(record.id, record.server)))
+        }
         SqlCommand::Update(id, update) => {
             let Some(record) = store.server_by_id(id)? else {
                 return Ok(Ok(ServerWrite::Missing));
@@ -256,7 +291,24 @@ pub(super) async fn process(
                 state
                     .servers
                     .insert(endpoint, profile_state::server_from_metadata(server));
-                ServerOutcome::Created(id)
+                ServerOutcome::Identity(id)
+            }
+            ServerWrite::Imported(id, snapshot) => {
+                let endpoint = snapshot.endpoint();
+                let name = snapshot.name.clone();
+                let server = state
+                    .servers
+                    .entry(endpoint.clone())
+                    .or_insert_with(|| profile_state::server_from_metadata(snapshot));
+                // Import carries only a reported name; retain current controls
+                // and health rather than publishing a stale whole-row snapshot.
+                server.name = name;
+                if server.enabled {
+                    state.disabled_servers.remove(&endpoint);
+                } else {
+                    state.disabled_servers.insert(endpoint);
+                }
+                ServerOutcome::Identity(id)
             }
             ServerWrite::Updated(snapshot, update) => {
                 let endpoint = snapshot.endpoint();

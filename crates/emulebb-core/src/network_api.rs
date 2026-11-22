@@ -243,7 +243,7 @@ impl EmulebbCore {
     pub async fn import_server_met_url(&self, url: &str) -> Result<bool> {
         let url = validate_url_import(url)?;
         match fetch_url_bytes(&url, crate::SERVER_MET_MAX_BYTES).await {
-            Ok(bytes) => Ok(self.import_server_met_bytes(&bytes).await.unwrap_or(0) > 0),
+            Ok(bytes) => Ok(self.import_server_met_bytes(&bytes).await? > 0),
             Err(error) => {
                 tracing::warn!("server.met import fetch failed: {error:#}");
                 Ok(false)
@@ -256,17 +256,13 @@ impl EmulebbCore {
         let servers = parse_server_met(data)?;
         let mut added = 0usize;
         for server in servers {
-            let request = ServerCreate {
+            self.import_server_resource(&emulebb_metadata::MetadataServerImport {
                 address: server.ip.to_string(),
                 port: server.port,
                 name: server.name,
-                priority: None,
-                static_server: None,
-                connect: None,
-            };
-            if self.add_server(request).await.is_ok() {
-                added += 1;
-            }
+            })
+            .await?;
+            added += 1;
         }
         Ok(added)
     }

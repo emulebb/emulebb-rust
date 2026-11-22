@@ -786,7 +786,12 @@ async fn rejected_discovery_url_documents_leave_servers_and_nodes_bytes_unchange
             Reply::raw(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n")
         } else { Reply::body(b"malformed discovery bytes") }).collect();
         let source = server(replies).await;
-        assert!(!core.import_server_met_url(&source.url).await.unwrap());
+        let result = core.import_server_met_url(&source.url).await;
+        if oversized {
+            assert!(matches!(result, Ok(false)));
+        } else {
+            assert!(result.is_err());
+        }
         assert!(!matches!(
             core.import_kad_nodes_url(&source.url).await,
             Ok(true)
