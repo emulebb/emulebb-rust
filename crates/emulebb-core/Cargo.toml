@@ -71,6 +71,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
 tokio-util = { workspace = true, features = ["codec"] }
 rusqlite.workspace = true
 rustls.workspace = true

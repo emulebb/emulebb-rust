@@ -617,6 +617,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "walkdir",
  "webpki-root-certs",

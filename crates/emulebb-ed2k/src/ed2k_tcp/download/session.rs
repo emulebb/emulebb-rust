@@ -332,6 +332,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 return Ok(Ed2kPeerDownloadOutcome::Completed);
             }
             if scheduling_yield.is_cancelled() || redundant_peer.is_cancelled() {
+                tracing::debug!(%peer_addr, job_id = %job_token.job_id,
+                    session_payload_down = session_state.session_payload_down,
+                    scheduling_yield = scheduling_yield.is_cancelled(),
+                    redundant_peer = redundant_peer.is_cancelled(),
+                    "download peer cancelled before request scheduling");
                 return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
             }
 
@@ -436,7 +441,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             // outcome; its partially read frame must never be reused for A4AF.
             let read_result = tokio::select! {
                 biased;
-                () = scheduling_yield.cancelled() => return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete),
+                () = scheduling_yield.cancelled() => {
+                    tracing::debug!(%peer_addr, job_id = %job_token.job_id,
+                        session_payload_down = session_state.session_payload_down,
+                        "closing download peer for scheduling yield");
+                    return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                },
                 () = redundant_peer.cancelled() => {
                     tracing::debug!(%peer_addr, job_id = %job_token.job_id, "closing redundant download peer after part verification");
                     return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
@@ -457,6 +467,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             let packet = match read_result {
                 Ok(Ok(Some(packet))) => packet,
                 Ok(Ok(None)) => {
+                    tracing::debug!(%peer_addr, job_id = %job_token.job_id,
+                        session_payload_down = session_state.session_payload_down,
+                        "download peer reached EOF");
                     if session_state.hello_complete {
                         dump_ed2k_tcp_download_meta(
                             peer_addr,
@@ -476,6 +489,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     anyhow::bail!("peer {peer_addr} closed ED2K download session");
                 }
                 Ok(Err(error)) => {
+                    tracing::debug!(%peer_addr, job_id = %job_token.job_id,
+                        session_payload_down = session_state.session_payload_down,
+                        error = %format_args!("{error:#}"), "download peer read failed");
                     if session_state.hello_complete && is_connection_shutdown_error(&error) {
                         dump_ed2k_tcp_download_meta(
                             peer_addr,
@@ -519,6 +535,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         continue;
                     }
                     if session_state.hello_complete {
+                        tracing::debug!(%peer_addr, job_id = %job_token.job_id,
+                            session_payload_down = session_state.session_payload_down,
+                            pending_requests = pending_part_requests.len(),
+                            "download peer response deadline expired");
                         dump_ed2k_tcp_download_meta(
                             peer_addr,
                             Some(transport.mode),
