@@ -103,7 +103,9 @@ mod profile_import;
 mod profile_model;
 mod profile_ownership;
 mod profile_store;
+mod server_mutation;
 mod server_query;
+pub use server_mutation::MetadataServerUpdate;
 pub use server_query::{
     MetadataServerPage, MetadataServerQuery, MetadataServerReadError, MetadataServerRecord,
     SERVER_READ_MAX_BYTES,
