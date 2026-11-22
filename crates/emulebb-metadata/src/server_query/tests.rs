@@ -1,5 +1,86 @@
 use super::*;
-use crate::MetadataServerUpdate;
+use crate::{MetadataServerUpdate, ServerEndpointConflict};
+
+#[test]
+fn explicit_server_creation_conflict_preserves_disabled_resource_and_observations() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut original = server("seed.example");
+    original.enabled = false;
+    original.failed_count = 3;
+    let id = store.create_server_resource(&original).unwrap();
+    let before = store.server_by_id(id).unwrap().unwrap().server;
+    let mut duplicate = server("SEED.EXAMPLE");
+    duplicate.name = "Must Not Replace".into();
+    duplicate.server_priority = "high".into();
+    let error = store.create_server_resource(&duplicate).unwrap_err();
+    assert!(error.is::<ServerEndpointConflict>());
+    assert_eq!(store.server_by_id(id).unwrap().unwrap().server, before);
+    assert!(store.delete_server_resource(id).unwrap());
+    let created = store.create_server_resource(&duplicate).unwrap();
+    assert!(created > id);
+    assert_eq!(
+        store.server_page(Default::default()).unwrap().servers.len(),
+        1
+    );
+}
+
+#[test]
+fn concurrent_server_creators_have_one_winner_and_one_endpoint_conflict() {
+    let store = MetadataStore::in_memory().unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let create = |address| {
+            barrier.wait();
+            store.create_server_resource(&server(address))
+        };
+        let first = scope.spawn(move || create("seed.example"));
+        let second = scope.spawn(move || create("SEED.EXAMPLE"));
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(
+        outcomes
+            .into_iter()
+            .find_map(Result::err)
+            .unwrap()
+            .is::<ServerEndpointConflict>()
+    );
+    assert_eq!(
+        store.server_page(Default::default()).unwrap().servers.len(),
+        1
+    );
+}
+
+#[test]
+fn failed_discovery_initialization_rolls_back_explicit_server_creation() {
+    let store = MetadataStore::in_memory().unwrap();
+    store.connection().unwrap().execute_batch(
+        "CREATE TRIGGER block_server_initialization BEFORE UPDATE ON discovery_initialization
+         WHEN NEW.domain='servers' BEGIN SELECT RAISE(ABORT,'injected initialization failure'); END;"
+    ).unwrap();
+    assert!(
+        store
+            .create_server_resource(&server("seed.example"))
+            .is_err()
+    );
+    assert!(
+        store
+            .server_page(Default::default())
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+    let status: String = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM discovery_initialization WHERE domain='servers'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
+}
 
 #[test]
 fn operator_server_edits_preserve_endpoint_and_network_observations() {

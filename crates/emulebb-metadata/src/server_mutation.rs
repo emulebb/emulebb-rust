@@ -2,7 +2,18 @@
 use anyhow::{Result, ensure};
 use rusqlite::{TransactionBehavior, params};
 
-use crate::{MetadataStore, store::unix_s};
+use crate::{MetadataServer, MetadataStore, store::unix_s};
+
+/// Explicit creation cannot modify a resource already owning this live endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerEndpointConflict;
+
+impl std::fmt::Display for ServerEndpointConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("server endpoint already exists")
+    }
+}
+impl std::error::Error for ServerEndpointConflict {}
 
 /// Saved operator fields; network observations and endpoint identity are separate.
 #[derive(Debug, Clone, Default)]
@@ -14,6 +25,26 @@ pub struct MetadataServerUpdate {
 }
 
 impl MetadataStore {
+    /// Create a resource without import's merge semantics. The writer lock spans
+    /// duplicate detection, insertion and discovery initialization.
+    pub fn create_server_resource(&self, server: &MetadataServer) -> Result<i64> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // WHY: a duplicate request must not edit or enable the existing server.
+        // Keep the live-endpoint check under the same SQLite writer lock as the
+        // insertion so concurrent creators cannot both claim success.
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM servers WHERE address=?1 AND port=?2 AND deleted_at_s IS NULL)",
+            params![server.address, server.port],
+            |row| row.get(0),
+        )?;
+        ensure!(!exists, ServerEndpointConflict);
+        let id = crate::profile_store::upsert_server_in_transaction(&transaction, server)?;
+        Self::mark_discovery_initialized(&transaction, crate::DiscoveryDomain::Servers)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
     /// Apply only selected fields to one live ID. False means no such resource.
     /// Unchanged values still acknowledge an existing resource.
     pub fn update_server_resource(&self, id: i64, update: &MetadataServerUpdate) -> Result<bool> {

@@ -393,7 +393,7 @@ impl super::MetadataStore {
     }
 }
 
-fn upsert_server_in_transaction(
+pub(super) fn upsert_server_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     server: &MetadataServer,
 ) -> Result<i64> {
