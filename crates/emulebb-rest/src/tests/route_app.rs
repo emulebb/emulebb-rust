@@ -765,7 +765,7 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     assert_eq!(data["app"]["name"], "eMuleBB");
     assert_eq!(data["status"]["lifecycle"]["state"], "running");
     assert_eq!(data["downloads"], json!({"unfinished":0,"completed":0}));
-    assert_eq!(data["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(data["status"]["servers"]["serverCount"], 1);
     assert_eq!(data["uploads"].as_array().unwrap().len(), 0);
     assert_eq!(data["uploadQueue"].as_array().unwrap().len(), 0);
     assert!(data["kad"].is_object());

@@ -86,7 +86,6 @@ const snapshot = {
   },
   downloads: { unfinished: 1, completed: 0 },
   searches: [],
-  servers: [{ id: "1", endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, auxiliaryPorts: [4662, 4663] }],
   kad: { enabled: true, connected: true, firewalled: false },
   uploads: [uploadFixture()],
   uploadQueue: [uploadFixture({ id: "12345678-1234-4234-8234-123456789abd", address: "192.0.2.11",
@@ -153,7 +152,8 @@ export function installMockApi(requests: RecordedApiRequest[]) {
     }
     if (request.method() === "GET" && path === "servers") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
-        data: snapshot.servers, meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
+        data: [{ id: "1", endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true, auxiliaryPorts: [4662, 4663] }],
+        meta: { apiVersion: "v1", nextCursor: null, hasMore: false }
       }) });
       return;
     }

@@ -42,6 +42,7 @@ import {
   SearchResultMedia,
   SearchResult,
   ServerItem,
+  ServerStatus,
   LibraryScan,
   LibraryRoot,
   SharedFileIgnores,
@@ -100,13 +101,12 @@ export function Overview(props: {
   snapshot: Snapshot | null;
   stats: Partial<Stats>;
   transfers: DownloadSummary[];
-  servers: ServerItem[];
   uploads: Upload[];
   uploadQueue: Upload[];
   libraryScan: LibraryScan | null;
   kad: KadStatus;
 }) {
-  const connectedServers = props.servers.filter((item) => item.connected).length;
+  const connectedServers = props.snapshot?.status?.servers?.connected ? 1 : 0;
   const resources = props.stats.downloadResources;
   const reload = props.libraryScan?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? props.snapshot?.status?.sharedStartupCache?.reloadProgress ?? {};
   const startupStages = startupStageRows(props.snapshot, props.libraryScan, props.kad, connectedServers);
@@ -1530,7 +1530,7 @@ type NetworkDownloadSource = DownloadSource & {
 };
 
 export function NetworkHealthView(props: {
-  servers: ServerItem[];
+  serverStatus: ServerStatus | undefined;
   transfers: DownloadSummary[];
   uploads: Upload[];
   uploadQueue: Upload[];
@@ -1543,6 +1543,18 @@ export function NetworkHealthView(props: {
   const [filter, setFilter] = useState("");
   const [selectedKey, setSelectedKey] = useState("");
   const [loadError, setLoadError] = useState("");
+  const [serverPage, setServerPage] = useState<CursorPage<ServerItem> | null>(null);
+  const [serverCursor, setServerCursor] = useState<string | null>(null);
+  const servers = serverPage?.data ?? [];
+
+  useEffect(() => {
+    let cancelled = false;
+    setServerPage(null);
+    void props.client.getPage<ServerItem>(`servers?limit=100${serverCursor ? `&cursor=${encodeURIComponent(serverCursor)}` : ""}`)
+      .then((page) => { if (!cancelled) setServerPage(page); })
+      .catch((error) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error)); });
+    return () => { cancelled = true; };
+  }, [props.client, serverCursor]);
   const sourceTargets = useMemo(
     () => props.transfers
       .filter((transfer) => transfer.state !== "completed")
@@ -1596,8 +1608,8 @@ export function NetworkHealthView(props: {
 
   const bindPolicy = networkBindPolicy(props.settings);
   const rows = useMemo(
-    () => networkEndpointRows(props.servers, nodes, sources, props.uploads, props.uploadQueue, bindPolicy),
-    [bindPolicy, nodes, props.servers, props.uploadQueue, props.uploads, sources]
+    () => networkEndpointRows(servers, nodes, sources, props.uploads, props.uploadQueue, bindPolicy),
+    [bindPolicy, nodes, servers, props.uploadQueue, props.uploads, sources]
   );
   const filteredRows = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -1624,7 +1636,7 @@ export function NetworkHealthView(props: {
     <section class="view-stack">
       <section class="view-grid">
         <Metric label="Kad Nodes" value={String(nodes.length)} />
-        <Metric label="Servers" value={`${props.servers.filter((server) => server.connected).length}/${props.servers.length}`} />
+        <Metric label="Servers" value={`${props.serverStatus?.connected ? 1 : 0}/${props.serverStatus?.serverCount ?? "unknown"}`} />
         <Metric label="Peer Endpoints (page)" value={String(sources.length + props.uploads.length + props.uploadQueue.length)} />
         <Metric label="DNS Pending" value={String(unresolved)} />
         <Metric label="DNS Failed" value={String(dnsFailed)} />
@@ -1656,6 +1668,11 @@ export function NetworkHealthView(props: {
           </div>
         </div>
         <TableScroll label="Network connections">
+          <div class="section-title">
+            <span>Server endpoint page</span>
+            <CursorControls cursor={serverCursor} nextCursor={serverPage?.meta.nextCursor ?? null}
+              loading={!serverPage && !loadError} change={setServerCursor} />
+          </div>
           <table class="table table-vcenter card-table">
             <thead>
               <tr>

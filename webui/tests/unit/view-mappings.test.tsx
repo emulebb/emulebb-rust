@@ -3,13 +3,31 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RestClient, RestError, type Upload } from "../../src/api";
 import { uploadFixture, uploadScore } from "../fixtures/mockApi";
-import { Overview, ServersView, SharingView, UploadsView } from "../../src/views";
+import { NetworkHealthView, Overview, ServersView, SharingView, UploadsView } from "../../src/views";
 
 afterEach(() => { vi.restoreAllMocks(); });
 
 const run = async (operation: () => Promise<unknown>) => { await operation(); };
 
 describe("canonical view mappings", () => {
+  it("pages network server endpoints independently of status counts", async () => {
+    const client = new RestClient();
+    vi.spyOn(client, "get").mockResolvedValue({ items: [] });
+    const pages = vi.spyOn(client, "getPage").mockImplementation(async (path) => ({
+      data: [{ address: path.includes("cursor=") ? "second.example" : "first.example", port: 4661 }],
+      meta: { apiVersion: "v1", nextCursor: path.includes("cursor=") ? null : "server-next", hasMore: !path.includes("cursor=") }
+    }));
+    render(<NetworkHealthView serverStatus={{ connected: true, serverCount: 10001 }} transfers={[]}
+      uploads={[]} uploadQueue={[]} kad={{}} settings={null} client={client} />);
+    expect(screen.getByText("Servers").parentElement).toHaveTextContent("1/10001");
+    await waitFor(() => expect(screen.getByText("first.example:4661")).toBeVisible());
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(screen.getByText("second.example:4661")).toBeVisible());
+    expect(screen.queryByText("first.example:4661")).not.toBeInTheDocument();
+    expect(pages).toHaveBeenLastCalledWith("servers?limit=100&cursor=server-next");
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+  });
+
   it("refreshes an expired queue cursor and keeps only the current page", async () => {
     const client = new RestClient();
     vi.spyOn(client, "get").mockResolvedValue({ id: "detail-peer" });
@@ -38,7 +56,7 @@ describe("canonical view mappings", () => {
       active: 17, preparing: 2, waiting: 981,
       concurrency: { mode: "fixed", configuredLimit: 16, target: 16, burstActive: 1 },
       residentMemory: { usedBytes: 33554432, softTargetBytes: 67108864, limitBytes: 134217728 }
-    } }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]} libraryScan={null} kad={{}} />);
+    } }} transfers={[]} uploads={[]} uploadQueue={[]} libraryScan={null} kad={{}} />);
     expect(screen.getByText("17 active / 2 preparing / 981 waiting")).toBeVisible();
     expect(screen.getByText("1000 unfinished / 99000 completed")).toBeVisible();
     expect(screen.getByText("Configured limit 16")).toBeVisible();
@@ -78,7 +96,7 @@ describe("canonical view mappings", () => {
   it("uses total shared-file diagnostics rather than a bounded snapshot page and does not invent shared bytes", () => {
     vi.spyOn(RestClient.prototype, "getPage").mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     const { unmount } = render(<Overview snapshot={{ status: { runtimeDiagnostics: { sharedFileCount: 1001 } } }}
-      stats={{ sharedFiles: 3, sharedBytes: 123 }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]} libraryScan={null} kad={{}} />);
+      stats={{ sharedFiles: 3, sharedBytes: 123 }} transfers={[]} uploads={[]} uploadQueue={[]} libraryScan={null} kad={{}} />);
     expect(screen.getByText("Shared").parentElement).toHaveTextContent("1001");
     expect(screen.getByText("Shared bytes").nextElementSibling).toHaveTextContent("n/a");
     unmount();

@@ -47,7 +47,7 @@ async fn server_connect_reports_core_failures() {
 }
 
 #[tokio::test]
-async fn snapshot_limit_does_not_truncate_servers() {
+async fn snapshot_uses_server_summary_and_catalog_is_a_separate_resource() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     for index in 1..=2 {
@@ -76,6 +76,7 @@ async fn snapshot_limit_does_not_truncate_servers() {
     );
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/v1/snapshot?limit=1")
@@ -88,13 +89,16 @@ async fn snapshot_limit_does_not_truncate_servers() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["servers"].as_array().unwrap().len(), 2);
-    assert_eq!(value["data"]["servers"][0]["name"], "snapshot-server-1");
-    assert_eq!(value["data"]["servers"][1]["name"], "snapshot-server-2");
+    assert_eq!(value["data"]["status"]["servers"]["serverCount"], 2);
+    let (status, page) =
+        crate::rest_test_support::request(&app, "GET", "/api/v1/servers?limit=1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["data"][0]["name"], "snapshot-server-1");
+    assert_eq!(page["meta"]["hasMore"], true);
 }
 
 #[tokio::test]
-async fn retained_snapshot_frames_share_capacity_and_release_after_final_drop() {
+async fn retained_server_page_frames_share_capacity_and_release_after_final_drop() {
     use http_body_util::BodyExt;
 
     let core =
@@ -117,14 +121,14 @@ async fn retained_snapshot_frames_share_capacity_and_release_after_final_drop() 
     );
     let request = || {
         Request::builder()
-            .uri("/api/v1/snapshot?limit=1")
+            .uri("/api/v1/servers?limit=200")
             .header("X-API-Key", "secret")
             .body(Body::empty())
             .unwrap()
     };
     let mut retained = Vec::new();
     let mut refused = false;
-    for _ in 0..8 {
+    for _ in 0..64 {
         let response = app.clone().oneshot(request()).await.unwrap();
         if response.status() == StatusCode::SERVICE_UNAVAILABLE {
             let error: Value =
@@ -137,10 +141,11 @@ async fn retained_snapshot_frames_share_capacity_and_release_after_final_drop() 
         assert_eq!(response.status(), StatusCode::OK);
         let mut body = response.into_body();
         let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
-        assert!(frame.len() > 1024 * 1024);
+        assert!(frame.len() > 128 * 1024);
         let document: Value = serde_json::from_slice(&frame).unwrap();
         assert_eq!(document["meta"]["apiVersion"], "v1");
-        assert_eq!(document["data"]["downloads"]["unfinished"], 0);
+        assert!(!document["data"].as_array().unwrap().is_empty());
+        assert_eq!(document["meta"]["hasMore"], true);
         retained.push(frame.clone());
         drop(frame);
         drop(body);
@@ -148,7 +153,7 @@ async fn retained_snapshot_frames_share_capacity_and_release_after_final_drop() 
     assert!(!retained.is_empty());
     assert!(
         refused,
-        "retained snapshot backing must exhaust shared capacity"
+        "retained server-page backing must exhaust shared capacity"
     );
     drop(retained);
     let recovered = app.oneshot(request()).await.unwrap();

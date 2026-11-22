@@ -358,10 +358,6 @@ pub(crate) fn server_response(server: &ServerInfo) -> Value {
     response
 }
 
-pub(crate) fn server_responses(servers: Vec<ServerInfo>) -> Vec<Value> {
-    servers.iter().map(server_response).collect()
-}
-
 pub(crate) async fn server_status_response(state: &RestState) -> Result<Value> {
     let status = state.core.status().await;
     let summary = state.core.server_connection_summary().await?;
