@@ -328,7 +328,7 @@ export type ServerItem = {
   udpFlags?: number | null;
   hostName?: string | null;
   hostNameStatus?: string | null;
-  hostNameResolvedAt?: string | null;
+  hostNameResolvedAt?: number | null;
   hostNameError?: string | null;
   [key: string]: unknown;
 };
@@ -338,7 +338,7 @@ export type KadNode = {
   ip?: string;
   hostName?: string | null;
   hostNameStatus?: string | null;
-  hostNameResolvedAt?: string | null;
+  hostNameResolvedAt?: number | null;
   hostNameError?: string | null;
   udpPort?: number;
   tcpPort?: number;
@@ -352,8 +352,8 @@ export type KadNode = {
   tcpFirewalled?: boolean;
   receivedHelloPacket?: boolean;
   bootstrap?: boolean;
-  createdAt?: string;
-  lastSeen?: string;
+  createdAt?: number;
+  lastSeen?: number;
   [key: string]: unknown;
 };
 
@@ -375,8 +375,7 @@ export type KadStatus = {
 };
 
 export type LogRecord = {
-  ts?: string;
-  timestamp?: string;
+  timestamp?: number;
   level?: string;
   message?: string;
   target?: string;
@@ -388,6 +387,11 @@ export type Category = {
   tempDir: string | null;
   destinationDir: string | null;
   comment: string;
+};
+
+export type DiagnosticBundle = Record<string, unknown> & {
+  schema: "emulebb.diagnostic-bundle.v7";
+  capturedAt: number;
 };
 
 export type Friend = {
@@ -803,15 +807,15 @@ export class RestClient {
     return this.request<T>("POST", path, body);
   }
 
-  async captureDiagnosticBundle(maxBytes: number): Promise<Record<string, unknown>> {
+  async captureDiagnosticBundle(maxBytes: number): Promise<DiagnosticBundle> {
     // This endpoint deliberately returns the bundle itself, not a data envelope.
     const bundle = await this.request<Record<string, unknown>>(
       "POST", "diagnostics/bundles", { confirmCapture: true, maxBytes }, "json"
     );
-    if (!isRecord(bundle) || bundle.schema !== "emulebb.diagnostic-bundle.v7" || typeof bundle.capturedAt !== "string") {
+    if (!isRecord(bundle) || bundle.schema !== "emulebb.diagnostic-bundle.v7" || typeof bundle.capturedAt !== "number" || !Number.isSafeInteger(bundle.capturedAt) || bundle.capturedAt < 0) {
       throw new Error("Diagnostic bundle returned an unexpected response");
     }
-    return bundle;
+    return bundle as DiagnosticBundle;
   }
 
   async patch<T>(path: string, body: unknown): Promise<T> {

@@ -131,6 +131,7 @@ pub struct ServerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_name_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, with = "chrono::serde::ts_seconds_option")]
     pub host_name_resolved_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_name_error: Option<String>,
@@ -141,6 +142,7 @@ pub struct ServerInfo {
 pub struct HostNameResolution {
     pub host_name: Option<String>,
     pub host_name_status: String,
+    #[serde(default, with = "chrono::serde::ts_seconds_option")]
     pub host_name_resolved_at: Option<DateTime<Utc>>,
     pub host_name_error: Option<String>,
 }
@@ -152,6 +154,7 @@ pub struct KadNode {
     pub ip: String,
     pub host_name: Option<String>,
     pub host_name_status: String,
+    #[serde(default, with = "chrono::serde::ts_seconds_option")]
     pub host_name_resolved_at: Option<DateTime<Utc>>,
     pub host_name_error: Option<String>,
     pub udp_port: u16,
@@ -166,7 +169,9 @@ pub struct KadNode {
     pub tcp_firewalled: bool,
     pub received_hello_packet: bool,
     pub bootstrap: bool,
+    #[serde(with = "chrono::serde::ts_seconds")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono::serde::ts_seconds")]
     pub last_seen: DateTime<Utc>,
 }
 
@@ -437,7 +442,9 @@ pub struct Search {
     pub status_reason: Option<String>,
     #[serde(default)]
     pub progress: SearchProgress,
+    #[serde(with = "chrono::serde::ts_seconds")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono::serde::ts_seconds")]
     pub updated_at: DateTime<Utc>,
 }
 
@@ -519,6 +526,7 @@ pub struct SearchResultObservation {
     pub aich_hash: String,
     pub complete: bool,
     pub directory: String,
+    #[serde(with = "chrono::serde::ts_seconds")]
     pub observed_at: DateTime<Utc>,
 }
 
@@ -968,7 +976,7 @@ pub enum NullableStringField {
 pub struct Friend {
     pub user_hash: String,
     pub name: String,
-    #[serde(with = "chrono::serde::ts_seconds_option")]
+    #[serde(default, with = "chrono::serde::ts_seconds_option")]
     pub last_seen: Option<DateTime<Utc>>,
     pub address: Option<String>,
     pub port: u16,

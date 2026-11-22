@@ -895,6 +895,22 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   expect(JSON.parse(kadImportPost?.body ?? "{}")).toEqual({ url: "http://example.invalid/nodes.dat" });
 });
 
+test("Kad node dates display calendar seconds including epoch zero", async ({ page }) => {
+  await page.route("**/api/v1/**", installMockApi([]));
+  await page.route("**/api/v1/kad/nodes?*", async route => {
+    await route.fulfill({ json: { data: { items: [
+      { nodeId: "00112233445566778899aabbccddeeff", ip: "192.0.2.10", createdAt: 0, lastSeen: 0 },
+      { nodeId: "112233445566778899aabbccddeeff00", ip: "192.0.2.11", createdAt: 1_800_000_000, lastSeen: 1_800_000_000 },
+    ] } } });
+  });
+  await page.goto("/");
+  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  for (const [ip, seconds] of [["192.0.2.10", 0], ["192.0.2.11", 1_800_000_000]] as const) {
+    const expected = await page.evaluate(time => new Date(time * 1000).toLocaleString(), seconds);
+    await expect(page.getByRole("row").filter({ hasText: ip }).getByRole("cell").nth(7)).toHaveText(expected);
+  }
+});
+
 test("friends display nullable calendar seconds including epoch zero", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi([]));
   await page.route("**/api/v1/friends", async route => {

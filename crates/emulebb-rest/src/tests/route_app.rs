@@ -462,6 +462,7 @@ async fn app_shutdown_requires_confirmation_and_signals_daemon() {
 
 #[tokio::test]
 async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
+    let capture_started_at = chrono::Utc::now().timestamp();
     let runtime_dir = unique_test_dir("diagnostic-bundle");
     let transfer_root = runtime_dir.join("transfers");
     let core = Arc::new(
@@ -539,6 +540,8 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(value.get("path").is_none());
     assert!(value.get("byteCount").is_none());
     assert_eq!(value["schema"], "emulebb.diagnostic-bundle.v7");
+    let captured_at = value["capturedAt"].as_i64().unwrap();
+    assert!((capture_started_at..=chrono::Utc::now().timestamp()).contains(&captured_at));
     assert_eq!(value["budget"]["maxBytes"], 4_194_304);
     assert_eq!(value["budget"]["encodedBytes"], body.len());
     assert_eq!(value["summary"]["artifactFileCount"], 0);

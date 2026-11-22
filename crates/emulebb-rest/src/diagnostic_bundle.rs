@@ -116,7 +116,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Box<[
 
     let payload = json!({
         "schema": DIAGNOSTIC_BUNDLE_SCHEMA,
-        "capturedAt": Utc::now(),
+        "capturedAt": Utc::now().timestamp(),
         "app": app_info_response(state.core.app_info()),
         "status": status,
         "settings": settings,

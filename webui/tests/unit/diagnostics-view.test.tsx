@@ -45,8 +45,8 @@ describe("DiagnosticsView", () => {
 
   it("downloads caller-owned inline diagnostic bundles", async () => {
     const bundle = {
-      schema: "emulebb.diagnostic-bundle.v7",
-      capturedAt: "2026-10-25T12:34:56Z",
+      schema: "emulebb.diagnostic-bundle.v7" as const,
+      capturedAt: 1792931696,
       summary: { artifactFileCount: 1, missingArtifactFamilies: [], issueCount: 0 }
     };
     const client = new RestClient();
@@ -88,7 +88,7 @@ describe("DiagnosticsView", () => {
     expect(capture).toHaveBeenCalledWith(16 * 1024 * 1024);
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:diagnostic-bundle");
-    expect(downloadedFileName).toBe("emulebb-rust-diagnostic-bundle-20261025T123456Z.json");
+    expect(downloadedFileName).toBe("emulebb-rust-diagnostic-bundle-1792931696.json");
     expect(screen.getByText(`Downloaded: ${downloadedFileName}`)).toBeInTheDocument();
   });
 

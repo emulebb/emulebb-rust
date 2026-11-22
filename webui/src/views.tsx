@@ -2494,13 +2494,13 @@ function yesNo(value: unknown): string {
   return value === true ? "yes" : "no";
 }
 
-function shortTime(value?: string | null): string {
-  if (!value) {
+function shortTime(value?: number | null): string {
+  if (value == null) {
     return "";
   }
-  const date = new Date(value);
+  const date = new Date(value * 1000);
   if (Number.isNaN(date.getTime())) {
-    return value;
+    return "";
   }
   return date.toLocaleString();
 }
@@ -2794,8 +2794,7 @@ export function DiagnosticsView(props: {
 
   const captureBundle = async () => {
     const bundle = await props.client.captureDiagnosticBundle(16 * 1024 * 1024);
-    const capturedAt = typeof bundle.capturedAt === "string" ? bundle.capturedAt : new Date().toISOString();
-    const stamp = capturedAt.replace(/[^0-9A-Za-z]/g, "");
+    const stamp = String(bundle.capturedAt);
     const fileName = `emulebb-rust-diagnostic-bundle-${stamp}.json`;
     const blob = new Blob([`${JSON.stringify(bundle, null, 2)}\n`], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2908,8 +2907,8 @@ export function LogsView(props: { logs: LogRecord[]; client: RestClient; run: Ru
       </div>
       <div class="logs">
         {props.logs.map((log, index) => (
-          <div class="log-row" key={`${log.timestamp ?? log.ts ?? index}-${index}`}>
-            <time>{log.timestamp ?? log.ts ?? ""}</time>
+          <div class="log-row" key={`${log.timestamp ?? index}-${index}`}>
+            <time>{shortTime(log.timestamp)}</time>
             <span>{log.level ?? "INFO"}</span>
             <p>{log.message ?? ""}</p>
           </div>
