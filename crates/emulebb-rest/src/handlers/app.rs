@@ -12,6 +12,7 @@ use axum::{
     },
 };
 use futures_util::stream;
+use serde::Serialize;
 use serde_json::json;
 use std::convert::Infallible;
 
@@ -325,17 +326,38 @@ pub(crate) async fn snapshot(
         Ok(page) => page,
         Err(error) => return super::persistence::persistence_error(error),
     };
-    api_ok(json!({
-        "app": app_info_response(state.core.app_info()),
-        "status": status,
-        "downloads": &*downloads,
-        "sharedFiles": shared_files,
-        "uploads": &uploads.uploads,
-        "uploadQueue": &upload_queue.uploads,
-        "servers": servers,
-        "kad": kad,
-        "network": network_response(network.as_ref(), &state.core.vpn_guard_status()),
-        "logs": recent_log_values(limit)
-    }))
-    .into_response()
+    // WHY: a JSON value tree would copy both admitted upload pages and release
+    // their charges before a slow receiver drops the encoded body. Borrow the
+    // rows and admit exact wire backing through the existing read registry.
+    super::resource::retained_json(
+        &downloads,
+        &super::resource::item_document(SnapshotResponse {
+            app: app_info_response(state.core.app_info()),
+            status,
+            downloads: &downloads,
+            shared_files,
+            uploads: &uploads.uploads,
+            upload_queue: &upload_queue.uploads,
+            servers,
+            kad,
+            network: network_response(network.as_ref(), &state.core.vpn_guard_status()),
+            logs: recent_log_values(limit),
+        }),
+    )
+}
+
+/// Borrow admitted transfer rows while encoding the dashboard envelope.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotResponse<'a> {
+    app: serde_json::Value,
+    status: serde_json::Value,
+    downloads: &'a emulebb_core::DownloadCounts,
+    shared_files: Vec<crate::dto::SharedFileResponse>,
+    uploads: &'a [emulebb_core::Upload],
+    upload_queue: &'a [emulebb_core::Upload],
+    servers: Vec<serde_json::Value>,
+    kad: serde_json::Value,
+    network: serde_json::Value,
+    logs: Vec<serde_json::Value>,
 }
