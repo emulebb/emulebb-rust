@@ -2181,7 +2181,13 @@ pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Re
     }
     state.pending = true;
     core.shared_reload_pending.store(true, Ordering::Release);
-    record_reload_progress(core, |diagnostics| diagnostics.phase = "queued".to_string());
+    record_reload_progress(core, |diagnostics| {
+        // WHY: a coalesced follow-up belongs to pending work. It must not
+        // overwrite the active pass's phase or imply its progress restarted.
+        if matches!(diagnostics.phase.as_str(), "idle" | "queued") {
+            diagnostics.phase = "queued".to_string();
+        }
+    });
     start_reload_worker(core, &mut state);
     core.shared_reload_control.wake.notify_one();
     Ok(0)

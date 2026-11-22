@@ -8,8 +8,10 @@
 //! `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`. Thus two mount points backed by one
 //! physical drive share a worker and a volume striped across disks fans out by
 //! its first extent. Raw FFI mirrors `emulebb-kad-net/src/socket_opts.rs`. Any
-//! resolution failure (and every non-Windows platform) falls back to a
-//! volume-root string key, which still parallelizes across distinct volumes.
+//! Windows resolution failures fall back to a volume-root key. Unix uses the
+//! filesystem device ID as a portable scheduling proxy; separate partitions or
+//! virtual volumes can share underlying hardware. Other platforms use a path-root
+//! proxy. The key is resolved once per configured root, not once per file.
 
 use std::path::Path;
 
@@ -50,8 +52,8 @@ fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
 }
 
 /// A stable, hashable key naming the physical disk a path primarily reads from.
-/// Equal keys mean "same spindle -> hash serially"; distinct keys hash in
-/// parallel. Never panics; resolution failures degrade to a volume-root key.
+/// Equal keys hash serially; distinct keys may hash in parallel. Unix identifies
+/// filesystems rather than their underlying physical hardware. Never panics.
 pub(crate) fn physical_disk_key(path: &Path) -> String {
     #[cfg(windows)]
     {
@@ -74,7 +76,13 @@ pub(crate) fn physical_disk_key(path: &Path) -> String {
             None => "vol:other".to_string(),
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        // WHY: every absolute Unix path starts at `/`. Its first component
+        // cannot distinguish mounted filesystems for independent hash workers.
+        volume_key(path)
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         // No portable physical-disk query: group by the top-level path component
         // (a mount-point proxy) so distinct mounts still hash concurrently.
@@ -262,6 +270,19 @@ mod tests {
         // On Windows it resolves to either a physical disk or a per-letter key.
         #[cfg(windows)]
         assert!(a.starts_with("disk:") || a.starts_with("vol:"), "got {a}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_grouping_uses_filesystem_identity_for_existing_and_future_paths() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir();
+        let expected = format!("dev:{}", std::fs::metadata(&root).unwrap().dev());
+        assert_eq!(physical_disk_key(&root), expected);
+        let future = root
+            .join(format!("emulebb-uncreated-{}", uuid::Uuid::new_v4()))
+            .join("nested");
+        assert_eq!(physical_disk_key(&future), expected);
     }
 
     #[cfg(windows)]

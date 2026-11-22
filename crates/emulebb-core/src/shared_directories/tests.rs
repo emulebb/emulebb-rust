@@ -4,6 +4,57 @@ use emulebb_metadata::MetadataFileImportRecord;
 use std::fs;
 use std::sync::atomic::AtomicU64;
 
+#[tokio::test]
+async fn followup_scan_requests_preserve_active_pass_progress() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let guard = core.shared_reload_gate.lock().await;
+    core.reload_shared_directories_detached().await.unwrap();
+    assert_eq!(core.shared_directory_reload_progress().phase, "queued");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while core.shared_reload_pending.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for phase in ["scanning", "planning", "hashing"] {
+        record_reload_progress(&core, |progress| {
+            progress.phase = phase.into();
+            progress.scanned_count = 123;
+            progress.planned_hash_count = 50;
+            progress.hashed_count = 7;
+            progress.started_at_ms = Some(1_000);
+            progress.updated_at_ms = Some(2_000);
+        });
+        for _ in 0..3 {
+            core.reload_shared_directories_detached().await.unwrap();
+        }
+        let progress = core.shared_directory_reload_progress();
+        assert_eq!(progress.phase, phase);
+        assert!(progress.running && progress.pending);
+        assert_eq!(
+            (
+                progress.scanned_count,
+                progress.planned_hash_count,
+                progress.hashed_count
+            ),
+            (123, 50, 7)
+        );
+        assert_eq!(
+            (progress.started_at_ms, progress.updated_at_ms),
+            (Some(1_000), Some(2_000))
+        );
+    }
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), drain_reload(&core))
+        .await
+        .unwrap()
+        .unwrap();
+    let progress = core.shared_directory_reload_progress();
+    assert!(!progress.running && !progress.pending);
+    assert_eq!(progress.phase, "idle");
+}
+
 /// Allocate a unique scratch directory under the system temp root.
 fn scratch_dir(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
