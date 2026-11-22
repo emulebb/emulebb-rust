@@ -539,7 +539,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(value.get("fullMemoryIncluded").is_none());
     assert!(value.get("path").is_none());
     assert!(value.get("byteCount").is_none());
-    assert_eq!(value["schema"], "emulebb.diagnostic-bundle.v7");
+    assert_eq!(value["schema"], "emulebb.diagnostic-bundle.v8");
     let captured_at = value["capturedAt"].as_i64().unwrap();
     assert!((capture_started_at..=chrono::Utc::now().timestamp()).contains(&captured_at));
     assert_eq!(value["budget"]["maxBytes"], 4_194_304);
@@ -555,7 +555,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(!runtime_dir.join("diagnostics").exists());
 
     let bundle = &value;
-    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v7");
+    assert_eq!(bundle["schema"], "emulebb.diagnostic-bundle.v8");
     assert!(bundle.get("memory").is_none());
     assert_eq!(bundle["settingsProvenance"]["apiKeyIncluded"], true);
     assert_eq!(bundle["settingsProvenance"]["sensitiveValues"], "exact");
@@ -575,7 +575,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(bundle["settings"].is_object());
     assert!(bundle["recentLogs"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["servers"]["items"].is_array());
-    assert!(bundle["operationalSnapshots"]["sharedFiles"]["items"].is_array());
+    assert!(bundle["operationalSnapshots"]["libraryFiles"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["searches"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["downloads"]["items"].is_array());
     assert!(bundle["operationalSnapshots"]["uploads"]["items"].is_array());
@@ -583,7 +583,7 @@ async fn diagnostic_bundle_is_returned_inline_without_daemon_persistence() {
     assert!(bundle["diagnosticArtifacts"]["families"].is_array());
     assert_eq!(bundle["limits"]["artifactFamilies"], 1);
     assert_eq!(bundle["limits"]["serverSnapshots"], 512);
-    assert_eq!(bundle["limits"]["sharedFileSnapshots"], 512);
+    assert_eq!(bundle["limits"]["libraryFileSnapshots"], 200);
     assert_eq!(bundle["limits"]["searchSnapshots"], 64);
     assert_eq!(bundle["limits"]["searchResultsPerSnapshot"], 128);
     assert_eq!(bundle["limits"]["downloadSnapshots"], 200);
@@ -760,7 +760,6 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     assert_eq!(data["app"]["name"], "eMuleBB");
     assert_eq!(data["status"]["lifecycle"]["state"], "running");
     assert_eq!(data["downloads"], json!({"unfinished":0,"completed":0}));
-    assert_eq!(data["sharedFiles"].as_array().unwrap().len(), 1);
     assert_eq!(data["servers"].as_array().unwrap().len(), 1);
     assert_eq!(data["uploads"].as_array().unwrap().len(), 0);
     assert_eq!(data["uploadQueue"].as_array().unwrap().len(), 0);

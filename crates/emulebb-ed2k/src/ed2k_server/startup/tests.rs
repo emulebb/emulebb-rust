@@ -429,22 +429,6 @@ fn large_file_offered_only_to_largefiles_server() {
 }
 
 #[test]
-fn not_published_files_are_excluded_from_offer_catalog() {
-    let mut published = shared_entry(1);
-    published.upload_priority = "high".to_string();
-    let mut suppressed = shared_entry(2);
-    suppressed.upload_priority = "not-published".to_string();
-    let catalog = vec![published.clone(), suppressed.clone()];
-    let published_hash = popular_hash_offer_file(&published).unwrap().0;
-    let suppressed_hash = popular_hash_offer_file(&suppressed).unwrap().0;
-
-    let ranked = ranked_offer_files(&catalog, true);
-    assert_eq!(ranked, vec![popular_hash_offer_file(&published).unwrap()]);
-    assert_eq!(ranked[0].0, published_hash);
-    assert_ne!(ranked[0].0, suppressed_hash);
-}
-
-#[test]
 fn verified_share_suppresses_same_hash_compatibility_hint() {
     let verified = shared_entry(1);
     let mut hint = verified.clone();

@@ -142,10 +142,10 @@ pub struct SharedDirectoryReloadProgress {
     pub planned_read_bytes: u64,
     pub completed_read_bytes: u64,
     pub read_rate_bytes_per_sec: u64,
-    pub started_at_ms: Option<i64>,
+    pub started_at: Option<i64>,
     #[serde(skip)]
     started: Option<Instant>,
-    pub updated_at_ms: Option<i64>,
+    pub updated_at: Option<i64>,
     pub active: Vec<SharedDirectoryHashActiveFile>,
     pub recent: Vec<SharedDirectoryHashRecentFile>,
     pub upcoming: Vec<SharedDirectoryHashQueuedFile>,
@@ -167,10 +167,10 @@ pub struct SharedDirectoryHashActiveFile {
     pub read_bytes: u64,
     pub read_bytes_total: u64,
     pub read_rate_bytes_per_sec: u64,
-    pub started_at_ms: i64,
+    pub started_at: i64,
     #[serde(skip)]
     started: Option<Instant>,
-    pub updated_at_ms: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +189,7 @@ pub struct SharedDirectoryHashRecentFile {
     pub read_bytes_total: u64,
     pub duration_ms: i64,
     pub average_read_rate_bytes_per_sec: u64,
-    pub finished_at_ms: i64,
+    pub finished_at: i64,
     #[serde(skip)]
     finished: Option<Instant>,
 }
@@ -250,9 +250,9 @@ impl Default for SharedDirectoryReloadProgress {
             planned_read_bytes: 0,
             completed_read_bytes: 0,
             read_rate_bytes_per_sec: 0,
-            started_at_ms: None,
+            started_at: None,
             started: None,
-            updated_at_ms: None,
+            updated_at: None,
             active: Vec::new(),
             recent: Vec::new(),
             upcoming: Vec::new(),
@@ -1313,9 +1313,9 @@ impl ReloadPlanStats {
             planned_read_bytes: self.planned_hash_bytes,
             completed_read_bytes: 0,
             read_rate_bytes_per_sec: 0,
-            started_at_ms: None,
+            started_at: None,
             started: None,
-            updated_at_ms: None,
+            updated_at: None,
             active: Vec::new(),
             recent: Vec::new(),
             upcoming: Vec::new(),
@@ -1325,12 +1325,20 @@ impl ReloadPlanStats {
 }
 
 pub(crate) fn reload_progress_snapshot(core: &EmulebbCore) -> SharedDirectoryReloadProgress {
+    // WHY: independent atomic reads can combine an old idle worker with a
+    // consumed pending bit and report false completion. Capture both flags from
+    // one coordinator state while following the writer's control/progress order.
+    let control = core
+        .shared_reload_control
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut snapshot = match core.shared_directory_reload_progress.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     };
-    snapshot.running = core.shared_reload_running.load(Ordering::Acquire);
-    snapshot.pending = core.shared_reload_pending.load(Ordering::Acquire);
+    snapshot.running = control.running;
+    snapshot.pending = control.pending;
     snapshot
 }
 
@@ -1347,11 +1355,11 @@ fn record_reload_progress(
     progress.pending = core.shared_reload_pending.load(Ordering::Acquire);
 }
 
-fn current_time_ms() -> i64 {
+fn current_time_s() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or(0)
 }
 
@@ -1607,7 +1615,7 @@ fn display_path(path: &Path) -> String {
 fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
     const UPCOMING_HASH_LIMIT: usize = 50;
     let now = Instant::now();
-    let now_ms = current_time_ms();
+    let now_s = current_time_s();
     let planned_hash_bytes = targets.iter().map(|target| target.file_size).sum::<u64>();
     let mut disks = targets
         .iter()
@@ -1642,9 +1650,9 @@ fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
         .collect::<Vec<_>>();
     disks.sort_by(|left, right| left.disk_key.cmp(&right.disk_key));
     record_reload_progress(core, |diagnostics| {
-        diagnostics.started_at_ms = Some(now_ms);
+        diagnostics.started_at = Some(now_s);
         diagnostics.started = Some(now);
-        diagnostics.updated_at_ms = Some(now_ms);
+        diagnostics.updated_at = Some(now_s);
         diagnostics.active_hash_count = 0;
         diagnostics.hashed_count = 0;
         diagnostics.failed_hash_count = 0;
@@ -1666,9 +1674,9 @@ fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
 
 fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
     let now = Instant::now();
-    let now_ms = current_time_ms();
+    let now_s = current_time_s();
     record_reload_progress(core, |diagnostics| {
-        diagnostics.updated_at_ms = Some(now_ms);
+        diagnostics.updated_at = Some(now_s);
         diagnostics.upcoming.retain(|queued| queued.id != target.id);
         diagnostics.active.push(SharedDirectoryHashActiveFile {
             id: target.id.clone(),
@@ -1683,9 +1691,9 @@ fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
             read_bytes: 0,
             read_bytes_total: target_read_bytes_total(target.file_size),
             read_rate_bytes_per_sec: 0,
-            started_at_ms: now_ms,
+            started_at: now_s,
             started: Some(now),
-            updated_at_ms: now_ms,
+            updated_at: now_s,
         });
         diagnostics.active_hash_count = diagnostics.active.len();
         if let Some(disk) = diagnostics
@@ -1712,7 +1720,7 @@ fn record_hash_target_progress(
     event: &LocalIngestProgressEvent,
 ) {
     let now = Instant::now();
-    let now_ms = current_time_ms();
+    let now_s = current_time_s();
     let mut diagnostics = progress
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1728,7 +1736,7 @@ fn record_hash_target_progress(
             active.stage_read_bytes = event.stage_bytes_read.min(event.stage_bytes_total);
             active.stage_total_bytes = event.stage_bytes_total;
             active.read_bytes = next_read;
-            active.updated_at_ms = now_ms;
+            active.updated_at = now_s;
             diagnostics.completed_read_bytes =
                 diagnostics.completed_read_bytes.saturating_add(delta);
             if let Some(disk) = diagnostics
@@ -1740,7 +1748,7 @@ fn record_hash_target_progress(
                 disk.current_stage = Some(event.stage.as_str().to_string());
             }
         }
-        diagnostics.updated_at_ms = Some(now_ms);
+        diagnostics.updated_at = Some(now_s);
         refresh_reload_rates(&mut diagnostics, now);
     }
     diagnostics.running = running.load(Ordering::Acquire);
@@ -1755,7 +1763,7 @@ fn record_hash_target_finished(
 ) {
     const RECENT_HASH_LIMIT: usize = 20;
     let now = Instant::now();
-    let now_ms = current_time_ms();
+    let now_s = current_time_s();
     record_reload_progress(core, |diagnostics| {
         let active = diagnostics
             .active
@@ -1831,13 +1839,13 @@ fn record_hash_target_finished(
                 read_bytes_total,
                 duration_ms,
                 average_read_rate_bytes_per_sec,
-                finished_at_ms: now_ms,
+                finished_at: now_s,
                 finished: Some(now),
             },
         );
         diagnostics.recent.truncate(RECENT_HASH_LIMIT);
         diagnostics.active_hash_count = diagnostics.active.len();
-        diagnostics.updated_at_ms = Some(now_ms);
+        diagnostics.updated_at = Some(now_s);
         refresh_reload_rates(diagnostics, now);
     });
 }
@@ -2181,7 +2189,13 @@ pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Re
     }
     state.pending = true;
     core.shared_reload_pending.store(true, Ordering::Release);
-    record_reload_progress(core, |diagnostics| diagnostics.phase = "queued".to_string());
+    record_reload_progress(core, |diagnostics| {
+        // WHY: a coalesced follow-up belongs to pending work. It must not
+        // overwrite the active pass's phase or imply its progress restarted.
+        if matches!(diagnostics.phase.as_str(), "idle" | "queued") {
+            diagnostics.phase = "queued".to_string();
+        }
+    });
     start_reload_worker(core, &mut state);
     core.shared_reload_control.wake.notify_one();
     Ok(0)
@@ -2303,7 +2317,7 @@ fn merge_initial_publish_progress(
             .is_none_or(|current| prior_start < current)
     {
         diagnostics.started = Some(prior_start);
-        diagnostics.started_at_ms = prior.started_at_ms;
+        diagnostics.started_at = prior.started_at;
     }
     diagnostics.recent.extend(prior.recent.iter().cloned());
     diagnostics.recent.sort_by(|left, right| {
@@ -2502,7 +2516,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             disk.current_name = None;
             disk.current_stage = None;
         }
-        diagnostics.updated_at_ms = Some(current_time_ms());
+        diagnostics.updated_at = Some(current_time_s());
         if let Some(bootstrap) = bootstrap.as_ref() {
             merge_initial_publish_progress(diagnostics, bootstrap);
         }
@@ -2528,8 +2542,8 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             completedHashBytes = diagnostics.completed_hash_bytes,
             plannedReadBytes = diagnostics.planned_read_bytes,
             completedReadBytes = diagnostics.completed_read_bytes,
-            startedAtMs = diagnostics.started_at_ms.unwrap_or(0),
-            updatedAtMs = diagnostics.updated_at_ms.unwrap_or(0),
+            startedAt = diagnostics.started_at.unwrap_or(0),
+            updatedAt = diagnostics.updated_at.unwrap_or(0),
             "shared-directory reload completed"
         );
     });

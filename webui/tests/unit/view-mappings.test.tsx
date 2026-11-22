@@ -38,7 +38,7 @@ describe("canonical view mappings", () => {
       active: 17, preparing: 2, waiting: 981,
       concurrency: { mode: "fixed", configuredLimit: 16, target: 16, burstActive: 1 },
       residentMemory: { usedBytes: 33554432, softTargetBytes: 67108864, limitBytes: 134217728 }
-    } }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]} sharedFiles={[]} libraryScan={null} kad={{}} />);
+    } }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]} libraryScan={null} kad={{}} />);
     expect(screen.getByText("17 active / 2 preparing / 981 waiting")).toBeVisible();
     expect(screen.getByText("1000 unfinished / 99000 completed")).toBeVisible();
     expect(screen.getByText("Configured limit 16")).toBeVisible();
@@ -51,7 +51,7 @@ describe("canonical view mappings", () => {
     const post = vi.spyOn(client, "post").mockResolvedValue({});
     const patch = vi.spyOn(client, "patch").mockResolvedValue({});
     vi.spyOn(client, "getPage").mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
-    render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
+    render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{}} uploads={[]} uploadQueue={[]} client={client} run={run} />);
     expect(screen.getByLabelText("Watch for changes")).not.toBeChecked();
     fireEvent.input(screen.getByRole("textbox", { name: "Server folder path" }), { target: { value: "/new" } });
     fireEvent.click(screen.getByLabelText("Watch for changes"));
@@ -68,7 +68,7 @@ describe("canonical view mappings", () => {
       { id: "17", path: "/intake", watchEnabled: false, managed: true, accessible: true, shareable: true, scanRequired: true, lastScannedAt: null }
     ], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     const patch = vi.spyOn(client, "patch").mockResolvedValue({});
-    render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{}} sharedFiles={[]} uploads={[]} uploadQueue={[]} client={client} run={run} />);
+    render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{}} uploads={[]} uploadQueue={[]} client={client} run={run} />);
     fireEvent.click(await screen.findByLabelText("Watch /intake"));
     expect(screen.getByText("Scan required")).toBeVisible();
     await waitFor(() => expect(patch).toHaveBeenCalledWith("library/roots/17", { watchEnabled: true }));
@@ -78,13 +78,12 @@ describe("canonical view mappings", () => {
   it("uses total shared-file diagnostics rather than a bounded snapshot page and does not invent shared bytes", () => {
     vi.spyOn(RestClient.prototype, "getPage").mockResolvedValue({ data: [], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
     const { unmount } = render(<Overview snapshot={{ status: { runtimeDiagnostics: { sharedFileCount: 1001 } } }}
-      stats={{ sharedFiles: 3, sharedBytes: 123 }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]}
-      sharedFiles={[{ hash: "synthetic", path: "/sample/shared.bin" }]} libraryScan={null} kad={{}} />);
+      stats={{ sharedFiles: 3, sharedBytes: 123 }} transfers={[]} servers={[]} uploads={[]} uploadQueue={[]} libraryScan={null} kad={{}} />);
     expect(screen.getByText("Shared").parentElement).toHaveTextContent("1001");
     expect(screen.getByText("Shared bytes").nextElementSibling).toHaveTextContent("n/a");
     unmount();
     render(<SharingView refreshGeneration={0} directories={null} ignores={null} stats={{ sharedFiles: 3, sharedBytes: 123 }}
-      sharedFileCount={1001} sharedFiles={[{ hash: "synthetic", path: "/sample/shared.bin" }]} uploads={[]} uploadQueue={[]} client={new RestClient()} run={run} />);
+      sharedFileCount={1001} uploads={[]} uploadQueue={[]} client={new RestClient()} run={run} />);
     expect(screen.getByText("Shared Files").parentElement).toHaveTextContent("1001");
     expect(screen.getByText("Shared Bytes").parentElement).toHaveTextContent("n/a");
   });

@@ -92,31 +92,33 @@ pub(crate) fn persist_server(
     server: &ServerInfo,
     enabled: bool,
 ) -> Result<()> {
-    metadata.upsert_server(&MetadataServer {
-        address: server.address.clone(),
-        port: server.port,
-        name: server.name.clone(),
-        description: server.description.clone(),
-        dynamic_host: server.dyn_ip.clone(),
-        auxiliary_ports: server.auxiliary_ports.clone(),
-        server_priority: server.priority.clone(),
-        static_server: server.static_server,
-        enabled,
-        failed_count: server.failed_count,
-        ping_ms: (server.ping != 0).then_some(server.ping),
-        users: server.users,
-        files: server.files,
-        max_users: server.max_users,
-        low_id_users: server.low_id_users,
-        soft_files: server.soft_files,
-        hard_files: server.hard_files,
-        version: server.version.clone(),
-        obfuscation_tcp_port: server.obfuscation_tcp_port,
-        obfuscation_udp_port: server.obfuscation_udp_port,
-        udp_flags: server.udp_flags,
-        udp_key: server.udp_key,
-        udp_key_ip: server.udp_key_ip,
-    })
+    metadata
+        .upsert_server(&MetadataServer {
+            address: server.address.clone(),
+            port: server.port,
+            name: server.name.clone(),
+            description: server.description.clone(),
+            dynamic_host: server.dyn_ip.clone(),
+            auxiliary_ports: server.auxiliary_ports.clone(),
+            server_priority: server.priority.clone(),
+            static_server: server.static_server,
+            enabled,
+            failed_count: server.failed_count,
+            ping_ms: (server.ping != 0).then_some(server.ping),
+            users: server.users,
+            files: server.files,
+            max_users: server.max_users,
+            low_id_users: server.low_id_users,
+            soft_files: server.soft_files,
+            hard_files: server.hard_files,
+            version: server.version.clone(),
+            obfuscation_tcp_port: server.obfuscation_tcp_port,
+            obfuscation_udp_port: server.obfuscation_udp_port,
+            udp_flags: server.udp_flags,
+            udp_key: server.udp_key,
+            udp_key_ip: server.udp_key_ip,
+        })
+        .map(|_| ())
 }
 
 pub(crate) fn category_from_metadata(category: MetadataCategory) -> Category {
@@ -141,7 +143,7 @@ fn friend_from_metadata(friend: MetadataFriend) -> Friend {
     }
 }
 
-fn server_from_metadata(server: MetadataServer) -> ServerInfo {
+pub(crate) fn server_from_metadata(server: MetadataServer) -> ServerInfo {
     let endpoint = server.endpoint();
     ServerInfo {
         address: server.address,

@@ -101,7 +101,7 @@ async fn hash_path_parameters_use_canonical_lowercase_hex_validation() {
     let cases = [
         (
             "GET",
-            "/api/v1/shared-files/abc",
+            "/api/v1/library/files/abc",
             "hash must be a 32-character lowercase hex string",
         ),
         (

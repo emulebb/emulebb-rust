@@ -35,8 +35,8 @@ async fn disconnected_copyless_editor_finishes_both_network_publications() {
         tokio::spawn(async move {
             core.edit_library_file_metadata(
                 &hash,
-                &SharedFileUpdate {
-                    priority: Some("high".into()),
+                &LibraryFileUpdate {
+                    upload_priority: Some("high".into()),
                     comment: Some("Operator note".into()),
                     rating: Some(4),
                 },
@@ -75,13 +75,13 @@ async fn disconnected_copyless_editor_finishes_both_network_publications() {
 
     // An unchanged note and ordinary priority edit do not dirty Kad notes.
     for request in [
-        SharedFileUpdate {
+        LibraryFileUpdate {
             comment: Some("Operator note".into()),
             rating: Some(4),
             ..Default::default()
         },
-        SharedFileUpdate {
-            priority: Some("low".into()),
+        LibraryFileUpdate {
+            upload_priority: Some("low".into()),
             ..Default::default()
         },
     ] {
@@ -97,8 +97,8 @@ async fn disconnected_copyless_editor_finishes_both_network_publications() {
         !core
             .edit_library_file_metadata(
                 &"ff".repeat(16),
-                &SharedFileUpdate {
-                    priority: Some("normal".into()),
+                &LibraryFileUpdate {
+                    upload_priority: Some("normal".into()),
                     ..Default::default()
                 }
             )

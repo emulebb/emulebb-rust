@@ -30,6 +30,7 @@ pub(crate) mod search_create;
 mod search_read;
 mod search_sessions;
 pub(crate) mod search_transition;
+mod servers;
 mod settings;
 
 #[cfg(test)]
@@ -110,6 +111,7 @@ impl std::error::Error for CategoryNameConflict {}
 
 enum Command {
     Settings(settings::SettingsCommand),
+    Servers(servers::ServerCommand),
     RootRead(crate::library_roots::Query),
     RootLoss(i64),
     Add { hash: String, name: String },
@@ -133,6 +135,7 @@ enum Command {
 
 enum Response {
     Settings(Box<settings::Outcome>),
+    Servers(Result<servers::ServerOutcome, emulebb_metadata::ServerEndpointConflict>),
     RootRead(crate::LibraryReply<crate::library_roots::Value>),
     RootLoss,
     ContentObserved(Result<(), PersistenceError>),
@@ -320,6 +323,7 @@ impl Drop for Permit {
 
 enum DbCommand {
     Settings(settings::SqlCommand),
+    Servers(servers::SqlCommand),
     RootRead(crate::library_roots::Query),
     RootLoss(i64),
     SearchRead(search_read::Query),
@@ -363,6 +367,7 @@ enum KadMergeOutcome {
 
 enum DbResponse {
     Settings(Box<settings::SqlOutcome>),
+    Servers(Result<servers::ServerWrite, emulebb_metadata::ServerEndpointConflict>),
     RootRead(crate::library_roots::Value),
     RootLoss,
     SearchRead(search_read::Value),
@@ -656,6 +661,21 @@ impl PersistenceOwner {
                         let _ = response.send(result);
                         continue;
                     }
+                    if matches!(&request.command, DbCommand::Servers(_)) {
+                        let DbRequest { command, response } = request;
+                        let DbCommand::Servers(command) = command else { unreachable!() };
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| servers::execute(&store, command)));
+                        let result = match outcome {
+                            Ok(Ok(value)) => Ok(DbResponse::Servers(value)),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "server persistence failed");
+                                Err(error.downcast::<PersistenceError>().unwrap_or_else(|_| PersistenceError::Storage("server database operation failed".into())))
+                            }
+                            Err(_) => Err(PersistenceError::CommitUnknown),
+                        };
+                        let _ = response.send(result);
+                        continue;
+                    }
                     if matches!(&request.command, DbCommand::Category(_)) {
                         let DbRequest { command, response } = request;
                         let DbCommand::Category(command) = command else {
@@ -781,6 +801,7 @@ impl PersistenceOwner {
                             | DbCommand::SearchRemove(_)
                             | DbCommand::SearchStop(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
+                            | DbCommand::Servers(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
@@ -832,6 +853,7 @@ impl PersistenceOwner {
                             | DbCommand::SearchRemove(_)
                             | DbCommand::SearchStop(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
+                            | DbCommand::Servers(_)
                             | DbCommand::Category(_)
                                 | DbCommand::KadLoad
                                 | DbCommand::KadIdentity
@@ -864,6 +886,7 @@ impl PersistenceOwner {
                             | DbCommand::SearchRemove(_)
                             | DbCommand::SearchStop(_)
                             | DbCommand::ContentObservations { .. } | DbCommand::LibraryTags(_)
+                            | DbCommand::Servers(_)
                             | DbCommand::Category(_)
                             | DbCommand::KadLoad
                             | DbCommand::KadIdentity
@@ -1120,6 +1143,7 @@ impl PersistenceOwner {
             | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)
+            | Command::Servers(_)
             | Command::LibraryMetadata(_)
             | Command::Category(_)
             | Command::Downloads(_)
@@ -1253,6 +1277,16 @@ async fn process(
     category_continuation: &mut Option<category::CategoryContinuation>,
     #[cfg(test)] publication_gate: &StdMutex<Option<Arc<PublicationGate>>>,
 ) -> Result<Response, PersistenceError> {
+    if matches!(&request.command, Command::Servers(_)) {
+        return servers::process(
+            state,
+            db,
+            request,
+            #[cfg(test)]
+            publication_gate,
+        )
+        .await;
+    }
     if matches!(&request.command, Command::Settings(_)) {
         return settings::process(
             state,
@@ -1397,6 +1431,7 @@ async fn process(
             | DbResponse::SearchMutated(_)
             | DbResponse::ContentObserved(_)
             | DbResponse::Friend(..)
+            | DbResponse::Servers(..)
             | DbResponse::Category(..)
             | DbResponse::LibraryTags(..) => Err(PersistenceError::Worker),
         };
@@ -1434,6 +1469,7 @@ async fn process(
             | Command::ContentObservations(_)
             | Command::LibraryTags(_)
             | Command::LibrarySharing(_)
+            | Command::Servers(_)
             | Command::LibraryMetadata(_)
             | Command::Category(_)
             | Command::Downloads(_)

@@ -9,14 +9,13 @@ use std::path::Path as FsPath;
 
 use emulebb_core::{
     AppInfo, AppLifecycle, BUILD_ARCHITECTURE, BUILD_CHANNEL, BUILD_FLAVOR, BUILD_SOURCE_REVISION,
-    LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus, Search, SearchSpec,
-    ServerInfo, SharedFileListItem, SharedFilePublishState, Status, TransferStats,
-    TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
-    normal_path_display,
+    NatStatusSnapshot, NetworkBindingStatus, NetworkStatus, Search, SearchSpec, ServerInfo, Status,
+    TransferStats, TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus,
+    VpnGuardStatus,
 };
 use serde_json::{Value, json};
 
-use crate::{RestState, SharedFileResponse};
+use crate::RestState;
 
 pub(crate) const CONTRACT_VERSION: &str = "2.0.0";
 
@@ -471,106 +470,20 @@ fn search_criteria_response(spec: &SearchSpec) -> Value {
     })
 }
 
-pub(crate) fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
-    shared_file_response_with_publication(share, None)
-}
-
-pub(crate) fn shared_file_list_response(item: &SharedFileListItem) -> SharedFileResponse {
-    shared_file_response_with_publication(&item.share, Some(item.publication.clone()))
-}
-
-fn shared_file_response_with_publication(
-    share: &LocalShare,
-    publication: Option<emulebb_core::SharedFilePublicationStatus>,
-) -> SharedFileResponse {
-    let path = normal_path_display(&share.path);
-    let published_ed2k = publication
-        .as_ref()
-        .is_none_or(|status| status.ed2k.state == SharedFilePublishState::Published);
-    SharedFileResponse {
-        hash: share.hash.clone(),
-        name: share.name.clone(),
-        directory: shared_file_directory(&path),
-        path,
-        size_bytes: share.size_bytes,
-        priority: share.priority.clone(),
-        auto_upload_priority: share.auto_upload_priority,
-        requests: share.all_time_upload_requests,
-        accepted_requests: share.all_time_upload_accepts,
-        transferred_bytes: share.all_time_uploaded_bytes,
-        all_time_requests: share.all_time_upload_requests,
-        all_time_accepts: share.all_time_upload_accepts,
-        all_time_transferred: share.all_time_uploaded_bytes,
-        part_count: share.part_count,
-        part_file: false,
-        complete: true,
-        comment: share.comment.clone(),
-        rating: share.rating,
-        has_comment: !share.comment.is_empty(),
-        user_rating: share.rating,
-        published_ed2k,
-        publication,
-        shared_by_rule: false,
-        ed2k_link: share.ed2k_link.clone(),
-    }
-}
-
-pub(crate) fn shared_file_directory(path: &str) -> String {
-    normal_path_display(
-        FsPath::new(path)
-            .parent()
-            .map(|directory| directory.display().to_string())
-            .unwrap_or_default(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use emulebb_core::{
-        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, ServerInfo,
-        TransferThroughputStats, VpnGuardStatus,
+        EmulebbCore, NetworkBindingStatus, NetworkStatus, ServerInfo, TransferThroughputStats,
+        VpnGuardStatus,
     };
     use emulebb_index::FileIndex;
 
     use super::{
         kad_response, network_response, server_connect_acknowledgement_value, server_status_value,
-        shared_file_response, stats_response,
+        stats_response,
     };
-
-    #[test]
-    fn shared_file_response_exposes_persisted_upload_counters() {
-        let response = shared_file_response(&LocalShare {
-            hash: "00112233445566778899aabbccddeeff".to_string(),
-            name: "Synthetic.Shared.bin".to_string(),
-            size_bytes: 123,
-            part_count: 1,
-            ed2k_link: "ed2k://|file|Synthetic.Shared.bin|123|00112233445566778899aabbccddeeff|/"
-                .to_string(),
-            aich_root: String::new(),
-            path: r"\\?\C:\shared\Synthetic.Shared.bin".to_string(),
-            priority: "normal".to_string(),
-            auto_upload_priority: false,
-            all_time_uploaded_bytes: 4096,
-            all_time_upload_requests: 7,
-            all_time_upload_accepts: 5,
-            comment: String::new(),
-            rating: 0,
-        });
-
-        assert_eq!(response.requests, 7);
-        assert_eq!(response.accepted_requests, 5);
-        assert_eq!(response.transferred_bytes, 4096);
-        assert_eq!(response.all_time_requests, 7);
-        assert_eq!(response.all_time_accepts, 5);
-        assert_eq!(response.all_time_transferred, 4096);
-        assert_eq!(response.path, r"C:\shared\Synthetic.Shared.bin");
-        assert_eq!(
-            response.directory,
-            if cfg!(windows) { r"C:\shared" } else { "" }
-        );
-    }
 
     #[test]
     fn kad_response_surfaces_indexed_counts() {

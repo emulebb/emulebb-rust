@@ -9,6 +9,7 @@ impl EmulebbCore {
     }
 
     pub async fn add_server(&self, request: ServerCreate) -> Result<ServerInfo> {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         let endpoint = server_endpoint_from_create(&request)?;
         let connection = self.ed2k_server_connection_view().await;
         let mut server = server_info_from_parts(
@@ -30,6 +31,7 @@ impl EmulebbCore {
         state.servers.insert(endpoint, server.clone());
         drop(state);
         self.refresh_ed2k_server_connect_plan().await?;
+        drop(_server_mutation);
         if request.connect.unwrap_or(false) {
             let _ = self.connect_ed2k_server(&server.endpoint).await?;
         }
@@ -41,6 +43,7 @@ impl EmulebbCore {
         endpoint: &str,
         request: ServerUpdate,
     ) -> Result<Option<ServerInfo>> {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         let Some(mut server) = self.server(endpoint).await else {
             return Ok(None);
         };
@@ -72,6 +75,7 @@ impl EmulebbCore {
     }
 
     pub async fn remove_server(&self, endpoint: &str) -> Result<Option<ServerInfo>> {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         let Some(mut server) = self.server(endpoint).await else {
             return Ok(None);
         };
@@ -96,6 +100,7 @@ impl EmulebbCore {
     /// previously dead-dropped server is NOT silently re-added: it stays in
     /// `disabled_servers` so we do not re-add what we just dropped.
     pub(crate) async fn merge_discovered_ed2k_servers(&self, servers: Vec<(Ipv4Addr, u16)>) {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         if servers.is_empty() {
             return;
         }
@@ -159,7 +164,16 @@ impl EmulebbCore {
     /// Resolve a feedback-event endpoint (which may be the configured host:port
     /// or the resolved ip:port) to the matching stored server endpoint key.
     async fn resolve_server_event_endpoint(&self, endpoint: &str) -> Option<String> {
-        let servers = self.servers().await;
+        let mut servers = self.servers().await;
+        {
+            let state = self.state.lock().await;
+            // WHY: delayed feedback from a removed runtime endpoint must not
+            // recreate a resource from the startup connection configuration.
+            servers.retain(|server| {
+                !state.disabled_servers.contains(&server.endpoint)
+                    || state.servers.contains_key(&server.endpoint)
+            });
+        }
         // Exact endpoint match first.
         if let Some(server) = servers
             .iter()
@@ -219,6 +233,7 @@ impl EmulebbCore {
         endpoint: &str,
         dead_server_retries: u32,
     ) {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
             tracing::debug!(
                 endpoint,
@@ -284,6 +299,7 @@ impl EmulebbCore {
     /// Clear a server's failure count after a successful connect (eMule resets the
     /// count on a successful response/connect).
     pub(crate) async fn note_ed2k_server_connect_succeeded(&self, endpoint: &str) {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
             return;
         };
@@ -303,6 +319,7 @@ impl EmulebbCore {
         version: Option<String>,
         auxiliary_ports: Vec<u16>,
     ) -> Option<String> {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         let stored_endpoint = self.resolve_server_event_endpoint(endpoint).await?;
         let mut server = self.server(&stored_endpoint).await?;
         if let Some(name) = name {
@@ -364,6 +381,7 @@ impl EmulebbCore {
         obfuscation_port_tcp: u16,
         obfuscation_port_udp: u16,
     ) -> Option<String> {
+        let _server_mutation = self.server_mutation_gate.lock().await;
         let stored_endpoint = self.resolve_server_event_endpoint(endpoint).await?;
         let mut server = self.server(&stored_endpoint).await?;
         server.users = u64::from(users);

@@ -15,8 +15,8 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn shared_files_use_canonical_route_and_envelope() {
-    let runtime_dir = unique_test_dir("shared-files-canonical");
+async fn library_files_use_canonical_route_and_envelope() {
+    let runtime_dir = unique_test_dir("library-files-canonical");
     let transfer_root = runtime_dir.join("transfers");
     let library_dir = runtime_dir.join("library");
     std::fs::create_dir_all(&library_dir).unwrap();
@@ -38,6 +38,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .unwrap();
     let hash = share.hash.clone();
     let ed2k_link = share.ed2k_link.clone();
+    settle_setup_scan(&core).await;
     let app = router(
         core,
         RestServerSettings {
@@ -46,115 +47,27 @@ async fn shared_files_use_canonical_route_and_envelope() {
         },
     );
 
-    let list_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/shared-files")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list_response.status(), StatusCode::OK);
-    let body = to_bytes(list_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["total"], 1);
-    assert!(value["data"].get("offset").is_none());
-    assert_eq!(value["data"]["limit"], 100);
-    assert_eq!(value["data"]["items"][0]["hash"], hash);
-    let item = &value["data"]["items"][0];
+    let list = get_json(&app, "/api/v1/library/files?countTotal=true").await;
+    assert_eq!(list["meta"]["total"], 1);
+    assert_eq!(list["data"][0]["hash"], hash);
+    assert_eq!(list["meta"]["hasMore"], false);
+    let detail = get_json(&app, &format!("/api/v1/library/files/{hash}")).await;
+    assert_eq!(detail["data"]["hash"], hash);
+    assert_eq!(detail["data"]["ed2kLink"], ed2k_link);
+    assert_eq!(detail["data"]["comment"], "");
+    assert_eq!(detail["data"]["rating"], 0);
+    let locations = get_json(&app, &format!("/api/v1/library/files/{hash}/locations")).await;
     assert_eq!(
-        item["path"],
-        normal_path_display(payload_path.canonicalize().unwrap())
+        std::path::Path::new(locations["data"][0]["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        payload_path.canonicalize().unwrap()
     );
-    assert!(item.get("sourcePath").is_none());
-    assert!(item.get("transferDir").is_none());
-    assert!(value["data"]["nextCursor"].is_null());
-
-    let paged_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/shared-files?limit=1")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(paged_response.status(), StatusCode::OK);
-    let body = to_bytes(paged_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["total"], 1);
-    assert_eq!(value["data"]["limit"], 1);
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
-
-    let read_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/shared-files/{hash}"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(read_response.status(), StatusCode::OK);
-    let body = to_bytes(read_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["hash"], hash);
-    assert_eq!(value["data"]["ed2kLink"], ed2k_link);
-
-    let link_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/shared-files/{hash}/ed2k-link"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(link_response.status(), StatusCode::OK);
-    let body = to_bytes(link_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["hash"], hash);
-    assert_eq!(value["data"]["link"], ed2k_link);
-
-    let comments_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/shared-files/{hash}/comments"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(comments_response.status(), StatusCode::OK);
-    let body = to_bytes(comments_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
-async fn shared_files_page_filename_search_and_publication_status() {
-    let runtime_dir = unique_test_dir("shared-files-query");
+async fn library_files_page_filename_search_and_publication_status() {
+    let runtime_dir = unique_test_dir("library-files-query");
     let transfer_root = runtime_dir.join("transfers");
     let library_dir = runtime_dir.join("library");
     std::fs::create_dir_all(&library_dir).unwrap();
@@ -183,6 +96,7 @@ async fn shared_files_page_filename_search_and_publication_status() {
         })
         .await
         .unwrap();
+    settle_setup_scan(&core).await;
     let app = router(
         core,
         RestServerSettings {
@@ -191,39 +105,48 @@ async fn shared_files_page_filename_search_and_publication_status() {
         },
     );
 
-    let first = get_json(&app, "/api/v1/shared-files?limit=1").await;
-    assert_eq!(first["data"]["total"], 2);
-    assert_eq!(first["data"]["limit"], 1);
-    assert_eq!(first["data"]["items"][0]["hash"], alpha.hash);
-    assert_eq!(
-        first["data"]["items"][0]["publication"]["ed2k"]["state"],
-        "waiting"
-    );
-    let cursor = first["data"]["nextCursor"].as_str().unwrap();
+    let first = get_json(&app, "/api/v1/library/files?limit=1&countTotal=true").await;
+    assert_eq!(first["meta"]["total"], 2);
+    assert_eq!(first["data"][0]["hash"], alpha.hash);
+    let detail = get_json(&app, &format!("/api/v1/library/files/{}", alpha.hash)).await;
+    assert_eq!(detail["data"]["publication"]["ed2k"]["state"], "waiting");
+    let cursor = first["meta"]["nextCursor"].as_str().unwrap();
     let encoded_cursor = utf8_percent_encode(cursor, NON_ALPHANUMERIC).to_string();
     let second = get_json(
         &app,
-        &format!("/api/v1/shared-files?limit=1&cursor={encoded_cursor}"),
+        &format!("/api/v1/library/files?limit=1&countTotal=true&cursor={encoded_cursor}"),
     )
     .await;
-    assert_eq!(second["data"]["items"][0]["hash"], zeta.hash);
-    assert!(second["data"]["nextCursor"].is_null());
+    assert_eq!(second["data"][0]["hash"], zeta.hash);
+    assert!(second["meta"]["nextCursor"].is_null());
 
     for query in ["q=ALPHA", "q=pha%20sam", "q=%C3%A4bc"] {
-        let searched = get_json(&app, &format!("/api/v1/shared-files?{query}")).await;
-        assert_eq!(searched["data"]["total"], 1);
-        assert_eq!(searched["data"]["items"][0]["hash"], alpha.hash);
+        let searched = get_json(
+            &app,
+            &format!("/api/v1/library/files?countTotal=true&{query}"),
+        )
+        .await;
+        assert_eq!(searched["meta"]["total"], 1);
+        assert_eq!(searched["data"][0]["hash"], alpha.hash);
     }
     for query in ["q=library".to_string(), format!("q={}", &alpha.hash[..12])] {
-        let searched = get_json(&app, &format!("/api/v1/shared-files?{query}")).await;
-        assert_eq!(searched["data"]["total"], 0);
-        assert!(searched["data"]["items"].as_array().unwrap().is_empty());
+        let searched = get_json(
+            &app,
+            &format!("/api/v1/library/files?countTotal=true&{query}"),
+        )
+        .await;
+        assert_eq!(searched["meta"]["total"], 0);
+        assert!(searched["data"].as_array().unwrap().is_empty());
     }
 
-    let filtered = get_json(&app, "/api/v1/shared-files?priority=normal").await;
-    assert_eq!(filtered["data"]["total"], 2);
+    let filtered = get_json(
+        &app,
+        "/api/v1/library/files?sharingEnabled=true&countTotal=true",
+    )
+    .await;
+    assert_eq!(filtered["meta"]["total"], 2);
     assert_eq!(
-        filtered["data"]["items"][0]["publication"]["kadSource"]["state"],
+        detail["data"]["publication"]["kadSource"]["state"],
         "unavailable"
     );
 }
@@ -276,6 +199,7 @@ async fn library_location_pages_preserve_cached_paths_when_sharing_is_disabled()
         Ok(emulebb_core::LibraryFileChange::Changed)
     ));
     drop(policy);
+    settle_setup_scan(&core).await;
     let app = router(
         core,
         RestServerSettings {
@@ -328,6 +252,25 @@ async fn library_location_pages_preserve_cached_paths_when_sharing_is_disabled()
         cached["data"], first["data"],
         "reading cached evidence must not inspect the deleted file"
     );
+}
+
+async fn settle_setup_scan(core: &EmulebbCore) {
+    // Root creation schedules independent work. Exercise idle reads only after
+    // setup releases its admission; capacity refusal is tested separately.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let scan = core.library_scan();
+            if !scan.reload_progress.running
+                && !scan.reload_progress.pending
+                && scan.hashing_count == 0
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("setup scan must settle before library reads");
 }
 
 async fn get_json(app: &axum::Router, uri: &str) -> Value {
@@ -447,7 +390,7 @@ async fn library_root_creation_and_scan_share_recursive_files() {
     assert!(value["data"]["reloadProgress"].is_object());
 
     // The reload hashes the library on a detached background task (independent of
-    // the request), so the shared-files list fills in asynchronously. Poll until
+    // the request), so the library list fills in asynchronously. Poll until
     // both files appear rather than expecting them synchronously after the POST.
     let mut names: Vec<String> = Vec::new();
     for _ in 0..200 {
@@ -455,7 +398,7 @@ async fn library_root_creation_and_scan_share_recursive_files() {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/shared-files")
+                    .uri("/api/v1/library/files")
                     .header("X-API-Key", "secret")
                     .body(Body::empty())
                     .unwrap(),
@@ -467,11 +410,11 @@ async fn library_root_creation_and_scan_share_recursive_files() {
             .await
             .unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        names = value["data"]["items"]
+        names = value["data"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|item| item["name"].as_str().unwrap().to_string())
+            .map(|item| item["displayName"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
         if names.iter().any(|name| name == "Top.Level.bin")
             && names.iter().any(|name| name == "Nested.bin")

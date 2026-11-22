@@ -160,18 +160,10 @@ pub fn router_with_shutdown(
             "/api/v1/searches/{searchId}/results/{resultId}/observations",
             get(search_result_observations),
         )
-        .route("/api/v1/shared-files", get(shared_files))
+        .route("/api/v1/library/files", get(library_files))
         .route(
-            "/api/v1/shared-files/{hash}",
-            get(shared_file).patch(update_shared_file),
-        )
-        .route(
-            "/api/v1/shared-files/{hash}/comments",
-            get(shared_file_comments),
-        )
-        .route(
-            "/api/v1/shared-files/{hash}/ed2k-link",
-            get(shared_file_ed2k_link),
+            "/api/v1/library/files/{hash}",
+            get(library_file).patch(update_library_file),
         )
         .route(
             "/api/v1/library/roots",

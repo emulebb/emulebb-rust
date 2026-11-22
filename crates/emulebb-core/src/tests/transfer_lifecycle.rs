@@ -1213,20 +1213,25 @@ async fn update_shared_file_priority_and_comment_do_not_queue_redundant_ed2k_reo
     let queued_before = core.ed2k_publish_diagnostics().queued_count;
 
     let updated = core
-        .update_shared_file(
+        .edit_library_file_metadata(
             &share.hash,
-            SharedFileUpdate {
-                priority: Some("high".to_string()),
+            &LibraryFileUpdate {
+                upload_priority: Some("high".to_string()),
                 comment: Some("synthetic note".to_string()),
                 rating: Some(0),
             },
         )
         .await
+        .unwrap();
+    assert!(updated);
+    let updated = core
+        .library_file_detail(&share.hash)
+        .await
         .unwrap()
         .unwrap();
 
     // The metadata is still applied over REST.
-    assert_eq!(updated.priority, "high");
+    assert_eq!(updated.upload_priority, "high");
     assert_eq!(updated.comment, "synthetic note");
     assert_eq!(updated.rating, 0);
     // ...but no eD2k re-offer session was queued.
@@ -1252,57 +1257,24 @@ async fn update_shared_file_rating_queues_ed2k_reoffer() {
     let queued_before = core.ed2k_publish_diagnostics().queued_count;
 
     let updated = core
-        .update_shared_file(
+        .edit_library_file_metadata(
             &share.hash,
-            SharedFileUpdate {
-                priority: None,
+            &LibraryFileUpdate {
+                upload_priority: None,
                 comment: Some(String::new()),
                 rating: Some(4),
             },
         )
         .await
+        .unwrap();
+    assert!(updated);
+    let updated = core
+        .library_file_detail(&share.hash)
+        .await
         .unwrap()
         .unwrap();
 
     assert_eq!(updated.rating, 4);
-    assert_eq!(
-        core.ed2k_publish_diagnostics().queued_count,
-        queued_before + 1
-    );
-}
-
-#[tokio::test]
-async fn update_shared_file_not_published_queues_ed2k_reoffer() {
-    let runtime_dir = unique_runtime_dir("emulebb-core-update-shared-not-published");
-    let transfer_root = runtime_dir.join("transfers");
-    let shared_path = runtime_dir.join("shared-suppressed.bin");
-    fs::write(&shared_path, b"shared publish suppression payload").unwrap();
-    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
-    configure_test_shared_root(&core, &shared_path).await;
-
-    let share = core
-        .share_local_file(LocalShareCreate {
-            path: shared_path.display().to_string(),
-            name: None,
-        })
-        .await
-        .unwrap();
-    let queued_before = core.ed2k_publish_diagnostics().queued_count;
-
-    let updated = core
-        .update_shared_file(
-            &share.hash,
-            SharedFileUpdate {
-                priority: Some("not-published".to_string()),
-                comment: None,
-                rating: None,
-            },
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(updated.priority, "not-published");
     assert_eq!(
         core.ed2k_publish_diagnostics().queued_count,
         queued_before + 1

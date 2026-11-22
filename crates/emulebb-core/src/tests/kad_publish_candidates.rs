@@ -311,18 +311,6 @@ fn kad_source_publish_admits_servable_partfiles_but_keyword_stays_complete_only(
     assert!(kad_source_publish_eligible(&complete));
     assert!(kad_keyword_publish_eligible(&complete));
 
-    // Locally suppressed shares remain in the catalog but are not published to
-    // Kad as SOURCE, KEYWORD, or NOTES candidates.
-    let not_published = Ed2kSharedEntry {
-        upload_priority: "not-published".to_string(),
-        comment: "hidden note".to_string(),
-        rating: 5,
-        ..base(0x05, true, Vec::new())
-    };
-    assert!(not_published.is_servable());
-    assert!(!kad_source_publish_eligible(&not_published));
-    assert!(!kad_keyword_publish_eligible(&not_published));
-
     // In-progress partfile with ≥1 complete ED2K part: SOURCE-eligible (we
     // can serve that part) but NOT keyword-eligible (oracle `!IsPartFile()`).
     let servable_partfile = base(0x02, false, vec![true, false]);
@@ -376,16 +364,11 @@ fn cheap_prune_hash_set_matches_old_source_scan_and_prunes_on_blocked_tick() {
         compatibility_hint: true,
         ..base(0x04, true, Vec::new())
     };
-    let not_published = Ed2kSharedEntry {
-        upload_priority: "not-published".to_string(),
-        ..base(0x05, true, Vec::new())
-    };
     let catalog = [
         complete.clone(),
         servable_partfile.clone(),
         empty_partfile.clone(),
         hint.clone(),
-        not_published.clone(),
     ];
 
     // OPP-1 prune input: the cheap hash read (what a gate-blocked tick uses to

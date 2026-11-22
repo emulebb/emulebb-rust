@@ -142,7 +142,6 @@ fn local_note_edit_and_durable_notes_clock_reset_are_atomic() {
         .unwrap()
         .unwrap();
     assert!(edit.notes_changed && edit.rating_changed);
-    assert!(!edit.publish_status_changed);
     assert!(
         store
             .load_kad_outbound_publish_schedule()
@@ -159,7 +158,7 @@ fn local_note_edit_and_durable_notes_clock_reset_are_atomic() {
             .update_shared_content_metadata(&job.file_hash, priority, comment)
             .unwrap()
             .unwrap();
-        assert!(!edit.notes_changed && !edit.rating_changed && !edit.publish_status_changed);
+        assert!(!edit.notes_changed && !edit.rating_changed);
         assert_eq!(
             store
                 .load_kad_outbound_publish_schedule()

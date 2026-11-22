@@ -15,11 +15,11 @@ use crate::{
     handlers::logs::recent_log_values,
     responses::{
         app_info_response, runtime_diagnostics_response, search_header_response,
-        search_summary_response, server_response, shared_file_response, status_response,
+        search_summary_response, server_response, status_response,
     },
 };
 
-pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v7";
+pub(crate) const DIAGNOSTIC_BUNDLE_SCHEMA: &str = "emulebb.diagnostic-bundle.v8";
 pub(crate) const MIN_DIAGNOSTIC_BUNDLE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_DIAGNOSTIC_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -28,7 +28,7 @@ const MAX_LOG_RECORDS: usize = 200;
 const MAX_TAIL_BYTES: u64 = 256 * 1024;
 const MAX_TAIL_RECORDS: usize = 64;
 const MAX_SERVER_SNAPSHOTS: usize = 512;
-const MAX_SHARED_FILE_SNAPSHOTS: usize = 512;
+const MAX_LIBRARY_FILE_SNAPSHOTS: usize = 200;
 const MAX_SEARCH_SNAPSHOTS: usize = 64;
 const MAX_SEARCH_RESULTS_PER_SNAPSHOT: usize = 128;
 const MAX_SEARCH_SNAPSHOT_BYTES: usize = 1024 * 1024;
@@ -143,7 +143,7 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Box<[
             "tailBytesPerArtifact": MAX_TAIL_BYTES,
             "tailRecordsPerArtifact": MAX_TAIL_RECORDS,
             "serverSnapshots": MAX_SERVER_SNAPSHOTS,
-            "sharedFileSnapshots": MAX_SHARED_FILE_SNAPSHOTS,
+            "libraryFileSnapshots": MAX_LIBRARY_FILE_SNAPSHOTS,
             "searchSnapshots": MAX_SEARCH_SNAPSHOTS,
             "searchResultsPerSnapshot": MAX_SEARCH_RESULTS_PER_SNAPSHOT,
             "searchSnapshotBytes": max_bytes.min(MAX_SEARCH_SNAPSHOT_BYTES),
@@ -170,8 +170,15 @@ pub(crate) async fn capture(state: &RestState, max_bytes: usize) -> Result<Box<[
 async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Value> {
     let mut servers = state.core.servers().await;
     servers.sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
-    let (shared_files, shared_file_total) =
-        state.core.shares_page(0, MAX_SHARED_FILE_SNAPSHOTS).await;
+    let library = state
+        .core
+        .library_file_page(emulebb_core::LibraryFileQuery {
+            view: emulebb_core::LibraryFileView::Present,
+            limit: MAX_LIBRARY_FILE_SNAPSHOTS,
+            count_total: true,
+            ..Default::default()
+        })
+        .await?;
     let searches = search_snapshots(state, max_bytes.min(MAX_SEARCH_SNAPSHOT_BYTES)).await?;
     let downloads = state
         .core
@@ -198,11 +205,9 @@ async fn operational_snapshots(state: &RestState, max_bytes: usize) -> Result<Va
             MAX_SERVER_SNAPSHOTS,
             server_response,
         ),
-        "sharedFiles": bounded_prefix_collection(
-            &shared_files,
-            shared_file_total,
-            MAX_SHARED_FILE_SNAPSHOTS,
-            |share| json!(shared_file_response(share)),
+        "libraryFiles": bounded_prefix_collection(
+            &library.files, usize::try_from(library.total.unwrap_or(0))?,
+            MAX_LIBRARY_FILE_SNAPSHOTS, |file| json!(file),
         ),
         "searches": searches,
         "downloads": bounded_prefix_collection(&downloads.downloads,download_count,MAX_DOWNLOAD_SNAPSHOTS,|download|json!(download)),
@@ -693,7 +698,7 @@ fn encode_bounded_bundle(mut payload: Value, max_bytes: usize) -> Result<Box<[u8
         "operationalSnapshots.uploadQueue",
         "operationalSnapshots.uploads",
         "operationalSnapshots.downloads",
-        "operationalSnapshots.sharedFiles",
+        "operationalSnapshots.libraryFiles",
         "operationalSnapshots.servers",
         "operationalSnapshots.searches",
         "recentLogs",
@@ -790,8 +795,8 @@ fn shrink_budget_section(payload: &mut Value, section: &str) -> bool {
         "operationalSnapshots.downloads" => {
             shrink_path_collection(payload, &["operationalSnapshots", "downloads"], false)
         }
-        "operationalSnapshots.sharedFiles" => {
-            shrink_path_collection(payload, &["operationalSnapshots", "sharedFiles"], false)
+        "operationalSnapshots.libraryFiles" => {
+            shrink_path_collection(payload, &["operationalSnapshots", "libraryFiles"], false)
         }
         "operationalSnapshots.servers" => {
             shrink_path_collection(payload, &["operationalSnapshots", "servers"], false)
@@ -982,7 +987,7 @@ mod tests {
             },
             "operationalSnapshots": {
                 "servers": empty_collection(),
-                "sharedFiles": empty_collection(),
+                "libraryFiles": empty_collection(),
                 "searches": {
                     "total": 1,
                     "included": 1,

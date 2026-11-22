@@ -83,79 +83,57 @@ impl EmulebbCore {
         &self,
         base: &Ed2kRuntimeConfig,
     ) -> Result<Ed2kRuntimeConfig> {
-        let mut config = base.clone();
-        // Route intent belongs to the active runtime, not persisted server settings.
-        config.egress_route = self.ed2k_network.as_ref().map_or(
-            emulebb_ed2k::networking::EgressRoute::StrictInterface,
-            |network| network.egress_route,
-        );
-        let state = self.state.lock().await;
-        config.server_entries.retain(|entry| {
-            let endpoint = format!("{}:{}", entry.host, entry.port);
-            !state.disabled_servers.contains(&endpoint)
-        });
-        config
-            .server_endpoints
-            .retain(|endpoint| !state.disabled_servers.contains(endpoint));
-        for (endpoint, server) in &state.servers {
-            if state.disabled_servers.contains(endpoint) {
-                continue;
-            }
-            let persisted = Ed2kServerEntry {
-                host: server.address.clone(),
-                port: server.port,
-                name: Some(server.name.clone()).filter(|name| !name.is_empty()),
-                description: Some(server.description.clone())
-                    .filter(|description| !description.is_empty()),
-                dynamic_host: Some(server.dyn_ip.clone()).filter(|host| !host.is_empty()),
-                udp_flags: server.udp_flags.unwrap_or_default(),
-                udp_key: server.udp_key.unwrap_or_default(),
-                udp_key_ip: server.udp_key_ip.unwrap_or_default(),
-                obfuscation_port_tcp: server.obfuscation_tcp_port.unwrap_or_default(),
-                obfuscation_port_udp: server.obfuscation_udp_port.unwrap_or_default(),
-                soft_files: u32::try_from(server.soft_files).unwrap_or(u32::MAX),
-                hard_files: u32::try_from(server.hard_files).unwrap_or(u32::MAX),
-                priority: server.priority.clone(),
-                static_server: server.static_server,
-            };
-            if let Some(existing) = config.server_entries.iter_mut().find(|entry| {
-                format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint)
-            }) {
-                // Persisted live metadata supersedes stale static config for the
-                // same endpoint while preserving its configured host spelling.
-                let host = existing.host.clone();
-                *existing = persisted;
-                existing.host = host;
-            } else {
-                // Carry the full persisted record even when `server_endpoints`
-                // already names it: configured_server_entries uses this richer
-                // record for key/port selection and offer-file limits.
-                config.server_entries.push(persisted);
-            }
-        }
-        let public_client_id = self
-            .ed2k_reachability
-            .get()
-            .map(|ip| u32::from_le_bytes(ip.octets()));
-        for entry in &mut config.server_entries {
-            let key_is_current = entry.udp_key != 0
-                && entry.udp_key_ip != 0
-                && public_client_id == Some(entry.udp_key_ip);
-            if !key_is_current {
-                // Keep the binding IP for diagnostics/persistence, but do not
-                // offer a stale key to the runtime after a public-IP change.
-                entry.udp_key = 0;
-            }
-        }
-        Ok(config)
+        effective_config(
+            base,
+            self.ed2k_network.as_deref(),
+            &self.state,
+            &self.ed2k_reachability,
+        )
+        .await
     }
 
     pub(crate) async fn refresh_ed2k_server_connect_plan(&self) -> Result<()> {
-        let Some(network) = self.ed2k_network.as_ref() else {
+        ServerPlanPublisher::new(self).refresh().await
+    }
+}
+
+/// Small retained publication context; it does not keep the Core alive.
+#[derive(Clone)]
+pub(crate) struct ServerPlanPublisher {
+    mutation_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    network: Option<std::sync::Arc<crate::Ed2kNetworkConfig>>,
+    state: std::sync::Arc<tokio::sync::Mutex<crate::core_state::CoreState>>,
+    runtime: std::sync::Arc<tokio::sync::Mutex<Option<crate::Ed2kRuntime>>>,
+    reachability: crate::ExternalReachability,
+}
+
+impl ServerPlanPublisher {
+    pub(crate) fn new(core: &EmulebbCore) -> Self {
+        Self {
+            mutation_gate: core.server_mutation_gate.clone(),
+            network: core.ed2k_network.clone(),
+            state: core.state.clone(),
+            runtime: core.ed2k_runtime.clone(),
+            reachability: core.ed2k_reachability.clone(),
+        }
+    }
+
+    pub(crate) async fn lock_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.mutation_gate.clone().lock_owned().await
+    }
+
+    pub(crate) async fn refresh(&self) -> Result<()> {
+        let Some(network) = self.network.as_ref() else {
             return Ok(());
         };
-        let config = self.effective_ed2k_config(&network.ed2k).await?;
-        let runtime_guard = self.ed2k_runtime.lock().await;
+        let config = effective_config(
+            &network.ed2k,
+            Some(network),
+            &self.state,
+            &self.reachability,
+        )
+        .await?;
+        let runtime_guard = self.runtime.lock().await;
         let Some(runtime) = runtime_guard.as_ref() else {
             return Ok(());
         };
@@ -166,4 +144,76 @@ impl EmulebbCore {
         }
         Ok(())
     }
+}
+
+async fn effective_config(
+    base: &Ed2kRuntimeConfig,
+    network: Option<&crate::Ed2kNetworkConfig>,
+    state: &std::sync::Arc<tokio::sync::Mutex<crate::core_state::CoreState>>,
+    reachability: &crate::ExternalReachability,
+) -> Result<Ed2kRuntimeConfig> {
+    let mut config = base.clone();
+    // Route intent belongs to the active runtime, not persisted server settings.
+    config.egress_route = network.map_or(
+        emulebb_ed2k::networking::EgressRoute::StrictInterface,
+        |network| network.egress_route,
+    );
+    let state = state.lock().await;
+    config.server_entries.retain(|entry| {
+        let endpoint = format!("{}:{}", entry.host, entry.port);
+        !state.disabled_servers.contains(&endpoint)
+    });
+    config
+        .server_endpoints
+        .retain(|endpoint| !state.disabled_servers.contains(endpoint));
+    for (endpoint, server) in &state.servers {
+        if state.disabled_servers.contains(endpoint) {
+            continue;
+        }
+        let persisted = Ed2kServerEntry {
+            host: server.address.clone(),
+            port: server.port,
+            name: Some(server.name.clone()).filter(|name| !name.is_empty()),
+            description: Some(server.description.clone())
+                .filter(|description| !description.is_empty()),
+            dynamic_host: Some(server.dyn_ip.clone()).filter(|host| !host.is_empty()),
+            udp_flags: server.udp_flags.unwrap_or_default(),
+            udp_key: server.udp_key.unwrap_or_default(),
+            udp_key_ip: server.udp_key_ip.unwrap_or_default(),
+            obfuscation_port_tcp: server.obfuscation_tcp_port.unwrap_or_default(),
+            obfuscation_port_udp: server.obfuscation_udp_port.unwrap_or_default(),
+            soft_files: u32::try_from(server.soft_files).unwrap_or(u32::MAX),
+            hard_files: u32::try_from(server.hard_files).unwrap_or(u32::MAX),
+            priority: server.priority.clone(),
+            static_server: server.static_server,
+        };
+        if let Some(existing) = config
+            .server_entries
+            .iter_mut()
+            .find(|entry| format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint))
+        {
+            // Persisted live metadata supersedes stale static config for the
+            // same endpoint while preserving its configured host spelling.
+            let host = existing.host.clone();
+            *existing = persisted;
+            existing.host = host;
+        } else {
+            // Carry the full persisted record even when `server_endpoints`
+            // already names it: configured_server_entries uses this richer
+            // record for key/port selection and offer-file limits.
+            config.server_entries.push(persisted);
+        }
+    }
+    let public_client_id = reachability.get().map(|ip| u32::from_le_bytes(ip.octets()));
+    for entry in &mut config.server_entries {
+        let key_is_current = entry.udp_key != 0
+            && entry.udp_key_ip != 0
+            && public_client_id == Some(entry.udp_key_ip);
+        if !key_is_current {
+            // Keep the binding IP for diagnostics/persistence, but do not
+            // offer a stale key to the runtime after a public-IP change.
+            entry.udp_key = 0;
+        }
+    }
+    Ok(config)
 }

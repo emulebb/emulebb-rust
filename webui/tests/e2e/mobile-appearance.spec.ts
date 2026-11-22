@@ -4,9 +4,9 @@ import { readFile } from "node:fs/promises";
 import { installMockApi, mockSnapshotFixture, mockDownloadFixture, type RecordedApiRequest } from "../fixtures/mockApi";
 import { pathForRoute, type Tab } from "../../src/routes";
 
-const views: Tab[] = ["overview", "transfers", "search", "sharing", "shared-files", "uploads", "network", "servers", "kad", "categories", "friends", "settings", "diagnostics", "logs"];
+const views: Tab[] = ["overview", "transfers", "search", "sharing", "library", "uploads", "network", "servers", "kad", "categories", "friends", "settings", "diagnostics", "logs"];
 const headings: Record<Tab, string> = { overview: "Startup & Indexing", transfers: "Transfers", search: "Search", sharing: "Shared Folders",
-  "shared-files": "Shared Files", uploads: "Upload Queue Inspector", network: "Network Health", servers: "Servers", kad: "Kad",
+  "library": "Library", uploads: "Upload Queue Inspector", network: "Network Health", servers: "Servers", kad: "Kad",
   categories: "Categories", friends: "Friends", settings: "Settings", diagnostics: "Diagnostics", logs: "Logs" };
 const nightlyVersion = "0.1.0-beta.2.nightly.20261114.g00112233";
 
@@ -177,7 +177,7 @@ test("mobile forms, row actions and direct diagnostic buttons preserve request m
   const downloadedPath = await downloaded.path();
   if (!downloadedPath) throw new Error("Diagnostic download has no saved artifact");
   expect(JSON.parse(await readFile(downloadedPath, "utf-8"))).toEqual({
-    schema: "emulebb.diagnostic-bundle.v7" as const, capturedAt: 1794657600,
+    schema: "emulebb.diagnostic-bundle.v8" as const, capturedAt: 1794657600,
     summary: { issueCount: 0 }
   });
   await page.getByRole("button", { name: "Crash test" }).click();
