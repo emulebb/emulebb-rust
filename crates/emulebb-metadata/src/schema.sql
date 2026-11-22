@@ -746,8 +746,8 @@ BEGIN
 END;
 
 CREATE TABLE servers (
-    id INTEGER PRIMARY KEY,
-    address TEXT NOT NULL CHECK(length(trim(address)) > 0),
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+    address TEXT NOT NULL COLLATE NOCASE CHECK(length(trim(address)) > 0),
     port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
     name TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
@@ -772,9 +772,11 @@ CREATE TABLE servers (
     udp_key_ip INTEGER CHECK(udp_key_ip IS NULL OR udp_key_ip BETWEEN 1 AND 4294967295),
     first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
     last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
-    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0),
-    UNIQUE(address, port)
+    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
 ) STRICT;
+
+CREATE UNIQUE INDEX servers_live_endpoint_idx ON servers(address,port) WHERE deleted_at_ms IS NULL;
+CREATE INDEX servers_live_id_idx ON servers(id) WHERE deleted_at_ms IS NULL;
 
 CREATE TABLE peers (
     id INTEGER PRIMARY KEY,

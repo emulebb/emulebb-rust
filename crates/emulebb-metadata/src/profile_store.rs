@@ -345,49 +345,13 @@ impl super::MetadataStore {
 
     pub fn load_servers(&self) -> Result<Vec<MetadataServer>> {
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT address, port, name, description, dynamic_host, auxiliary_ports,
-                   server_priority, static_server,
-                   enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
-                   soft_files, hard_files, version,
-                   obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key, udp_key_ip
-            FROM servers
-            WHERE deleted_at_ms IS NULL
-            ORDER BY address, port
-            "#,
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(MetadataServer {
-                address: row.get(0)?,
-                port: row.get::<_, u16>(1)?,
-                name: row.get(2)?,
-                description: row.get(3)?,
-                dynamic_host: row.get(4)?,
-                auxiliary_ports: decode_auxiliary_ports(&row.get::<_, String>(5)?),
-                server_priority: row.get(6)?,
-                static_server: row.get::<_, i64>(7)? != 0,
-                enabled: row.get::<_, i64>(8)? != 0,
-                failed_count: row.get::<_, u32>(9)?,
-                ping_ms: row.get::<_, Option<u32>>(10)?,
-                users: crate::sql_value::optional_unsigned::<u64>(row, 11)?.unwrap_or_default(),
-                files: crate::sql_value::optional_unsigned::<u64>(row, 12)?.unwrap_or_default(),
-                max_users: crate::sql_value::optional_unsigned::<u64>(row, 13)?.unwrap_or_default(),
-                low_id_users: crate::sql_value::optional_unsigned::<u64>(row, 14)?
-                    .unwrap_or_default(),
-                soft_files: crate::sql_value::optional_unsigned::<u64>(row, 15)?
-                    .unwrap_or_default(),
-                hard_files: crate::sql_value::optional_unsigned::<u64>(row, 16)?
-                    .unwrap_or_default(),
-                version: row.get(17)?,
-                obfuscation_tcp_port: row.get::<_, Option<u16>>(18)?,
-                obfuscation_udp_port: row.get::<_, Option<u16>>(19)?,
-                udp_flags: row.get::<_, Option<u32>>(20)?,
-                udp_key: row.get::<_, Option<u32>>(21)?,
-                udp_key_ip: row.get::<_, Option<u32>>(22)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
+        let sql = format!(
+            "SELECT {} FROM servers WHERE deleted_at_ms IS NULL ORDER BY address,port",
+            crate::server_query::SERVER_COLUMNS
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map([], |row| crate::server_query::server_from_row(row, 0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
@@ -444,7 +408,7 @@ fn upsert_server_in_transaction(
                 udp_key_ip, first_seen_at_ms, last_seen_at_ms, deleted_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24, NULL)
-            ON CONFLICT(address, port) DO UPDATE SET
+            ON CONFLICT(address, port) WHERE deleted_at_ms IS NULL DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
                 dynamic_host = excluded.dynamic_host,
@@ -466,8 +430,7 @@ fn upsert_server_in_transaction(
                 udp_flags = excluded.udp_flags,
                 udp_key = excluded.udp_key,
                 udp_key_ip = excluded.udp_key_ip,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                deleted_at_ms = NULL
+                last_seen_at_ms = excluded.last_seen_at_ms
             "#,
             params![
                 server.address,
@@ -579,12 +542,13 @@ fn encode_auxiliary_ports(ports: &[u16]) -> String {
         .join(",")
 }
 
-fn decode_auxiliary_ports(value: &str) -> Vec<u16> {
+pub(super) fn decode_auxiliary_ports(value: &str) -> Vec<u16> {
     let mut ports = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for value in value.split(',') {
         if let Ok(port) = value.parse::<u16>()
             && port != 0
-            && !ports.contains(&port)
+            && seen.insert(port)
         {
             ports.push(port);
         }
