@@ -1003,6 +1003,57 @@ async fn effective_ed2k_config_preserves_ed2k_owned_server_policy() {
 }
 
 #[tokio::test]
+async fn server_point_read_and_plan_merge_preserve_reported_metadata_and_endpoint_identity() {
+    let transfer_root = unique_runtime_dir("server-point-and-plan-merge");
+    let mut network = test_network_config_with_store(
+        &transfer_root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.ed2k.server_entries = vec![emulebb_ed2k::config::Ed2kServerEntry {
+        host: "Seed.Example".into(),
+        port: 4661,
+        name: Some("Configured".into()),
+        priority: "high".into(),
+        static_server: true,
+        ..Default::default()
+    }];
+    network.ed2k.server_endpoints = vec!["Endpoint.Example:4662".into()];
+    let base = network.ed2k.clone();
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &transfer_root,
+        Some(network),
+    )
+    .unwrap();
+    assert_eq!(
+        core.server("SEED.EXAMPLE:4661").await.unwrap().name,
+        "Configured"
+    );
+    assert_eq!(
+        core.server("endpoint.example:4662").await.unwrap().endpoint,
+        "Endpoint.Example:4662"
+    );
+    core.import_server_resource(&emulebb_metadata::MetadataServerImport {
+        address: "seed.example".into(),
+        port: 4661,
+        name: Some("Reported".into()),
+    })
+    .await
+    .unwrap();
+    let point = core.server("SEED.EXAMPLE:4661").await.unwrap();
+    assert_eq!(point.name, "Reported");
+    let config = core.effective_ed2k_config(&base).await.unwrap();
+    assert_eq!(config.server_entries.len(), 1);
+    assert_eq!(config.server_entries[0].host, "Seed.Example");
+    assert_eq!(config.server_entries[0].name.as_deref(), Some("Reported"));
+    assert_eq!(config.server_entries[0].priority, point.priority);
+    assert_eq!(config.server_entries[0].static_server, point.static_server);
+    assert!(core.server("missing.example:4661").await.is_none());
+}
+
+#[tokio::test]
 async fn udp_server_description_metadata_updates_the_persisted_server() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let definition = emulebb_metadata::MetadataServerCreate {

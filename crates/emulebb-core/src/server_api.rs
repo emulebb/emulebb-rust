@@ -2,10 +2,63 @@ use super::*;
 
 impl EmulebbCore {
     pub async fn server(&self, endpoint: &str) -> Option<ServerInfo> {
-        self.servers()
-            .await
-            .into_iter()
-            .find(|server| server.endpoint.eq_ignore_ascii_case(endpoint))
+        let (address, port) = parse_server_endpoint(endpoint).ok()?;
+        let connection = self.ed2k_server_connection_view().await;
+        let mut server = {
+            let state = self.state.lock().await;
+            // Common feedback reads clone one row, never the whole directory.
+            let cached = state.servers.get(endpoint).or_else(|| {
+                state
+                    .servers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(endpoint))
+                    .map(|(_, row)| row)
+            });
+            let mut server = if let Some(cached) = cached {
+                cached.clone()
+            } else {
+                let network = self.ed2k_network.as_ref()?;
+                let entry =
+                    network.ed2k.server_entries.iter().find(|entry| {
+                        entry.port == port && entry.host.eq_ignore_ascii_case(&address)
+                    });
+                if let Some(entry) = entry {
+                    let mut server = server_info_from_parts(
+                        &entry.host,
+                        port,
+                        entry.name.as_deref(),
+                        entry.description.as_deref(),
+                        entry.static_server,
+                        None,
+                        None,
+                    );
+                    server.priority = entry.normalized_priority().to_string();
+                    server
+                } else {
+                    let configured = network
+                        .ed2k
+                        .server_endpoints
+                        .iter()
+                        .find(|configured| configured.eq_ignore_ascii_case(endpoint))?;
+                    let (address, port) = parse_server_endpoint(configured).ok()?;
+                    server_info_from_parts(&address, port, None, None, true, None, None)
+                }
+            };
+            server.enabled = !state.disabled_servers.contains(&server.endpoint);
+            let update = state.server_control_overrides.get(&server.endpoint);
+            crate::views::apply_server_update(&mut server, update);
+            server
+        };
+        crate::views::apply_server_connection_flags(
+            &mut server,
+            connection.0.as_deref(),
+            connection.1.as_deref(),
+        );
+        if server.current {
+            crate::views::apply_server_live_details(&mut server, &connection.2);
+        }
+        self.apply_hostname_to_server(&mut server);
+        Some(server)
     }
 
     /// Merge servers discovered from an `OP_SERVERLIST` reply into the server
