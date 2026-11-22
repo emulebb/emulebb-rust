@@ -139,6 +139,7 @@ mod kad_publish_runtime;
 mod library_files;
 mod library_locations;
 mod search_servers;
+mod server_reads;
 mod transfer_lifecycle;
 mod upload_pages;
 

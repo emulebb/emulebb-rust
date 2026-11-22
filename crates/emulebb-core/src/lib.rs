@@ -215,6 +215,7 @@ mod search_queue_runtime;
 mod search_state;
 mod server_api;
 mod server_list;
+mod server_read;
 mod shared_dir_monitor;
 mod shared_directories;
 mod shared_file_api;
