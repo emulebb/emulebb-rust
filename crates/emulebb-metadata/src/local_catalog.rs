@@ -54,7 +54,7 @@ pub(crate) const VERIFIED_SHARE_EXISTS_SQL: &str = concat!(
     crate::local_catalog::unexcluded_identity_sql!("i"),
     " AND EXISTS(SELECT 1 FROM shared_file_memberships m JOIN shared_directory_roots r ON r.id=m.root_id WHERE m.path_id=i.path_id AND m.removed_at_s IS NULL AND r.enabled=1 AND r.deleted_at_s IS NULL AND r.accessible=1 AND r.shareable=1))"
 );
-const PARTIAL_SHARE_OFFER_SQL: &str = "SELECT length(CAST(t.display_name AS BLOB)),length(CAST(t.upload_priority AS BLOB)),t.display_name,t.expected_size_bytes,t.upload_priority,t.rating,t.id,t.execution_generation FROM known_files k JOIN download_jobs t ON t.known_file_id=k.id WHERE k.ed2k_hash=?1 AND t.expected_size_bytes IS NOT NULL AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL AND t.delete_requested_at_s IS NULL AND EXISTS(SELECT 1 FROM download_job_verified_ranges r WHERE r.job_id=t.id)";
+const PARTIAL_SHARE_OFFER_SQL: &str = "SELECT length(CAST(t.display_name AS BLOB)),length(CAST(k.upload_priority AS BLOB)),t.display_name,t.expected_size_bytes,k.upload_priority,k.rating,t.id,t.execution_generation FROM known_files k JOIN download_jobs t ON t.known_file_id=k.id WHERE k.ed2k_hash=?1 AND t.expected_size_bytes IS NOT NULL AND t.completed=0 AND t.final_rehash_pending=0 AND t.md4_hashset_acquired=1 AND t.removed_at_s IS NULL AND t.terminal_completed_at_s IS NULL AND t.delete_requested_at_s IS NULL AND EXISTS(SELECT 1 FROM download_job_verified_ranges r WHERE r.job_id=t.id)";
 
 /// Compact, bounded fields needed to advertise an independent partial source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,9 +70,9 @@ pub(crate) const COLUMNS: &str = r#"lower(hex(known_files.ed2k_hash)), known_fil
                     verified_local_content.part_count,
                     CASE WHEN verified_local_content.aich_root IS NULL THEN NULL
                          ELSE lower(hex(verified_local_content.aich_root)) END,
-                    verified_local_content.upload_priority,
-                    verified_local_content.auto_upload_priority,
-                    verified_local_content.comment, verified_local_content.rating,
+                    known_files.upload_priority,
+                    known_files.auto_upload_priority,
+                    known_files.comment, known_files.rating,
                     known_files.all_time_uploaded_bytes,
                     known_files.all_time_upload_requests,
                     known_files.all_time_upload_accepts,
@@ -252,7 +252,7 @@ impl MetadataStore {
             CROSS JOIN known_files ON known_files.id = cache.known_file_id
             CROSS JOIN verified_local_content ON verified_local_content.known_file_id = known_files.id
             WHERE (?3 IS NULL OR instr(local_paths.file_name_search_key, ?3) > 0)
-              AND (?4 IS NULL OR verified_local_content.upload_priority = ?4)";
+              AND (?4 IS NULL OR known_files.upload_priority = ?4)";
         let started = std::time::Instant::now();
         tracing::debug!(phase = "connectionWait", "catalog read");
         let mut guard = self.connection()?;

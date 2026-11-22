@@ -125,10 +125,14 @@ fn payload_page_advances_over_ineligible_ids_and_short_byte_pages() {
             .connection()
             .unwrap()
             .execute(
-                "UPDATE download_jobs SET display_name=?2,comment=?2 WHERE id=?1",
+                "UPDATE download_jobs SET display_name=?2 WHERE id=?1",
                 params![value.token.job_id, "x".repeat(65_536)],
             )
             .unwrap();
+        store.connection().unwrap().execute(
+            "UPDATE known_files SET comment=?2 WHERE id=(SELECT known_file_id FROM download_jobs WHERE id=?1)",
+            params![value.token.job_id, "x".repeat(65_536)],
+        ).unwrap();
     }
     let first = store.download_payloads_after(None, 256).unwrap();
     assert!(!first.entries.is_empty() && first.entries.len() < 20);

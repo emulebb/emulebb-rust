@@ -99,13 +99,13 @@ impl MetadataStore {
         let bounded: Option<bool> = tx
             .query_row(
                 "SELECT length(CAST(j.display_name AS BLOB))<=65536
-                AND length(CAST(j.comment AS BLOB))<=65536
-                AND length(CAST(j.upload_priority AS BLOB))<=65536
+                AND length(CAST(k.comment AS BLOB))<=65536
+                AND length(CAST(k.upload_priority AS BLOB))<=65536
                 AND coalesce(length(p.native_path),0)<=65536
                 AND coalesce(length(j.source_fingerprint),0)<=1024
                 AND coalesce(length(j.payload_fingerprint),0)<=1024
                 AND coalesce(length(CAST(j.aich_root_origin AS BLOB)),0)<=64
-             FROM download_jobs j LEFT JOIN local_paths p ON p.id=j.delivered_path_id
+             FROM download_jobs j JOIN known_files k ON k.id=j.known_file_id LEFT JOIN local_paths p ON p.id=j.delivered_path_id
              WHERE j.id=?1 AND j.execution_generation=?2 AND j.removed_at_s IS NULL
                AND j.delete_requested_at_s IS NULL AND j.internal_storage_retired=0",
                 params![token.job_id, i64::try_from(token.generation)?],
@@ -547,7 +547,7 @@ mod tests {
             .connection()
             .unwrap()
             .execute(
-                "UPDATE download_jobs SET comment='changed' WHERE id=?1",
+                "UPDATE known_files SET comment='changed' WHERE id=(SELECT known_file_id FROM download_jobs WHERE id=?1)",
                 [token.job_id],
             )
             .unwrap();
@@ -604,7 +604,7 @@ mod tests {
                 assert!(
                     writer
                         .execute(
-                            "UPDATE download_jobs SET comment='external' WHERE id=?1",
+                            "UPDATE known_files SET comment='external' WHERE id=(SELECT known_file_id FROM download_jobs WHERE id=?1)",
                             [token.job_id]
                         )
                         .is_err()
@@ -614,7 +614,7 @@ mod tests {
             .unwrap();
         writer
             .execute(
-                "UPDATE download_jobs SET comment='external' WHERE id=?1",
+                "UPDATE known_files SET comment='external' WHERE id=(SELECT known_file_id FROM download_jobs WHERE id=?1)",
                 [token.job_id],
             )
             .unwrap();

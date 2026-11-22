@@ -421,8 +421,8 @@ impl MetadataStore {
              JOIN known_files ON known_files.id=local_file_instances.known_file_id
              JOIN verified_local_content ON verified_local_content.known_file_id=known_files.id
              WHERE local_paths.platform=?1 AND local_paths.native_path=?2 AND known_files.ed2k_hash=?3
-               AND length(CAST(verified_local_content.upload_priority AS BLOB))<=65536
-               AND length(CAST(verified_local_content.comment AS BLOB))<=65536
+               AND length(CAST(known_files.upload_priority AS BLOB))<=65536
+               AND length(CAST(known_files.comment AS BLOB))<=65536
                AND length(CAST(known_files.media_artist AS BLOB))<=65536
                AND length(CAST(known_files.media_album AS BLOB))<=65536
                AND length(CAST(known_files.media_title AS BLOB))<=65536

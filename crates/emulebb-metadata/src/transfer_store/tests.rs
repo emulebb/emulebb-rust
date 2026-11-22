@@ -126,6 +126,88 @@ fn progress_snapshot_preserves_explicit_shared_presentation() {
     );
 }
 
+#[test]
+fn hash_presentation_survives_copyless_edit_job_removal_and_reopen() {
+    let path = unique_store_path("hash-presentation");
+    let store = MetadataStore::open(&path).unwrap();
+    let first = completed_pending_download_manifest(&store);
+    let hash = first.file_hash.clone();
+    assert_eq!(
+        store
+            .update_shared_content_metadata(
+                &hash,
+                Some(("high", false)),
+                Some(("First comment", 4))
+            )
+            .unwrap(),
+        Some(Some(first.token))
+    );
+    let current = store
+        .download_job_manifest(first.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            current.upload_priority.as_str(),
+            current.comment.as_str(),
+            current.rating
+        ),
+        ("high", "First comment", 4)
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM download_jobs WHERE id=?1",
+            [first.token.job_id],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .update_shared_content_metadata(
+                &hash,
+                Some(("release", false)),
+                Some(("Copyless comment", 5))
+            )
+            .unwrap(),
+        Some(None)
+    );
+    assert_eq!(
+        store
+            .update_shared_content_metadata(&"ff".repeat(16), Some(("low", false)), None)
+            .unwrap(),
+        None
+    );
+    drop(store);
+
+    let store = MetadataStore::open(&path).unwrap();
+    let next = store
+        .admit_download_job(&crate::DownloadJobRequest {
+            file_hash: hash,
+            display_name: "Another.bin".into(),
+            expected_size_bytes: Some(16),
+            category_id: None,
+            intent: crate::DownloadIntent::Stopped,
+            piece_size: 16,
+        })
+        .unwrap();
+    let current = store
+        .download_job_manifest(next.job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            current.upload_priority.as_str(),
+            current.comment.as_str(),
+            current.rating
+        ),
+        ("release", "Copyless comment", 5)
+    );
+    assert!(!current.auto_upload_priority);
+    drop(store);
+    remove_store_files(&path);
+}
+
 fn register_shared_test_job(store: &MetadataStore, id: crate::JobId) {
     let manifest = store.download_job_manifest(id).unwrap().unwrap();
     let root = std::env::temp_dir().join("metadata-job-catalog");
@@ -782,7 +864,7 @@ fn failed_partial_projection_rolls_back_shared_path_withdrawal() {
     store
         .connection()
         .unwrap()
-        .execute("UPDATE download_jobs SET comment=?1", ["x".repeat(65_537)])
+        .execute("UPDATE known_files SET comment=?1", ["x".repeat(65_537)])
         .unwrap();
     let root =
         PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR is required"))
