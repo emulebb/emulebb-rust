@@ -828,6 +828,16 @@ pub(crate) fn decode_fixed_hex(value: &str, byte_len: usize, label: &str) -> Res
     hex::decode(clean).with_context(|| format!("invalid {label}"))
 }
 
+/// Current calendar time as nonnegative Unix seconds.
+pub(crate) fn unix_s() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
 pub(crate) fn unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

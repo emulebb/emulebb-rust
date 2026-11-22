@@ -65,7 +65,7 @@ fn page_sql() -> String {
     // a sparse/empty page does not walk historical rows after the boundary.
     format!(
         "SELECT id,{TEXT_BYTES},{SERVER_COLUMNS} FROM servers INDEXED BY servers_live_id_idx
-        WHERE deleted_at_ms IS NULL AND id>?1 ORDER BY id LIMIT ?2"
+        WHERE deleted_at_s IS NULL AND id>?1 ORDER BY id LIMIT ?2"
     )
 }
 
@@ -117,7 +117,7 @@ impl MetadataStore {
         drop(statement);
         let total = if query.count_total {
             Some(u64::try_from(conn.query_row(
-                "SELECT count(*) FROM servers WHERE deleted_at_ms IS NULL",
+                "SELECT count(*) FROM servers WHERE deleted_at_s IS NULL",
                 [],
                 |r| r.get::<_, i64>(0),
             )?)?)
@@ -143,7 +143,7 @@ impl MetadataStore {
         let conn = self.connection()?;
         let sql = format!(
             "SELECT id,{TEXT_BYTES},{SERVER_COLUMNS} FROM servers
-            WHERE id=?1 AND deleted_at_ms IS NULL"
+            WHERE id=?1 AND deleted_at_s IS NULL"
         );
         let mut statement = conn.prepare_cached(&sql)?;
         let mut rows = statement.query([id])?;

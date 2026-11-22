@@ -6,7 +6,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use crate::{
     profile_model::{MetadataCategory, MetadataFriend, MetadataServer},
     store::{
-        bool_to_i64, decode_fixed_hex, refresh_shared_root_eligibility, unix_ms, upsert_local_path,
+        bool_to_i64, decode_fixed_hex, refresh_shared_root_eligibility, unix_ms, unix_s,
+        upsert_local_path,
     },
 };
 
@@ -346,7 +347,7 @@ impl super::MetadataStore {
     pub fn load_servers(&self) -> Result<Vec<MetadataServer>> {
         let conn = self.connection()?;
         let sql = format!(
-            "SELECT {} FROM servers WHERE deleted_at_ms IS NULL ORDER BY address,port",
+            "SELECT {} FROM servers WHERE deleted_at_s IS NULL ORDER BY address,port",
             crate::server_query::SERVER_COLUMNS
         );
         let mut statement = conn.prepare(&sql)?;
@@ -396,7 +397,7 @@ fn upsert_server_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     server: &MetadataServer,
 ) -> Result<()> {
-    let now = unix_ms();
+    let now = unix_s();
     tx.execute(
             r#"
             INSERT INTO servers(
@@ -405,10 +406,10 @@ fn upsert_server_in_transaction(
                 enabled, failed_count, ping_ms, users, files, max_users, low_id_users,
                 soft_files, hard_files,
                 version, obfuscation_tcp_port, obfuscation_udp_port, udp_flags, udp_key,
-                udp_key_ip, first_seen_at_ms, last_seen_at_ms, deleted_at_ms
+                udp_key_ip, first_seen_at_s, last_seen_at_s, deleted_at_s
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24, NULL)
-            ON CONFLICT(address, port) WHERE deleted_at_ms IS NULL DO UPDATE SET
+            ON CONFLICT(address, port) WHERE deleted_at_s IS NULL DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
                 dynamic_host = excluded.dynamic_host,
@@ -430,7 +431,7 @@ fn upsert_server_in_transaction(
                 udp_flags = excluded.udp_flags,
                 udp_key = excluded.udp_key,
                 udp_key_ip = excluded.udp_key_ip,
-                last_seen_at_ms = excluded.last_seen_at_ms
+                last_seen_at_s = excluded.last_seen_at_s
             "#,
             params![
                 server.address,

@@ -29,6 +29,50 @@ fn server(address: &str) -> MetadataServer {
 }
 
 #[test]
+fn server_calendar_times_use_seconds_and_updates_preserve_first_seen() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut entry = server("seed.example");
+    entry.ping_ms = Some(1234);
+    let before = crate::store::unix_s();
+    assert!(
+        store
+            .initialize_servers_if_pending(&[entry.clone()])
+            .unwrap()
+    );
+    let read_times = || {
+        store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT first_seen_at_s,last_seen_at_s,deleted_at_s,ping_ms FROM servers",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let initial = read_times();
+    assert!((before..=crate::store::unix_s()).contains(&initial.0));
+    assert_eq!(initial, (initial.0, initial.0, None, 1234));
+    store
+        .connection()
+        .unwrap()
+        .execute("UPDATE servers SET first_seen_at_s=1,last_seen_at_s=2", [])
+        .unwrap();
+    store.upsert_server(&entry).unwrap();
+    let updated = read_times();
+    assert_eq!(updated.0, 1);
+    assert!((before..=crate::store::unix_s()).contains(&updated.1));
+    assert_eq!((updated.2, updated.3), (None, 1234));
+}
+
+#[test]
 fn identity_survives_upsert_bootstrap_and_reopen_without_reusing_removed_ids() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("metadata.sqlite");
@@ -95,7 +139,7 @@ fn reimporting_a_retired_endpoint_allocates_a_new_identity() {
     store
         .connection()
         .unwrap()
-        .execute("UPDATE servers SET deleted_at_ms=0 WHERE id=?1", [retired])
+        .execute("UPDATE servers SET deleted_at_s=0 WHERE id=?1", [retired])
         .unwrap();
     store.upsert_server(&server("SEED.EXAMPLE")).unwrap();
     let live = store.server_page(Default::default()).unwrap();
@@ -106,7 +150,7 @@ fn reimporting_a_retired_endpoint_allocates_a_new_identity() {
         .connection()
         .unwrap()
         .query_row(
-            "SELECT deleted_at_ms FROM servers WHERE id=?1",
+            "SELECT deleted_at_s FROM servers WHERE id=?1",
             [retired],
             |row| row.get(0),
         )
@@ -160,7 +204,7 @@ fn disabled_rows_remain_visible_and_deleted_boundaries_continue() {
     store
         .connection()
         .unwrap()
-        .execute("UPDATE servers SET deleted_at_ms=0 WHERE id=?1", [id])
+        .execute("UPDATE servers SET deleted_at_s=0 WHERE id=?1", [id])
         .unwrap();
     assert!(store.server_by_id(id).unwrap().is_none());
     let next = store
@@ -309,7 +353,7 @@ fn late_page_uses_indexed_seek_with_a_large_deleted_cohort() {
         let conn = store.connection().unwrap();
         conn.execute_batch(
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000)
-            INSERT INTO servers(address,port,first_seen_at_ms,last_seen_at_ms,deleted_at_ms)
+            INSERT INTO servers(address,port,first_seen_at_s,last_seen_at_s,deleted_at_s)
             SELECT printf('server-%06d.example',x),4661,0,0,CASE WHEN x%2=0 THEN 0 END FROM n;",
         )
         .unwrap();
