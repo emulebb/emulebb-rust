@@ -110,7 +110,7 @@ pub use server_mutation::{
 };
 pub use server_query::{
     MetadataServerPage, MetadataServerQuery, MetadataServerReadError, MetadataServerRecord,
-    SERVER_READ_MAX_BYTES,
+    MetadataServerSummary, SERVER_READ_MAX_BYTES,
 };
 mod schema;
 mod schema_validation;

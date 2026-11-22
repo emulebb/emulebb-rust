@@ -4,6 +4,53 @@ use crate::{
 };
 
 #[test]
+fn server_summary_counts_live_rows_and_reads_only_the_selected_endpoint() {
+    let store = MetadataStore::in_memory().unwrap();
+    let first = store
+        .create_server_resource(creation("seed.example"))
+        .unwrap();
+    let second = store
+        .create_server_resource(creation("other.example"))
+        .unwrap();
+    store
+        .update_server_resource(
+            first.id,
+            &MetadataServerUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // An unrelated oversized row must not turn a count/current read into a list read.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE servers SET name=?1 WHERE id=?2",
+            params!["x".repeat(SERVER_READ_MAX_BYTES), second.id],
+        )
+        .unwrap();
+    let summary = store.server_summary(Some(("SEED.EXAMPLE", 4661))).unwrap();
+    assert_eq!(summary.total, 2);
+    let current = summary.current.unwrap();
+    assert_eq!(current.id, first.id);
+    assert!(!current.server.enabled);
+    assert_eq!(store.server_summary(None).unwrap().total, 2);
+    assert!(
+        store
+            .server_summary(Some(("missing.example", 4661)))
+            .unwrap()
+            .current
+            .is_none()
+    );
+    assert!(store.server_summary(Some(("other.example", 4661))).is_err());
+    store.delete_server_resource(first.id).unwrap();
+    let summary = store.server_summary(Some(("seed.example", 4661))).unwrap();
+    assert_eq!(summary.total, 1);
+    assert!(summary.current.is_none());
+}
+
+#[test]
 fn explicit_server_creation_conflict_preserves_disabled_resource_and_observations() {
     let store = MetadataStore::in_memory().unwrap();
     let mut original = server("seed.example");

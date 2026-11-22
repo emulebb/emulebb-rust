@@ -38,6 +38,13 @@ pub struct MetadataServerPage {
     pub total: Option<u64>,
 }
 
+/// Catalog summary reads at most one rich row, independent of catalog size.
+#[derive(Debug)]
+pub struct MetadataServerSummary {
+    pub total: u64,
+    pub current: Option<MetadataServerRecord>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataServerReadError {
     InvalidQuery,
@@ -79,6 +86,32 @@ fn row_bytes(row: &Row<'_>) -> Result<usize> {
 }
 
 impl MetadataStore {
+    pub fn server_summary(&self, endpoint: Option<(&str, u16)>) -> Result<MetadataServerSummary> {
+        let mut conn = self.connection()?;
+        let transaction = conn.transaction()?;
+        let total = u64::try_from(transaction.query_row(
+            "SELECT count(*) FROM servers WHERE deleted_at_s IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?)?;
+        let current = if let Some((address, port)) = endpoint {
+            let id = transaction.query_row(
+                "SELECT id FROM servers WHERE address=?1 AND port=?2 AND deleted_at_s IS NULL",
+                params![address, port],
+                |row| row.get::<_, i64>(0),
+            );
+            match id {
+                Ok(id) => server_by_id_connection(&transaction, id)?,
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            None
+        };
+        transaction.commit()?;
+        Ok(MetadataServerSummary { total, current })
+    }
+
     /// Ascending immutable-ID traversal. Disabled servers remain visible;
     /// deleted boundaries need no lookup and never invalidate continuation.
     pub fn server_page(&self, query: MetadataServerQuery) -> Result<MetadataServerPage> {

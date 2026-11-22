@@ -22,6 +22,13 @@ pub struct ServerResourcePage {
     pub total: Option<u64>,
 }
 
+/// Current connection presentation and saved catalog count, without a list clone.
+pub struct ServerConnectionSummary {
+    pub total: u64,
+    pub current: Option<crate::ServerInfo>,
+    pub connecting: bool,
+}
+
 fn read_error(error: anyhow::Error) -> anyhow::Error {
     match error.downcast_ref::<MetadataServerReadError>() {
         Some(MetadataServerReadError::InvalidQuery) => return error,
@@ -36,6 +43,38 @@ fn read_error(error: anyhow::Error) -> anyhow::Error {
 }
 
 impl EmulebbCore {
+    pub async fn server_connection_summary(&self) -> Result<RetainedRead<ServerConnectionSummary>> {
+        self.persistence_owner.check_coherent_state()?;
+        let connection = self.ed2k_server_connection_view().await;
+        let endpoint = connection
+            .0
+            .as_deref()
+            .or(connection.1.as_deref())
+            .map(crate::parse_server_endpoint)
+            .transpose()?;
+        let summary = self
+            .ed2k_transfers
+            .server_summary(endpoint)
+            .await
+            .map_err(read_error)?;
+        self.persistence_owner.check_coherent_state()?;
+        summary.try_project(2 * emulebb_metadata::SERVER_READ_MAX_BYTES, |summary| {
+            Ok(ServerConnectionSummary {
+                total: summary.total,
+                connecting: connection.1.is_some(),
+                current: summary.current.map(|record| {
+                    self.present_server_record(
+                        record,
+                        connection.0.as_deref(),
+                        connection.1.as_deref(),
+                        &connection.2,
+                    )
+                    .server
+                }),
+            })
+        })
+    }
+
     fn present_server_record(
         &self,
         record: MetadataServerRecord,

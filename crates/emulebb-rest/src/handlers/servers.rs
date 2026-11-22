@@ -138,14 +138,14 @@ pub(crate) async fn create_server(State(state): State<RestState>, body: Bytes) -
 
 pub(crate) async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.connect_ed2k().await {
-        Ok(_status) => api_ok(server_connect_acknowledgement(&state).await).into_response(),
+        Ok(_status) => connection_response(server_connect_acknowledgement(&state).await),
         Err(error) => super::persistence::persistence_error(error),
     }
 }
 
 pub(crate) async fn servers_disconnect(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.disconnect_ed2k_server().await {
-        Ok(_status) => api_ok(server_status_response(&state).await).into_response(),
+        Ok(_status) => connection_response(server_status_response(&state).await),
         Err(error) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "EMULE_ERROR",
@@ -257,8 +257,15 @@ pub(crate) async fn connect_server(
         Err(error) => return super::persistence::persistence_error(error),
     };
     match state.core.connect_ed2k_server(&endpoint).await {
-        Ok(Some(_status)) => api_ok(server_connect_acknowledgement(&state).await).into_response(),
+        Ok(Some(_status)) => connection_response(server_connect_acknowledgement(&state).await),
         Ok(None) => missing(),
+        Err(error) => super::persistence::persistence_error(error),
+    }
+}
+
+fn connection_response(result: anyhow::Result<serde_json::Value>) -> Response {
+    match result {
+        Ok(value) => api_ok(value).into_response(),
         Err(error) => super::persistence::persistence_error(error),
     }
 }

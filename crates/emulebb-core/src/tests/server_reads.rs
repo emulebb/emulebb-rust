@@ -37,6 +37,17 @@ async fn server_catalog_reads_use_persisted_ids_and_retain_owned_conversion() {
     add(&core, "192.0.2.1", "Sample Server").await;
     add(&core, "192.0.2.2", "Second Server").await;
     core.state.lock().await.servers.clear();
+    let summary = core.server_connection_summary().await.unwrap();
+    assert_eq!(summary.total, 2);
+    assert!(summary.current.is_none());
+    assert!(!summary.connecting);
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .transient_bytes,
+        2 * SERVER_READ_MAX_BYTES
+    );
+    drop(summary);
     let resident = core
         .ed2k_transfers
         .download_resource_snapshot()

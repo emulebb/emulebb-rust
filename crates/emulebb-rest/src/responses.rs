@@ -125,7 +125,7 @@ pub(crate) async fn status_response(state: &RestState) -> Result<Value> {
     Ok(json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
         "stats": stats_response(&status, &transfers, &upload_policy, &throughput, shared_hashing_count),
-        "servers": server_status_response(state).await,
+        "servers": server_status_response(state).await?,
         "kad": kad_response(&status.kad, network.as_ref(), &guard),
         "network": network_response(network.as_ref(), &guard),
         "sharedStartupCache": {
@@ -362,20 +362,23 @@ pub(crate) fn server_responses(servers: Vec<ServerInfo>) -> Vec<Value> {
     servers.iter().map(server_response).collect()
 }
 
-pub(crate) async fn server_status_response(state: &RestState) -> Value {
+pub(crate) async fn server_status_response(state: &RestState) -> Result<Value> {
     let status = state.core.status().await;
-    let servers = state.core.servers().await;
-    server_status_value(&status, &servers)
+    let summary = state.core.server_connection_summary().await?;
+    Ok(server_status_value(&status, &summary))
 }
 
-pub(crate) async fn server_connect_acknowledgement(state: &RestState) -> Value {
+pub(crate) async fn server_connect_acknowledgement(state: &RestState) -> Result<Value> {
     let status = state.core.status().await;
-    let servers = state.core.servers().await;
-    server_connect_acknowledgement_value(&status, &servers)
+    let summary = state.core.server_connection_summary().await?;
+    Ok(server_connect_acknowledgement_value(&status, &summary))
 }
 
-fn server_connect_acknowledgement_value(status: &Status, servers: &[ServerInfo]) -> Value {
-    let mut response = server_status_value(status, servers);
+fn server_connect_acknowledgement_value(
+    status: &Status,
+    summary: &emulebb_core::ServerConnectionSummary,
+) -> Value {
+    let mut response = server_status_value(status, summary);
     let connected = response["connected"].as_bool().unwrap_or(false);
     let object = response
         .as_object_mut()
@@ -391,18 +394,17 @@ fn server_connect_acknowledgement_value(status: &Status, servers: &[ServerInfo])
     response
 }
 
-pub(crate) fn server_status_value(status: &Status, servers: &[ServerInfo]) -> Value {
-    let current_server = servers
-        .iter()
-        .find(|server| server.current)
-        .map(server_response);
-    let connecting = servers.iter().any(|server| server.connecting);
+pub(crate) fn server_status_value(
+    status: &Status,
+    summary: &emulebb_core::ServerConnectionSummary,
+) -> Value {
+    let current_server = summary.current.as_ref().map(server_response);
     json!({
         "connected": status.ed2k.connected,
-        "connecting": connecting,
+        "connecting": summary.connecting,
         "currentServer": current_server,
         "ed2kIdState": ed2k_id_state(status.ed2k.connected, status.ed2k.firewalled),
-        "serverCount": servers.len()
+        "serverCount": summary.total
     })
 }
 
@@ -484,6 +486,14 @@ mod tests {
         kad_response, network_response, server_connect_acknowledgement_value, server_status_value,
         stats_response,
     };
+
+    fn empty_server_summary() -> emulebb_core::ServerConnectionSummary {
+        emulebb_core::ServerConnectionSummary {
+            total: 0,
+            current: None,
+            connecting: false,
+        }
+    }
 
     #[test]
     fn kad_response_surfaces_indexed_counts() {
@@ -636,16 +646,16 @@ mod tests {
             Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
         let mut status = core.status().await;
 
-        let disconnected = server_status_value(&status, &[]);
+        let disconnected = server_status_value(&status, &empty_server_summary());
         assert_eq!(disconnected["ed2kIdState"], "unknown");
 
         status.ed2k.connected = true;
         status.ed2k.firewalled = Some(true);
-        let low_id = server_status_value(&status, &[]);
+        let low_id = server_status_value(&status, &empty_server_summary());
         assert_eq!(low_id["ed2kIdState"], "low");
 
         status.ed2k.firewalled = Some(false);
-        let high_id = server_status_value(&status, &[]);
+        let high_id = server_status_value(&status, &empty_server_summary());
         assert_eq!(high_id["ed2kIdState"], "high");
     }
 
@@ -654,48 +664,53 @@ mod tests {
         let core =
             Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
         let status = core.status().await;
-        let mut servers = vec![ServerInfo {
-            address: "203.0.113.9".to_string(),
-            port: 4661,
-            endpoint: "203.0.113.9:4661".to_string(),
-            name: "test server".to_string(),
-            priority: "normal".to_string(),
-            static_server: true,
-            enabled: true,
-            connected: false,
+        let mut summary = emulebb_core::ServerConnectionSummary {
+            total: 17,
             connecting: true,
-            current: true,
-            description: String::new(),
-            dyn_ip: String::new(),
-            auxiliary_ports: vec![4662, 4663],
-            failed_count: 0,
-            hard_files: 0,
-            ip: String::new(),
-            ping: 0,
-            soft_files: 0,
-            offer_files_mode: Some("negotiatedV1".to_string()),
-            offer_files_batch_max: Some(300),
-            offer_files_min_interval_ms: Some(1_500),
-            offer_files_fallback_reason: Some("none".to_string()),
-            offer_files_published_entries: 400,
-            offer_files_pending_entries: 25,
-            version: String::new(),
-            obfuscation_tcp_port: Some(4665),
-            obfuscation_udp_port: Some(4675),
-            udp_flags: Some(0x331),
-            udp_key: Some(0x1122_3344),
-            udp_key_ip: Some(0x5566_7788),
-            max_users: 0,
-            low_id_users: 0,
-            users: 0,
-            files: 0,
-            host_name: None,
-            host_name_status: None,
-            host_name_resolved_at: None,
-            host_name_error: None,
-        }];
+            current: Some(ServerInfo {
+                address: "203.0.113.9".to_string(),
+                port: 4661,
+                endpoint: "203.0.113.9:4661".to_string(),
+                name: "test server".to_string(),
+                priority: "normal".to_string(),
+                static_server: true,
+                enabled: true,
+                connected: false,
+                connecting: true,
+                current: true,
+                description: String::new(),
+                dyn_ip: String::new(),
+                auxiliary_ports: vec![4662, 4663],
+                failed_count: 0,
+                hard_files: 0,
+                ip: String::new(),
+                ping: 0,
+                soft_files: 0,
+                offer_files_mode: Some("negotiatedV1".to_string()),
+                offer_files_batch_max: Some(300),
+                offer_files_min_interval_ms: Some(1_500),
+                offer_files_fallback_reason: Some("none".to_string()),
+                offer_files_published_entries: 400,
+                offer_files_pending_entries: 25,
+                version: String::new(),
+                obfuscation_tcp_port: Some(4665),
+                obfuscation_udp_port: Some(4675),
+                udp_flags: Some(0x331),
+                udp_key: Some(0x1122_3344),
+                udp_key_ip: Some(0x5566_7788),
+                max_users: 0,
+                low_id_users: 0,
+                users: 0,
+                files: 0,
+                host_name: None,
+                host_name_status: None,
+                host_name_resolved_at: None,
+                host_name_error: None,
+            }),
+        };
 
-        let value = server_status_value(&status, &servers);
+        let value = server_status_value(&status, &summary);
+        assert_eq!(value["serverCount"], 17);
 
         assert_eq!(value["connected"], false);
         assert_eq!(value["connecting"], true);
@@ -717,9 +732,9 @@ mod tests {
             serde_json::Value::Null
         );
         for seconds in [0, 1_800_000_000] {
-            servers[0].host_name_resolved_at =
+            summary.current.as_mut().unwrap().host_name_resolved_at =
                 chrono::DateTime::from_timestamp(seconds, 456_000_000);
-            let value = server_status_value(&status, &servers);
+            let value = server_status_value(&status, &summary);
             assert_eq!(value["currentServer"]["hostNameResolvedAt"], seconds);
         }
     }
@@ -730,7 +745,7 @@ mod tests {
             Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
         let status = core.status().await;
 
-        let value = server_connect_acknowledgement_value(&status, &[]);
+        let value = server_connect_acknowledgement_value(&status, &empty_server_summary());
 
         assert_eq!(value["connected"], false);
         assert_eq!(value["connecting"], true);

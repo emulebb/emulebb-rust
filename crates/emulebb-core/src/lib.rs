@@ -215,7 +215,7 @@ mod search_state;
 mod server_api;
 mod server_list;
 mod server_read;
-pub use server_read::{ServerResource, ServerResourcePage};
+pub use server_read::{ServerConnectionSummary, ServerResource, ServerResourcePage};
 mod shared_catalog_publisher;
 mod shared_dir_monitor;
 mod shared_directories;
