@@ -598,7 +598,10 @@ impl Ed2kTransferRuntime {
         file_hash: &Ed2kHash,
     ) -> Result<Option<super::Ed2kFileServingView>> {
         let hash_hex = file_hash.to_string();
-        let token = self.resolve_protocol_job(&hash_hex).await?;
+        let token = self
+            .resolve_protocol_job(&hash_hex)
+            .await
+            .context("failed to resolve job for local serving view")?;
         let _guard = if let Some(token) = token {
             Some(self.lock_manifest(token).await)
         } else {
@@ -606,6 +609,7 @@ impl Ed2kTransferRuntime {
         };
         self.load_serving_view_optional_unlocked(&hash_hex, token)
             .await
+            .context("failed to load local serving view")
     }
 
     /// Like [`Self::local_entry`] but only returns an entry that may be served
