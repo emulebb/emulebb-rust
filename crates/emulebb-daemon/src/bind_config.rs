@@ -72,7 +72,9 @@ impl DaemonProfile {
         if !self.vpn_guard_blocks_p2p() {
             return resolve_default_route_ip(interfaces);
         }
-        bail!("p2pBindIp or p2pBindInterface is required when VPN Guard blocks public P2P");
+        bail!(
+            "network.p2p.bindIp or network.p2p.bindInterface is required when VPN Guard blocks public P2P"
+        );
     }
 
     pub(crate) fn vpn_binding_confirmed(
@@ -105,8 +107,8 @@ fn resolve_default_route_ip(interfaces: &[NetworkInterface]) -> Result<Ipv4Addr>
         [address] => Ok(*address),
         [] => Err(NetworkStartupError::DefaultRouteUnavailable.into()),
         _ => bail!(
-            "p2pBindIp or p2pBindInterface is required because multiple default-route IPv4 interfaces were detected; \
-             start with --p2p-bind-interface <NAME>, then save the P2P bind interface in WebUI Settings > Network"
+            "network.p2p.bindIp or network.p2p.bindInterface is required because multiple default-route IPv4 interfaces were detected; \
+             while the daemon is stopped, run emulebb-rust --profile <PATH> settings set network.p2p.bindInterface <NAME>"
         ),
     }
 }
@@ -121,11 +123,11 @@ pub(crate) fn resolve_p2p_bind_interface_ip(
         .iter()
         .find(|address| matches!(address.family, InterfaceAddressFamily::Ipv4))
     else {
-        bail!("p2pBindInterface {bind_interface:?} did not resolve to an IPv4 address");
+        bail!("network.p2p.bindInterface {bind_interface:?} did not resolve to an IPv4 address");
     };
     address.address.parse::<Ipv4Addr>().with_context(|| {
         format!(
-            "p2pBindInterface {bind_interface:?} resolved to non-IPv4 address {:?}",
+            "network.p2p.bindInterface {bind_interface:?} resolved to non-IPv4 address {:?}",
             address.address
         )
     })
@@ -149,10 +151,10 @@ fn find_unique_interface<'a>(
     };
     let mut matches = matches.into_iter();
     let Some(iface) = matches.next() else {
-        bail!("p2pBindInterface {bind_interface:?} did not resolve to an IPv4 address");
+        bail!("network.p2p.bindInterface {bind_interface:?} did not resolve to an IPv4 address");
     };
     if matches.next().is_some() {
-        bail!("p2pBindInterface {bind_interface:?} is ambiguous");
+        bail!("network.p2p.bindInterface {bind_interface:?} is ambiguous");
     }
     Ok(iface)
 }
