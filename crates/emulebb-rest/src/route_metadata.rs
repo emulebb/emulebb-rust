@@ -465,33 +465,6 @@ fn is_lowercase_md4_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-fn validate_endpoint_path_token(value: &str, field: &'static str) -> Result<(), Box<Response>> {
-    let Some((address, port)) = value.rsplit_once(':') else {
-        return Err(endpoint_path_token_error(field));
-    };
-    if address.is_empty() || port.is_empty() {
-        return Err(endpoint_path_token_error(field));
-    }
-    let Ok(port) = port.parse::<u64>() else {
-        return Err(endpoint_path_token_error(field));
-    };
-    if !(1..=u16::MAX as u64).contains(&port) {
-        return Err(endpoint_path_token_error(field));
-    }
-    Ok(())
-}
-
-fn endpoint_path_token_error(field: &'static str) -> Box<Response> {
-    Box::new(
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            format!("{field} must use address:port with a port in the range 1..65535"),
-        )
-        .into_response(),
-    )
-}
-
 fn validate_client_id_path_token(value: &str) -> Result<(), Box<Response>> {
     if is_lowercase_md4_hex(value) || is_endpoint_path_token(value) {
         return Ok(());

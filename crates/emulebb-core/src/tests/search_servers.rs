@@ -1878,7 +1878,7 @@ async fn classified_non_remote_failures_never_mutate_server_health() {
             let address = format!("203.0.113.{}", index + 20);
             let endpoint = format!("{address}:4661");
             core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
-                address: address,
+                address,
                 port: 4661,
                 priority: "normal".into(),
                 static_server: false,
