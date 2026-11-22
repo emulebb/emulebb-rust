@@ -3007,7 +3007,7 @@ impl EmulebbCore {
                 diagnostics.phase = "publishing".to_string();
                 diagnostics.running = true;
                 diagnostics.dirty = false;
-                diagnostics.last_attempt_at_ms = Utc::now().timestamp_millis();
+                diagnostics.last_attempt_at = Some(Utc::now().timestamp());
             });
             match self.publish_ed2k_shared_catalog().await {
                 Ok(Ed2kSharedCatalogPublishOutcome::Published(stats)) => {
@@ -3028,7 +3028,7 @@ impl EmulebbCore {
                             diagnostics.skipped_duplicate_batch = stats.skipped_duplicate_batch;
                             diagnostics.session_pump_active = stats.session_pump_active;
                             diagnostics.last_error = None;
-                            diagnostics.last_success_at_ms = Utc::now().timestamp_millis();
+                            diagnostics.last_success_at = Some(Utc::now().timestamp());
                         },
                     );
                     tracing::debug!(
