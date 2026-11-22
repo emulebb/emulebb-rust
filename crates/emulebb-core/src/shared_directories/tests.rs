@@ -23,8 +23,8 @@ async fn followup_scan_requests_preserve_active_pass_progress() {
             progress.scanned_count = 123;
             progress.planned_hash_count = 50;
             progress.hashed_count = 7;
-            progress.started_at_ms = Some(1_000);
-            progress.updated_at_ms = Some(2_000);
+            progress.started_at = Some(1_000);
+            progress.updated_at = Some(2_000);
         });
         for _ in 0..3 {
             core.reload_shared_directories_detached().await.unwrap();
@@ -41,7 +41,7 @@ async fn followup_scan_requests_preserve_active_pass_progress() {
             (123, 50, 7)
         );
         assert_eq!(
-            (progress.started_at_ms, progress.updated_at_ms),
+            (progress.started_at, progress.updated_at),
             (Some(1_000), Some(2_000))
         );
     }
@@ -1460,6 +1460,33 @@ fn clock_test_target() -> ReloadHashTarget {
 }
 
 #[tokio::test]
+async fn scan_calendar_fields_serialize_unix_seconds() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let target = clock_test_target();
+    let before = chrono::Utc::now().timestamp();
+    record_hash_queue(&core, std::slice::from_ref(&target));
+    record_hash_target_started(&core, &target);
+    let active = serde_json::to_value(core.shared_directory_reload_progress()).unwrap();
+    record_hash_target_finished(&core, &target, Some(&"11".repeat(16)), None);
+    let completed = serde_json::to_value(core.shared_directory_reload_progress()).unwrap();
+    let after = chrono::Utc::now().timestamp();
+    let bounds = before.min(after)..=before.max(after);
+    for value in [
+        &active["startedAt"],
+        &active["updatedAt"],
+        &active["active"][0]["startedAt"],
+        &active["active"][0]["updatedAt"],
+        &completed["updatedAt"],
+        &completed["recent"][0]["finishedAt"],
+    ] {
+        assert!(
+            bounds.contains(&value.as_i64().expect("calendar seconds")),
+            "{value}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn scan_rates_ignore_calendar_changes_and_keep_elapsed_precision() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let target = clock_test_target();
@@ -1474,10 +1501,10 @@ async fn scan_rates_ignore_calendar_changes_and_keep_elapsed_precision() {
     progress.disks[0].completed_read_bytes = 2000;
     let now = anchor + std::time::Duration::from_millis(2000);
     for (started_at, updated_at) in [(0, 2000), (5000, 1), (1, i64::MAX)] {
-        progress.started_at_ms = Some(started_at);
-        progress.updated_at_ms = Some(updated_at);
-        progress.active[0].started_at_ms = started_at;
-        progress.active[0].updated_at_ms = updated_at;
+        progress.started_at = Some(started_at);
+        progress.updated_at = Some(updated_at);
+        progress.active[0].started_at = started_at;
+        progress.active[0].updated_at = updated_at;
         refresh_reload_rates(&mut progress, now);
         assert_eq!(progress.read_rate_bytes_per_sec, 1000);
         assert_eq!(progress.active[0].read_rate_bytes_per_sec, 500);
@@ -1498,9 +1525,9 @@ async fn scan_completion_uses_final_bytes_and_monotonic_duration_and_order() {
     {
         let mut progress = core.shared_directory_reload_progress.lock().unwrap();
         progress.started = Some(anchor);
-        progress.started_at_ms = Some(i64::MAX);
+        progress.started_at = Some(i64::MAX);
         progress.active[0].started = Some(anchor);
-        progress.active[0].started_at_ms = i64::MAX;
+        progress.active[0].started_at = i64::MAX;
         progress.active[0].read_bytes = 1000;
     }
     let before = Instant::now();
@@ -1526,27 +1553,27 @@ async fn scan_completion_uses_final_bytes_and_monotonic_duration_and_order() {
 
     let mut current = SharedDirectoryReloadProgress {
         started: Some(anchor + std::time::Duration::from_secs(1)),
-        started_at_ms: Some(1),
+        started_at: Some(1),
         ..Default::default()
     };
     let mut newer = recent.clone();
     newer.id = "newer".into();
     newer.finished = Some(anchor + std::time::Duration::from_secs(2));
-    newer.finished_at_ms = 0;
+    newer.finished_at = 0;
     current.recent.push(newer);
     let mut prior = SharedDirectoryReloadProgress {
         started: Some(anchor),
-        started_at_ms: Some(5000),
+        started_at: Some(5000),
         ..Default::default()
     };
     let mut older = recent.clone();
     older.id = "older".into();
     older.finished = Some(anchor + std::time::Duration::from_secs(1));
-    older.finished_at_ms = i64::MAX;
+    older.finished_at = i64::MAX;
     prior.recent.push(older);
     merge_initial_publish_progress(&mut current, &InitialPublishBootstrap { progress: prior });
     assert_eq!(current.started, Some(anchor));
-    assert_eq!(current.started_at_ms, Some(5000));
+    assert_eq!(current.started_at, Some(5000));
     assert_eq!(
         current
             .recent

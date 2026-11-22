@@ -513,8 +513,8 @@ export type SharedDirectoryReloadProgress = {
   plannedReadBytes?: number;
   completedReadBytes?: number;
   readRateBytesPerSec?: number;
-  startedAtMs?: number | null;
-  updatedAtMs?: number | null;
+  startedAt?: number | null;
+  updatedAt?: number | null;
   active?: SharedDirectoryHashActiveFile[];
   recent?: SharedDirectoryHashRecentFile[];
   upcoming?: SharedDirectoryHashQueuedFile[];
@@ -535,8 +535,8 @@ export type SharedDirectoryHashActiveFile = {
   readBytes?: number;
   readBytesTotal?: number;
   readRateBytesPerSec?: number;
-  startedAtMs?: number;
-  updatedAtMs?: number;
+  startedAt?: number;
+  updatedAt?: number;
   [key: string]: unknown;
 };
 
@@ -554,7 +554,7 @@ export type SharedDirectoryHashRecentFile = {
   readBytesTotal?: number;
   durationMs?: number;
   averageReadRateBytesPerSec?: number;
-  finishedAtMs?: number;
+  finishedAt?: number;
   [key: string]: unknown;
 };
 
