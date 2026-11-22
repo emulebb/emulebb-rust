@@ -234,7 +234,7 @@ fn is_ed2k_udp_source_batch_transfer_candidate(transfer: &Transfer) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap};
 
     use super::*;
     use crate::{CoreState, download_source_registry::DownloadSourceRegistry};
@@ -446,7 +446,7 @@ mod tests {
             friends: BTreeMap::new(),
             servers: HashMap::new(),
             server_control_overrides: HashMap::new(),
-            disabled_servers: HashSet::new(),
+            disabled_servers: Default::default(),
             server_fail_counts: HashMap::new(),
 
             active_download_peer_endpoints: std::collections::HashMap::new(),

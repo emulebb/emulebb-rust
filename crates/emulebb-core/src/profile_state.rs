@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{Category, CoreState, Friend, ServerInfo, SharedDirectoryRoot};
 use anyhow::Result;
@@ -26,7 +26,7 @@ pub(crate) fn load_core_state(
         .collect::<BTreeMap<_, _>>();
 
     let mut servers = HashMap::new();
-    let mut disabled_servers = HashSet::new();
+    let mut disabled_servers = crate::core_state::ServerEndpointSet::default();
     for server in metadata.load_servers()? {
         let endpoint = server.endpoint();
         if !server.enabled {

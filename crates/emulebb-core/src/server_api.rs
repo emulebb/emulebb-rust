@@ -82,16 +82,6 @@ impl EmulebbCore {
         {
             return;
         }
-        let existing: HashSet<String> = self
-            .servers()
-            .await
-            .into_iter()
-            .map(|server| server.endpoint)
-            .collect();
-        let disabled: HashSet<String> = {
-            let state = self.state.lock().await;
-            state.disabled_servers.clone()
-        };
         let connection = self.ed2k_server_connection_view().await;
         let mut added = 0usize;
         for (ip, port) in servers {
@@ -99,7 +89,8 @@ impl EmulebbCore {
                 continue;
             }
             let endpoint = format!("{ip}:{port}");
-            if existing.contains(&endpoint) || disabled.contains(&endpoint) {
+            let disabled = self.state.lock().await.disabled_servers.contains(&endpoint);
+            if disabled || self.server(&endpoint).await.is_some() {
                 continue;
             }
             let mut server = server_info_from_parts(
@@ -132,34 +123,28 @@ impl EmulebbCore {
     /// Resolve a feedback-event endpoint (which may be the configured host:port
     /// or the resolved ip:port) to the matching stored server endpoint key.
     async fn resolve_server_event_endpoint(&self, endpoint: &str) -> Option<String> {
-        let mut servers = self.servers().await;
-        {
+        if let Some(server) = self.server(endpoint).await {
             let state = self.state.lock().await;
             // WHY: delayed feedback from a removed runtime endpoint must not
             // recreate a resource from the startup connection configuration.
-            servers.retain(|server| {
-                !state.disabled_servers.contains(&server.endpoint)
-                    || state.servers.contains_key(&server.endpoint)
-            });
-        }
-        // Exact endpoint match first.
-        if let Some(server) = servers
-            .iter()
-            .find(|server| server.endpoint.eq_ignore_ascii_case(endpoint))
-        {
-            return Some(server.endpoint.clone());
+            return (!state.disabled_servers.contains(&server.endpoint)
+                || state.servers.contains_key(&server.endpoint))
+            .then_some(server.endpoint);
         }
         // Fall back to matching the resolved host:port against each server's
         // configured address (handles a DNS-named server whose event carries the
         // resolved IP, or vice versa, when the literal forms differ).
         let (event_host, event_port) = parse_server_endpoint(endpoint).ok()?;
-        servers
-            .into_iter()
-            .find(|server| {
+        let state = self.state.lock().await;
+        state
+            .servers
+            .values()
+            .filter(|server| {
                 server.port == event_port
                     && (server.address == event_host || server.ip == event_host)
             })
-            .map(|server| server.endpoint)
+            .min_by(|left, right| left.endpoint.cmp(&right.endpoint))
+            .map(|server| server.endpoint.clone())
     }
 
     /// Apply classified failure policy before touching durable server health.

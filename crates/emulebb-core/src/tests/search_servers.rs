@@ -1051,6 +1051,46 @@ async fn server_point_read_and_plan_merge_preserve_reported_metadata_and_endpoin
     assert_eq!(config.server_entries[0].priority, point.priority);
     assert_eq!(config.server_entries[0].static_server, point.static_server);
     assert!(core.server("missing.example:4661").await.is_none());
+    let page = core.server_page(Default::default()).await.unwrap();
+    let id = page
+        .servers
+        .iter()
+        .find(|row| row.server.address.eq_ignore_ascii_case("seed.example"))
+        .unwrap()
+        .id;
+    drop(page);
+    core.delete_server_resource(id).await.unwrap();
+    assert!(
+        core.note_ed2k_server_metadata(
+            "SEED.EXAMPLE:4661",
+            Some("Delayed observation".into()),
+            None,
+            None,
+            None,
+            Vec::new()
+        )
+        .await
+        .is_none()
+    );
+    assert!(core.server_by_id(id).await.unwrap().is_none());
+    assert!(!core.server("Seed.Example:4661").await.unwrap().enabled);
+    assert!(
+        core.effective_ed2k_config(&base)
+            .await
+            .unwrap()
+            .server_entries
+            .is_empty()
+    );
+    let replacement = core
+        .import_server_resource(&emulebb_metadata::MetadataServerImport {
+            address: "SEED.EXAMPLE".into(),
+            port: 4661,
+            name: Some("Fresh observation".into()),
+        })
+        .await
+        .unwrap();
+    assert!(replacement > id);
+    assert!(core.server("seed.example:4661").await.unwrap().enabled);
 }
 
 #[tokio::test]
