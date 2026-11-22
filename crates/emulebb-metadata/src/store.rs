@@ -837,15 +837,6 @@ pub(crate) fn unix_s() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-pub(crate) fn unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(i64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

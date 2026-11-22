@@ -11,12 +11,12 @@
 //! integers; writes reject out-of-range sizes and counters.
 //! Full-range unsigned wire/search values use eight big-endian bytes, preserving
 //! numeric ordering under SQLite BLOB comparison. Nullable values mean absent;
-//! timestamp columns declare Unix seconds (`_s`) or milliseconds (`_ms`) explicitly.
+//! calendar timestamp columns use Unix seconds with explicit unit suffixes.
 //! Every persisted shape change bumps the single version. Older profiles are
 //! rejected: this module contains no migration or legacy interpretation.
 
 pub const SCHEMA_ID: &str = "emulebb.metadata";
-pub const SCHEMA_VERSION: i64 = 113;
+pub const SCHEMA_VERSION: i64 = 114;
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 
 #[cfg(test)]

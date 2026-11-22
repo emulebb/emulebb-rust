@@ -43,7 +43,7 @@ impl super::MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO temp.incoming_kad_keyword_publishes(
-                    target_node_id, ed2k_hash, known_file_id, raw_tags, load, valid, observed_at_ms, size_bytes
+                    target_node_id, ed2k_hash, known_file_id, raw_tags, load, valid, observed_at_s, size_bytes
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)
                 "#,
@@ -53,7 +53,7 @@ impl super::MetadataStore {
                     known_file_id,
                     publish.raw_tags,
                     publish.load.map(i64::from),
-                    publish.observed_at_ms,
+                    publish.observed_at_s,
                     publish.size_bytes.to_be_bytes().as_slice(),
                 ],
             )?;
@@ -65,7 +65,7 @@ impl super::MetadataStore {
                 r#"
                 INSERT INTO temp.incoming_kad_source_publishes(
                     target_node_id, publisher_id, ed2k_hash, source_ip, source_tcp_port,
-                    source_udp_port, raw_tags, load, valid, observed_at_ms
+                    source_udp_port, raw_tags, load, valid, observed_at_s
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
                 "#,
@@ -78,7 +78,7 @@ impl super::MetadataStore {
                     i64::from(publish.source_udp_port),
                     publish.raw_tags,
                     publish.load.map(i64::from),
-                    publish.observed_at_ms,
+                    publish.observed_at_s,
                 ],
             )?;
         }
@@ -88,7 +88,7 @@ impl super::MetadataStore {
                 r#"
                 INSERT INTO temp.incoming_kad_note_publishes(
                     target_node_id, publisher_id, publisher_ip, ed2k_hash, raw_tags, load, valid,
-                    observed_at_ms
+                    observed_at_s
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
                 "#,
@@ -99,7 +99,7 @@ impl super::MetadataStore {
                     optional_fixed_hex(publish.file_hash.as_deref(), 16, "Kad note file hash")?,
                     publish.raw_tags,
                     publish.load.map(i64::from),
-                    publish.observed_at_ms,
+                    publish.observed_at_s,
                 ],
             )?;
         }
@@ -123,25 +123,25 @@ impl super::MetadataStore {
     pub fn upsert_kad_outbound_publish(
         &self,
         publish: &MetadataKadOutboundPublish,
-        updated_at_ms: i64,
+        updated_at_s: i64,
     ) -> Result<()> {
         let file_hash = decode_fixed_hex(&publish.file_hash, 16, "Kad outbound file hash")?;
         self.connection()?.execute(
             r#"
             INSERT INTO kad_outbound_publish_schedule(
-                ed2k_hash, publish_kind, keyword, published_at_ms, updated_at_ms
+                ed2k_hash, publish_kind, keyword, published_at_s, updated_at_s
             )
             VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(ed2k_hash, publish_kind, keyword) DO UPDATE SET
-                published_at_ms = excluded.published_at_ms,
-                updated_at_ms = excluded.updated_at_ms
+                published_at_s = excluded.published_at_s,
+                updated_at_s = excluded.updated_at_s
             "#,
             params![
                 file_hash,
                 publish.publish_kind.as_str(),
                 publish.keyword,
-                publish.published_at_ms,
-                updated_at_ms,
+                publish.published_at_s,
+                updated_at_s,
             ],
         )?;
         Ok(())
@@ -171,7 +171,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(ed2k_hash)), publish_kind, keyword, published_at_ms
+            SELECT lower(hex(ed2k_hash)), publish_kind, keyword, published_at_s
             FROM kad_outbound_publish_schedule
             ORDER BY ed2k_hash, publish_kind, keyword
             "#,
@@ -190,7 +190,7 @@ impl super::MetadataStore {
                 file_hash: row.get(0)?,
                 publish_kind,
                 keyword: row.get(2)?,
-                published_at_ms: row.get(3)?,
+                published_at_s: row.get(3)?,
             })
         })?;
         Ok(MetadataKadOutboundPublishSchedule {
@@ -212,10 +212,10 @@ fn known_file_id_by_hash(tx: &rusqlite::Transaction<'_>, file_hash: &[u8]) -> Re
 fn load_keyword_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadKeywordPublish>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT lower(hex(target_node_id)), lower(hex(ed2k_hash)), raw_tags, load, observed_at_ms, size_bytes
+        SELECT lower(hex(target_node_id)), lower(hex(ed2k_hash)), raw_tags, load, observed_at_s, size_bytes
         FROM kad_keyword_publishes
         WHERE valid = 1
-        ORDER BY observed_at_ms, id
+        ORDER BY observed_at_s, id
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -225,7 +225,7 @@ fn load_keyword_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKad
             file_hash: row.get(1)?,
             raw_tags: row.get(2)?,
             load: row.get::<_, Option<u8>>(3)?,
-            observed_at_ms: row.get(4)?,
+            observed_at_s: row.get(4)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -236,10 +236,10 @@ fn load_source_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadS
     let mut stmt = conn.prepare(
         r#"
         SELECT lower(hex(target_node_id)), lower(hex(publisher_id)), lower(hex(ed2k_hash)),
-               source_ip, source_tcp_port, source_udp_port, raw_tags, load, observed_at_ms
+               source_ip, source_tcp_port, source_udp_port, raw_tags, load, observed_at_s
         FROM kad_source_publishes
         WHERE valid = 1
-        ORDER BY observed_at_ms, id
+        ORDER BY observed_at_s, id
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -252,7 +252,7 @@ fn load_source_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadS
             source_udp_port: row.get::<_, u16>(5)?,
             raw_tags: row.get(6)?,
             load: row.get::<_, Option<u8>>(7)?,
-            observed_at_ms: row.get(8)?,
+            observed_at_s: row.get(8)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -264,10 +264,10 @@ fn load_note_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadNot
         r#"
         SELECT lower(hex(target_node_id)), lower(hex(publisher_id)), publisher_ip,
                CASE WHEN ed2k_hash IS NULL THEN NULL ELSE lower(hex(ed2k_hash)) END,
-               raw_tags, load, observed_at_ms
+               raw_tags, load, observed_at_s
         FROM kad_note_publishes
         WHERE valid = 1
-        ORDER BY observed_at_ms, id
+        ORDER BY observed_at_s, id
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -278,7 +278,7 @@ fn load_note_publishes(conn: &rusqlite::Connection) -> Result<Vec<MetadataKadNot
             file_hash: row.get(3)?,
             raw_tags: row.get(4)?,
             load: row.get::<_, Option<u8>>(5)?,
-            observed_at_ms: row.get(6)?,
+            observed_at_s: row.get(6)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -311,7 +311,7 @@ mod tests {
                 file_hash: "11112222333344445555666677778888".to_string(),
                 raw_tags: b"keyword-tags".to_vec(),
                 load: Some(2),
-                observed_at_ms: 10,
+                observed_at_s: 10,
             }],
             source_publishes: vec![MetadataKadSourcePublish {
                 target_node_id: "22222222333333334444444455555555".to_string(),
@@ -322,7 +322,7 @@ mod tests {
                 source_udp_port: 4672,
                 raw_tags: b"source-tags".to_vec(),
                 load: Some(3),
-                observed_at_ms: 20,
+                observed_at_s: 20,
             }],
             note_publishes: vec![MetadataKadNotePublish {
                 target_node_id: "33333333444444445555555566666666".to_string(),
@@ -331,7 +331,7 @@ mod tests {
                 file_hash: Some("1234567890abcdef1234567890abcdef".to_string()),
                 raw_tags: "Zażółć note".as_bytes().to_vec(),
                 load: Some(4),
-                observed_at_ms: 30,
+                observed_at_s: 30,
             }],
         };
 
@@ -358,7 +358,7 @@ mod tests {
                     file_hash: "11112222333344445555666677778888".to_string(),
                     raw_tags: Vec::new(),
                     load: None,
-                    observed_at_ms: 1,
+                    observed_at_s: 1,
                 }],
                 source_publishes: Vec::new(),
                 note_publishes: Vec::new(),
@@ -380,7 +380,7 @@ mod tests {
                     file_hash: "11112222333344445555666677778888".to_string(),
                     publish_kind: MetadataKadOutboundPublishKind::Keyword,
                     keyword: "ubuntu".to_string(),
-                    published_at_ms: 10,
+                    published_at_s: 10,
                 },
                 11,
             )
@@ -391,7 +391,7 @@ mod tests {
                     file_hash: "11112222333344445555666677778888".to_string(),
                     publish_kind: MetadataKadOutboundPublishKind::Keyword,
                     keyword: "ubuntu".to_string(),
-                    published_at_ms: 20,
+                    published_at_s: 20,
                 },
                 21,
             )
@@ -402,7 +402,7 @@ mod tests {
                     file_hash: "99992222333344445555666677778888".to_string(),
                     publish_kind: MetadataKadOutboundPublishKind::Source,
                     keyword: String::new(),
-                    published_at_ms: 30,
+                    published_at_s: 30,
                 },
                 31,
             )
@@ -416,13 +416,13 @@ mod tests {
                         file_hash: "11112222333344445555666677778888".to_string(),
                         publish_kind: MetadataKadOutboundPublishKind::Keyword,
                         keyword: "ubuntu".to_string(),
-                        published_at_ms: 20,
+                        published_at_s: 20,
                     },
                     MetadataKadOutboundPublish {
                         file_hash: "99992222333344445555666677778888".to_string(),
                         publish_kind: MetadataKadOutboundPublishKind::Source,
                         keyword: String::new(),
-                        published_at_ms: 30,
+                        published_at_s: 30,
                     },
                 ],
             }

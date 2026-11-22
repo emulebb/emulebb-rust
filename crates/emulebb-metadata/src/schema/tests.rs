@@ -112,7 +112,7 @@ fn schema_rejects_wrong_storage_types_null_keys_and_out_of_range_values() {
         "UPDATE discovery_initialization SET status = 'invalid' WHERE domain = 'kad'",
         "INSERT INTO discovery_initialization(domain,status) VALUES ('invalid','pending')",
         "INSERT INTO shared_file_ignore_patterns(pattern,created_at_s) VALUES (NULL,0)",
-        "INSERT INTO peers(user_hash,secure_ident_pubkey,secure_ident_pubkey_len,first_seen_at_ms,last_seen_at_ms) VALUES(zeroblob(16),x'01',2,0,0)",
+        "INSERT INTO peers(user_hash,secure_ident_pubkey,secure_ident_pubkey_len,first_seen_at_s,last_seen_at_s) VALUES(zeroblob(16),x'01',2,0,0)",
         "INSERT INTO local_identities(identity_kind, public_identity, created_at_s, updated_at_s) VALUES('ed2k-secure-ident',zeroblob(16),0,0)",
         "INSERT INTO local_identities(identity_kind, created_at_s, updated_at_s) VALUES('ed2k-user-hash',0,0)",
     ] {

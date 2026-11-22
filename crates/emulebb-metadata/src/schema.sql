@@ -802,8 +802,8 @@ CREATE TABLE peers (
     banned INTEGER NOT NULL DEFAULT 0 CHECK(banned IN (0, 1)),
     uploaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(uploaded_bytes >= 0),
     downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(downloaded_bytes >= 0),
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER NOT NULL CHECK(last_seen_at_ms >= 0),
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
     CHECK((secure_ident_pubkey IS NULL AND secure_ident_pubkey_len = 0)
           OR (secure_ident_pubkey IS NOT NULL AND length(secure_ident_pubkey) = secure_ident_pubkey_len
               AND secure_ident_pubkey_len BETWEEN 1 AND 80)),
@@ -881,7 +881,7 @@ WHERE user_hash IS NULL;
 CREATE TABLE kad_bootstrap_endpoints (
     position INTEGER PRIMARY KEY,
     endpoint TEXT NOT NULL UNIQUE,
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     CHECK(position >= 0),
     CHECK(length(trim(endpoint)) > 0)
 ) STRICT;
@@ -924,7 +924,7 @@ CREATE TABLE kad_keyword_publishes (
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    observed_at_s INTEGER NOT NULL CHECK(observed_at_s >= 0),
     UNIQUE(target_node_id, ed2k_hash, size_bytes)
 ) STRICT;
 
@@ -939,7 +939,7 @@ CREATE TABLE kad_source_publishes (
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    observed_at_s INTEGER NOT NULL CHECK(observed_at_s >= 0),
     UNIQUE(target_node_id, source_ip, source_tcp_port, source_udp_port)
 ) STRICT;
 
@@ -952,7 +952,7 @@ CREATE TABLE kad_note_publishes (
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    observed_at_s INTEGER NOT NULL CHECK(observed_at_s >= 0),
     UNIQUE(target_node_id, publisher_id, publisher_ip)
 ) STRICT;
 
@@ -960,8 +960,8 @@ CREATE TABLE kad_outbound_publish_schedule (
     ed2k_hash BLOB NOT NULL CHECK(length(ed2k_hash) = 16),
     publish_kind TEXT NOT NULL CHECK(publish_kind IN ('keyword', 'source', 'notes')),
     keyword TEXT NOT NULL DEFAULT '',
-    published_at_ms INTEGER NOT NULL CHECK(published_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    published_at_s INTEGER NOT NULL CHECK(published_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     PRIMARY KEY(ed2k_hash, publish_kind, keyword)
 ) STRICT, WITHOUT ROWID;
 
@@ -1148,9 +1148,9 @@ CREATE INDEX shared_file_memberships_path_content_idx ON shared_file_memberships
 CREATE INDEX download_jobs_pending_delete_idx
 ON download_jobs(delete_requested_at_s)
 WHERE delete_requested_at_s IS NOT NULL;
-CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
-CREATE INDEX kad_source_file_idx ON kad_source_publishes(ed2k_hash, observed_at_ms);
-CREATE INDEX kad_note_file_idx ON kad_note_publishes(ed2k_hash, observed_at_ms);
+CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_s);
+CREATE INDEX kad_source_file_idx ON kad_source_publishes(ed2k_hash, observed_at_s);
+CREATE INDEX kad_note_file_idx ON kad_note_publishes(ed2k_hash, observed_at_s);
 CREATE INDEX search_result_observations_observation_idx
 ON search_result_observations(claim_id, observation_id);
 CREATE INDEX categories_temp_path_id_idx ON categories(temp_path_id);

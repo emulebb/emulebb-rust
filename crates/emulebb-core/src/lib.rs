@@ -3684,7 +3684,7 @@ fn hydrate_kad_outbound_publish_schedule(
     metadata_store: &MetadataStore,
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
 ) {
-    let wall_now_ms = Utc::now().timestamp_millis();
+    let wall_now_s = Utc::now().timestamp();
     let instant_now = Instant::now();
     let persisted = match metadata_store.load_kad_outbound_publish_schedule() {
         Ok(persisted) => persisted,
@@ -3694,7 +3694,7 @@ fn hydrate_kad_outbound_publish_schedule(
         }
     };
     for publish in persisted.publishes {
-        let at = instant_from_persisted_wall_ms(publish.published_at_ms, wall_now_ms, instant_now);
+        let at = instant_from_persisted_wall_s(publish.published_at_s, wall_now_s, instant_now);
         match publish.publish_kind {
             MetadataKadOutboundPublishKind::Keyword => {
                 schedule.hydrate_keyword_published(&publish.file_hash, &publish.keyword, at);
@@ -3709,14 +3709,14 @@ fn hydrate_kad_outbound_publish_schedule(
     }
 }
 
-fn instant_from_persisted_wall_ms(
-    persisted_ms: i64,
-    wall_now_ms: i64,
+fn instant_from_persisted_wall_s(
+    persisted_s: i64,
+    wall_now_s: i64,
     instant_now: Instant,
 ) -> Instant {
-    let elapsed_ms = wall_now_ms.saturating_sub(persisted_ms);
+    let elapsed_s = wall_now_s.saturating_sub(persisted_s).max(0);
     instant_now
-        .checked_sub(Duration::from_millis(elapsed_ms as u64))
+        .checked_sub(Duration::from_secs(elapsed_s as u64))
         .unwrap_or(instant_now)
 }
 
@@ -3732,9 +3732,9 @@ fn persist_kad_outbound_publish(
             file_hash: file_hash.to_string(),
             publish_kind,
             keyword: keyword.to_string(),
-            published_at_ms,
+            published_at_s: published_at_ms / 1000,
         },
-        Utc::now().timestamp_millis(),
+        Utc::now().timestamp(),
     ) {
         tracing::warn!(
             file_hash,

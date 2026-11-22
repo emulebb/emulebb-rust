@@ -6,8 +6,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use crate::{
     profile_model::{MetadataCategory, MetadataFriend, MetadataServer},
     store::{
-        bool_to_i64, decode_fixed_hex, refresh_shared_root_eligibility, unix_ms, unix_s,
-        upsert_local_path,
+        bool_to_i64, decode_fixed_hex, refresh_shared_root_eligibility, unix_s, upsert_local_path,
     },
 };
 
@@ -65,7 +64,7 @@ impl super::MetadataStore {
     }
 
     pub fn replace_kad_bootstrap_endpoints(&self, endpoints: &[String]) -> Result<()> {
-        let now = unix_ms();
+        let now = unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM kad_bootstrap_endpoints", [])?;
@@ -76,7 +75,7 @@ impl super::MetadataStore {
             );
             tx.execute(
                 r#"
-                INSERT INTO kad_bootstrap_endpoints(position, endpoint, updated_at_ms)
+                INSERT INTO kad_bootstrap_endpoints(position, endpoint, updated_at_s)
                 VALUES (?1, ?2, ?3)
                 "#,
                 params![i64::try_from(position)?, endpoint, now],

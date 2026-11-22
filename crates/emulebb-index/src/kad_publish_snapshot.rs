@@ -100,7 +100,7 @@ fn metadata_keyword_publish(
         file_hash: publish.file_hash.to_string(),
         raw_tags: encode_tags(&publish.tags)?,
         load: publish.load,
-        observed_at_ms: publish.observed_at.timestamp_millis(),
+        observed_at_s: publish.observed_at.timestamp(),
     })
 }
 
@@ -114,7 +114,7 @@ fn metadata_source_publish(publish: &KadSourcePublishSnapshot) -> Result<Metadat
         source_udp_port: publish.source_udp_port,
         raw_tags: encode_tags(&publish.tags)?,
         load: publish.load,
-        observed_at_ms: publish.observed_at.timestamp_millis(),
+        observed_at_s: publish.observed_at.timestamp(),
     })
 }
 
@@ -126,7 +126,7 @@ fn metadata_note_publish(publish: &KadNotePublishSnapshot) -> Result<MetadataKad
         file_hash: Some(target_file_hash(publish.target).to_string()),
         raw_tags: encode_tags(&publish.tags)?,
         load: publish.load,
-        observed_at_ms: publish.observed_at.timestamp_millis(),
+        observed_at_s: publish.observed_at.timestamp(),
     })
 }
 
@@ -139,7 +139,7 @@ fn keyword_publish_from_metadata(
         "stored keyword identity differs from its wire tags"
     );
     Ok(KadKeywordPublishSnapshot {
-        observed_at: timestamp_ms(publish.observed_at_ms, "Kad keyword observed_at_ms")?,
+        observed_at: timestamp_s(publish.observed_at_s, "Kad keyword observed_at_s")?,
         target: publish.target_node_id.parse()?,
         file_hash: publish.file_hash.parse()?,
         tags,
@@ -151,7 +151,7 @@ fn source_publish_from_metadata(
     publish: MetadataKadSourcePublish,
 ) -> Result<KadSourcePublishSnapshot> {
     Ok(KadSourcePublishSnapshot {
-        observed_at: timestamp_ms(publish.observed_at_ms, "Kad source observed_at_ms")?,
+        observed_at: timestamp_s(publish.observed_at_s, "Kad source observed_at_s")?,
         target: publish.target_node_id.parse()?,
         publisher_id: publish.publisher_id.parse()?,
         source_ip: publish.source_ip.parse()?,
@@ -164,7 +164,7 @@ fn source_publish_from_metadata(
 
 fn note_publish_from_metadata(publish: MetadataKadNotePublish) -> Result<KadNotePublishSnapshot> {
     Ok(KadNotePublishSnapshot {
-        observed_at: timestamp_ms(publish.observed_at_ms, "Kad note observed_at_ms")?,
+        observed_at: timestamp_s(publish.observed_at_s, "Kad note observed_at_s")?,
         target: publish.target_node_id.parse()?,
         publisher_id: publish.publisher_id.parse()?,
         publisher_ip: publish.publisher_ip.parse()?,
@@ -204,9 +204,8 @@ fn target_file_hash(target: NodeId) -> Ed2kHash {
     Ed2kHash::from_bytes(target.to_be_bytes())
 }
 
-fn timestamp_ms(value: i64, label: &str) -> Result<DateTime<Utc>> {
-    DateTime::<Utc>::from_timestamp_millis(value)
-        .with_context(|| format!("invalid {label}: {value}"))
+fn timestamp_s(value: i64, label: &str) -> Result<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(value, 0).with_context(|| format!("invalid {label}: {value}"))
 }
 
 #[cfg(test)]
@@ -219,6 +218,26 @@ mod tests {
     use std::time::Duration;
 
     use crate::{KadLocalStore, KadLocalStoreConfig};
+
+    #[test]
+    fn observation_storage_uses_calendar_seconds_without_changing_wire_tags() {
+        let snapshot = KadKeywordPublishSnapshot {
+            observed_at: Utc.timestamp_millis_opt(1_234).single().unwrap(),
+            target: "00112233445566778899aabbccddeeff".parse().unwrap(),
+            file_hash: "11112222333344445555666677778888".parse().unwrap(),
+            tags: vec![Tag::filename("Sample.bin")],
+            load: None,
+        };
+        let stored = metadata_keyword_publish(&snapshot).unwrap();
+        assert_eq!(stored.observed_at_s, 1);
+        assert_eq!(decode_tags(&stored.raw_tags).unwrap(), snapshot.tags);
+        let restored = keyword_publish_from_metadata(stored).unwrap();
+        assert_eq!(
+            restored.observed_at,
+            Utc.timestamp_opt(1, 0).single().unwrap()
+        );
+        assert_eq!(restored.tags, snapshot.tags);
+    }
 
     #[test]
     fn publish_snapshot_roundtrips_through_metadata() {
@@ -271,7 +290,7 @@ mod tests {
                 file_hash: "11112222333344445555666677778888".to_string(),
                 raw_tags: vec![1, 0, 0xaa],
                 load: None,
-                observed_at_ms: 1,
+                observed_at_s: 1,
             }],
             source_publishes: Vec::new(),
             note_publishes: Vec::new(),
