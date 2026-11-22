@@ -14,7 +14,7 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
     DownloadFileNameObservation, DownloadSource, LibraryFileUpdate, NetworkStatus, ServerCreate,
-    ServerInfo, ServerUpdate, Transfer,
+    ServerInfo, Transfer,
 };
 
 // MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
@@ -398,13 +398,13 @@ pub(crate) fn server_info_from_parts(
     }
 }
 
-pub(crate) fn apply_server_update(server: &mut ServerInfo, update: Option<&ServerUpdate>) {
+pub(crate) fn apply_server_update(
+    server: &mut ServerInfo,
+    update: Option<&emulebb_metadata::MetadataServerUpdate>,
+) {
     let Some(update) = update else {
         return;
     };
-    if let Some(name) = update.name.as_ref() {
-        server.name = name.clone();
-    }
     if let Some(priority) = update.priority.as_ref() {
         server.priority = priority.clone();
     }
@@ -510,13 +510,6 @@ pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLi
     if let Some(key_ip) = live.udp_key_ip {
         server.udp_key_ip = Some(key_ip);
     }
-}
-
-pub(crate) fn validate_server_update(update: &ServerUpdate) -> Result<()> {
-    if let Some(priority) = update.priority.as_deref() {
-        let _ = validate_server_priority(priority)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn validate_server_priority(priority: &str) -> Result<&str> {

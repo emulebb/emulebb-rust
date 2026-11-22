@@ -252,7 +252,7 @@ pub(super) async fn process(
                 } else {
                     state.disabled_servers.insert(endpoint.clone());
                 }
-                state.server_overrides.remove(&endpoint);
+                state.server_control_overrides.remove(&endpoint);
                 state
                     .servers
                     .insert(endpoint, profile_state::server_from_metadata(server));
@@ -281,7 +281,7 @@ pub(super) async fn process(
                 } else {
                     state.disabled_servers.insert(endpoint.clone());
                 }
-                let overlay = state.server_overrides.entry(endpoint).or_default();
+                let overlay = state.server_control_overrides.entry(endpoint).or_default();
                 if let Some(priority) = update.priority {
                     overlay.priority = Some(priority);
                 }
@@ -295,7 +295,7 @@ pub(super) async fn process(
             }
             ServerWrite::Deleted(endpoint) => {
                 state.servers.remove(&endpoint);
-                state.server_overrides.remove(&endpoint);
+                state.server_control_overrides.remove(&endpoint);
                 state.disabled_servers.insert(endpoint);
                 ServerOutcome::Changed(true)
             }

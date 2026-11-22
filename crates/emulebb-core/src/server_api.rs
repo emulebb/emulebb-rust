@@ -38,61 +38,6 @@ impl EmulebbCore {
         Ok(server)
     }
 
-    pub async fn update_server(
-        &self,
-        endpoint: &str,
-        request: ServerUpdate,
-    ) -> Result<Option<ServerInfo>> {
-        let _server_mutation = self.server_mutation_gate.lock().await;
-        let Some(mut server) = self.server(endpoint).await else {
-            return Ok(None);
-        };
-        validate_server_update(&request)?;
-        apply_server_update(&mut server, Some(&request));
-        let mut state = self.state.lock().await;
-        let enabled = request
-            .enabled
-            .unwrap_or_else(|| !state.disabled_servers.contains(&server.endpoint));
-        server.enabled = enabled;
-        profile_state::persist_server(&self.metadata_store, &server, enabled)?;
-        if enabled {
-            state.disabled_servers.remove(&server.endpoint);
-        } else {
-            state.disabled_servers.insert(server.endpoint.clone());
-        }
-        state
-            .servers
-            .insert(server.endpoint.clone(), server.clone());
-        state
-            .server_overrides
-            .insert(server.endpoint.clone(), request);
-        drop(state);
-        // WHY: server-list edits must not tear down Kad, peer transfers, or the
-        // shared ED2K runtime. Publishing the complete plan lets the server
-        // scheduler cancel an ineligible current/pending attempt and fail over.
-        self.refresh_ed2k_server_connect_plan().await?;
-        Ok(Some(server))
-    }
-
-    pub async fn remove_server(&self, endpoint: &str) -> Result<Option<ServerInfo>> {
-        let _server_mutation = self.server_mutation_gate.lock().await;
-        let Some(mut server) = self.server(endpoint).await else {
-            return Ok(None);
-        };
-        server.enabled = false;
-        profile_state::persist_server(&self.metadata_store, &server, false)?;
-        {
-            let mut state = self.state.lock().await;
-            state
-                .servers
-                .insert(server.endpoint.clone(), server.clone());
-            state.server_overrides.remove(&server.endpoint);
-            state.disabled_servers.insert(server.endpoint.clone());
-        }
-        self.refresh_ed2k_server_connect_plan().await?;
-        Ok(Some(server))
-    }
-
     /// Merge servers discovered from an `OP_SERVERLIST` reply into the server
     /// store (eMule `CServerSocket::ProcessPacket` OP_SERVERLIST -> AddServer).
     /// New `(ip, port)` servers are added at low priority; existing ones (by
@@ -268,7 +213,7 @@ impl EmulebbCore {
             let _ = profile_state::persist_server(&self.metadata_store, &server_info, false);
             let mut state = self.state.lock().await;
             state.servers.insert(stored_endpoint.clone(), server_info);
-            state.server_overrides.remove(&stored_endpoint);
+            state.server_control_overrides.remove(&stored_endpoint);
             state.server_fail_counts.remove(&stored_endpoint);
             state.disabled_servers.insert(stored_endpoint.clone());
             drop(state);

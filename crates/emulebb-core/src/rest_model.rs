@@ -190,19 +190,6 @@ pub struct ServerCreate {
     pub connect: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ServerUpdate {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub priority: Option<String>,
-    #[serde(default, rename = "static")]
-    pub static_server: Option<bool>,
-    #[serde(default)]
-    pub enabled: Option<bool>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexingStatus {

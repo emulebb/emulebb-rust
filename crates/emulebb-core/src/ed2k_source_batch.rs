@@ -445,7 +445,7 @@ mod tests {
             categories: BTreeMap::new(),
             friends: BTreeMap::new(),
             servers: HashMap::new(),
-            server_overrides: HashMap::new(),
+            server_control_overrides: HashMap::new(),
             disabled_servers: HashSet::new(),
             server_fail_counts: HashMap::new(),
 

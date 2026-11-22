@@ -31,7 +31,7 @@ impl EmulebbCore {
                 );
                 server.priority = entry.normalized_priority().to_string();
                 server.enabled = !state.disabled_servers.contains(&endpoint);
-                apply_server_update(&mut server, state.server_overrides.get(&endpoint));
+                apply_server_update(&mut server, state.server_control_overrides.get(&endpoint));
                 server_map.insert(endpoint, server);
             }
             for endpoint in &network.ed2k.server_endpoints {
@@ -49,7 +49,7 @@ impl EmulebbCore {
                         connection.1.as_deref(),
                     );
                     server.enabled = !state.disabled_servers.contains(endpoint);
-                    apply_server_update(&mut server, state.server_overrides.get(endpoint));
+                    apply_server_update(&mut server, state.server_control_overrides.get(endpoint));
                     server_map.insert(endpoint.clone(), server);
                 }
             }
@@ -57,7 +57,7 @@ impl EmulebbCore {
         for (endpoint, server) in &state.servers {
             let mut server = server.clone();
             server.enabled = !state.disabled_servers.contains(endpoint);
-            apply_server_update(&mut server, state.server_overrides.get(endpoint));
+            apply_server_update(&mut server, state.server_control_overrides.get(endpoint));
             apply_server_connection_flags(
                 &mut server,
                 connection.0.as_deref(),

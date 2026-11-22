@@ -1,4 +1,17 @@
 use super::*;
+use emulebb_metadata::MetadataServerUpdate;
+
+async fn saved_server_id(core: &EmulebbCore, endpoint: &str) -> i64 {
+    core.server_page(Default::default())
+        .await
+        .unwrap()
+        .servers
+        .iter()
+        .find(|record| record.server.endpoint() == endpoint)
+        .expect("fixture must persist the server before editing it")
+        .id
+}
+
 use emulebb_ed2k::ed2k_server::{
     Ed2kServerFailure, Ed2kServerFailurePhase, Ed2kServerFailureReason,
 };
@@ -895,7 +908,15 @@ async fn effective_ed2k_config_excludes_disabled_runtime_servers() {
     })
     .await
     .unwrap();
-    core.remove_server("203.0.113.20:4661").await.unwrap();
+    core.update_server_resource(
+        saved_server_id(&core, "203.0.113.20:4661").await,
+        &MetadataServerUpdate {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let servers = core.servers().await;
     let server = servers
@@ -925,21 +946,36 @@ async fn server_update_reenables_disabled_runtime_servers() {
     })
     .await
     .unwrap();
-    core.remove_server("203.0.113.21:4661").await.unwrap();
+    core.update_server_resource(
+        saved_server_id(&core, "203.0.113.21:4661").await,
+        &MetadataServerUpdate {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let updated = core
-        .update_server(
-            "203.0.113.21:4661",
-            ServerUpdate {
+        .update_server_resource(
+            saved_server_id(&core, "203.0.113.21:4661").await,
+            &MetadataServerUpdate {
                 enabled: Some(true),
-                ..ServerUpdate::default()
+                ..MetadataServerUpdate::default()
             },
         )
         .await
-        .unwrap()
-        .expect("server is visible while disabled");
+        .unwrap();
 
-    assert!(updated.enabled);
+    assert!(updated);
+    assert!(
+        core.server_resource(saved_server_id(&core, "203.0.113.21:4661").await)
+            .await
+            .unwrap()
+            .unwrap()
+            .server
+            .enabled
+    );
     let config = core
         .effective_ed2k_config(&Ed2kRuntimeConfig::default())
         .await
@@ -1244,6 +1280,15 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
         Some(network),
     )
     .unwrap();
+    core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
+        address: "203.0.113.71".into(),
+        port: 4661,
+        priority: "normal".into(),
+        static_server: false,
+        enabled: true,
+    })
+    .await
+    .unwrap();
     let (_plan, mut plan_rx, shutdown) = install_test_server_plan_runtime(
         &core,
         Ed2kServerConnectMode::Directed(endpoint.to_string()),
@@ -1255,12 +1300,12 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
     )
     .await;
 
-    core.update_server(
-        endpoint,
-        ServerUpdate {
+    core.update_server_resource(
+        saved_server_id(&core, endpoint).await,
+        &MetadataServerUpdate {
             priority: Some("high".to_string()),
             static_server: Some(true),
-            ..ServerUpdate::default()
+            ..MetadataServerUpdate::default()
         },
     )
     .await
@@ -1275,11 +1320,11 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
     assert_eq!(updated_entry.priority, "high");
     assert!(updated_entry.static_server);
 
-    core.update_server(
-        endpoint,
-        ServerUpdate {
+    core.update_server_resource(
+        saved_server_id(&core, endpoint).await,
+        &MetadataServerUpdate {
             enabled: Some(false),
-            ..ServerUpdate::default()
+            ..MetadataServerUpdate::default()
         },
     )
     .await
@@ -1294,11 +1339,11 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
     assert!(core.ed2k_runtime.lock().await.is_some());
     assert!(!shutdown.load(Ordering::SeqCst));
 
-    core.update_server(
-        endpoint,
-        ServerUpdate {
+    core.update_server_resource(
+        saved_server_id(&core, endpoint).await,
+        &MetadataServerUpdate {
             enabled: Some(true),
-            ..ServerUpdate::default()
+            ..MetadataServerUpdate::default()
         },
     )
     .await
@@ -1312,7 +1357,9 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
             .any(|entry| entry.host == "203.0.113.71" && entry.port == 4661)
     );
 
-    core.remove_server(endpoint).await.unwrap();
+    core.delete_server_resource(saved_server_id(&core, endpoint).await)
+        .await
+        .unwrap();
     let removed = wait_for_server_plan_update(&mut plan_rx).await;
     assert!(removed.config().server_entries.is_empty());
     assert!(removed.config().server_endpoints.is_empty());
@@ -1804,7 +1851,15 @@ async fn explicit_server_connect_ignores_disabled_servers() {
     })
     .await
     .unwrap();
-    core.remove_server("203.0.113.8:4661").await.unwrap();
+    core.update_server_resource(
+        saved_server_id(&core, "203.0.113.8:4661").await,
+        &MetadataServerUpdate {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let result = core.connect_ed2k_server("203.0.113.8:4661").await.unwrap();
 

@@ -160,7 +160,7 @@ use tokio_util::sync::CancellationToken;
 use emulebb_metadata::NativeFileFingerprint;
 
 use crate::{
-    Category, Friend, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot, Transfer,
+    Category, Friend, Search, ServerInfo, SharedDirectoryRoot, Transfer,
     download_source_registry::DownloadSourceRegistry, ed2k_dead_source_list::DeadSourceList,
 };
 
@@ -189,7 +189,7 @@ pub(crate) struct CoreState {
     pub(crate) categories: BTreeMap<i64, Category>,
     pub(crate) friends: BTreeMap<String, Friend>,
     pub(crate) servers: HashMap<String, ServerInfo>,
-    pub(crate) server_overrides: HashMap<String, ServerUpdate>,
+    pub(crate) server_control_overrides: HashMap<String, emulebb_metadata::MetadataServerUpdate>,
     pub(crate) disabled_servers: HashSet<String>,
     pub(crate) server_fail_counts: HashMap<String, u32>,
 
