@@ -1448,11 +1448,11 @@ function kadKeywordLabel(file: SharedFile): string {
 }
 
 function publicationTitle(
-  publication?: { lastSuccessAtMs?: number | null },
+  publication?: { lastSuccessAt?: number | null },
   prefix = ""
 ): string {
-  const lastSuccess = publication?.lastSuccessAtMs
-    ? `Last confirmed success: ${new Date(publication.lastSuccessAtMs).toLocaleString()}`
+  const lastSuccess = publication?.lastSuccessAt != null
+    ? `Last confirmed success: ${new Date(publication.lastSuccessAt * 1000).toLocaleString()}`
     : "No confirmed success in this runtime";
   return prefix ? `${prefix} ${lastSuccess}` : lastSuccess;
 }
@@ -2494,13 +2494,13 @@ function yesNo(value: unknown): string {
   return value === true ? "yes" : "no";
 }
 
-function shortTime(value?: string | null): string {
-  if (!value) {
+function shortTime(value?: number | null): string {
+  if (value == null) {
     return "";
   }
-  const date = new Date(value);
+  const date = new Date(value * 1000);
   if (Number.isNaN(date.getTime())) {
-    return value;
+    return "";
   }
   return date.toLocaleString();
 }
@@ -2598,7 +2598,7 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
                   <td>{friend.name ?? ""}</td>
                   <td>{hash}</td>
                   <td>{friend.address ?? ""}{friend.port ? `:${friend.port}` : ""}</td>
-                  <td>{friend.lastSeen ?? ""}</td>
+                  <td>{friend.lastSeen == null ? "" : new Date(friend.lastSeen * 1000).toLocaleString()}</td>
                   <td><Action title="Delete" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.delete(`friends/${hash}`), "Friend deleted")} /></td>
                 </tr>
               );
@@ -2794,8 +2794,7 @@ export function DiagnosticsView(props: {
 
   const captureBundle = async () => {
     const bundle = await props.client.captureDiagnosticBundle(16 * 1024 * 1024);
-    const capturedAt = typeof bundle.capturedAt === "string" ? bundle.capturedAt : new Date().toISOString();
-    const stamp = capturedAt.replace(/[^0-9A-Za-z]/g, "");
+    const stamp = String(bundle.capturedAt);
     const fileName = `emulebb-rust-diagnostic-bundle-${stamp}.json`;
     const blob = new Blob([`${JSON.stringify(bundle, null, 2)}\n`], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2845,9 +2844,9 @@ export function DiagnosticsView(props: {
         </div>
         <p class="hint">Memory is the daemon's resident RAM. CPU: 100% means one fully occupied core; multiple cores can exceed 100%.</p>
         <p class="hint">
-          {resources?.sampledAtMs == null
+          {resources?.sampledAt == null
             ? "Resource metrics are unavailable."
-            : `Sampled ${new Date(resources.sampledAtMs).toLocaleTimeString()}. ${resources.cpuSampleIntervalMs == null
+            : `Sampled ${new Date(resources.sampledAt * 1000).toLocaleTimeString()}. ${resources.cpuSampleIntervalMs == null
               ? "CPU usage needs two samples at least one second apart; unavailable counters show n/a."
               : `CPU average over ${(resources.cpuSampleIntervalMs / 1000).toFixed(1)} s.`}`}
         </p>
@@ -2908,8 +2907,8 @@ export function LogsView(props: { logs: LogRecord[]; client: RestClient; run: Ru
       </div>
       <div class="logs">
         {props.logs.map((log, index) => (
-          <div class="log-row" key={`${log.timestamp ?? log.ts ?? index}-${index}`}>
-            <time>{log.timestamp ?? log.ts ?? ""}</time>
+          <div class="log-row" key={`${log.timestamp ?? index}-${index}`}>
+            <time>{shortTime(log.timestamp)}</time>
             <span>{log.level ?? "INFO"}</span>
             <p>{log.message ?? ""}</p>
           </div>

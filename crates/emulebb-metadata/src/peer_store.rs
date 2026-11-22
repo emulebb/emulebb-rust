@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{
     peer_model::MetadataPeerCredit,
-    store::{decode_fixed_hex, unix_ms},
+    store::{decode_fixed_hex, unix_s},
 };
 
 /// Committed upload facts for one known hash; optional times use Unix seconds.
@@ -37,17 +37,17 @@ pub struct MetadataFileUploadDelta {
 impl super::MetadataStore {
     pub fn upsert_peer_credit(&self, credit: &MetadataPeerCredit) -> Result<()> {
         let user_hash = decode_fixed_hex(&credit.user_hash, 16, "peer user hash")?;
-        let now = unix_ms();
+        let now = unix_s();
         self.connection()?.execute(
             r#"
             INSERT INTO peers(
-                user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
+                user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_s, last_seen_at_s
             )
             VALUES (?1, ?2, ?3, ?4, ?4)
             ON CONFLICT(user_hash) DO UPDATE SET
                 uploaded_bytes = excluded.uploaded_bytes,
                 downloaded_bytes = excluded.downloaded_bytes,
-                last_seen_at_ms = excluded.last_seen_at_ms
+                last_seen_at_s = excluded.last_seen_at_s
             "#,
             params![
                 user_hash,
@@ -87,7 +87,7 @@ impl super::MetadataStore {
         downloaded_delta: u64,
     ) -> Result<()> {
         let user_hash_bytes = decode_fixed_hex(user_hash, 16, "peer user hash")?;
-        let now = unix_ms();
+        let now = unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let current = tx
@@ -111,13 +111,13 @@ impl super::MetadataStore {
         tx.prepare_cached(
             r#"
             INSERT INTO peers(
-                user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
+                user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_s, last_seen_at_s
             )
             VALUES (?1, ?2, ?3, ?4, ?4)
             ON CONFLICT(user_hash) DO UPDATE SET
                 uploaded_bytes = excluded.uploaded_bytes,
                 downloaded_bytes = excluded.downloaded_bytes,
-                last_seen_at_ms = excluded.last_seen_at_ms
+                last_seen_at_s = excluded.last_seen_at_s
             "#,
         )?
         .execute(params![
@@ -141,7 +141,7 @@ impl super::MetadataStore {
         if peer_deltas.is_empty() && file_deltas.is_empty() {
             return Ok(());
         }
-        let now = unix_ms();
+        let now = unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         for (user_hash, uploaded_delta, downloaded_delta) in peer_deltas {
@@ -165,13 +165,13 @@ impl super::MetadataStore {
             tx.prepare_cached(
                 r#"
                 INSERT INTO peers(
-                    user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
+                    user_hash, uploaded_bytes, downloaded_bytes, first_seen_at_s, last_seen_at_s
                 )
                 VALUES (?1, ?2, ?3, ?4, ?4)
                 ON CONFLICT(user_hash) DO UPDATE SET
                     uploaded_bytes = excluded.uploaded_bytes,
                     downloaded_bytes = excluded.downloaded_bytes,
-                    last_seen_at_ms = excluded.last_seen_at_ms
+                    last_seen_at_s = excluded.last_seen_at_s
                 "#,
             )?
             .execute(params![
@@ -206,10 +206,14 @@ impl super::MetadataStore {
     /// now - DAY2S(150)` (ClientCredits.cpp:240-251). Returns the number of rows
     /// pruned. The 150-day window is the master constant `DAY2S(150)`.
     pub fn prune_aged_peers(&self) -> Result<usize> {
-        const CREDIT_AGE_LIMIT_MS: i64 = 150 * 24 * 60 * 60 * 1000;
-        let cutoff = unix_ms().saturating_sub(CREDIT_AGE_LIMIT_MS);
+        self.prune_aged_peers_at(unix_s())
+    }
+
+    fn prune_aged_peers_at(&self, now_s: i64) -> Result<usize> {
+        const CREDIT_AGE_LIMIT_S: i64 = 150 * 24 * 60 * 60;
+        let cutoff = now_s.saturating_sub(CREDIT_AGE_LIMIT_S);
         let pruned = self.connection()?.execute(
-            "DELETE FROM peers WHERE last_seen_at_ms < ?1",
+            "DELETE FROM peers WHERE last_seen_at_s < ?1",
             params![cutoff],
         )?;
         Ok(pruned)
@@ -257,7 +261,7 @@ impl super::MetadataStore {
         public_key: &[u8],
     ) -> Result<(bool, bool, Vec<u8>)> {
         let user_hash_bytes = decode_fixed_hex(user_hash, 16, "peer user hash")?;
-        let now = unix_ms();
+        let now = unix_s();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let existing: Option<(Option<Vec<u8>>, i64)> = tx
@@ -290,7 +294,7 @@ impl super::MetadataStore {
                         secure_ident_pubkey_len = ?3,
                         uploaded_bytes = 1,
                         downloaded_bytes = 1,
-                        last_seen_at_ms = ?4
+                        last_seen_at_s = ?4
                     WHERE user_hash = ?1
                     "#,
                     params![user_hash_bytes, public_key, key_len, now],
@@ -304,13 +308,13 @@ impl super::MetadataStore {
                     r#"
                     INSERT INTO peers(
                         user_hash, secure_ident_pubkey, secure_ident_pubkey_len,
-                        first_seen_at_ms, last_seen_at_ms
+                        first_seen_at_s, last_seen_at_s
                     )
                     VALUES (?1, ?2, ?3, ?4, ?4)
                     ON CONFLICT(user_hash) DO UPDATE SET
                         secure_ident_pubkey = excluded.secure_ident_pubkey,
                         secure_ident_pubkey_len = excluded.secure_ident_pubkey_len,
-                        last_seen_at_ms = excluded.last_seen_at_ms
+                        last_seen_at_s = excluded.last_seen_at_s
                     "#,
                     params![user_hash_bytes, public_key, key_len, now],
                 )?;
@@ -337,6 +341,56 @@ fn u64_to_i64_saturating(value: u64) -> i64 {
 mod tests {
     use super::*;
     use crate::MetadataStore;
+
+    #[test]
+    fn peer_credit_calendar_times_and_exact_expiry_boundary_use_seconds() {
+        let before = unix_s();
+        let store = MetadataStore::in_memory().unwrap();
+        for n in 1..=3 {
+            store
+                .add_peer_credit_delta(&hex::encode([n; 16]), 1, 1)
+                .unwrap();
+        }
+        let conn = store.connection().unwrap();
+        let times: (i64, i64) = conn
+            .query_row(
+                "SELECT min(first_seen_at_s),max(last_seen_at_s) FROM peers",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(before <= times.0 && times.0 <= times.1 && times.1 <= unix_s());
+        for (n, last_seen) in [(1u8, 99), (2, 100), (3, 101)] {
+            conn.execute(
+                "UPDATE peers SET last_seen_at_s=?2 WHERE user_hash=?1",
+                params![&[n; 16][..], last_seen],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        assert_eq!(
+            store.prune_aged_peers_at(150 * 24 * 60 * 60 + 100).unwrap(),
+            1
+        );
+        assert!(
+            store
+                .peer_credit_by_hash(&hex::encode([1; 16]))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .peer_credit_by_hash(&hex::encode([2; 16]))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .peer_credit_by_hash(&hex::encode([3; 16]))
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn peer_credit_roundtrips_by_user_hash() {
@@ -448,14 +502,14 @@ mod tests {
         store.add_peer_credit_delta(fresh, 1, 1).unwrap();
         store.add_peer_credit_delta(stale, 1, 1).unwrap();
         // Backdate the stale peer to 200 days ago (> the 150-day window).
-        let two_hundred_days_ms: i64 = 200 * 24 * 60 * 60 * 1000;
-        let cutoff = crate::store::unix_ms() - two_hundred_days_ms;
+        let two_hundred_days_s: i64 = 200 * 24 * 60 * 60;
+        let cutoff = crate::store::unix_s() - two_hundred_days_s;
         let stale_bytes = crate::store::decode_fixed_hex(stale, 16, "peer user hash").unwrap();
         store
             .connection()
             .unwrap()
             .execute(
-                "UPDATE peers SET last_seen_at_ms = ?1 WHERE user_hash = ?2",
+                "UPDATE peers SET last_seen_at_s = ?1 WHERE user_hash = ?2",
                 params![cutoff, stale_bytes],
             )
             .unwrap();

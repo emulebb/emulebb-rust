@@ -15,6 +15,8 @@ pub(in crate::ed2k_transfer) enum JobRead {
     Counts,
     Waiting(Vec<JobId>),
     UploadFile([u8; 16]),
+    ServerPage(emulebb_metadata::MetadataServerQuery),
+    Server(i64),
     LibraryStatistics([u8; 16]),
     LibraryQuery(emulebb_metadata::LibraryFileQuery),
     LibraryFile([u8; 16]),
@@ -60,6 +62,8 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     Counts(RetainedRead<emulebb_metadata::DownloadJobCounts>),
     Waiting(RetainedRead<u64>),
     UploadFile(Option<RetainedRead<emulebb_metadata::MetadataUploadFileSummary>>),
+    ServerPage(RetainedRead<emulebb_metadata::MetadataServerPage>),
+    Server(Option<RetainedRead<emulebb_metadata::MetadataServerRecord>>),
     LibraryStatistics(Option<RetainedRead<emulebb_metadata::MetadataFileUploadStatistics>>),
     LibraryQuery(RetainedRead<emulebb_metadata::MetadataLibraryFilePage>),
     LibraryFile(Option<RetainedRead<emulebb_metadata::MetadataLibraryFile>>),
@@ -99,6 +103,20 @@ impl LocalMutationRegistry {
             }
             JobRead::Counts | JobRead::TransferCounts => 4096,
             JobRead::UploadFile(_) => 256 * 1024,
+            JobRead::ServerPage(query) => {
+                ensure!(
+                    (1..=200).contains(&query.limit) && query.after_id.is_none_or(|id| id > 0),
+                    emulebb_metadata::MetadataServerReadError::InvalidQuery
+                );
+                emulebb_metadata::SERVER_READ_MAX_BYTES
+            }
+            JobRead::Server(id) => {
+                ensure!(
+                    id > 0,
+                    emulebb_metadata::MetadataServerReadError::InvalidQuery
+                );
+                emulebb_metadata::SERVER_READ_MAX_BYTES
+            }
             JobRead::LibraryStatistics(_) => 64 * 1024,
             JobRead::LibraryFile(_) => 2 * 1024 * 1024,
             JobRead::LibraryQuery(ref query) => {
@@ -223,6 +241,14 @@ impl LocalMutationRegistry {
                 }),
                 JobRead::UploadFile(hash) => metadata.upload_file_summary(&hash).map(|value| {
                     JobReadResult::UploadFile(
+                        value.map(|value| RetainedRead::new(value, capacity.take_result())),
+                    )
+                }),
+                JobRead::ServerPage(query) => metadata.server_page(query).map(|value| {
+                    JobReadResult::ServerPage(RetainedRead::new(value, capacity.take_result()))
+                }),
+                JobRead::Server(id) => metadata.server_by_id(id).map(|value| {
+                    JobReadResult::Server(
                         value.map(|value| RetainedRead::new(value, capacity.take_result())),
                     )
                 }),
@@ -455,6 +481,31 @@ impl LocalMutationRegistry {
     }
 }
 impl transfer::Ed2kTransferRuntime {
+    /// Bounded persisted server pages use the existing admitted metadata owner.
+    pub async fn server_page(
+        &self,
+        query: emulebb_metadata::MetadataServerQuery,
+    ) -> Result<RetainedRead<emulebb_metadata::MetadataServerPage>> {
+        let JobReadResult::ServerPage(page) =
+            self.read_job_metadata(JobRead::ServerPage(query)).await?
+        else {
+            unreachable!()
+        };
+        Ok(page)
+    }
+
+    /// Select an immutable server ID without collecting protocol/runtime lists.
+    pub async fn server_by_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataServerRecord>>> {
+        let JobReadResult::Server(server) = self.read_job_metadata(JobRead::Server(id)).await?
+        else {
+            unreachable!()
+        };
+        Ok(server)
+    }
+
     /// One retained library summary without a file probe or execution hydration.
     pub async fn library_file(
         &self,

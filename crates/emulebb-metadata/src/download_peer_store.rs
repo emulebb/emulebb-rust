@@ -347,7 +347,7 @@ fn upsert_source(
         .as_deref()
         .map(|hash| crate::store::decode_fixed_hex(hash, 16, "source user hash"))
         .transpose()?;
-    let now = crate::download_job_store::unix_s();
+    let now = crate::store::unix_s();
     if description {
         if source.file_comment.is_empty() && source.file_rating == 0 {
             return Ok(false);
@@ -471,7 +471,7 @@ impl MetadataStore {
                     WHERE id=?1 AND execution_generation=?2 AND terminal_completed_at_s IS NULL AND removed_at_s IS NULL
                       AND delete_requested_at_s IS NULL AND delivery_state='pending'
                       AND NOT EXISTS(SELECT 1 FROM download_delivery_attempts WHERE job_id=?1)",
-                    params![token.job_id,i64::try_from(token.generation)?,value,crate::download_job_store::unix_s()])? == 1,
+                    params![token.job_id,i64::try_from(token.generation)?,value,crate::store::unix_s()])? == 1,
                     "only unfinished jobs without a delivery attempt may be renamed");
                 name = Some(value.clone());
                 true

@@ -73,7 +73,7 @@ pub(crate) fn checkpoint_download_progress_in(
     let Some((size, part_size)) = geometry else {
         return Ok(false);
     };
-    let now = crate::download_job_store::unix_s();
+    let now = crate::store::unix_s();
     {
         let mut statement = tx.prepare_cached(
             "UPDATE download_job_pieces SET prefix_bytes=?3,block_bitmap=?4,updated_at_s=?5,present_bytes=?8

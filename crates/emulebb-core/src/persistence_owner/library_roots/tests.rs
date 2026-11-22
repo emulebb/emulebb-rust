@@ -149,7 +149,7 @@ fn root_timestamps_use_unix_seconds_and_ids_remain_decimal_strings() {
         managed: false,
         accessible: false,
         shareable: true,
-        last_scanned_at_ms: Some(1_234_567),
+        last_scanned_at_s: Some(1234),
     });
     let json = serde_json::to_value(root).unwrap();
     assert_eq!(json["id"], i64::MAX.to_string());

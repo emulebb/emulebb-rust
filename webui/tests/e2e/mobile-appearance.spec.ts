@@ -177,7 +177,7 @@ test("mobile forms, row actions and direct diagnostic buttons preserve request m
   const downloadedPath = await downloaded.path();
   if (!downloadedPath) throw new Error("Diagnostic download has no saved artifact");
   expect(JSON.parse(await readFile(downloadedPath, "utf-8"))).toEqual({
-    schema: "emulebb.diagnostic-bundle.v7", capturedAt: "2026-11-14T12:00:00Z",
+    schema: "emulebb.diagnostic-bundle.v7" as const, capturedAt: 1794657600,
     summary: { issueCount: 0 }
   });
   await page.getByRole("button", { name: "Crash test" }).click();

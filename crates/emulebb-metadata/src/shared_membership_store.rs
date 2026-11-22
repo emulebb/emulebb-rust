@@ -8,11 +8,11 @@ use std::{
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 
-use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_ms};
+use crate::{MetadataStore, NativeFileFingerprint, NativePath, store::unix_s};
 
 const LIBRARY_ROOT_SELECT: &str = "SELECT r.id,p.platform,p.native_path,r.watch_enabled,
     EXISTS(SELECT 1 FROM shared_directory_root_origins o WHERE o.root_id=r.id AND o.origin='implicit'),
-    r.accessible,r.shareable,r.last_scanned_at_ms,length(p.native_path),r.scan_required
+    r.accessible,r.shareable,r.last_scanned_at_s,length(p.native_path),r.scan_required
     FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx
     JOIN local_paths p ON p.id=r.path_id";
 
@@ -26,7 +26,7 @@ fn library_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::Metadata
         managed: row.get(4)?,
         accessible: row.get(5)?,
         shareable: row.get(6)?,
-        last_scanned_at_ms: row.get(7)?,
+        last_scanned_at_s: row.get(7)?,
     })
 }
 
@@ -53,7 +53,7 @@ fn library_root_on_connection(
     id: i64,
 ) -> Result<Option<crate::MetadataLibraryRoot>> {
     conn.prepare_cached(&format!(
-        "{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id=?1"
+        "{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_s IS NULL AND r.id=?1"
     ))?
     .query_row([id], library_root_row)
     .optional()
@@ -103,7 +103,7 @@ impl MetadataStore {
         {
             // WHY: validate and insert under the same writer transaction, so
             // simultaneous parent/child requests cannot both pass admission.
-            let mut roots = tx.prepare_cached("SELECT p.platform,p.native_path FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx JOIN local_paths p ON p.id=r.path_id WHERE r.enabled=1 AND r.deleted_at_ms IS NULL")?;
+            let mut roots = tx.prepare_cached("SELECT p.platform,p.native_path FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx JOIN local_paths p ON p.id=r.path_id WHERE r.enabled=1 AND r.deleted_at_s IS NULL")?;
             let paths = roots.query_map([], |row| crate::native_path::path_from_row(row, 0, 1))?;
             for existing in paths {
                 if root_paths_overlap(path, &existing?) {
@@ -113,10 +113,10 @@ impl MetadataStore {
         }
         let path_id = crate::store::upsert_local_path(&tx, path)?;
         let inserted = tx.execute(
-            "INSERT INTO shared_directory_roots(path_id,watch_enabled,accessible,created_at_ms)
+            "INSERT INTO shared_directory_roots(path_id,watch_enabled,accessible,created_at_s)
              VALUES(?1,?2,?3,?4)
-             ON CONFLICT(path_id) WHERE deleted_at_ms IS NULL DO NOTHING",
-            params![path_id, watch_enabled, accessible, unix_ms()],
+             ON CONFLICT(path_id) WHERE deleted_at_s IS NULL DO NOTHING",
+            params![path_id, watch_enabled, accessible, unix_s()],
         )?;
         if inserted == 0 {
             return Ok(None);
@@ -175,9 +175,9 @@ impl MetadataStore {
         );
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        let total: i64 = tx.query_row("SELECT count(*) FROM shared_directory_roots INDEXED BY shared_directory_roots_active_id_idx WHERE enabled=1 AND deleted_at_ms IS NULL", [], |row| row.get(0))?;
+        let total: i64 = tx.query_row("SELECT count(*) FROM shared_directory_roots INDEXED BY shared_directory_roots_active_id_idx WHERE enabled=1 AND deleted_at_s IS NULL", [], |row| row.get(0))?;
         let (items, more) = {
-            let mut stmt = tx.prepare_cached(&format!("{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_ms IS NULL AND r.id>?1 ORDER BY r.id LIMIT ?2"))?;
+            let mut stmt = tx.prepare_cached(&format!("{LIBRARY_ROOT_SELECT} WHERE r.enabled=1 AND r.deleted_at_s IS NULL AND r.id>?1 ORDER BY r.id LIMIT ?2"))?;
             let mut rows = stmt.query(params![after, i64::try_from(limit + 1)?])?;
             let mut items = Vec::with_capacity(limit);
             let mut bytes = 0;
@@ -218,7 +218,7 @@ impl MetadataStore {
         ensure!(id > 0, "root id must be positive");
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        tx.execute("UPDATE shared_directory_roots SET watch_enabled=?2 WHERE id=?1 AND enabled=1 AND deleted_at_ms IS NULL AND watch_enabled!=?2", params![id, watch_enabled])?;
+        tx.execute("UPDATE shared_directory_roots SET watch_enabled=?2 WHERE id=?1 AND enabled=1 AND deleted_at_s IS NULL AND watch_enabled!=?2", params![id, watch_enabled])?;
         let result = library_root_on_connection(&tx, id)?;
         tx.commit()?;
         Ok(result)
@@ -245,22 +245,22 @@ impl MetadataStore {
         );
         // WHY: retiring one root must not recompute other roots' observed health
         // from origin snapshots, which can predate their latest availability probe.
-        let now = unix_ms();
-        tx.execute("UPDATE shared_directory_roots SET monitor_owned=0,shareable=0,accessible=0,enabled=0,deleted_at_ms=?2 WHERE id=?1", params![id, now])?;
-        tx.execute("UPDATE shared_file_memberships SET removed_at_ms=?2 WHERE root_id=?1 AND removed_at_ms IS NULL", params![id, now])?;
+        let now = unix_s();
+        tx.execute("UPDATE shared_directory_roots SET monitor_owned=0,shareable=0,accessible=0,enabled=0,deleted_at_s=?2 WHERE id=?1", params![id, now])?;
+        tx.execute("UPDATE shared_file_memberships SET removed_at_s=?2 WHERE root_id=?1 AND removed_at_s IS NULL", params![id, now])?;
         tx.commit()?;
         Ok(crate::MetadataLibraryRootDelete::Deleted(root))
     }
 
-    pub fn shared_root_last_scan_ms(&self, root: &Path) -> Result<Option<i64>> {
+    pub fn shared_root_last_scan_s(&self, root: &Path) -> Result<Option<i64>> {
         let native = NativePath::from(root);
         self.connection()?
             .query_row(
-                "SELECT shared_directory_roots.last_scanned_at_ms
+                "SELECT shared_directory_roots.last_scanned_at_s
                  FROM shared_directory_roots
                  JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
                  WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
-                   AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_ms IS NULL",
+                   AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_s IS NULL",
                 params![NativePath::platform(), native.storage_bytes()],
                 |row| row.get(0),
             )
@@ -319,7 +319,7 @@ impl MetadataStore {
              WHERE root_paths.platform = ?1 AND root_paths.native_path = ?2
                AND file_paths.native_path = ?3
                AND shared_directory_roots.enabled = 1
-               AND shared_directory_roots.deleted_at_ms IS NULL
+               AND shared_directory_roots.deleted_at_s IS NULL
                AND (?4 = 1 OR shared_directory_roots.accessible = 1)
                AND shared_directory_roots.shareable = 1",
             params![
@@ -350,7 +350,7 @@ impl MetadataStore {
         if crate::delivery_exclusion_store::evidence_is_excluded(tx, evidence)? {
             return Ok(false);
         }
-        let now = unix_ms();
+        let now = unix_s();
         if observed_root {
             tx.execute(
                 "UPDATE shared_directory_roots SET accessible=1 WHERE id=?1",
@@ -360,12 +360,12 @@ impl MetadataStore {
         }
         tx.execute(
             "INSERT INTO shared_file_memberships(
-                root_id, path_id, known_file_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
+                root_id, path_id, known_file_id, relative_path, first_seen_at_s, last_seen_at_s, removed_at_s
              ) VALUES (?1, ?2, (SELECT known_file_id FROM local_file_instances WHERE path_id=?2), ?3, ?4, ?4, NULL)
              ON CONFLICT(root_id, path_id) DO UPDATE SET
                 relative_path = excluded.relative_path,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                removed_at_ms = NULL",
+                last_seen_at_s = excluded.last_seen_at_s,
+                removed_at_s = NULL",
             params![
                 root_id,
                 path_id,
@@ -464,10 +464,10 @@ impl MetadataStore {
     pub fn withdraw_local_file_path(&self, path: &Path) -> Result<usize> {
         let native = NativePath::from(path);
         let changed = self.connection()?.execute(
-            "UPDATE shared_file_memberships SET removed_at_ms = ?3
+            "UPDATE shared_file_memberships SET removed_at_s = ?3
              WHERE path_id = (SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2)
-               AND removed_at_ms IS NULL",
-            params![NativePath::platform(), native.storage_bytes(), unix_ms()],
+               AND removed_at_s IS NULL",
+            params![NativePath::platform(), native.storage_bytes(), unix_s()],
         )?;
         Ok(changed)
     }
@@ -484,7 +484,7 @@ impl MetadataStore {
         let native = NativePath::from(path);
         let hash = crate::store::decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let changed = self.connection()?.execute(
-            "UPDATE shared_file_memberships SET removed_at_ms = ?5
+            "UPDATE shared_file_memberships SET removed_at_s = ?5
              WHERE path_id IN (
                  SELECT local_file_instances.path_id
                  FROM local_file_instances
@@ -493,13 +493,13 @@ impl MetadataStore {
                  WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
                    AND known_files.ed2k_hash = ?3
                    AND local_file_instances.verified_fingerprint = ?4
-             ) AND removed_at_ms IS NULL",
+             ) AND removed_at_s IS NULL",
             params![
                 NativePath::platform(),
                 native.storage_bytes(),
                 hash,
                 expected.storage_bytes(),
-                unix_ms()
+                unix_s()
             ],
         )?;
         Ok(changed)
@@ -519,8 +519,8 @@ impl MetadataStore {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let changed = tx.execute(
-            "UPDATE shared_file_memberships SET removed_at_ms=?5 WHERE path_id IN (SELECT i.path_id FROM local_file_instances i JOIN local_paths p ON p.id=i.path_id JOIN known_files k ON k.id=i.known_file_id WHERE p.platform=?1 AND p.native_path=?2 AND k.ed2k_hash=?3 AND (?4 IS NULL OR i.verified_fingerprint=?4)) AND removed_at_ms IS NULL",
-            params![NativePath::platform(), native.storage_bytes(), hash, fingerprint, unix_ms()],
+            "UPDATE shared_file_memberships SET removed_at_s=?5 WHERE path_id IN (SELECT i.path_id FROM local_file_instances i JOIN local_paths p ON p.id=i.path_id JOIN known_files k ON k.id=i.known_file_id WHERE p.platform=?1 AND p.native_path=?2 AND k.ed2k_hash=?3 AND (?4 IS NULL OR i.verified_fingerprint=?4)) AND removed_at_s IS NULL",
+            params![NativePath::platform(), native.storage_bytes(), hash, fingerprint, unix_s()],
         )?;
         let complete = tx.query_row(
             crate::local_catalog::VERIFIED_SHARE_EXISTS_SQL,
@@ -586,7 +586,7 @@ impl MetadataStore {
              JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
              WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
                AND shared_directory_roots.enabled = 1
-               AND shared_directory_roots.deleted_at_ms IS NULL",
+               AND shared_directory_roots.deleted_at_s IS NULL",
             params![NativePath::platform(), native_root.storage_bytes()],
             |row| row.get(0),
         )?;
@@ -594,7 +594,7 @@ impl MetadataStore {
             root_id == watermark.root_id,
             "root was replaced during scan"
         );
-        let now = unix_ms();
+        let now = unix_s();
         tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS scanned_membership_paths(path_id INTEGER PRIMARY KEY);
             DELETE FROM temp.scanned_membership_paths;",
@@ -650,12 +650,12 @@ impl MetadataStore {
                 .execute([path_id])?;
             tx.prepare_cached(
                 "INSERT INTO shared_file_memberships(
-                    root_id, path_id, known_file_id, relative_path, first_seen_at_ms, last_seen_at_ms, removed_at_ms
+                    root_id, path_id, known_file_id, relative_path, first_seen_at_s, last_seen_at_s, removed_at_s
                  ) VALUES (?1, ?2, (SELECT known_file_id FROM local_file_instances WHERE path_id=?2), ?3, ?4, ?4, NULL)
                  ON CONFLICT(root_id, path_id) DO UPDATE SET
                     relative_path = excluded.relative_path,
-                    last_seen_at_ms = excluded.last_seen_at_ms,
-                    removed_at_ms = NULL")?.execute(
+                    last_seen_at_s = excluded.last_seen_at_s,
+                    removed_at_s = NULL")?.execute(
                 params![
                     root_id,
                     path_id,
@@ -672,8 +672,8 @@ impl MetadataStore {
             )?;
         }
         tx.execute(
-            "UPDATE shared_file_memberships SET removed_at_ms = ?2
-            WHERE root_id = ?1 AND removed_at_ms IS NULL
+            "UPDATE shared_file_memberships SET removed_at_s = ?2
+            WHERE root_id = ?1 AND removed_at_s IS NULL
               AND path_id NOT IN (SELECT path_id FROM temp.scanned_membership_paths)",
             params![root_id, now],
         )?;
@@ -687,7 +687,7 @@ impl MetadataStore {
         // memberships. At counter exhaustion keep the flag sticky, so a later
         // loss can never compare equal to an earlier captured watermark.
         tx.execute(
-            "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_ms = ?2,
+            "UPDATE shared_directory_roots SET accessible = 1, last_scanned_at_s = ?2, scan_revision=scan_revision+1,
              scan_required=CASE WHEN id=?3 AND watch_loss_revision=?4
                 AND watch_loss_revision<9223372036854775807 THEN 0 ELSE scan_required END
              WHERE id = ?1",
@@ -710,7 +710,7 @@ impl MetadataStore {
         let changed = tx.execute(
             "UPDATE shared_directory_roots SET accessible = ?3
              WHERE path_id = (SELECT id FROM local_paths WHERE platform = ?1 AND native_path = ?2)
-               AND enabled = 1 AND deleted_at_ms IS NULL AND accessible != ?3",
+               AND enabled = 1 AND deleted_at_s IS NULL AND accessible != ?3",
             params![
                 NativePath::platform(),
                 native.storage_bytes(),
@@ -721,14 +721,14 @@ impl MetadataStore {
             0
         } else {
             tx.execute(
-                "UPDATE shared_file_memberships SET removed_at_ms = ?3
+                "UPDATE shared_file_memberships SET removed_at_s = ?3
                  WHERE root_id = (
                      SELECT shared_directory_roots.id FROM shared_directory_roots
                      JOIN local_paths ON local_paths.id = shared_directory_roots.path_id
                      WHERE local_paths.platform = ?1 AND local_paths.native_path = ?2
-                       AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_ms IS NULL
-                 ) AND removed_at_ms IS NULL",
-                params![NativePath::platform(), native.storage_bytes(), unix_ms()],
+                       AND shared_directory_roots.enabled = 1 AND shared_directory_roots.deleted_at_s IS NULL
+                 ) AND removed_at_s IS NULL",
+                params![NativePath::platform(), native.storage_bytes(), unix_s()],
             )?
         };
         tx.commit()?;
@@ -743,10 +743,10 @@ impl MetadataStore {
              FROM shared_file_memberships
              JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
              JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
-             WHERE shared_file_memberships.removed_at_ms IS NULL
+             WHERE shared_file_memberships.removed_at_s IS NULL
                AND ", crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), "
                AND shared_directory_roots.enabled = 1
-               AND shared_directory_roots.deleted_at_ms IS NULL
+               AND shared_directory_roots.deleted_at_s IS NULL
                AND shared_directory_roots.accessible = 1
                AND shared_directory_roots.shareable = 1"),
             [], |row| row.get(0),

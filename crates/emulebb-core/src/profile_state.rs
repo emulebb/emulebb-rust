@@ -79,13 +79,11 @@ pub(crate) fn persist_friend(
         name: friend.name.clone(),
         last_address: friend.address.clone(),
         last_port: friend.port,
-        first_seen_ms: friend
+        first_seen_s: friend
             .last_seen
-            .map(|last_seen| last_seen.timestamp_millis())
+            .map(|last_seen| last_seen.timestamp())
             .unwrap_or_default(),
-        last_seen_ms: friend
-            .last_seen
-            .map(|last_seen| last_seen.timestamp_millis()),
+        last_seen_s: friend.last_seen.map(|last_seen| last_seen.timestamp()),
     })
 }
 
@@ -136,8 +134,8 @@ fn friend_from_metadata(friend: MetadataFriend) -> Friend {
         user_hash: friend.user_hash,
         name: friend.name,
         last_seen: friend
-            .last_seen_ms
-            .and_then(DateTime::<Utc>::from_timestamp_millis),
+            .last_seen_s
+            .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0)),
         address: friend.last_address,
         port: friend.last_port,
     }
@@ -184,5 +182,47 @@ fn server_from_metadata(server: MetadataServer) -> ServerInfo {
         host_name_status: None,
         host_name_resolved_at: None,
         host_name_error: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn friend_calendar_time_roundtrips_seconds_in_storage_and_json() {
+        let store = MetadataStore::in_memory().unwrap();
+        for time in [
+            None,
+            DateTime::<Utc>::from_timestamp(0, 0),
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 987_000_000),
+        ] {
+            let friend = Friend {
+                user_hash: "00112233445566778899aabbccddeeff".into(),
+                name: "Sample Peer".into(),
+                last_seen: time,
+                address: None,
+                port: 0,
+            };
+            persist_friend(&store, &friend).unwrap();
+            assert!(
+                store
+                    .friend_matches(
+                        &friend.user_hash,
+                        &friend.name,
+                        None,
+                        0,
+                        time.map(|value| value.timestamp())
+                    )
+                    .unwrap()
+            );
+            let restored = friend_from_metadata(store.load_friends().unwrap().remove(0));
+            let expected = time.map(|value| value.timestamp());
+            assert_eq!(restored.last_seen.map(|value| value.timestamp()), expected);
+            let json = serde_json::to_value(&restored).unwrap();
+            assert_eq!(json["lastSeen"], serde_json::to_value(expected).unwrap());
+            let decoded: Friend = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.last_seen, restored.last_seen);
+        }
     }
 }

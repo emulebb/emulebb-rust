@@ -288,7 +288,7 @@ fn every_statistic_orders_the_full_hundred_thousand_hash_population_without_sort
         let mut conn = store.connection().unwrap();
         let tx = conn.transaction().unwrap();
         {
-            let mut insert = tx.prepare("INSERT INTO known_files(ed2k_hash,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
+            let mut insert = tx.prepare("INSERT INTO known_files(ed2k_hash,display_name,first_seen_at_s,last_seen_at_s,updated_at_s)
                 VALUES(?1,'Sample.bin',0,0,0)").unwrap();
             for n in 0..100_000 {
                 insert.execute([key(n).as_slice()]).unwrap();

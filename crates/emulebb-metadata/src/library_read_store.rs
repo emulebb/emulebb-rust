@@ -37,10 +37,10 @@ pub(crate) const LOCATION_PAGE_SQL: &str = concat!(
             WHERE v.path_id=i.path_id AND v.verified_fingerprint=i.verified_fingerprint),
         EXISTS(SELECT 1 FROM shared_file_memberships m INDEXED BY shared_file_memberships_path_content_idx
             CROSS JOIN shared_directory_roots r ON r.id=m.root_id
-            WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL),
+            WHERE m.path_id=i.path_id AND m.removed_at_s IS NULL AND r.enabled=1 AND r.deleted_at_s IS NULL),
         EXISTS(SELECT 1 FROM shared_file_memberships m INDEXED BY shared_file_memberships_path_content_idx
             CROSS JOIN shared_directory_roots r ON r.id=m.root_id
-            WHERE m.path_id=i.path_id AND m.removed_at_ms IS NULL AND r.enabled=1 AND r.deleted_at_ms IS NULL
+            WHERE m.path_id=i.path_id AND m.removed_at_s IS NULL AND r.enabled=1 AND r.deleted_at_s IS NULL
                 AND r.accessible=1 AND r.shareable=1),
         NOT (", crate::local_catalog::unexcluded_identity_sql!("i"), ")
      FROM local_file_instances i INDEXED BY local_file_instances_content_idx

@@ -103,6 +103,11 @@ mod profile_import;
 mod profile_model;
 mod profile_ownership;
 mod profile_store;
+mod server_query;
+pub use server_query::{
+    MetadataServerPage, MetadataServerQuery, MetadataServerReadError, MetadataServerRecord,
+    SERVER_READ_MAX_BYTES,
+};
 mod schema;
 mod schema_validation;
 mod search_model;

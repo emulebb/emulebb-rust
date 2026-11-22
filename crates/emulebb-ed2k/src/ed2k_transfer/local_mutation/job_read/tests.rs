@@ -224,32 +224,38 @@ async fn received_page_conversion_retains_charge_after_reap() {
 
 #[tokio::test]
 async fn cancelled_read_receiver_and_drain_keep_actual_worker_charged() {
-    let root = tempfile::tempdir().unwrap();
-    let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
-    let registry = Arc::clone(&runtime.local_mutations);
-    let (started, ready) = oneshot::channel();
-    let (release, gate) = std::sync::mpsc::channel();
-    registry.install_publication_gate(started, gate);
-    let receipt = registry
-        .submit_job_read(&runtime, JobRead::Page(None, 1, false))
-        .unwrap();
-    ready.await.unwrap();
-    drop(receipt);
-    let pending = registry.signal_next_pending_drain();
-    let drain = {
-        let registry = Arc::clone(&registry);
-        tokio::spawn(async move { registry.seal_and_drain().await })
-    };
-    pending.await.unwrap();
-    drain.abort();
-    let _ = drain.await;
-    let capacity = Arc::clone(&registry.state.lock().unwrap().capacity);
-    assert_eq!(capacity.usage().bytes, 2 * 1024 * 1024 + 4096);
-    release.send(()).unwrap();
-    registry.seal_and_drain().await.unwrap();
-    assert_eq!(capacity.usage().bytes, 0);
-    assert_eq!(capacity.usage().long_fs_units, 0);
-    assert_eq!(capacity.usage().long_fs_bytes, 0);
+    for (request, expected) in [
+        (JobRead::Page(None, 1, false), 2 * 1024 * 1024 + 4096),
+        (
+            JobRead::ServerPage(Default::default()),
+            emulebb_metadata::SERVER_READ_MAX_BYTES,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+        let registry = Arc::clone(&runtime.local_mutations);
+        let (started, ready) = oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        registry.install_publication_gate(started, gate);
+        let receipt = registry.submit_job_read(&runtime, request).unwrap();
+        ready.await.unwrap();
+        drop(receipt);
+        let pending = registry.signal_next_pending_drain();
+        let drain = {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move { registry.seal_and_drain().await })
+        };
+        pending.await.unwrap();
+        drain.abort();
+        let _ = drain.await;
+        let capacity = Arc::clone(&registry.state.lock().unwrap().capacity);
+        assert_eq!(capacity.usage().bytes, expected);
+        release.send(()).unwrap();
+        registry.seal_and_drain().await.unwrap();
+        assert_eq!(capacity.usage().bytes, 0);
+        assert_eq!(capacity.usage().long_fs_units, 0);
+        assert_eq!(capacity.usage().long_fs_bytes, 0);
+    }
 }
 
 #[tokio::test]
@@ -287,6 +293,7 @@ async fn every_compact_result_variant_reuses_and_releases_the_registry_control()
         JobRead::Counts,
         JobRead::Waiting(vec![job.token.job_id]),
         JobRead::TransferCounts,
+        JobRead::ServerPage(Default::default()),
         JobRead::Exact(job.token.job_id),
         JobRead::Detail(job.token.job_id),
         JobRead::Parts(job.token.job_id, None, 1),
@@ -374,4 +381,45 @@ async fn native_queries_preserve_order_filter_and_retained_charge() {
     drop(counts);
     assert_eq!(capacity.usage().bytes, 0);
     runtime.local_mutations.seal_and_drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn server_reads_share_capacity_and_release_missing_or_closed_results() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Ed2kTransferRuntime::load_or_create(root.path()).unwrap();
+    let page = runtime.server_page(Default::default()).await.unwrap();
+    reap_workers(&runtime.local_mutations).await;
+    let capacity = Arc::clone(&runtime.local_mutations.state.lock().unwrap().capacity);
+    let charge = emulebb_metadata::SERVER_READ_MAX_BYTES;
+    assert_eq!(capacity.usage().bytes, charge);
+    let headroom = capacity.reserve(MAX_BYTES - charge, false, false).unwrap();
+    let error = runtime.server_page(Default::default()).await.err().unwrap();
+    assert!(matches!(
+        error.downcast_ref::<LocalMutationError>(),
+        Some(LocalMutationError::Busy)
+    ));
+    let invalid = runtime
+        .server_page(emulebb_metadata::MetadataServerQuery {
+            limit: 0,
+            ..Default::default()
+        })
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        invalid.downcast_ref::<emulebb_metadata::MetadataServerReadError>(),
+        Some(&emulebb_metadata::MetadataServerReadError::InvalidQuery)
+    );
+    drop(page);
+    drop(headroom);
+    assert!(runtime.server_by_id(i64::MAX).await.unwrap().is_none());
+    reap_workers(&runtime.local_mutations).await;
+    assert_eq!(capacity.usage().bytes, 0);
+    runtime.local_mutations.seal_and_drain().await.unwrap();
+    let closed = runtime.server_by_id(1).await.err().unwrap();
+    assert!(matches!(
+        closed.downcast_ref::<LocalMutationError>(),
+        Some(LocalMutationError::Closing)
+    ));
+    assert_eq!(capacity.usage().bytes, 0);
 }

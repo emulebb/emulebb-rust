@@ -1,7 +1,7 @@
 //! Content-owned, packed AICH recovery leaves. No native paths enter this cache.
 use crate::{
     MetadataStore, MetadataVerifiedLocalContent,
-    store::{decode_fixed_hex, unix_ms},
+    store::{decode_fixed_hex, unix_s},
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
@@ -37,7 +37,7 @@ impl MetadataStore {
         );
         let mut connection = self.connection()?;
         let mut tx = connection.transaction()?;
-        Self::upsert_verified_local_content_tx(&tx, content, unix_ms())?;
+        Self::upsert_verified_local_content_tx(&tx, content, unix_s())?;
         let mut save = tx.savepoint()?;
         let recovery_error = match write_set(
             &save,

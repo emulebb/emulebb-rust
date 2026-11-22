@@ -335,7 +335,7 @@ pub(crate) fn server_response(server: &ServerInfo) -> Value {
         "files": server.files,
         "hostName": server.host_name,
         "hostNameStatus": server.host_name_status,
-        "hostNameResolvedAt": server.host_name_resolved_at,
+        "hostNameResolvedAt": server.host_name_resolved_at.map(|time| time.timestamp()),
         "hostNameError": server.host_name_error
     });
     let object = response
@@ -741,7 +741,7 @@ mod tests {
         let core =
             Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
         let status = core.status().await;
-        let servers = vec![ServerInfo {
+        let mut servers = vec![ServerInfo {
             address: "203.0.113.9".to_string(),
             port: 4661,
             endpoint: "203.0.113.9:4661".to_string(),
@@ -799,6 +799,16 @@ mod tests {
         assert_eq!(value["currentServer"]["obfuscationTcpPort"], 4665);
         assert_eq!(value["currentServer"]["udpFlags"], 0x331);
         assert_eq!(value["ed2kIdState"], "unknown");
+        assert_eq!(
+            value["currentServer"]["hostNameResolvedAt"],
+            serde_json::Value::Null
+        );
+        for seconds in [0, 1_800_000_000] {
+            servers[0].host_name_resolved_at =
+                chrono::DateTime::from_timestamp(seconds, 456_000_000);
+            let value = server_status_value(&status, &servers);
+            assert_eq!(value["currentServer"]["hostNameResolvedAt"], seconds);
+        }
     }
 
     #[tokio::test]

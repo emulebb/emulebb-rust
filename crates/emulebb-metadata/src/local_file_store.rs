@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{
     MetadataStore, MetadataTransferCatalogEntry, NativeFileFingerprint, NativePath,
     native_path::path_from_row,
-    store::{decode_fixed_hex, unix_ms, upsert_local_path},
+    store::{decode_fixed_hex, unix_s, upsert_local_path},
 };
 
 /// A rejected content merge. Database and I/O errors retain their original types.
@@ -375,9 +375,9 @@ impl MetadataStore {
              JOIN local_file_instances ON local_file_instances.path_id = shared_file_memberships.path_id
              JOIN temp.session_verified_local_paths verified ON verified.path_id = local_file_instances.path_id
                   AND verified.verified_fingerprint = local_file_instances.verified_fingerprint
-             WHERE shared_file_memberships.removed_at_ms IS NULL AND ", crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), "
+             WHERE shared_file_memberships.removed_at_s IS NULL AND ", crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), "
                AND shared_directory_roots.enabled = 1
-               AND shared_directory_roots.deleted_at_ms IS NULL
+               AND shared_directory_roots.deleted_at_s IS NULL
                AND shared_directory_roots.accessible = 1
                AND shared_directory_roots.shareable = 1"),
             [],
@@ -418,7 +418,7 @@ impl MetadataStore {
     ) -> Result<()> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        Self::upsert_verified_local_content_tx(&tx, content, unix_ms())?;
+        Self::upsert_verified_local_content_tx(&tx, content, unix_s())?;
         tx.commit()?;
         Ok(())
     }
@@ -480,7 +480,7 @@ impl MetadataStore {
         tx.execute(
             "INSERT INTO known_files(
                 ed2k_hash, size_bytes, display_name, aich_root, aich_root_origin,
-                first_seen_at_ms, last_seen_at_ms, updated_at_ms
+                first_seen_at_s, last_seen_at_s, updated_at_s
              ) VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5, ?5)
              ON CONFLICT(ed2k_hash) DO UPDATE SET
                  display_name = CASE
@@ -492,8 +492,8 @@ impl MetadataStore {
                     WHEN excluded.aich_root IS NULL THEN known_files.aich_root_origin
                     WHEN known_files.aich_root_origin = 'local_computed' THEN known_files.aich_root_origin
                     ELSE excluded.aich_root_origin END,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                updated_at_ms = excluded.updated_at_ms",
+                last_seen_at_s = excluded.last_seen_at_s,
+                updated_at_s = excluded.updated_at_s",
             params![hash, size, content.display_name, aich_root, now, aich_root.as_ref().map(|_| origin)],
         )?;
         let (known_file_id, stored_size): (i64, i64) = tx.query_row(
@@ -581,10 +581,10 @@ impl MetadataStore {
         }
         tx.execute(
             "INSERT INTO known_file_origins(
-                known_file_id, origin, size_bytes, first_seen_at_ms, last_seen_at_ms
+                known_file_id, origin, size_bytes, first_seen_at_s, last_seen_at_s
              ) VALUES (?1, 'local_share', ?2, ?3, ?3)
              ON CONFLICT(known_file_id, origin) DO UPDATE SET
-                last_seen_at_ms = excluded.last_seen_at_ms",
+                last_seen_at_s = excluded.last_seen_at_s",
             params![known_file_id, size, now],
         )?;
         if inserted != 0 {
@@ -607,14 +607,14 @@ impl MetadataStore {
         tx.execute(
             "INSERT INTO local_file_instances(
                 path_id, known_file_id, size_bytes, native_identity,
-                verified_fingerprint, verified_at_ms, secondary_identity
+                verified_fingerprint, verified_at_s, secondary_identity
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(path_id) DO UPDATE SET
                 known_file_id = excluded.known_file_id,
                 size_bytes = excluded.size_bytes,
                 native_identity = excluded.native_identity,
                 verified_fingerprint = excluded.verified_fingerprint,
-                verified_at_ms = excluded.verified_at_ms,
+                verified_at_s = excluded.verified_at_s,
                 secondary_identity = excluded.secondary_identity",
             params![
                 path_id,
@@ -660,15 +660,15 @@ impl MetadataStore {
         );
         let path_id = upsert_local_path(&tx, path)?;
         tx.execute(
-            "INSERT INTO local_file_instances(path_id, known_file_id, size_bytes, native_identity, verified_fingerprint, verified_at_ms, secondary_identity)
+            "INSERT INTO local_file_instances(path_id, known_file_id, size_bytes, native_identity, verified_fingerprint, verified_at_s, secondary_identity)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(path_id) DO UPDATE SET
                  known_file_id = excluded.known_file_id,
                  size_bytes = excluded.size_bytes,
                  native_identity = excluded.native_identity,
                  verified_fingerprint = excluded.verified_fingerprint,
-                 verified_at_ms = excluded.verified_at_ms, secondary_identity = excluded.secondary_identity",
-            params![path_id, known_file_id, known_size, fingerprint.identity.storage_bytes(), fingerprint.storage_bytes(), unix_ms(),evidence.secondary().map(|identity|identity.storage_bytes())],
+                 verified_at_s = excluded.verified_at_s, secondary_identity = excluded.secondary_identity",
+            params![path_id, known_file_id, known_size, fingerprint.identity.storage_bytes(), fingerprint.storage_bytes(), unix_s(),evidence.secondary().map(|identity|identity.storage_bytes())],
         )?;
         tx.commit()?;
         Ok(())
@@ -870,9 +870,9 @@ impl MetadataStore {
                  JOIN shared_file_memberships ON shared_file_memberships.path_id = local_file_instances.path_id
                  JOIN shared_directory_roots ON shared_directory_roots.id = shared_file_memberships.root_id
                  WHERE known_files.ed2k_hash = ?1 AND ", crate::local_catalog::unexcluded_identity_sql!("local_file_instances"), "
-                   AND shared_file_memberships.removed_at_ms IS NULL
+                   AND shared_file_memberships.removed_at_s IS NULL
                    AND shared_directory_roots.enabled = 1
-                   AND shared_directory_roots.deleted_at_ms IS NULL
+                   AND shared_directory_roots.deleted_at_s IS NULL
                    AND shared_directory_roots.accessible = 1
                    AND shared_directory_roots.shareable = 1
                  ORDER BY local_paths.platform, local_paths.native_path LIMIT 1"),
@@ -1013,6 +1013,7 @@ mod tests {
 
     #[test]
     fn verified_path_cache_needs_no_transfer_and_retains_identity() {
+        let before = crate::store::unix_s();
         let store = MetadataStore::in_memory().unwrap();
         let hash = "00112233445566778899aabbccddeeff";
         store
@@ -1020,7 +1021,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO known_files(ed2k_hash, size_bytes, display_name,
-                first_seen_at_ms, last_seen_at_ms, updated_at_ms)
+                first_seen_at_s, last_seen_at_s, updated_at_s)
              VALUES (?1, 32, 'Sample.bin', 1, 1, 1)",
                 params![decode_fixed_hex(hash, 16, "ED2K hash").unwrap()],
             )
@@ -1054,6 +1055,16 @@ mod tests {
                 verified_fingerprint: first,
             })
         );
+        let verified_at: i64 = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT verified_at_s FROM local_file_instances",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((before..=crate::store::unix_s()).contains(&verified_at));
         let changed = fingerprint(12);
         store
             .upsert_local_file_instance(

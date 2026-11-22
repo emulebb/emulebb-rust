@@ -49,12 +49,12 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         let tx = conn.transaction().unwrap();
         let root_id = crate::store::upsert_local_path(&tx, &root).unwrap();
         tx.execute(
-            "INSERT INTO shared_directory_roots(id,path_id,created_at_ms) VALUES(1,?1,0)",
+            "INSERT INTO shared_directory_roots(id,path_id,created_at_s) VALUES(1,?1,0)",
             [root_id],
         )
         .unwrap();
         tx.execute_batch("WITH RECURSIVE files(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM files WHERE n<100000)
-            INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_ms,last_seen_at_ms,updated_at_ms)
+            INSERT INTO known_files(id,ed2k_hash,size_bytes,display_name,first_seen_at_s,last_seen_at_s,updated_at_s)
             SELECT n,CAST(printf('%016d',n) AS BLOB),32,'sample',0,0,0 FROM files;
             INSERT INTO verified_local_content(known_file_id,display_name,part_size_bytes,part_count)
             SELECT id,'sample',9728000,0 FROM known_files;").unwrap();
@@ -77,7 +77,7 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
             }
         }
         tx.execute(
-            "INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_ms) SELECT id+1,id,32,x'01',?1,0 FROM known_files",
+            "INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,verified_fingerprint,verified_at_s) SELECT id+1,id,32,x'01',?1,0 FROM known_files",
             [&fingerprint],
         )
         .unwrap();
@@ -155,7 +155,14 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
         );
     }
     // Withdrawn memberships remain enumerable for bounded root reconciliation.
-    store.connection().unwrap().execute("UPDATE shared_file_memberships SET removed_at_ms=1 WHERE root_id=1 AND known_file_id=1", []).unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE shared_file_memberships SET removed_at_s=1 WHERE root_id=1 AND known_file_id=1",
+            [],
+        )
+        .unwrap();
     let affected_first = store.category_root_hash_page(&root, 0, 128).unwrap();
     let affected_next = store
         .category_root_hash_page(&root, affected_first.last().unwrap().0, 128)
@@ -164,7 +171,7 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
     assert_eq!(affected_next.len(), 128);
     assert_eq!(affected_first[0].0, 1);
     assert!(affected_next[0].0 > affected_first.last().unwrap().0);
-    store.connection().unwrap().execute("UPDATE shared_file_memberships SET removed_at_ms=NULL WHERE root_id=1 AND known_file_id=1", []).unwrap();
+    store.connection().unwrap().execute("UPDATE shared_file_memberships SET removed_at_s=NULL WHERE root_id=1 AND known_file_id=1", []).unwrap();
     let first = store
         .query_active_local_share_entries(&MetadataSharedFileQuery {
             limit: 2,
@@ -446,7 +453,7 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
     // A one-row root table legitimately favors SCAN. Populate unrelated roots
     // before qualifying seeks, so this checks growing roots as well as copies.
     conn.execute_batch(
-        "INSERT INTO shared_directory_roots(id,path_id,created_at_ms)
+        "INSERT INTO shared_directory_roots(id,path_id,created_at_s)
         SELECT id+1,id+1,0 FROM known_files WHERE id<=32;
         ANALYZE shared_directory_roots;",
     )

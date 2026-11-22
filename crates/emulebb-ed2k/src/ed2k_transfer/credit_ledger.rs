@@ -490,7 +490,7 @@ mod tests {
         let stored_row = || {
             database
                 .query_row(
-                    "SELECT uploaded_bytes, downloaded_bytes, first_seen_at_ms, last_seen_at_ms
+                    "SELECT uploaded_bytes, downloaded_bytes, first_seen_at_s, last_seen_at_s
                      FROM peers WHERE user_hash = ?1",
                     [user.as_slice()],
                     |row| {

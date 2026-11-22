@@ -15,7 +15,7 @@ pub(crate) struct ProcessResourceMonitor {
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProcessResources {
-    sampled_at_ms: Option<i64>,
+    sampled_at: Option<i64>,
     resident_memory_bytes: Option<u64>,
     /// Total process CPU use: 100% means one occupied core, not the whole host.
     cpu_usage_percent: Option<f64>,
@@ -53,7 +53,7 @@ struct Sampler {
 #[derive(Debug)]
 struct RawSample {
     at: Instant,
-    sampled_at_ms: i64,
+    sampled_at: i64,
     cpu_time: Option<Duration>,
     resident_memory_bytes: Option<u64>,
 }
@@ -64,7 +64,7 @@ impl RawSample {
         let at = Instant::now();
         Self {
             at,
-            sampled_at_ms: chrono::Utc::now().timestamp_millis(),
+            sampled_at: chrono::Utc::now().timestamp(),
             cpu_time,
             resident_memory_bytes: resident_memory_bytes(),
         }
@@ -84,7 +84,7 @@ impl Sampler {
             })
         });
         self.current = ProcessResources {
-            sampled_at_ms: Some(sample.sampled_at_ms),
+            sampled_at: Some(sample.sampled_at),
             resident_memory_bytes: sample.resident_memory_bytes,
             cpu_usage_percent: cpu_sample.map(|(percent, _)| percent),
             cpu_sample_interval_ms: cpu_sample.map(|(_, interval)| interval),
@@ -245,7 +245,7 @@ mod tests {
         let mut sampler = Sampler::default();
         let sample = |seconds, cpu: Option<u64>| RawSample {
             at: start + Duration::from_secs(seconds),
-            sampled_at_ms: 1_000 + seconds as i64 * 1_000,
+            sampled_at: seconds as i64,
             cpu_time: cpu.map(Duration::from_millis),
             resident_memory_bytes: Some(42),
         };
@@ -256,6 +256,12 @@ mod tests {
         let busy = sampler.record(sample(2, Some(3_000)));
         assert_eq!(busy.cpu_usage_percent, Some(125.0));
         assert_eq!(busy.cpu_sample_interval_ms, Some(2_000));
+        assert_eq!(serde_json::to_value(first).unwrap()["sampledAt"], 0);
+        assert_eq!(serde_json::to_value(busy).unwrap()["sampledAt"], 2);
+        assert_eq!(
+            serde_json::to_value(busy).unwrap()["cpuSampleIntervalMs"],
+            2_000
+        );
         assert_eq!(
             sampler.record(sample(4, Some(3_000))).cpu_usage_percent,
             Some(0.0)
@@ -291,7 +297,7 @@ mod tests {
     async fn native_metrics_are_live_and_repeated_requests_reuse_the_sample() {
         let monitor = ProcessResourceMonitor::default();
         let first = monitor.snapshot().await;
-        assert!(first.sampled_at_ms.is_some());
+        assert!(first.sampled_at.is_some());
         assert!(first.resident_memory_bytes.is_some_and(|bytes| bytes > 0));
         assert!(
             monitor
@@ -305,7 +311,7 @@ mod tests {
                 .is_some()
         );
         let second = monitor.snapshot().await;
-        assert_eq!(first.sampled_at_ms, second.sampled_at_ms);
+        assert_eq!(first.sampled_at, second.sampled_at);
         assert_eq!(first.resident_memory_bytes, second.resident_memory_bytes);
         assert_eq!(second.cpu_usage_percent, None);
     }

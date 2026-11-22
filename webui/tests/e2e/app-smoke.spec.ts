@@ -895,6 +895,39 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   expect(JSON.parse(kadImportPost?.body ?? "{}")).toEqual({ url: "http://example.invalid/nodes.dat" });
 });
 
+test("Kad node dates display calendar seconds including epoch zero", async ({ page }) => {
+  await page.route("**/api/v1/**", installMockApi([]));
+  await page.route("**/api/v1/kad/nodes?*", async route => {
+    await route.fulfill({ json: { data: { items: [
+      { nodeId: "00112233445566778899aabbccddeeff", ip: "192.0.2.10", createdAt: 0, lastSeen: 0 },
+      { nodeId: "112233445566778899aabbccddeeff00", ip: "192.0.2.11", createdAt: 1_800_000_000, lastSeen: 1_800_000_000 },
+    ] } } });
+  });
+  await page.goto("/");
+  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  for (const [ip, seconds] of [["192.0.2.10", 0], ["192.0.2.11", 1_800_000_000]] as const) {
+    const expected = await page.evaluate(time => new Date(time * 1000).toLocaleString(), seconds);
+    await expect(page.getByRole("row").filter({ hasText: ip }).getByRole("cell").nth(7)).toHaveText(expected);
+  }
+});
+
+test("friends display nullable calendar seconds including epoch zero", async ({ page }) => {
+  await page.route("**/api/v1/**", installMockApi([]));
+  await page.route("**/api/v1/friends", async route => {
+    await route.fulfill({ json: { data: { items: [
+      { userHash: "00112233445566778899aabbccddeeff", name: "Epoch Peer", lastSeen: 0 },
+      { userHash: "112233445566778899aabbccddeeff00", name: "Unknown Peer", lastSeen: null },
+      { userHash: "2233445566778899aabbccddeeff0011", name: "Recent Peer", lastSeen: 1_800_000_000 },
+    ] }, meta: { apiVersion: "v1" } } });
+  });
+  await page.goto("/");
+  await page.getByRole("link", { name: "Friends" }).click();
+  for (const [name, seconds] of [["Epoch Peer", 0], ["Unknown Peer", null], ["Recent Peer", 1_800_000_000]] as const) {
+    const expected = await page.evaluate(time => time == null ? "" : new Date(time * 1000).toLocaleString(), seconds);
+    await expect(page.getByRole("row").filter({ hasText: name }).getByRole("cell").nth(3)).toHaveText(expected);
+  }
+});
+
 test("friend create form validates hash and name", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
@@ -978,6 +1011,11 @@ test("shared file metadata form validates rating and priority contract", async (
   const sharedFilesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Files", exact: true }) });
   await expect(sharedFilesPanel.getByText("Published", { exact: true })).toBeVisible();
   await expect(sharedFilesPanel.getByText("1/2 Partial", { exact: true })).toBeVisible();
+  const epoch = await page.evaluate(() => new Date(0).toLocaleString());
+  const success = await page.evaluate(() => new Date(1_700_000_000 * 1000).toLocaleString());
+  await expect(sharedFilesPanel.getByRole("cell", { name: "1/2 Partial", exact: true })).toHaveAttribute("title", `Last confirmed success: ${epoch}`);
+  await expect(sharedFilesPanel.getByRole("cell", { name: "Published", exact: true })).toHaveAttribute("title", `Sent to the connected server; eD2K servers do not acknowledge individual files. Last confirmed success: ${success}`);
+
   await expect(sharedFilesPanel.getByText("Publishing", { exact: true })).toBeVisible();
   const metadataPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) });
   await expect(metadataPanel.getByText("Shared Sample.bin")).toBeVisible();
