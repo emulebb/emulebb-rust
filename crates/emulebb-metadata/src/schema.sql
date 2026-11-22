@@ -2,7 +2,7 @@ CREATE TABLE metadata_schema (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     schema_id TEXT NOT NULL UNIQUE,
     schema_version INTEGER NOT NULL CHECK(schema_version > 0),
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0)
 ) STRICT;
 
 CREATE TABLE discovery_initialization (
@@ -17,8 +17,8 @@ CREATE TABLE profile (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     uuid TEXT NOT NULL UNIQUE,
     created_by TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0)
 ) STRICT;
 
 CREATE TABLE local_identities (
@@ -26,8 +26,8 @@ CREATE TABLE local_identities (
     identity_kind TEXT NOT NULL UNIQUE CHECK(identity_kind IN ('ed2k-user-hash', 'ed2k-secure-ident', 'kad-node-id')),
     public_identity BLOB,
     private_secret BLOB,
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    created_at_s INTEGER NOT NULL CHECK(created_at_s >= 0),
+    updated_at_s INTEGER NOT NULL CHECK(updated_at_s >= 0),
     CHECK (
         (identity_kind = 'ed2k-user-hash' AND public_identity IS NOT NULL AND length(public_identity) = 16 AND private_secret IS NULL)
         OR (identity_kind = 'ed2k-secure-ident' AND public_identity IS NULL AND private_secret IS NOT NULL AND length(private_secret) > 0)
@@ -59,9 +59,9 @@ CREATE TABLE friends (
     name TEXT NOT NULL,
     last_address TEXT,
     last_port INTEGER NOT NULL DEFAULT 0 CHECK(last_port BETWEEN 0 AND 65535),
-    first_seen_at_ms INTEGER NOT NULL CHECK(first_seen_at_ms >= 0),
-    last_seen_at_ms INTEGER CHECK(last_seen_at_ms IS NULL OR last_seen_at_ms >= 0),
-    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
+    first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
+    last_seen_at_s INTEGER CHECK(last_seen_at_s IS NULL OR last_seen_at_s >= 0),
+    deleted_at_s INTEGER CHECK(deleted_at_s IS NULL OR deleted_at_s >= 0)
 ) STRICT;
 
 CREATE TABLE known_files (

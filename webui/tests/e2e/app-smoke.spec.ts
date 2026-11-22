@@ -895,6 +895,23 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   expect(JSON.parse(kadImportPost?.body ?? "{}")).toEqual({ url: "http://example.invalid/nodes.dat" });
 });
 
+test("friends display nullable calendar seconds including epoch zero", async ({ page }) => {
+  await page.route("**/api/v1/**", installMockApi([]));
+  await page.route("**/api/v1/friends", async route => {
+    await route.fulfill({ json: { data: { items: [
+      { userHash: "00112233445566778899aabbccddeeff", name: "Epoch Peer", lastSeen: 0 },
+      { userHash: "112233445566778899aabbccddeeff00", name: "Unknown Peer", lastSeen: null },
+      { userHash: "2233445566778899aabbccddeeff0011", name: "Recent Peer", lastSeen: 1_800_000_000 },
+    ] }, meta: { apiVersion: "v1" } } });
+  });
+  await page.goto("/");
+  await page.getByRole("link", { name: "Friends" }).click();
+  for (const [name, seconds] of [["Epoch Peer", 0], ["Unknown Peer", null], ["Recent Peer", 1_800_000_000]] as const) {
+    const expected = await page.evaluate(time => time == null ? "" : new Date(time * 1000).toLocaleString(), seconds);
+    await expect(page.getByRole("row").filter({ hasText: name }).getByRole("cell").nth(3)).toHaveText(expected);
+  }
+});
+
 test("friend create form validates hash and name", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));

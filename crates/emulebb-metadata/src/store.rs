@@ -232,18 +232,18 @@ impl MetadataStore {
     }
 
     fn create_schema(&mut self, initialize_storage: Option<StorageInitializer>) -> Result<()> {
-        let now = unix_ms();
+        let now = unix_s();
         let profile_uuid = Uuid::new_v4().to_string();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA_SQL)?;
         tx.execute(
-            "INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms) VALUES (?1, ?2, ?3)",
+            "INSERT INTO metadata_schema(schema_id, schema_version, created_at_s) VALUES (?1, ?2, ?3)",
             params![SCHEMA_ID, SCHEMA_VERSION, now],
         )?;
         tx.execute(
             r#"
-            INSERT INTO profile(id, uuid, created_by, created_at_ms, updated_at_ms)
+            INSERT INTO profile(id, uuid, created_by, created_at_s, updated_at_s)
             VALUES (1, ?1, 'emulebb-rust', ?2, ?2)
             "#,
             params![profile_uuid, now],
@@ -993,10 +993,10 @@ mod tests {
             CREATE TABLE metadata_schema (
                 schema_id TEXT PRIMARY KEY,
                 schema_version INTEGER NOT NULL,
-                created_at_ms INTEGER NOT NULL
+                created_at_s INTEGER NOT NULL
             );
             CREATE TABLE files(id INTEGER PRIMARY KEY);
-            INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms)
+            INSERT INTO metadata_schema(schema_id, schema_version, created_at_s)
             VALUES ('emulebb.metadata', 24, 0);
             INSERT INTO files(id) VALUES (7);
             "#,
@@ -1028,9 +1028,9 @@ mod tests {
             CREATE TABLE metadata_schema (
                 schema_id TEXT PRIMARY KEY,
                 schema_version INTEGER NOT NULL,
-                created_at_ms INTEGER NOT NULL
+                created_at_s INTEGER NOT NULL
             );
-            INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms)
+            INSERT INTO metadata_schema(schema_id, schema_version, created_at_s)
             VALUES ('other-schema', 16, 0);
             "#,
         )

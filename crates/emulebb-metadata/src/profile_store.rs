@@ -234,9 +234,9 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(user_hash)), name, last_address, last_port, first_seen_at_ms, last_seen_at_ms
+            SELECT lower(hex(user_hash)), name, last_address, last_port, first_seen_at_s, last_seen_at_s
             FROM friends
-            WHERE deleted_at_ms IS NULL
+            WHERE deleted_at_s IS NULL
             ORDER BY name, user_hash
             "#,
         )?;
@@ -246,8 +246,8 @@ impl super::MetadataStore {
                 name: row.get(1)?,
                 last_address: row.get(2)?,
                 last_port: row.get::<_, u16>(3)?,
-                first_seen_ms: row.get(4)?,
-                last_seen_ms: row.get(5)?,
+                first_seen_s: row.get(4)?,
+                last_seen_s: row.get(5)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -260,7 +260,7 @@ impl super::MetadataStore {
 
     /// Write a friend and report connection wait and statement/commit time.
     pub fn upsert_friend_timed(&self, friend: &MetadataFriend) -> Result<FriendWriteTiming> {
-        let now = unix_ms();
+        let now = unix_s();
         let user_hash = decode_fixed_hex(&friend.user_hash, 16, "friend user hash")?;
         let waiting = std::time::Instant::now();
         let conn = self.connection()?;
@@ -268,26 +268,26 @@ impl super::MetadataStore {
         let execution = std::time::Instant::now();
         conn.execute(
             r#"
-            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_ms, last_seen_at_ms, deleted_at_ms)
+            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_s, last_seen_at_s, deleted_at_s)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
             ON CONFLICT(user_hash) DO UPDATE SET
                 name = excluded.name,
                 last_address = excluded.last_address,
                 last_port = excluded.last_port,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                deleted_at_ms = NULL
+                last_seen_at_s = excluded.last_seen_at_s,
+                deleted_at_s = NULL
             "#,
             params![
                 user_hash,
                 friend.name,
                 friend.last_address,
                 i64::from(friend.last_port),
-                if friend.first_seen_ms > 0 {
-                    friend.first_seen_ms
+                if friend.first_seen_s > 0 {
+                    friend.first_seen_s
                 } else {
                     now
                 },
-                friend.last_seen_ms,
+                friend.last_seen_s,
             ],
         )?;
         Ok(FriendWriteTiming {
@@ -300,7 +300,7 @@ impl super::MetadataStore {
     pub fn has_friend(&self, user_hash: &str) -> Result<bool> {
         let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
         self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_s IS NULL)",
             [user_hash],
             |row| row.get(0),
         ).map_err(Into::into)
@@ -313,12 +313,12 @@ impl super::MetadataStore {
         name: &str,
         address: Option<&str>,
         port: u16,
-        last_seen_ms: Option<i64>,
+        last_seen_s: Option<i64>,
     ) -> Result<bool> {
         let user_hash = decode_fixed_hex(user_hash, 16, "friend user hash")?;
         self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_ms IS NULL AND name = ?2 AND last_address IS ?3 AND last_port = ?4 AND last_seen_at_ms IS ?5)",
-            params![user_hash, name, address, i64::from(port), last_seen_ms],
+            "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash = ?1 AND deleted_at_s IS NULL AND name = ?2 AND last_address IS ?3 AND last_port = ?4 AND last_seen_at_s IS ?5)",
+            params![user_hash, name, address, i64::from(port), last_seen_s],
             |row| row.get(0),
         ).map_err(Into::into)
     }
@@ -335,8 +335,8 @@ impl super::MetadataStore {
         let connection_wait = waiting.elapsed();
         let execution = std::time::Instant::now();
         conn.execute(
-            "UPDATE friends SET deleted_at_ms = ?1 WHERE user_hash = ?2",
-            params![unix_ms(), user_hash],
+            "UPDATE friends SET deleted_at_s = ?1 WHERE user_hash = ?2",
+            params![unix_s(), user_hash],
         )?;
         Ok(FriendWriteTiming {
             connection_wait,
@@ -593,8 +593,8 @@ mod tests {
                 name: "Peer".to_string(),
                 last_address: Some("192.0.2.44".to_string()),
                 last_port: 4662,
-                first_seen_ms: 1,
-                last_seen_ms: Some(2),
+                first_seen_s: 1,
+                last_seen_s: Some(2),
             })
             .unwrap();
         assert_eq!(store.load_friends().unwrap()[0].last_port, 4662);

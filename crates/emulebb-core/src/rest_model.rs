@@ -968,6 +968,7 @@ pub enum NullableStringField {
 pub struct Friend {
     pub user_hash: String,
     pub name: String,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
     pub last_seen: Option<DateTime<Utc>>,
     pub address: Option<String>,
     pub port: u16,

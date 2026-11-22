@@ -393,7 +393,7 @@ export type Category = {
 export type Friend = {
   userHash?: string;
   name?: string;
-  lastSeen?: string | null;
+  lastSeen?: number | null;
   address?: string | null;
   port?: number;
   [key: string]: unknown;

@@ -2598,7 +2598,7 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
                   <td>{friend.name ?? ""}</td>
                   <td>{hash}</td>
                   <td>{friend.address ?? ""}{friend.port ? `:${friend.port}` : ""}</td>
-                  <td>{friend.lastSeen ?? ""}</td>
+                  <td>{friend.lastSeen == null ? "" : new Date(friend.lastSeen * 1000).toLocaleString()}</td>
                   <td><Action title="Delete" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.delete(`friends/${hash}`), "Friend deleted")} /></td>
                 </tr>
               );

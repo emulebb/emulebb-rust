@@ -1387,7 +1387,7 @@ fn transfer_manifest_waits_for_existing_writer_before_reading_snapshot() {
         .unwrap();
     writer_tx
         .execute(
-            "UPDATE metadata_schema SET created_at_ms = created_at_ms + 1",
+            "UPDATE metadata_schema SET created_at_s = created_at_s + 1",
             [],
         )
         .unwrap();

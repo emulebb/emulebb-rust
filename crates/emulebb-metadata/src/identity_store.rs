@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
-use crate::{identity_model::MetadataLocalIdentity, store::unix_ms};
+use crate::{identity_model::MetadataLocalIdentity, store::unix_s};
 
 /// Durable nonzero Kad routing identity for one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +49,8 @@ impl super::MetadataStore {
             Some(bytes) => KadNodeId::try_from(bytes)?,
             None => {
                 let id = create()?;
-                let now = unix_ms();
-                tx.execute("INSERT INTO local_identities(identity_kind, public_identity, private_secret, created_at_ms, updated_at_ms) VALUES ('kad-node-id', ?1, NULL, ?2, ?2)", params![id.as_bytes().as_slice(), now])?;
+                let now = unix_s();
+                tx.execute("INSERT INTO local_identities(identity_kind, public_identity, private_secret, created_at_s, updated_at_s) VALUES ('kad-node-id', ?1, NULL, ?2, ?2)", params![id.as_bytes().as_slice(), now])?;
                 id
             }
         };
@@ -90,15 +90,15 @@ impl super::MetadataStore {
             identity.identity_kind != "kad-node-id",
             "Kad identity is created only by its typed owner"
         );
-        let now = unix_ms();
+        let now = unix_s();
         self.connection()?.execute(
             r#"
-            INSERT INTO local_identities(identity_kind, public_identity, private_secret, created_at_ms, updated_at_ms)
+            INSERT INTO local_identities(identity_kind, public_identity, private_secret, created_at_s, updated_at_s)
             VALUES (?1, ?2, ?3, ?4, ?4)
             ON CONFLICT(identity_kind) DO UPDATE SET
                 public_identity = excluded.public_identity,
                 private_secret = excluded.private_secret,
-                updated_at_ms = excluded.updated_at_ms
+                updated_at_s = excluded.updated_at_s
             "#,
             params![
                 identity.identity_kind,
@@ -114,6 +114,43 @@ impl super::MetadataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_and_identity_calendar_times_are_seconds() {
+        let before = unix_s();
+        let store = super::super::MetadataStore::in_memory().unwrap();
+        let identity = MetadataLocalIdentity {
+            identity_kind: "ed2k-user-hash".into(),
+            public_identity: Some(vec![0x11; 16]),
+            private_secret: None,
+        };
+        store.upsert_local_identity(&identity).unwrap();
+        store.load_or_create_kad_node_id().unwrap();
+        let conn = store.connection().unwrap();
+        let mut stmt = conn.prepare("SELECT created_at_s FROM metadata_schema UNION ALL SELECT created_at_s FROM profile UNION ALL SELECT updated_at_s FROM profile UNION ALL SELECT created_at_s FROM local_identities UNION ALL SELECT updated_at_s FROM local_identities").unwrap();
+        let times = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(times.len(), 7);
+        assert!(
+            times
+                .into_iter()
+                .all(|time| (before..=unix_s()).contains(&time))
+        );
+        conn.execute(
+            "UPDATE local_identities SET created_at_s=1 WHERE identity_kind='ed2k-user-hash'",
+            [],
+        )
+        .unwrap();
+        drop(stmt);
+        drop(conn);
+        store.upsert_local_identity(&identity).unwrap();
+        let (created, updated): (i64, i64) = store.connection().unwrap().query_row("SELECT created_at_s,updated_at_s FROM local_identities WHERE identity_kind='ed2k-user-hash'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(created, 1);
+        assert!((before..=unix_s()).contains(&updated));
+    }
 
     #[test]
     fn kad_identity_rejects_zero_and_never_replaces_existing() {

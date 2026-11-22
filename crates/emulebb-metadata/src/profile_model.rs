@@ -13,8 +13,8 @@ pub struct MetadataFriend {
     pub name: String,
     pub last_address: Option<String>,
     pub last_port: u16,
-    pub first_seen_ms: i64,
-    pub last_seen_ms: Option<i64>,
+    pub first_seen_s: i64,
+    pub last_seen_s: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
