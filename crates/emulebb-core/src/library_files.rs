@@ -76,29 +76,34 @@ impl EmulebbCore {
         &self,
         query: LibraryFileQuery,
     ) -> Result<RetainedRead<LibraryFilePage>> {
-        self.ed2k_transfers
+        self.persistence_owner.check_coherent_state()?;
+        let page = self
+            .ed2k_transfers
             .library_file_page(query)
             .await
-            .map_err(read_error)?
-            .try_project(LIBRARY_FILE_PAGE_BYTES, |page| {
-                Ok(LibraryFilePage {
-                    files: page.files.into_iter().map(Into::into).collect(),
-                    next_after: page.next_after,
-                    total: page.total,
-                })
+            .map_err(read_error)?;
+        self.persistence_owner.check_coherent_state()?;
+        page.try_project(LIBRARY_FILE_PAGE_BYTES, |page| {
+            Ok(LibraryFilePage {
+                files: page.files.into_iter().map(Into::into).collect(),
+                next_after: page.next_after,
+                total: page.total,
             })
-            .map_err(read_error)
+        })
+        .map_err(read_error)
     }
 
     /// The same summary facts as the collection, independent of current presence.
     pub async fn library_file(&self, hash: &str) -> Result<Option<RetainedRead<LibraryFile>>> {
         crate::library_policy::validate_hash(hash)?;
-        let Some(file) = self
+        self.persistence_owner.check_coherent_state()?;
+        let file = self
             .ed2k_transfers
             .library_file(hash)
             .await
-            .map_err(read_error)?
-        else {
+            .map_err(read_error)?;
+        self.persistence_owner.check_coherent_state()?;
+        let Some(file) = file else {
             return Ok(None);
         };
         file.try_project(LIBRARY_FILE_PAGE_BYTES, |file| Ok(file.into()))
