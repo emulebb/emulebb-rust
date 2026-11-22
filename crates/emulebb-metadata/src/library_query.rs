@@ -114,6 +114,17 @@ pub struct MetadataLibraryFile {
     pub statistics: MetadataFileUploadStatistics,
 }
 
+/// Point-read metadata is separate from thin collection rows.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MetadataLibraryFileDetail {
+    pub file: MetadataLibraryFile,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
+    pub aich_root: Option<[u8; 20]>,
+}
+
 #[derive(Debug)]
 pub struct MetadataLibraryFilePage {
     pub files: Vec<MetadataLibraryFile>,
@@ -259,6 +270,51 @@ impl MetadataStore {
     /// Read one client hash, including unavailable/copyless content. This uses
     /// the same cached facts as pages and never warms unrelated filename keys.
     pub fn library_file(&self, hash: &[u8; 16]) -> Result<Option<MetadataLibraryFile>> {
+        self.library_file_read(hash, "", decode)
+    }
+
+    /// One transaction supplies the same summary facts and explicit local
+    /// metadata, without reading any job, copy list, hashset or filesystem.
+    pub fn library_file_detail(
+        &self,
+        hash: &[u8; 16],
+    ) -> Result<Option<MetadataLibraryFileDetail>> {
+        self.library_file_read(
+            hash,
+            ",length(CAST(k.comment AS BLOB)),
+            CASE WHEN length(CAST(k.comment AS BLOB))<=65536 THEN k.comment END,
+            length(CAST(k.upload_priority AS BLOB)),
+            CASE WHEN length(CAST(k.upload_priority AS BLOB))<=64 THEN k.upload_priority END,
+            k.auto_upload_priority,k.rating,k.aich_root",
+            |row| {
+                crate::download_job_store::bounded_row_bytes(row, &[(14, 65_536, 8), (16, 64, 8)])?;
+                let aich_root = match row.get_ref(20)? {
+                    rusqlite::types::ValueRef::Null => None,
+                    value => Some(
+                        value
+                            .as_blob()?
+                            .try_into()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    ),
+                };
+                Ok(MetadataLibraryFileDetail {
+                    file: decode(row)?,
+                    upload_priority: row.get(17)?,
+                    auto_upload_priority: row.get(18)?,
+                    comment: row.get(15)?,
+                    rating: row.get(19)?,
+                    aich_root,
+                })
+            },
+        )
+    }
+
+    fn library_file_read<T>(
+        &self,
+        hash: &[u8; 16],
+        extra: &str,
+        decode: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Option<T>> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         if !tx.query_row(
@@ -269,7 +325,7 @@ impl MetadataStore {
             return Ok(None);
         }
         crate::library_projection::refresh(&tx)?;
-        let file=tx.query_row(&format!("SELECT f.ed2k_hash,{COLUMNS}
+        let file=tx.query_row(&format!("SELECT f.ed2k_hash,{COLUMNS}{extra}
             FROM temp.session_library_files f CROSS JOIN temp.session_file_upload_statistics s ON s.known_file_id=f.known_file_id
             CROSS JOIN known_files k ON k.id=f.known_file_id WHERE f.ed2k_hash=?1"),[hash.as_slice()],|row| {
                 crate::download_job_store::bounded_row_bytes(row,&[(1,65_536,8)])?;

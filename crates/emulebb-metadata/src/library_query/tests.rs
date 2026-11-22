@@ -6,6 +6,57 @@ fn hash(byte: u8) -> [u8; 16] {
     [byte; 16]
 }
 
+#[test]
+fn hash_detail_has_canonical_local_metadata_and_rejects_oversized_text() {
+    let store = fixture();
+    let file_hash = hex::encode(hash(1));
+    store
+        .update_shared_content_metadata(
+            &file_hash,
+            Some(("high", false)),
+            Some(("Explicit note", 4)),
+        )
+        .unwrap();
+    let detail = store.library_file_detail(&hash(1)).unwrap().unwrap();
+    assert_eq!(detail.file, store.library_file(&hash(1)).unwrap().unwrap());
+    assert_eq!(
+        (
+            detail.upload_priority.as_str(),
+            detail.auto_upload_priority,
+            detail.comment.as_str(),
+            detail.rating
+        ),
+        ("high", false, "Explicit note", 4)
+    );
+    assert!(detail.aich_root.is_none());
+    assert!(
+        store.library_file_detail(&hash(5)).unwrap().is_none(),
+        "passive evidence is not a client library hash"
+    );
+    assert!(store.library_file_detail(&hash(99)).unwrap().is_none());
+    let conn = store.connection().unwrap();
+    conn.execute(
+        "UPDATE known_files SET comment=?2 WHERE ed2k_hash=?1",
+        params![hash(1).as_slice(), "x".repeat(65_537)],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(store.library_file_detail(&hash(1)).is_err());
+    assert!(
+        store.library_file(&hash(1)).unwrap().is_some(),
+        "thin summaries do not load detail text"
+    );
+    let conn = store.connection().unwrap();
+    let text = "\u{0001}".repeat(65_536);
+    conn.execute("UPDATE known_files SET display_name=?2,comment=?2,aich_root=?3,aich_root_origin='operator_link' WHERE ed2k_hash=?1",
+        params![hash(1).as_slice(), text, [0x42u8;20].as_slice()]).unwrap();
+    drop(conn);
+    let detail = store.library_file_detail(&hash(1)).unwrap().unwrap();
+    assert_eq!(detail.file.display_name, text);
+    assert_eq!(detail.comment, text);
+    assert_eq!(detail.aich_root, Some([0x42; 20]));
+}
+
 // Paths deliberately do not exist. Browsing must use cached observations only.
 fn fixture() -> MetadataStore {
     let mut store = MetadataStore::in_memory().unwrap();

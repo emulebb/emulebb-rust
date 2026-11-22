@@ -73,7 +73,7 @@ mod library_projection;
 mod library_query;
 pub use library_query::{
     LibraryFileQuery, LibraryFileSort, LibraryFileView, MetadataLibraryCursorExpired,
-    MetadataLibraryFile, MetadataLibraryFilePage,
+    MetadataLibraryFile, MetadataLibraryFileDetail, MetadataLibraryFilePage,
 };
 mod library_read_store;
 pub use library_policy_store::{LibraryTagError, MetadataLibraryTag, MetadataLibraryTagPage};

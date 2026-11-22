@@ -132,8 +132,9 @@ mod download_controls;
 mod library_files;
 mod library_locations;
 pub use library_files::{
-    LIBRARY_FILE_PAGE_BYTES, LibraryFile, LibraryFilePage, LibraryFileQuery, LibraryFileSort,
-    LibraryFileView, MetadataLibraryCursorExpired,
+    LIBRARY_FILE_DETAIL_BYTES, LIBRARY_FILE_PAGE_BYTES, LibraryFile, LibraryFileDetail,
+    LibraryFilePage, LibraryFileQuery, LibraryFileSort, LibraryFileView,
+    MetadataLibraryCursorExpired,
 };
 mod library_policy;
 pub use library_locations::{LIBRARY_LOCATION_PAGE_BYTES, LibraryLocation, LibraryLocationPage};

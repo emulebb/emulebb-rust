@@ -1,6 +1,110 @@
 use super::*;
 use crate::{LIBRARY_FILE_PAGE_BYTES, LibraryFileQuery, LibraryFileView};
 
+#[tokio::test]
+async fn known_hash_detail_uses_accepted_size_and_delimiter_safe_link() {
+    let root = unique_runtime_dir("library-hash-detail-link");
+    let library = root.join("library");
+    fs::create_dir_all(&library).unwrap();
+    fs::write(library.join("link %.bin"), b"accepted payload").unwrap();
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        root.join("transfers"),
+    )
+    .unwrap();
+    core.create_library_root(&library.to_string_lossy(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    let shares = core.reload_shared_directories().await.unwrap();
+    let hash = shares[0].hash.clone();
+    drop(shares);
+    let detail = core.library_file_detail(&hash).await.unwrap().unwrap();
+    assert_eq!(detail.file.size_bytes, Some(16));
+    let link = detail.ed2k_link.as_deref().unwrap();
+    assert!(
+        link.starts_with("ed2k://|file|link%20%25.bin|16|"),
+        "{link}"
+    );
+    assert!(link.contains(&hash));
+    assert!(link.ends_with("|/"));
+    drop(detail);
+    core.persistence_owner.close_and_drain().await.unwrap();
+    core.ed2k_transfers.drain_local_mutations().await.unwrap();
+}
+
+#[tokio::test]
+async fn copyless_detail_keeps_explicit_metadata_and_charges_conversion_until_drop() {
+    let (core, hash) = core_with_copyless_library();
+    assert!(
+        core.edit_library_file_metadata(
+            &hash,
+            &SharedFileUpdate {
+                priority: Some("high".into()),
+                comment: Some("Explicit note".into()),
+                rating: Some(4),
+            }
+        )
+        .await
+        .unwrap()
+    );
+    let resident = core
+        .ed2k_transfers
+        .download_resource_snapshot()
+        .resident_bytes;
+    let detail = core.library_file_detail(&hash).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            detail.upload_priority.as_str(),
+            detail.auto_upload_priority,
+            detail.comment.as_str(),
+            detail.rating
+        ),
+        ("high", false, "Explicit note", 4)
+    );
+    assert!(
+        detail.ed2k_link.is_none(),
+        "provisional size must not produce a link"
+    );
+    assert!(!detail.file.present);
+    assert_eq!(detail.file.lifetime_uploaded_bytes, 17);
+    let resources = core.ed2k_transfers.download_resource_snapshot();
+    assert_eq!(resources.resident_bytes, resident);
+    assert_eq!(resources.transient_bytes, crate::LIBRARY_FILE_DETAIL_BYTES);
+    let encoded = detail.serialize_json().unwrap();
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .transient_bytes,
+        encoded.len()
+    );
+    let value: serde_json::Value = serde_json::from_slice(encoded.as_ref()).unwrap();
+    assert_eq!(value["hash"], hash);
+    assert_eq!(value["comment"], "Explicit note");
+    assert_eq!(value["rating"], 4);
+    assert!(value["ed2kLink"].is_null());
+    assert!(
+        value.get("file").is_none(),
+        "detail reuses flat summary fields"
+    );
+    drop(encoded);
+    assert!(
+        core.library_file_detail(&"ff".repeat(16))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        core.ed2k_transfers
+            .download_resource_snapshot()
+            .transient_bytes,
+        0
+    );
+    core.persistence_owner.close_and_drain().await.unwrap();
+    core.ed2k_transfers.drain_local_mutations().await.unwrap();
+}
+
 fn core_with_copyless_library() -> (EmulebbCore, String) {
     let index = FileIndex::in_memory().unwrap();
     let hash = "61".repeat(16);

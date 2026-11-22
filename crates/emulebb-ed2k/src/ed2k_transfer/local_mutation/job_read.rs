@@ -20,6 +20,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
     LibraryStatistics([u8; 16]),
     LibraryQuery(emulebb_metadata::LibraryFileQuery),
     LibraryFile([u8; 16]),
+    LibraryFileDetail([u8; 16]),
     LibraryLocations([u8; 16], i64, usize),
     Scheduling(
         Arc<transfer::Ed2kTransferRuntime>,
@@ -67,6 +68,7 @@ pub(in crate::ed2k_transfer) enum JobReadResult {
     LibraryStatistics(Option<RetainedRead<emulebb_metadata::MetadataFileUploadStatistics>>),
     LibraryQuery(RetainedRead<emulebb_metadata::MetadataLibraryFilePage>),
     LibraryFile(Option<RetainedRead<emulebb_metadata::MetadataLibraryFile>>),
+    LibraryFileDetail(Option<RetainedRead<emulebb_metadata::MetadataLibraryFileDetail>>),
     LibraryLocations(Option<RetainedRead<emulebb_metadata::MetadataLibraryLocationPage>>),
     Scheduling(Option<transfer::DownloadSchedulingState>),
     TransferCounts(RetainedRead<emulebb_metadata::MetadataTransferCounts>),
@@ -118,7 +120,7 @@ impl LocalMutationRegistry {
                 emulebb_metadata::SERVER_READ_MAX_BYTES
             }
             JobRead::LibraryStatistics(_) => 64 * 1024,
-            JobRead::LibraryFile(_) => 2 * 1024 * 1024,
+            JobRead::LibraryFile(_) | JobRead::LibraryFileDetail(_) => 2 * 1024 * 1024,
             JobRead::LibraryQuery(ref query) => {
                 ensure!(
                     (1..=200).contains(&query.limit)
@@ -277,6 +279,14 @@ impl LocalMutationRegistry {
                     accounting.publish_file_statistics()?;
                     metadata.library_file(&hash).map(|file| {
                         JobReadResult::LibraryFile(
+                            file.map(|file| RetainedRead::new(file, capacity.take_result())),
+                        )
+                    })
+                }
+                JobRead::LibraryFileDetail(hash) => {
+                    accounting.publish_file_statistics()?;
+                    metadata.library_file_detail(&hash).map(|file| {
+                        JobReadResult::LibraryFileDetail(
                             file.map(|file| RetainedRead::new(file, capacity.take_result())),
                         )
                     })
@@ -519,6 +529,22 @@ impl transfer::Ed2kTransferRuntime {
         };
         Ok(file)
     }
+    /// Local hash metadata and live captured counters through the admitted read
+    /// owner. This does not admit payload storage or hydrate an execution.
+    pub async fn library_file_detail(
+        &self,
+        hash: &str,
+    ) -> Result<Option<RetainedRead<emulebb_metadata::MetadataLibraryFileDetail>>> {
+        let hash: emulebb_kad_proto::Ed2kHash = hash.parse()?;
+        let JobReadResult::LibraryFileDetail(file) = self
+            .read_job_metadata(JobRead::LibraryFileDetail(hash.0))
+            .await?
+        else {
+            unreachable!()
+        };
+        Ok(file)
+    }
+
     /// A thin library page, with current captured statistics, through the same
     /// admitted owner as other reads. Includes work headroom for name folding.
     pub async fn library_file_page(

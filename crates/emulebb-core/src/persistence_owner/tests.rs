@@ -1175,6 +1175,7 @@ async fn unreconciled_profile_refuses_library_reads_including_absent_hashes() {
         .unwrap();
     let core = crate::EmulebbCore::new_in_memory("test", index).unwrap();
     assert!(core.library_file(&hash).await.unwrap().is_some());
+    assert!(core.library_file_detail(&hash).await.unwrap().is_some());
     assert!(
         core.library_locations(&hash, 0, 100)
             .await
@@ -1202,6 +1203,11 @@ async fn unreconciled_profile_refuses_library_reads_including_absent_hashes() {
     ));
     for candidate in [&hash, &"ff".repeat(16)] {
         let error = core.library_file(candidate).await.err().unwrap();
+        assert!(matches!(
+            error.downcast_ref::<PersistenceError>(),
+            Some(PersistenceError::CommitUnknown)
+        ));
+        let error = core.library_file_detail(candidate).await.err().unwrap();
         assert!(matches!(
             error.downcast_ref::<PersistenceError>(),
             Some(PersistenceError::CommitUnknown)

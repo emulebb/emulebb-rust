@@ -10,6 +10,9 @@ pub use emulebb_metadata::{
 };
 
 pub const LIBRARY_FILE_PAGE_BYTES: usize = emulebb_metadata::LIBRARY_READ_MAX_BYTES;
+// Both maximum-length name and comment, including escaped output/link text,
+// fit independently of the thin page allowance. This is a retained read charge.
+pub const LIBRARY_FILE_DETAIL_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +59,20 @@ pub struct LibraryFilePage {
     pub total: Option<u64>,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFileDetail {
+    #[serde(flatten)]
+    pub file: LibraryFile,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
+    /// A link requires an accepted content size; provisional job sizes do not
+    /// become identity merely because the user browses the library.
+    pub ed2k_link: Option<String>,
+}
+
 fn read_error(error: anyhow::Error) -> anyhow::Error {
     if error.downcast_ref::<LocalMutationError>().is_some()
         || error
@@ -71,6 +88,47 @@ fn read_error(error: anyhow::Error) -> anyhow::Error {
 }
 
 impl EmulebbCore {
+    /// One hash detail with retained storage/conversion ownership. All facts are
+    /// cached metadata; unavailable copies never cause a filesystem probe.
+    pub async fn library_file_detail(
+        &self,
+        hash: &str,
+    ) -> Result<Option<RetainedRead<LibraryFileDetail>>> {
+        crate::library_policy::validate_hash(hash)?;
+        self.persistence_owner.check_coherent_state()?;
+        let detail = self
+            .ed2k_transfers
+            .library_file_detail(hash)
+            .await
+            .map_err(read_error)?;
+        self.persistence_owner.check_coherent_state()?;
+        let Some(detail) = detail else {
+            return Ok(None);
+        };
+        detail
+            .try_project(LIBRARY_FILE_DETAIL_BYTES, |detail| {
+                let ed2k_link = detail.file.size_bytes.map(|size| {
+                    let root = detail.aich_root.map(hex::encode);
+                    crate::views::format_ed2k_file_link(
+                        &detail.file.display_name,
+                        size,
+                        &detail.file.file_hash,
+                        root.as_deref(),
+                    )
+                });
+                Ok(LibraryFileDetail {
+                    file: detail.file.into(),
+                    upload_priority: detail.upload_priority,
+                    auto_upload_priority: detail.auto_upload_priority,
+                    comment: detail.comment,
+                    rating: detail.rating,
+                    ed2k_link,
+                })
+            })
+            .map(Some)
+            .map_err(read_error)
+    }
+
     /// Convert one bounded page while retaining source and conversion backing.
     pub async fn library_file_page(
         &self,
