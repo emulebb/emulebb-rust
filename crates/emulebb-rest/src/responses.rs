@@ -291,7 +291,7 @@ pub(crate) fn kad_response(
         "connected": kad.connected,
         "firewallState": firewall_state(kad.firewalled),
         "bootstrapping": kad.bootstrapping.unwrap_or(false),
-        "bootstrapProgress": kad.bootstrap_progress.unwrap_or(0),
+        "bootstrapProgress": kad.bootstrap_progress,
         "contactCount": contact_count,
         "lanMode": kad.lan_mode.unwrap_or(false),
         "users": kad.users,
@@ -500,7 +500,7 @@ mod tests {
             peer_count: 7,
             firewalled: Some(false),
             bootstrapping: Some(false),
-            bootstrap_progress: Some(100),
+            bootstrap_progress: Some(1.0),
             contact_count: Some(7),
             lan_mode: Some(false),
             users: Some(0),
@@ -514,6 +514,16 @@ mod tests {
         assert_eq!(value["indexedSources"], 42);
         assert_eq!(value["indexedKeywords"], 13);
         assert_eq!(value["firewallState"], "open");
+        assert_eq!(value["bootstrapProgress"], 1.0);
+
+        kad.connected = false;
+        kad.bootstrapping = Some(true);
+        kad.bootstrap_progress = None;
+        assert!(kad_response(&kad, None, &guard)["bootstrapProgress"].is_null());
+        kad.running = false;
+        kad.bootstrapping = Some(false);
+        kad.bootstrap_progress = Some(0.0);
+        assert_eq!(kad_response(&kad, None, &guard)["bootstrapProgress"], 0.0);
 
         // When Kad is not running the counts are unknown -> reported as 0.
         kad.firewalled = None;

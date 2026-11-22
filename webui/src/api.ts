@@ -365,7 +365,7 @@ export type KadStatus = {
   connected?: boolean;
   firewalled?: boolean | null;
   bootstrapping?: boolean;
-  bootstrapProgress?: number;
+  bootstrapProgress?: number | null;
   contactCount?: number;
   users?: number;
   files?: number;
