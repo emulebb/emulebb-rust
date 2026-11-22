@@ -92,13 +92,11 @@ fn operator_server_edits_preserve_endpoint_and_network_observations() {
     let id = store.upsert_server(&entry).unwrap();
     let mut expected = store.server_by_id(id).unwrap().unwrap().server;
     let edit = MetadataServerUpdate {
-        name: Some("Edited Server".into()),
         priority: Some("high".into()),
         static_server: Some(true),
         enabled: Some(false),
     };
     assert!(store.update_server_resource(id, &edit).unwrap());
-    expected.name = "Edited Server".into();
     expected.server_priority = "high".into();
     expected.static_server = true;
     expected.enabled = false;
@@ -132,7 +130,6 @@ fn server_mutation_failure_leaves_saved_resource_unchanged() {
             .update_server_resource(
                 id,
                 &MetadataServerUpdate {
-                    name: Some("Must Roll Back".into()),
                     priority: Some("invalid-priority".into()),
                     ..Default::default()
                 }

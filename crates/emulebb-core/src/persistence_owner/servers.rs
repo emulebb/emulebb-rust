@@ -30,15 +30,12 @@ fn readable_record(
     server: &MetadataServer,
     update: Option<&MetadataServerUpdate>,
 ) -> Result<(), PersistenceError> {
-    let name = update
-        .and_then(|value| value.name.as_deref())
-        .unwrap_or(&server.name);
     let priority = update
         .and_then(|value| value.priority.as_deref())
         .unwrap_or(&server.server_priority);
     let text = [
         server.address.len(),
-        name.len(),
+        server.name.len(),
         server.description.len(),
         server.dynamic_host.len(),
         priority.len(),
@@ -131,13 +128,7 @@ impl EmulebbCore {
         if let Some(priority) = update.priority.as_deref() {
             crate::views::validate_server_priority(priority)?;
         }
-        let bytes = charge(
-            [
-                update.name.as_ref().map_or(0, String::len),
-                update.priority.as_ref().map_or(0, String::len),
-            ],
-            0,
-        )?;
+        let bytes = charge([update.priority.as_ref().map_or(0, String::len)], 0)?;
         let owner = self
             .persistence_owner
             .owner(&self.metadata_store, &self.state)?;
@@ -273,9 +264,6 @@ pub(super) async fn process(
                     .servers
                     .entry(endpoint.clone())
                     .or_insert_with(|| profile_state::server_from_metadata(snapshot));
-                if let Some(name) = update.name.as_ref() {
-                    server.name = name.clone();
-                }
                 if let Some(priority) = update.priority.as_ref() {
                     server.priority = priority.clone();
                 }
@@ -292,9 +280,6 @@ pub(super) async fn process(
                     state.disabled_servers.insert(endpoint.clone());
                 }
                 let overlay = state.server_overrides.entry(endpoint).or_default();
-                if let Some(name) = update.name {
-                    overlay.name = Some(name);
-                }
                 if let Some(priority) = update.priority {
                     overlay.priority = Some(priority);
                 }

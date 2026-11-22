@@ -55,7 +55,7 @@ async fn disconnected_mutation(action: u8) {
                     core.update_server_resource(
                         id,
                         &MetadataServerUpdate {
-                            name: Some("Edited Server".into()),
+                            priority: Some("high".into()),
                             enabled: Some(false),
                             ..Default::default()
                         },
@@ -116,7 +116,8 @@ async fn disconnected_mutation(action: u8) {
         1 => {
             let cached = state.servers.get(&endpoint).unwrap();
             assert!(!cached.enabled);
-            assert_eq!(cached.name, "Edited Server");
+            assert_eq!(cached.name, "Sample Server");
+            assert_eq!(cached.priority, "high");
             assert_eq!(cached.failed_count, 99);
             assert!(state.disabled_servers.contains(&endpoint));
         }
@@ -175,7 +176,7 @@ async fn server_conflict_is_typed_and_sql_failure_does_not_publish() {
         core.update_server_resource(
             id,
             &MetadataServerUpdate {
-                name: Some("Must Not Publish".into()),
+                priority: Some("high".into()),
                 ..Default::default()
             }
         )
@@ -234,47 +235,6 @@ async fn oversized_server_create_is_refused_before_sql_capture() {
 }
 
 #[tokio::test]
-async fn oversized_server_edit_is_refused_without_committing_unreadable_content() {
-    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let server = record();
-    let id = core.create_server_resource(&server).await.unwrap();
-    let error = core
-        .update_server_resource(
-            id,
-            &MetadataServerUpdate {
-                name: Some("x".repeat(emulebb_metadata::SERVER_READ_MAX_BYTES / 4)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<PersistenceError>(),
-        Some(PersistenceError::TooLarge)
-    ));
-    assert_eq!(
-        core.metadata_store
-            .server_by_id(id)
-            .unwrap()
-            .unwrap()
-            .server
-            .name,
-        server.name
-    );
-    assert_eq!(
-        core.state
-            .lock()
-            .await
-            .servers
-            .get(&server.endpoint())
-            .unwrap()
-            .name,
-        server.name
-    );
-    core.persistence_owner.check_coherent_state().unwrap();
-}
-
-#[tokio::test]
 async fn network_feedback_waits_for_committed_server_edit_publication() {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
@@ -293,7 +253,6 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
             core.update_server_resource(
                 id,
                 &MetadataServerUpdate {
-                    name: Some("Operator Name".into()),
                     priority: Some("high".into()),
                     ..Default::default()
                 },
@@ -314,7 +273,7 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
         tokio::spawn(async move {
             core.note_ed2k_server_metadata(
                 &endpoint,
-                None,
+                Some("Observed Server".into()),
                 Some("Observed description".into()),
                 None,
                 None,
@@ -339,12 +298,12 @@ async fn network_feedback_waits_for_committed_server_edit_publication() {
         .unwrap()
         .unwrap()
         .server;
-    assert_eq!(saved.name, "Operator Name");
+    assert_eq!(saved.name, "Observed Server");
     assert_eq!(saved.server_priority, "high");
     assert_eq!(saved.description, "Observed description");
     assert_eq!(
         core.state.lock().await.servers.get(&endpoint).unwrap().name,
-        "Operator Name"
+        "Observed Server"
     );
 }
 
