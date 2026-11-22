@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
@@ -143,6 +143,8 @@ pub struct SharedDirectoryReloadProgress {
     pub completed_read_bytes: u64,
     pub read_rate_bytes_per_sec: u64,
     pub started_at_ms: Option<i64>,
+    #[serde(skip)]
+    started: Option<Instant>,
     pub updated_at_ms: Option<i64>,
     pub active: Vec<SharedDirectoryHashActiveFile>,
     pub recent: Vec<SharedDirectoryHashRecentFile>,
@@ -166,6 +168,8 @@ pub struct SharedDirectoryHashActiveFile {
     pub read_bytes_total: u64,
     pub read_rate_bytes_per_sec: u64,
     pub started_at_ms: i64,
+    #[serde(skip)]
+    started: Option<Instant>,
     pub updated_at_ms: i64,
 }
 
@@ -186,6 +190,8 @@ pub struct SharedDirectoryHashRecentFile {
     pub duration_ms: i64,
     pub average_read_rate_bytes_per_sec: u64,
     pub finished_at_ms: i64,
+    #[serde(skip)]
+    finished: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +251,7 @@ impl Default for SharedDirectoryReloadProgress {
             completed_read_bytes: 0,
             read_rate_bytes_per_sec: 0,
             started_at_ms: None,
+            started: None,
             updated_at_ms: None,
             active: Vec::new(),
             recent: Vec::new(),
@@ -1307,6 +1314,7 @@ impl ReloadPlanStats {
             completed_read_bytes: 0,
             read_rate_bytes_per_sec: 0,
             started_at_ms: None,
+            started: None,
             updated_at_ms: None,
             active: Vec::new(),
             recent: Vec::new(),
@@ -1553,29 +1561,30 @@ fn unchanged_failure(
         .is_some_and(|(stored, current)| stored.safely_matches(current))
 }
 
-fn refresh_reload_rates(progress: &mut SharedDirectoryReloadProgress, now_ms: i64) {
-    if let Some(started_at_ms) = progress.started_at_ms {
-        let elapsed_ms = now_ms.saturating_sub(started_at_ms).max(1);
-        progress.read_rate_bytes_per_sec = progress
-            .completed_read_bytes
-            .saturating_mul(1000)
-            .saturating_div(u64::try_from(elapsed_ms).unwrap_or(1));
-    }
+fn elapsed_millis(started: Option<Instant>, now: Instant) -> u64 {
+    started.map_or(0, |started| {
+        now.saturating_duration_since(started)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64
+    })
+}
+
+fn refresh_reload_rates(progress: &mut SharedDirectoryReloadProgress, now: Instant) {
+    // WHY: wall-clock corrections must not change measured throughput. Keep
+    // elapsed-time anchors private and independent of diagnostic calendar time.
+    let rate = |bytes: u64, started: Option<Instant>| {
+        if started.is_some() {
+            bytes.saturating_mul(1000) / elapsed_millis(started, now).max(1)
+        } else {
+            0
+        }
+    };
+    progress.read_rate_bytes_per_sec = rate(progress.completed_read_bytes, progress.started);
     for active in &mut progress.active {
-        let elapsed_ms = now_ms.saturating_sub(active.started_at_ms).max(1);
-        active.read_rate_bytes_per_sec = active
-            .read_bytes
-            .saturating_mul(1000)
-            .saturating_div(u64::try_from(elapsed_ms).unwrap_or(1));
+        active.read_rate_bytes_per_sec = rate(active.read_bytes, active.started);
     }
     for disk in &mut progress.disks {
-        if let Some(started_at_ms) = progress.started_at_ms {
-            let elapsed_ms = now_ms.saturating_sub(started_at_ms).max(1);
-            disk.read_rate_bytes_per_sec = disk
-                .completed_read_bytes
-                .saturating_mul(1000)
-                .saturating_div(u64::try_from(elapsed_ms).unwrap_or(1));
-        }
+        disk.read_rate_bytes_per_sec = rate(disk.completed_read_bytes, progress.started);
     }
 }
 
@@ -1597,6 +1606,7 @@ fn display_path(path: &Path) -> String {
 
 fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
     const UPCOMING_HASH_LIMIT: usize = 50;
+    let now = Instant::now();
     let now_ms = current_time_ms();
     let planned_hash_bytes = targets.iter().map(|target| target.file_size).sum::<u64>();
     let mut disks = targets
@@ -1633,6 +1643,7 @@ fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
     disks.sort_by(|left, right| left.disk_key.cmp(&right.disk_key));
     record_reload_progress(core, |diagnostics| {
         diagnostics.started_at_ms = Some(now_ms);
+        diagnostics.started = Some(now);
         diagnostics.updated_at_ms = Some(now_ms);
         diagnostics.active_hash_count = 0;
         diagnostics.hashed_count = 0;
@@ -1654,6 +1665,7 @@ fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
 }
 
 fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
+    let now = Instant::now();
     let now_ms = current_time_ms();
     record_reload_progress(core, |diagnostics| {
         diagnostics.updated_at_ms = Some(now_ms);
@@ -1672,6 +1684,7 @@ fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
             read_bytes_total: target_read_bytes_total(target.file_size),
             read_rate_bytes_per_sec: 0,
             started_at_ms: now_ms,
+            started: Some(now),
             updated_at_ms: now_ms,
         });
         diagnostics.active_hash_count = diagnostics.active.len();
@@ -1686,7 +1699,7 @@ fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
             disk.current_name = Some(target_name(&target.path));
             disk.current_stage = Some("md4".to_string());
         }
-        refresh_reload_rates(diagnostics, now_ms);
+        refresh_reload_rates(diagnostics, now);
     });
 }
 
@@ -1698,6 +1711,7 @@ fn record_hash_target_progress(
     disk_key: &str,
     event: &LocalIngestProgressEvent,
 ) {
+    let now = Instant::now();
     let now_ms = current_time_ms();
     let mut diagnostics = progress
         .lock()
@@ -1727,7 +1741,7 @@ fn record_hash_target_progress(
             }
         }
         diagnostics.updated_at_ms = Some(now_ms);
-        refresh_reload_rates(&mut diagnostics, now_ms);
+        refresh_reload_rates(&mut diagnostics, now);
     }
     diagnostics.running = running.load(Ordering::Acquire);
     diagnostics.pending = pending.load(Ordering::Acquire);
@@ -1740,6 +1754,7 @@ fn record_hash_target_finished(
     error: Option<&str>,
 ) {
     const RECENT_HASH_LIMIT: usize = 20;
+    let now = Instant::now();
     let now_ms = current_time_ms();
     record_reload_progress(core, |diagnostics| {
         let active = diagnostics
@@ -1783,14 +1798,18 @@ fn record_hash_target_finished(
             disk.current_name = None;
             disk.current_stage = None;
         }
-        let started_at_ms = active
+        let started = active
             .as_ref()
-            .map(|active| active.started_at_ms)
-            .or(diagnostics.started_at_ms)
-            .unwrap_or(now_ms);
-        let duration_ms = now_ms.saturating_sub(started_at_ms).max(0);
-        let average_read_rate_bytes_per_sec = if duration_ms > 0 {
+            .and_then(|active| active.started)
+            .or(diagnostics.started);
+        let duration_ms = elapsed_millis(started, now).min(i64::MAX as u64) as i64;
+        let final_read_bytes = if hash.is_some() {
+            read_bytes_total
+        } else {
             read_bytes
+        };
+        let average_read_rate_bytes_per_sec = if duration_ms > 0 {
+            final_read_bytes
                 .saturating_mul(1000)
                 .saturating_div(u64::try_from(duration_ms).unwrap_or(1))
         } else {
@@ -1808,21 +1827,18 @@ fn record_hash_target_finished(
                 result: if hash.is_some() { "ok" } else { "failed" }.to_string(),
                 error: error.map(str::to_string),
                 hash: hash.map(str::to_string),
-                read_bytes: if hash.is_some() {
-                    read_bytes_total
-                } else {
-                    read_bytes
-                },
+                read_bytes: final_read_bytes,
                 read_bytes_total,
                 duration_ms,
                 average_read_rate_bytes_per_sec,
                 finished_at_ms: now_ms,
+                finished: Some(now),
             },
         );
         diagnostics.recent.truncate(RECENT_HASH_LIMIT);
         diagnostics.active_hash_count = diagnostics.active.len();
         diagnostics.updated_at_ms = Some(now_ms);
-        refresh_reload_rates(diagnostics, now_ms);
+        refresh_reload_rates(diagnostics, now);
     });
 }
 
@@ -2281,15 +2297,19 @@ fn merge_initial_publish_progress(
     diagnostics.completed_read_bytes = diagnostics
         .completed_read_bytes
         .saturating_add(prior.completed_read_bytes);
-    diagnostics.started_at_ms = match (diagnostics.started_at_ms, prior.started_at_ms) {
-        (Some(current), Some(bootstrap)) => Some(current.min(bootstrap)),
-        (current, bootstrap) => current.or(bootstrap),
-    };
+    if let Some(prior_start) = prior.started
+        && diagnostics
+            .started
+            .is_none_or(|current| prior_start < current)
+    {
+        diagnostics.started = Some(prior_start);
+        diagnostics.started_at_ms = prior.started_at_ms;
+    }
     diagnostics.recent.extend(prior.recent.iter().cloned());
     diagnostics.recent.sort_by(|left, right| {
         right
-            .finished_at_ms
-            .cmp(&left.finished_at_ms)
+            .finished
+            .cmp(&left.finished)
             .then_with(|| left.id.cmp(&right.id))
     });
     diagnostics.recent.truncate(20);
@@ -2318,6 +2338,7 @@ fn merge_initial_publish_progress(
         .disks
         .sort_by(|left, right| left.disk_key.cmp(&right.disk_key));
     diagnostics.disk_count = diagnostics.disks.len();
+    refresh_reload_rates(diagnostics, Instant::now());
 }
 
 async fn hash_reload_targets(core: &EmulebbCore, mut to_hash: Vec<ReloadHashTarget>) {

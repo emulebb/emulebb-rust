@@ -1393,3 +1393,115 @@ async fn empty_catalog_bootstrap_makes_files_publishable_before_full_scan() {
     assert_eq!(progress.scanned_count, 3);
     fs::remove_dir_all(root).ok();
 }
+
+fn clock_test_target() -> ReloadHashTarget {
+    let path = std::env::temp_dir().join("scan-clock-sample.bin");
+    ReloadHashTarget {
+        id: "clock-file".into(),
+        order: 0,
+        disk_key: "synthetic-disk".into(),
+        path: path.clone(),
+        key: path,
+        reason: "new".into(),
+        file_size: 4000,
+        source_fingerprint: None,
+    }
+}
+
+#[tokio::test]
+async fn scan_rates_ignore_calendar_changes_and_keep_elapsed_precision() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let target = clock_test_target();
+    record_hash_queue(&core, std::slice::from_ref(&target));
+    record_hash_target_started(&core, &target);
+    let mut progress = reload_progress_snapshot(&core);
+    let anchor = Instant::now();
+    progress.started = Some(anchor);
+    progress.active[0].started = Some(anchor);
+    progress.completed_read_bytes = 2000;
+    progress.active[0].read_bytes = 1000;
+    progress.disks[0].completed_read_bytes = 2000;
+    let now = anchor + std::time::Duration::from_millis(2000);
+    for (started_at, updated_at) in [(0, 2000), (5000, 1), (1, i64::MAX)] {
+        progress.started_at_ms = Some(started_at);
+        progress.updated_at_ms = Some(updated_at);
+        progress.active[0].started_at_ms = started_at;
+        progress.active[0].updated_at_ms = updated_at;
+        refresh_reload_rates(&mut progress, now);
+        assert_eq!(progress.read_rate_bytes_per_sec, 1000);
+        assert_eq!(progress.active[0].read_rate_bytes_per_sec, 500);
+        assert_eq!(progress.disks[0].read_rate_bytes_per_sec, 1000);
+    }
+    let value = serde_json::to_value(&progress).unwrap();
+    assert!(value.get("started").is_none());
+    assert!(value["active"][0].get("started").is_none());
+}
+
+#[tokio::test]
+async fn scan_completion_uses_final_bytes_and_monotonic_duration_and_order() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let target = clock_test_target();
+    record_hash_queue(&core, std::slice::from_ref(&target));
+    record_hash_target_started(&core, &target);
+    let anchor = Instant::now() - std::time::Duration::from_secs(2);
+    {
+        let mut progress = core.shared_directory_reload_progress.lock().unwrap();
+        progress.started = Some(anchor);
+        progress.started_at_ms = Some(i64::MAX);
+        progress.active[0].started = Some(anchor);
+        progress.active[0].started_at_ms = i64::MAX;
+        progress.active[0].read_bytes = 1000;
+    }
+    let before = Instant::now();
+    record_hash_target_finished(&core, &target, Some(&"11".repeat(16)), None);
+    let after = Instant::now();
+    let progress = reload_progress_snapshot(&core);
+    let recent = &progress.recent[0];
+    assert!(
+        (elapsed_millis(Some(anchor), before)..=elapsed_millis(Some(anchor), after))
+            .contains(&(recent.duration_ms as u64))
+    );
+    assert_eq!(recent.read_bytes, target.file_size);
+    assert_eq!(
+        recent.average_read_rate_bytes_per_sec,
+        target.file_size * 1000 / recent.duration_ms as u64
+    );
+    assert!(
+        serde_json::to_value(recent)
+            .unwrap()
+            .get("finished")
+            .is_none()
+    );
+
+    let mut current = SharedDirectoryReloadProgress {
+        started: Some(anchor + std::time::Duration::from_secs(1)),
+        started_at_ms: Some(1),
+        ..Default::default()
+    };
+    let mut newer = recent.clone();
+    newer.id = "newer".into();
+    newer.finished = Some(anchor + std::time::Duration::from_secs(2));
+    newer.finished_at_ms = 0;
+    current.recent.push(newer);
+    let mut prior = SharedDirectoryReloadProgress {
+        started: Some(anchor),
+        started_at_ms: Some(5000),
+        ..Default::default()
+    };
+    let mut older = recent.clone();
+    older.id = "older".into();
+    older.finished = Some(anchor + std::time::Duration::from_secs(1));
+    older.finished_at_ms = i64::MAX;
+    prior.recent.push(older);
+    merge_initial_publish_progress(&mut current, &InitialPublishBootstrap { progress: prior });
+    assert_eq!(current.started, Some(anchor));
+    assert_eq!(current.started_at_ms, Some(5000));
+    assert_eq!(
+        current
+            .recent
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["newer", "older"]
+    );
+}
