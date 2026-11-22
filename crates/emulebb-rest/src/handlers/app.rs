@@ -265,13 +265,13 @@ pub(crate) async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     };
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
-    let shared_hashing_count = state.core.shared_directories().await.hashing_count;
+    let scan = state.core.library_scan();
     api_ok(stats_response(
         &status,
         &transfers,
         &upload_policy,
         &throughput,
-        shared_hashing_count,
+        &scan,
     ))
     .into_response()
 }

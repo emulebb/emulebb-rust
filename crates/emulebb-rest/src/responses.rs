@@ -65,12 +65,15 @@ pub(crate) fn stats_response(
     transfers: &TransferStats,
     upload_policy: &UploadPolicyMetrics,
     throughput: &TransferThroughputStats,
-    shared_hashing_count: i64,
+    scan: &emulebb_core::LibraryScan,
 ) -> Value {
     let ed2k_connected = status.ed2k.connected;
     let kad_connected = status.kad.connected;
     let ed2k_high_id = ed2k_connected && !status.ed2k.firewalled.unwrap_or(false);
+    let shared_hashing_count = scan.hashing_count;
     let shared_hashing_active = shared_hashing_count > 0;
+    let shared_files_complete =
+        !shared_hashing_active && !scan.reload_progress.running && !scan.reload_progress.pending;
     json!({
         "connected": ed2k_connected || kad_connected,
         "downloadSpeedKiBps": throughput.download_rate_bytes_per_sec as f64 / 1024.0,
@@ -91,7 +94,7 @@ pub(crate) fn stats_response(
         "sharedHashingActive": shared_hashing_active,
         "sharedHashingCount": shared_hashing_count,
         "sharedFilesReady": status.lifecycle.state == "running",
-        "sharedFilesComplete": !shared_hashing_active,
+        "sharedFilesComplete": shared_files_complete,
         "ed2kConnected": ed2k_connected,
         "ed2kHighId": ed2k_high_id,
         "kadRunning": status.kad.running,
@@ -107,43 +110,26 @@ pub(crate) async fn status_response(state: &RestState) -> Result<Value> {
     let network = state.core.network_binding_status();
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
-    let shared_directories = state.core.shared_directories().await;
-    let shared_hashing_count = shared_directories.hashing_count;
-    let shared_directory_reload_progress = shared_directories.reload_progress;
-    let shared_hashing_active = shared_hashing_count > 0;
+    let scan = state.core.library_scan();
+    let shared_hashing_count = scan.hashing_count;
     let shared_file_count = state.core.shared_catalog_count().await;
     let download_file_count = transfers.total;
+    let stats = stats_response(&status, &transfers, &upload_policy, &throughput, &scan);
     let runtime_diagnostics = runtime_diagnostics_response_with(
         state,
         shared_file_count,
         download_file_count,
         shared_hashing_count,
-        shared_directory_reload_progress.clone(),
+        scan.reload_progress,
         &upload_policy,
     )
     .await;
     Ok(json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
-        "stats": stats_response(&status, &transfers, &upload_policy, &throughput, shared_hashing_count),
+        "stats": stats,
         "servers": server_status_response(state).await?,
         "kad": kad_response(&status.kad, network.as_ref(), &guard),
         "network": network_response(network.as_ref(), &guard),
-        "sharedStartupCache": {
-            "available": false,
-            "ready": status.lifecycle.state == "running",
-            "complete": !shared_hashing_active,
-            "filePresent": false,
-            "loaded": false,
-            "rejected": false,
-            "removed": false,
-            "rejectCode": null,
-            "recordsLoaded": 0,
-            "volumesLoaded": 0,
-            "hashingCount": shared_hashing_count,
-            "deferredHashingActive": shared_hashing_active,
-            "interruptedHashingInvalidatedCache": false,
-            "reloadProgress": shared_directory_reload_progress.clone()
-        },
         "runtimeDiagnostics": runtime_diagnostics
     }))
 }
@@ -151,14 +137,14 @@ pub(crate) async fn status_response(state: &RestState) -> Result<Value> {
 pub(crate) async fn runtime_diagnostics_response(state: &RestState) -> Result<Value> {
     let transfers = state.core.transfer_stats().await?;
     let upload_policy = state.core.upload_policy_metrics().await;
-    let shared_directories = state.core.shared_directories().await;
+    let scan = state.core.library_scan();
     let shared_file_count = state.core.shared_catalog_count().await;
     Ok(runtime_diagnostics_response_with(
         state,
         shared_file_count,
         transfers.total,
-        shared_directories.hashing_count,
-        shared_directories.reload_progress,
+        scan.hashing_count,
+        scan.reload_progress,
         &upload_policy,
     )
     .await)
@@ -586,7 +572,7 @@ mod tests {
             &core.transfer_stats().await.unwrap(),
             &upload_policy,
             &throughput,
-            0,
+            &core.library_scan(),
         );
         assert_eq!(value["downloadSpeedKiBps"], 4.0);
         assert_eq!(value["sessionDownloadedBytes"], 1_048_576);
@@ -602,25 +588,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stats_response_reports_active_shared_hashing() {
+    async fn stats_response_reports_hashing_and_scan_quiescence() {
         let core =
             Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
         let status = core.status().await;
         let upload_policy = core.upload_policy_metrics().await;
         let throughput = TransferThroughputStats::default();
-
+        let mut scan = core.library_scan();
+        scan.hashing_count = 3;
         let value = stats_response(
             &status,
             &core.transfer_stats().await.unwrap(),
             &upload_policy,
             &throughput,
-            3,
+            &scan,
         );
 
         assert_eq!(value["sharedHashingActive"], true);
         assert_eq!(value["sharedHashingCount"], 3);
         assert_eq!(value["sharedFilesReady"], true);
         assert_eq!(value["sharedFilesComplete"], false);
+        scan.hashing_count = 0;
+        let transfers = core.transfer_stats().await.unwrap();
+        for (running, pending, complete) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            scan.reload_progress.running = running;
+            scan.reload_progress.pending = pending;
+            let value = stats_response(&status, &transfers, &upload_policy, &throughput, &scan);
+            assert_eq!(value["sharedFilesComplete"], complete);
+            assert_eq!(value["sharedHashingActive"], false);
+        }
     }
 
     #[tokio::test]
@@ -638,7 +638,7 @@ mod tests {
             &core.transfer_stats().await.unwrap(),
             &upload_policy,
             &throughput,
-            0,
+            &core.library_scan(),
         );
 
         assert_eq!(value["ed2kConnected"], true);
