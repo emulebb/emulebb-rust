@@ -1299,7 +1299,7 @@ pub struct Ed2kNetworkConfig {
     pub nat_config: NatConfig,
     pub ed2k: Ed2kRuntimeConfig,
     /// Optional configured P2P bind IP. `None` is valid when the bind came from
-    /// `p2pBindInterface` only; `bind_ip` carries the resolved runtime address.
+    /// `network.p2p.bindInterface` only; `bind_ip` carries the resolved runtime address.
     pub p2p_bind_ip: Option<Ipv4Addr>,
     /// Optional configured P2P bind interface name for runtime VPN Guard checks.
     pub p2p_bind_interface: Option<String>,

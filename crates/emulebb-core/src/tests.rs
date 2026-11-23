@@ -755,7 +755,11 @@ async fn completed_ed2k_transfer_runtime(
     )
 }
 
-fn direct_test_source(file_hash: Ed2kHash, ip: Ipv4Addr, tcp_port: u16) -> Ed2kFoundSource {
+pub(crate) fn direct_test_source(
+    file_hash: Ed2kHash,
+    ip: Ipv4Addr,
+    tcp_port: u16,
+) -> Ed2kFoundSource {
     Ed2kFoundSource {
         file_hash,
         ip,
@@ -782,6 +786,7 @@ fn direct_download_options(
     sources: Vec<Ed2kFoundSource>,
 ) -> DirectDownloadOptions {
     DirectDownloadOptions {
+        completion_read_busy: false,
         prepared: None,
         job_token,
         bind_ip: Ipv4Addr::new(192, 0, 2, 10),

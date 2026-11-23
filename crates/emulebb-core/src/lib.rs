@@ -1022,20 +1022,45 @@ impl EmulebbCore {
         Ok(Ed2kServerSearchOutcome::Completed { status_reason })
     }
 
-    #[expect(
-        clippy::cognitive_complexity,
-        reason = "linear protocol orchestration flow"
-    )]
     async fn run_ed2k_download_attempt(
         &self,
         transfer: &Transfer,
         job_token: emulebb_metadata::JobToken,
         cancel: &CancellationToken,
+        prepared: Option<download_preparation::PreparedDownloadSource>,
+    ) -> Result<Option<&'static str>> {
+        let mut unused = prepared.as_ref().map(|ready| ready.reservation.clone());
+        let result = self
+            .run_ed2k_download_attempt_inner(transfer, job_token, cancel, prepared, &mut unused)
+            .await;
+        // WHY: early storage/config/cancellation exits must not strand the
+        // already-probed source. The inner future drops its socket first.
+        if let Some(reservation) = unused {
+            self.settle_source_reservation(&reservation, true, None)
+                .await;
+        }
+        result
+    }
+
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "linear protocol orchestration flow"
+    )]
+    async fn run_ed2k_download_attempt_inner(
+        &self,
+        transfer: &Transfer,
+        job_token: emulebb_metadata::JobToken,
+        cancel: &CancellationToken,
         mut prepared: Option<download_preparation::PreparedDownloadSource>,
+        unused: &mut Option<download_preparation::PreparedSourceReservation>,
     ) -> Result<Option<&'static str>> {
         // Already cancelled before any work started (delete/pause raced the
         // queue): do nothing, don't touch state, don't retry.
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled()
+            || prepared
+                .as_ref()
+                .is_some_and(|ready| tokio::time::Instant::now() >= ready.admission_deadline)
+        {
             return Ok(None);
         }
         // A crash may leave every part verified with the durable completion
@@ -1075,7 +1100,7 @@ impl EmulebbCore {
             preparation_id: None,
         };
         let mut sources = if let Some(ready) = prepared.as_ref() {
-            vec![ready.source.clone()]
+            vec![ready.reservation.source.clone()]
         } else {
             self.acquire_ed2k_sources(
                 network,
@@ -1214,7 +1239,7 @@ impl EmulebbCore {
                 direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
             if let Some(ready) = prepared.as_ref() {
                 candidate_direct_sources.retain(|source| {
-                    source_endpoint_key(source) != source_endpoint_key(&ready.source)
+                    source_endpoint_key(source) != source_endpoint_key(&ready.reservation.source)
                 });
             }
             had_direct_sources |= !candidate_direct_sources.is_empty();
@@ -1226,7 +1251,7 @@ impl EmulebbCore {
                 )
                 .await;
             if let Some(ready) = prepared.as_ref() {
-                direct_sources.insert(0, ready.source.clone());
+                direct_sources.insert(0, ready.reservation.source.clone());
             }
             let acquired_direct_source_count = direct_sources.len();
             deferred_active_direct_sources |= deferred_count != 0;
@@ -1276,9 +1301,15 @@ impl EmulebbCore {
                 // source can detach onto the reask loop (None when reask is off).
                 let reask_register = self.ed2k_reask_handle.lock().unwrap().clone();
                 let egress_route = network.egress_route;
+                if prepared
+                    .as_ref()
+                    .is_some_and(|ready| tokio::time::Instant::now() >= ready.admission_deadline)
+                {
+                    return Ok(None);
+                }
                 let prepared_execution = prepared.take().map(|ready| {
                     let alternate_files = a4af_alternates
-                        .get(&source_endpoint_key(&ready.source))
+                        .get(&source_endpoint_key(&ready.reservation.source))
                         .cloned()
                         .unwrap_or_default();
                     let options = emulebb_ed2k::ed2k_tcp::Ed2kPreparedDownloadOptions {
@@ -1289,16 +1320,28 @@ impl EmulebbCore {
                         established_context: established_context.clone(),
                         reask_register: reask_register.clone(),
                     };
+                    let reservation = ready.reservation.clone();
+                    let core = self.clone();
                     ed2k_direct_download_types::PreparedDirectDownload {
-                        source: ready.source,
+                        source: ready.reservation.source,
                         download: Box::pin(async move {
-                            ready.peer.remember_availability(job_token).await?;
-                            ready.peer.download_files(options, alternate_files).await
+                            core.run_prepared_source(&reservation, async move {
+                                ready.peer.remember_availability(job_token).await?;
+                                ready.peer.download_files(options, alternate_files).await
+                            })
+                            .await
                         }),
                     }
                 });
+                let prepared_reservation = if prepared_execution.is_some() {
+                    unused.take()
+                } else {
+                    None
+                };
                 let outcome = run_ed2k_direct_downloads(
                     DirectDownloadOptions {
+                        #[cfg(test)]
+                        completion_read_busy: false,
                         prepared: prepared_execution,
                         job_token,
                         bind_ip: network.bind_ip,
@@ -1367,9 +1410,21 @@ impl EmulebbCore {
                     .iter()
                     .copied()
                     .filter(|endpoint| !detached_endpoints.contains(endpoint))
+                    .filter(|endpoint| {
+                        prepared_reservation.as_ref().is_none_or(|reservation| {
+                            source_endpoint_key(&reservation.source) != *endpoint
+                        })
+                    })
                     .collect();
                 self.release_direct_download_source_leases(job_token, &endpoints_to_release)
                     .await;
+                if let Some(reservation) = prepared_reservation
+                    && !detached_endpoints.contains(&source_endpoint_key(&reservation.source))
+                {
+                    // Keep prepared settlement exact even when its future failed,
+                    // was not polled, or an old same-token result arrives late.
+                    self.settle_prepared_round(&reservation, &outcome).await;
+                }
                 let outcome = outcome?;
                 // A4AF NNP swap (eMuleBB CUpDownClient::SwapToAnotherFile):
                 // a source that has No Needed Parts for THIS file but serves
@@ -2042,7 +2097,7 @@ impl EmulebbCore {
                 if !alternates.is_empty() {
                     let endpoint = source_endpoint_key(source);
                     let reporter = prepared
-                        .filter(|ready| source_endpoint_key(&ready.source) == endpoint)
+                        .filter(|ready| source_endpoint_key(&ready.reservation.source) == endpoint)
                         .map(|ready| ready.peer.availability().user_hash)
                         .or(source.user_hash);
                     by_endpoint.insert(endpoint, (reporter, alternates));

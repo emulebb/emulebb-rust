@@ -96,7 +96,14 @@ async fn prepared_worker_panic_drains_other_workers_and_their_permits() {
         }
     })
     .await;
-    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap()
+            .last_error
+            .unwrap()
+            .to_string()
+            .contains("worker panicked")
+    );
     assert_eq!(runtime.download_resource_snapshot().connections, 0);
 }
 
@@ -178,7 +185,15 @@ async fn direct_download_scheduler_releases_all_slots_on_worker_panic() {
     )
     .await;
 
-    assert!(result.is_err(), "a worker panic propagates as an error");
+    assert!(
+        result
+            .unwrap()
+            .last_error
+            .unwrap()
+            .to_string()
+            .contains("worker panicked"),
+        "a worker panic must remain visible in the round outcome"
+    );
 
     // Every acquired connection-budget slot must have been released; if a
     // slot leaked, active_connections would be non-zero. Probe via a fresh
@@ -236,6 +251,66 @@ async fn disconnect_drains_download_tasks_and_releases_connection_budget() {
             panic!("disconnect leaked the prior connection budget: {decision:?}")
         }
     }
+}
+
+#[tokio::test]
+async fn detached_alternate_source_is_not_redialed_during_another_peers_retry() {
+    let (runtime, secure, file, name, size, token) =
+        completed_ed2k_transfer_runtime("detached-alternate-retry").await;
+    let hash = file.parse().unwrap();
+    let first = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41001);
+    let second = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41002);
+    let mut options = direct_download_options(
+        token,
+        runtime,
+        secure,
+        file,
+        name,
+        size,
+        vec![first, second],
+    );
+    options.completion_read_busy = true;
+    let attempts = Arc::new(Mutex::new(HashMap::<u16, usize>::new()));
+    let observed = Arc::clone(&attempts);
+    let outcome = run_ed2k_direct_downloads(options, move |_, source, _, _, _, _, _, _, _| {
+        let attempts = Arc::clone(&attempts);
+        async move {
+            let count = {
+                let mut counts = attempts.lock().await;
+                let count = counts.entry(source.tcp_port).or_default();
+                *count += 1;
+                *count
+            };
+            if source.tcp_port == 41001 {
+                let alternate = emulebb_metadata::JobToken {
+                    job_id: emulebb_metadata::JobId::new(token.job_id.get() + 1).unwrap(),
+                    ..token
+                };
+                return Ok(Ed2kPeerDownloadReport::single(
+                    alternate,
+                    Ed2kHash([0x71; 16]),
+                    Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask,
+                ));
+            }
+            if count == 1 {
+                return Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into());
+            }
+            Ok(Ed2kPeerDownloadReport::single(
+                token,
+                hash,
+                Ed2kPeerDownloadOutcome::FileNotFound,
+            ))
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(observed.lock().await.get(&41001), Some(&1));
+    assert_eq!(observed.lock().await.get(&41002), Some(&2));
+    assert_eq!(
+        outcome.detached_reask_endpoints,
+        vec![(Ipv4Addr::LOCALHOST, 41001)]
+    );
+    assert_eq!(outcome.file_not_found_sources.len(), 1);
 }
 
 #[tokio::test]

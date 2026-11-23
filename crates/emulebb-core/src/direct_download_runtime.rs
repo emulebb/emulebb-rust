@@ -50,6 +50,8 @@ where
     DownloadFuture: Future<Output = Result<Ed2kPeerDownloadReport>> + Send + 'static,
 {
     let DirectDownloadOptions {
+        #[cfg(test)]
+        completion_read_busy,
         mut prepared,
         job_token,
         bind_ip,
@@ -63,6 +65,16 @@ where
         connect_timeout,
         max_parallel_download_peers,
     } = options;
+    let read_manifest = || {
+        let runtime = Arc::clone(&transfer_runtime);
+        async move {
+            #[cfg(test)]
+            if completion_read_busy {
+                return Err(emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy.into());
+            }
+            runtime.manifest(job_token).await
+        }
+    };
     let prepared_endpoint = prepared
         .as_ref()
         .map(|ready| source_endpoint_key(&ready.source));
@@ -100,7 +112,11 @@ where
     loop {
         let mut accepted_incomplete_peers = 0u32;
         let mut retryable_error_seen = false;
-        let mut pending_sources = VecDeque::from(retry_sources.clone());
+        let mut pending_sources = retry_sources
+            .iter()
+            .filter(|source| !detached_reask_endpoints.contains(&source_endpoint_key(source)))
+            .cloned()
+            .collect::<VecDeque<_>>();
         if let Some(ready) = prepared.as_ref() {
             pending_sources.push_front(ready.source.clone());
         }
@@ -133,13 +149,22 @@ where
                 Err(join_error) => {
                     // Drain aborted workers before returning so their RAII budget
                     // permits and connection futures are released promptly.
-                    active_downloads.abort_all();
-                    while active_downloads.join_next().await.is_some() {}
-                    return Err(anyhow::Error::new(join_error)
-                        .context("ED2K direct download worker panicked"));
+                    abort_and_drain_direct_downloads(
+                        &mut active_downloads,
+                        &mut detached_reask_endpoints,
+                    )
+                    .await;
+                    tracing::warn!(%join_error, "ED2K direct download worker panicked");
+                    last_error = Some(
+                        anyhow::Error::new(join_error)
+                            .context("ED2K direct download worker panicked"),
+                    );
+                    retryable_error_seen = false;
+                    break;
                 }
             };
             let mut completed_primary_manifest = false;
+            let mut invalid_report = false;
             match result {
                 Ok(report) => {
                     if let Some(error) = report.terminal_error {
@@ -156,10 +181,14 @@ where
                         }
                         let result_file_hash = file_result.file_hash.to_string();
                         let is_primary = file_result.job_token == job_token;
-                        anyhow::ensure!(
-                            !is_primary || result_file_hash == file_hash_hex,
-                            "peer outcome differs from admitted job identity"
-                        );
+                        if is_primary && result_file_hash != file_hash_hex {
+                            last_error = Some(anyhow::anyhow!(
+                                "peer outcome differs from admitted job identity"
+                            ));
+                            tracing::warn!(peer=%peer_addr, "peer outcome differs from admitted job identity");
+                            invalid_report = true;
+                            continue;
+                        }
                         let mut result_source = source.clone();
                         result_source.file_hash = file_result.file_hash;
                         if !is_primary {
@@ -172,20 +201,28 @@ where
                         }
                         match file_result.outcome {
                             Ed2kPeerDownloadOutcome::Completed if is_primary => {
-                                let manifest = transfer_runtime.manifest(job_token).await?;
-                                tracing::debug!(
-                                    "ED2K direct download peer completed file_hash={} peer={} manifest_completed={} verified_ranges={} file_size={}",
-                                    file_hash_hex,
-                                    peer_addr,
-                                    manifest.completed,
-                                    manifest.verified_ranges.len(),
-                                    manifest.file_size
-                                );
-                                if manifest.completed {
-                                    // Keep consuming this report so every result from the
-                                    // already-used A4AF connection is attributed before the
-                                    // remaining peer workers are cancelled.
-                                    completed_primary_manifest = true;
+                                match read_manifest().await {
+                                    Ok(manifest) => {
+                                        tracing::debug!(
+                                            "ED2K direct download peer completed file_hash={} peer={} manifest_completed={} verified_ranges={} file_size={}",
+                                            file_hash_hex,
+                                            peer_addr,
+                                            manifest.completed,
+                                            manifest.verified_ranges.len(),
+                                            manifest.file_size
+                                        );
+                                        if manifest.completed {
+                                            // Keep consuming this report so every result from the
+                                            // already-used A4AF connection is attributed before the
+                                            // remaining peer workers are cancelled.
+                                            completed_primary_manifest = true;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        if last_error.is_none() {
+                                            last_error = Some(error);
+                                        }
+                                    }
                                 }
                             }
                             Ed2kPeerDownloadOutcome::Completed => {
@@ -264,15 +301,25 @@ where
                 }
             }
 
+            if invalid_report {
+                abort_and_drain_direct_downloads(
+                    &mut active_downloads,
+                    &mut detached_reask_endpoints,
+                )
+                .await;
+                retryable_error_seen = false;
+                break;
+            }
             if completed_primary_manifest {
-                active_downloads.abort_all();
-                while active_downloads.join_next().await.is_some() {}
+                abort_and_drain_direct_downloads(
+                    &mut active_downloads,
+                    &mut detached_reask_endpoints,
+                )
+                .await;
                 return Ok(DirectDownloadOutcome {
                     completed: true,
                     accepted_incomplete_peers,
-                    last_error: last_error
-                        .as_ref()
-                        .map(|error| anyhow::anyhow!(error.to_string())),
+                    last_error: last_error.take(),
                     detached_reask_endpoints: detached_reask_endpoints.clone(),
                     no_needed_parts_sources: no_needed_parts_sources.clone(),
                     file_not_found_sources: file_not_found_sources.clone(),
@@ -289,12 +336,20 @@ where
             );
         }
 
+        // A later read failure cannot erase handoffs already accepted by UDP.
+        let completed = match read_manifest().await {
+            Ok(manifest) => manifest.completed,
+            Err(error) => {
+                if last_error.is_none() {
+                    last_error = Some(error);
+                }
+                false
+            }
+        };
         let outcome = DirectDownloadOutcome {
-            completed: transfer_runtime.manifest(job_token).await?.completed,
+            completed,
             accepted_incomplete_peers,
-            last_error: last_error
-                .as_ref()
-                .map(|error| anyhow::anyhow!(error.to_string())),
+            last_error: last_error.take(),
             detached_reask_endpoints: detached_reask_endpoints.clone(),
             no_needed_parts_sources: no_needed_parts_sources.clone(),
             file_not_found_sources: file_not_found_sources.clone(),
@@ -315,6 +370,7 @@ where
             return Ok(outcome);
         }
 
+        last_error = outcome.last_error;
         retry_round = retry_round.saturating_add(1);
         tracing::debug!(
             "ED2K direct download retrying loopback sources file_hash={} retry_round={}",
@@ -322,6 +378,27 @@ where
             retry_round
         );
         tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+async fn abort_and_drain_direct_downloads(
+    active: &mut JoinSet<crate::ed2k_direct_download_types::DirectDownloadJoin>,
+    detached: &mut Vec<(Ipv4Addr, u16)>,
+) {
+    active.abort_all();
+    while let Some(joined) = active.join_next().await {
+        // A producer can finish its UDP handoff before the abort is observed.
+        // Its accepted owner must survive even if this round cannot continue.
+        if let Ok((_, source, Ok(report))) = joined
+            && report.file_outcomes.iter().any(|result| {
+                matches!(
+                    result.outcome,
+                    Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask
+                )
+            })
+        {
+            detached.push(source_endpoint_key(&source));
+        }
     }
 }
 
