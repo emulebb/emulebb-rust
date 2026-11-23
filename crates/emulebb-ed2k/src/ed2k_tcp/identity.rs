@@ -5,15 +5,18 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use rand::rngs::SysRng;
 use rsa::{
-    RsaPrivateKey, RsaPublicKey,
-    pkcs1::DecodeRsaPublicKey,
+    BoxedUint, PrivateKey, PublicKey,
+    pkcs1::{self, RsaPublicKeyRef},
     pkcs1v15::{Signature, SigningKey, VerifyingKey},
-    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
-    rand_core::OsRng,
+    pkcs8::{
+        DecodePrivateKey, EncodePrivateKey, EncodePublicKey, SubjectPublicKeyInfoRef,
+        der::{Decode, asn1::Null},
+    },
     signature::{RandomizedSigner, SignatureEncoding, Verifier},
 };
-use sha1_legacy::Sha1;
+use sha1::Sha1;
 
 use super::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_KEY_BITS, Ed2kTransport,
@@ -25,10 +28,16 @@ use super::{
 /// this, so both received and emitted keys must fit.
 const ED2K_MAX_PUBKEY_SIZE: usize = 80;
 
+/// The stock eD2k wire format fixes the local key size below RSA's default minimum.
+pub(super) fn generate_stock_ed2k_ident_keypair() -> Result<PrivateKey> {
+    PrivateKey::new_unchecked(&mut SysRng, ED2K_SECURE_IDENT_KEY_BITS)
+        .context("failed to generate stock eD2k secure-ident keypair")
+}
+
 /// Persistent RSA identity used for the eMule secure-ident side channel.
 #[derive(Debug)]
 pub struct Ed2kSecureIdent {
-    pub(super) private_key: RsaPrivateKey,
+    pub(super) private_key: PrivateKey,
     public_key_der: Vec<u8>,
 }
 
@@ -55,13 +64,11 @@ impl Ed2kSecureIdent {
     }
 
     pub fn generate() -> Result<Self> {
-        let private_key = RsaPrivateKey::new(&mut OsRng, ED2K_SECURE_IDENT_KEY_BITS)
-            .context("failed to generate ED2K secure-ident RSA keypair")?;
-        Self::from_private_key(private_key)
+        Self::from_private_key(generate_stock_ed2k_ident_keypair()?)
     }
 
     pub fn from_pkcs8_der(bytes: &[u8]) -> Result<Self> {
-        let private_key = RsaPrivateKey::from_pkcs8_der(bytes)
+        let private_key = PrivateKey::from_pkcs8_der(bytes)
             .context("invalid PKCS#8 ED2K secure-ident private key")?;
         Self::from_private_key(private_key)
     }
@@ -75,11 +82,11 @@ impl Ed2kSecureIdent {
             .to_vec())
     }
 
-    pub(super) fn from_private_key(private_key: RsaPrivateKey) -> Result<Self> {
+    pub(super) fn from_private_key(private_key: PrivateKey) -> Result<Self> {
         // WHY: MFC's Crypto++ GetMaterial().Save() emits SPKI DER, and its
         // VerifyIdent rejects bare PKCS#1 with a decoder exception. Mirror the
         // observed OP_PUBLICKEY form while keeping the stock 80-byte limit.
-        let public_key_der = RsaPublicKey::from(&private_key)
+        let public_key_der = PublicKey::from(&private_key)
             .to_public_key_der()
             .context("failed to encode ED2K secure-ident public key")?
             .as_bytes()
@@ -143,7 +150,11 @@ impl Ed2kSecureIdent {
         }
 
         let signing_key = SigningKey::<Sha1>::new(self.private_key.clone());
-        let signature = signing_key.sign_with_rng(&mut OsRng, &message);
+        let signature = signing_key
+            .try_sign_with_rng(&mut SysRng, &message)
+            .map_err(|error| {
+                anyhow::anyhow!("failed to sign eD2k secure-ident challenge: {error}")
+            })?;
         let signature_bytes = signature.to_bytes();
         let sig_len = u8::try_from(signature_bytes.len())
             .context("ED2K secure-ident signature exceeds u8 length")?;
@@ -315,12 +326,29 @@ pub(super) fn decode_signature_payload(payload: &[u8]) -> Result<SecureIdentSign
 
 /// Parse a peer's secure-ident public key. Stock eMule uses SPKI DER; accept
 /// bare PKCS#1 as well for peers that emit that alternate form.
-fn parse_peer_public_key(bytes: &[u8]) -> Result<RsaPublicKey> {
-    if let Ok(key) = RsaPublicKey::from_public_key_der(bytes) {
-        return Ok(key);
+fn parse_peer_public_key(bytes: &[u8]) -> Result<PublicKey> {
+    if bytes.len() > ED2K_MAX_PUBKEY_SIZE {
+        anyhow::bail!("peer secure-ident public key exceeds stock MAXPUBKEYSIZE");
     }
-    RsaPublicKey::from_pkcs1_der(bytes)
-        .context("peer secure-ident public key is neither PKCS#1 nor SPKI DER")
+    let pkcs1_der = if let Ok(info) = SubjectPublicKeyInfoRef::from_der(bytes) {
+        info.algorithm.assert_algorithm_oid(pkcs1::ALGORITHM_OID)?;
+        if info.algorithm.parameters_any()? != Null.into() {
+            anyhow::bail!("invalid RSA algorithm parameters in peer secure-ident public key");
+        }
+        info.subject_public_key
+            .as_bytes()
+            .context("peer secure-ident public key has unused bits")?
+    } else {
+        bytes
+    };
+    let key = RsaPublicKeyRef::from_der(pkcs1_der)
+        .context("peer secure-ident public key is neither PKCS#1 nor SPKI DER")?;
+    PublicKey::new_with_size_limits(
+        BoxedUint::from_be_slice_vartime(key.modulus.as_bytes()),
+        BoxedUint::from_be_slice_vartime(key.public_exponent.as_bytes()),
+        1..=ED2K_MAX_PUBKEY_SIZE * u8::BITS as usize,
+    )
+    .context("invalid peer secure-ident RSA public key")
 }
 
 /// Reconstruct the challenge IP a V2 signer folded into the signed message,

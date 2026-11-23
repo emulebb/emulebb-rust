@@ -85,7 +85,7 @@ async fn small_file_download_accepts_split_sending_part_frames() {
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,

@@ -153,7 +153,7 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
         source_udp_port: None,
     };
     let secure_ident = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     );
     let hello_identity = Ed2kHelloIdentity {
         user_hash: [0x11; 16],
@@ -332,7 +332,7 @@ async fn small_file_download_resumes_partial_piece_after_obfuscated_reconnect() 
         source_udp_port: None,
     };
     let secure_ident = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     );
     let hello_identity = Ed2kHelloIdentity {
         user_hash: [0x11; 16],

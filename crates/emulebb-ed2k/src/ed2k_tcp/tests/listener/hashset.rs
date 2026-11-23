@@ -49,7 +49,7 @@ async fn listener_hashset_request2_returns_aich_when_available() {
     let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
     let secure_ident = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     );
     let hello_identity = Ed2kHelloIdentity {
         user_hash: [0x31; 16],

@@ -17,7 +17,7 @@ async fn small_file_download_starts_before_peer_secure_ident_key_arrives() {
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
     let peer_public_key = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     );
     let payload_for_server = payload.clone();
     let peer_public_key_for_server = Arc::clone(&peer_public_key);
@@ -109,7 +109,7 @@ async fn small_file_download_starts_before_peer_secure_ident_key_arrives() {
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,

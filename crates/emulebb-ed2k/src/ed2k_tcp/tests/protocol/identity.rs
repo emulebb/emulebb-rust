@@ -50,8 +50,8 @@ fn secure_ident_probe_requests_key_and_signature() {
 #[test]
 fn secure_ident_signature_matches_oracle_message_shape() {
     let identity =
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap();
-    let peer_public_key = RsaPublicKey::from(&RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap();
+    let peer_public_key = PublicKey::from(&generate_stock_ed2k_ident_keypair().unwrap())
         .to_public_key_der()
         .unwrap()
         .as_bytes()
@@ -67,7 +67,7 @@ fn secure_ident_signature_matches_oracle_message_shape() {
 
     assert_eq!(usize::from(payload[0]), payload.len() - 1);
     assert!(
-        VerifyingKey::<Sha1>::new(RsaPublicKey::from(&identity.private_key))
+        VerifyingKey::<Sha1>::new(PublicKey::from(&identity.private_key))
             .verify(&message, &signature)
             .is_ok()
     );

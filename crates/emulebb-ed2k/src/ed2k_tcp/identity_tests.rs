@@ -25,7 +25,10 @@ fn peer_sign(
         message.push(ip_kind);
     }
     let signing_key = SigningKey::<Sha1>::new(peer.private_key.clone());
-    let bytes = signing_key.sign_with_rng(&mut OsRng, &message).to_bytes();
+    let bytes = signing_key
+        .try_sign_with_rng(&mut SysRng, &message)
+        .unwrap()
+        .to_bytes();
     SecureIdentSignature {
         signature_len: bytes.len() as u8,
         challenge_ip_kind: v2.map(|(kind, _)| kind),
@@ -231,10 +234,8 @@ fn public_key_decoder_accepts_stock_size_boundary_and_rejects_oversize() {
 
 #[test]
 fn outbound_identity_rejects_public_key_exceeding_stock_cap() {
-    let private_key = RsaPrivateKey::new(&mut OsRng, 512).unwrap();
-    let public_key = RsaPublicKey::from(&private_key)
-        .to_public_key_der()
-        .unwrap();
+    let private_key = PrivateKey::new_unchecked(&mut SysRng, 512).unwrap();
+    let public_key = PublicKey::from(&private_key).to_public_key_der().unwrap();
     assert!(public_key.as_bytes().len() > 80);
     let error = Ed2kSecureIdent::from_private_key(private_key).unwrap_err();
     assert!(error.to_string().contains("MAXPUBKEYSIZE 80"));
@@ -266,14 +267,12 @@ fn emitted_public_key_is_spki_within_stock_cap() {
         key_bytes.len()
     );
 
-    let parsed = RsaPublicKey::from_public_key_der(key_bytes)
-        .expect("emitted key must decode as SPKI RSA public key");
-    assert!(RsaPublicKey::from_pkcs1_der(key_bytes).is_err());
-    assert_eq!(
-        parsed,
-        RsaPublicKey::from(&us.private_key),
-        "round-tripped key must equal our own public key"
-    );
+    assert!(SubjectPublicKeyInfoRef::from_der(key_bytes).is_ok());
+    assert!(RsaPublicKeyRef::from_der(key_bytes).is_err());
+    let public = PublicKey::from(&us.private_key);
+    assert_eq!(parse_peer_public_key(key_bytes).unwrap(), public);
+    let bare = pkcs1::EncodeRsaPublicKey::to_pkcs1_der(&public).unwrap();
+    assert_eq!(parse_peer_public_key(bare.as_bytes()).unwrap(), public);
 
     // Signatures must verify over the same SPKI bytes emitted on the wire.
     let peer = ident();

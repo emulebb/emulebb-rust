@@ -14,7 +14,7 @@ pub(crate) struct MemorySampler {
 impl MemorySampler {
     pub(crate) fn new() -> Self {
         Self {
-            system: Some(sysinfo::System::new()),
+            system: None,
             #[cfg(test)]
             available: None,
         }
@@ -31,8 +31,10 @@ impl MemorySampler {
         if let Some(bytes) = self.available {
             return Some(bytes);
         }
-        let mut system = self.system.take()?;
-        let result = tokio::task::spawn_blocking(move || {
+        let previous = self.system.take();
+        let (system, available) = tokio::task::spawn_blocking(move || {
+            // Retry a failed initialization on the next sample.
+            let mut system = previous.or_else(|| sysinfo::System::new().ok())?;
             system.refresh_memory();
             let available = if system.total_memory() == 0 {
                 None
@@ -47,19 +49,13 @@ impl MemorySampler {
                     )
                 }))
             };
-            (system, available)
+            Some((system, available))
         })
-        .await;
-        match result {
-            Ok((system, available)) => {
-                self.system = Some(system);
-                available
-            }
-            Err(_) => {
-                self.system = Some(sysinfo::System::new());
-                None
-            }
-        }
+        .await
+        .ok()
+        .flatten()?;
+        self.system = Some(system);
+        available
     }
 }
 
