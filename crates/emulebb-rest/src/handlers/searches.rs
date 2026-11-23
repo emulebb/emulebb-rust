@@ -101,14 +101,7 @@ pub(crate) async fn download_search_result(
 ) -> impl IntoResponse {
     let request = match optional_json_body::<SearchResultDownloadCreate>(&body) {
         Ok(request) => request,
-        Err(error) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                json_error_message(&error),
-            )
-            .into_response();
-        }
+        Err(response) => return *response,
     };
     match state
         .core

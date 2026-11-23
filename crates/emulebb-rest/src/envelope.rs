@@ -13,7 +13,10 @@ use axum::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::PageQuery;
+use crate::{
+    PageQuery,
+    request_body_policy::{MAX_API_REQUEST_BODY_BYTES, payload_too_large_response},
+};
 
 pub(crate) fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
     (
@@ -163,15 +166,25 @@ pub(crate) fn parse_required_json_body<T>(body: &[u8]) -> Result<T, Box<Response
 where
     T: DeserializeOwned,
 {
-    serde_json::from_slice(body).map_err(|error| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            json_error_message(&error),
-        )
-        .into_response()
-        .into()
-    })
+    // WHY: direct callers of the parser still need the transport's byte limit.
+    if body.len() > MAX_API_REQUEST_BODY_BYTES {
+        return Err(payload_too_large_response(MAX_API_REQUEST_BODY_BYTES).into());
+    }
+    let mut decoder = serde_json::Deserializer::from_slice(body);
+    T::deserialize(&mut decoder)
+        .and_then(|request| {
+            decoder.end()?;
+            Ok(request)
+        })
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                json_error_message(&error),
+            )
+            .into_response()
+            .into()
+        })
 }
 
 pub(crate) fn parse_optional_query<T>(query: Option<&str>) -> Result<T, Box<Response>>
@@ -217,13 +230,13 @@ pub(crate) fn trim_json_location(message: String) -> String {
     }
 }
 
-pub(crate) fn optional_json_body<T>(body: &[u8]) -> Result<T, serde_json::Error>
+pub(crate) fn optional_json_body<T>(body: &[u8]) -> Result<T, Box<Response>>
 where
     T: DeserializeOwned + Default,
 {
     if body.is_empty() {
         Ok(T::default())
     } else {
-        serde_json::from_slice(body)
+        parse_required_json_body(body)
     }
 }
