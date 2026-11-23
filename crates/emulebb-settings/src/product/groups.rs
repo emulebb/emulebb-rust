@@ -78,8 +78,8 @@ macro_rules! setting_group {
         }
         impl $partial {
             /// Validate supplied leaves with the same types/rules as persisted values.
-            pub(super) fn validate_json_fields(value:&Value,issues:&mut Vec<ValidationIssue>) {
-                let Some(object)=value.as_object() else {return;};
+            pub(super) fn validate_json_fields(value:&Value,issues:&mut Vec<ValidationIssue>,object_groups:&mut bool) {
+                let Some(object)=value.as_object() else {*object_groups=false;return;};
                 $(if let Some(value)=object.get($wire) {
                     let key=concat!($prefix,".",$wire);
                     match serde_json::from_value::<$ty>(value.clone()) {
@@ -87,7 +87,7 @@ macro_rules! setting_group {
                         Err(_)=>issue(issues,key,"invalid-type","Value does not match the supported setting type."),
                     }
                 })*
-                $(if let Some(value)=object.get($group_wire) {$partial_child::validate_json_fields(value,issues);})*
+                $(if let Some(value)=object.get($group_wire) {$partial_child::validate_json_fields(value,issues,object_groups);})*
             }
             pub(super) fn schema()->Value {
                 schema::object_schema([

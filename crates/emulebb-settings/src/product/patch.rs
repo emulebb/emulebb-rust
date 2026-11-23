@@ -17,16 +17,23 @@ impl SettingsPatch {
         if body.len() > MAX_PATCH_BYTES {
             return Err(SettingsError::DocumentTooLarge);
         }
-        let raw: Value =
-            serde_json::from_slice(body).map_err(|_| SettingsError::InvalidDocument)?;
         let mut issues = Vec::new();
-        if let Some(set) = raw.get("set") {
-            SettingsPartial::validate_json_fields(set, &mut issues);
+        let mut object_groups = true;
+        {
+            // WHY: validate only an object and release its generic backing
+            // before constructing the strict typed patch.
+            let raw: serde_json::Map<String, Value> = decode_json(body)?;
+            if let Some(set) = raw.get("set") {
+                SettingsPartial::validate_json_fields(set, &mut issues, &mut object_groups);
+            }
         }
         if !issues.is_empty() {
             return Err(SettingsError::Validation(issues));
         }
-        serde_json::from_slice(body).map_err(|_| SettingsError::InvalidDocument)
+        if !object_groups {
+            return Err(SettingsError::InvalidDocument);
+        }
+        decode_json(body)
     }
     pub fn into_parts(self) -> (SettingsRevision, SettingsEdit) {
         (
@@ -42,6 +49,13 @@ impl SettingsPatch {
     pub fn payload_bytes(&self) -> Result<usize, SettingsError> {
         json_size(self, MAX_PATCH_BYTES)
     }
+}
+
+fn decode_json<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, SettingsError> {
+    let mut decoder = serde_json::Deserializer::from_slice(body);
+    let document = T::deserialize(&mut decoder).map_err(|_| SettingsError::InvalidDocument)?;
+    decoder.end().map_err(|_| SettingsError::InvalidDocument)?;
+    Ok(document)
 }
 
 impl SettingsEdit {
@@ -163,6 +177,10 @@ mod tests {
             r#"{"expectedRevision":"1","set":{"network":false}}"#,
             r#"{"expectedRevision":1,"set":{"network":{"nickname":"First"}}}"#,
             r#"{"expectedRevision":"1","extension":true}"#,
+            r#"["1",{},[]]"#,
+            r#"{"expectedRevision":"1","set":[],"reset":["network.nickname"]}"#,
+            r#"{"expectedRevision":"1","set":{"network":[]},"reset":["network.nickname"]}"#,
+            r#"{"expectedRevision":"1"} {}"#,
         ] {
             assert_eq!(
                 SettingsPatch::from_json(body.as_bytes()).unwrap_err(),

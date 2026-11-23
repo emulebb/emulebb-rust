@@ -72,7 +72,7 @@ fn declared_body_is_oversized(request: &Request<Body>, maximum: usize) -> bool {
         .is_some_and(|length| length > maximum as u64)
 }
 
-fn payload_too_large_response(maximum: usize) -> Response {
+pub(crate) fn payload_too_large_response(maximum: usize) -> Response {
     api_error(
         StatusCode::PAYLOAD_TOO_LARGE,
         "PAYLOAD_TOO_LARGE",
