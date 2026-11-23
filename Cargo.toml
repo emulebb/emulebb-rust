@@ -69,8 +69,8 @@ rand = "0.10"
 reqwest = { version = "0.13", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 roxmltree = "0.21"
-rsa = "0.9"
-rusqlite = { version = "0.41", features = ["bundled"] }
+rsa = "0.10"
+rusqlite = { version = "0.43", features = ["bundled"] }
 rustix = { version = "1.1.5", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -79,7 +79,7 @@ sha1 = { version = "0.11", features = ["oid"] }
 sha1-legacy = { package = "sha1", version = "0.10", features = ["oid"] }
 sha2 = "0.11"
 socket2 = "0.6"
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 symphonia = { version = "0.6.1", default-features = false, features = [
     "aac",
     "aiff",

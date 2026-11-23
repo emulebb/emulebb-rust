@@ -148,7 +148,7 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
         self.assertEqual([line for line in recipe if line.startswith("FROM ")], [
             "FROM ${ALPINE_UNPACK_IMAGE} AS unpack",
             "FROM ghcr.io/linuxserver/baseimage-alpine:3.24@sha256:"
-            "7315b19a32460a84b4474993ef33065483ffec792fbc70dbe12eab918aa2bbf4",
+            "9c6e3858551c37815ea3362494e1e316bf7f204e8303ff73c860fedbb291882a",
         ])
 
     def test_musl_host_cache_preflight_inherits_an_existing_owned_target(self):
