@@ -27,6 +27,37 @@ pub(crate) enum DownloadPreparation {
 }
 
 impl EmulebbCore {
+    /// Settle only this probe's reservation. Local admission refusal does not
+    /// consume the peer's reask interval, even after a successful wire probe.
+    pub(crate) async fn settle_download_preparation_probe(
+        &self,
+        guard: &DownloadAttemptGuard,
+        source: &Ed2kFoundSource,
+        lease: crate::download_source_registry::DownloadSourceLeaseId,
+        deferred: bool,
+        result: &Result<DownloadPreparation>,
+    ) {
+        let local_capacity = result.as_ref().err().is_some_and(|error| {
+            matches!(
+                error.downcast_ref(),
+                Some(
+                    emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy
+                        | emulebb_ed2k::ed2k_transfer::LocalMutationError::Closing
+                )
+            )
+        });
+        // WHY: refused availability persistence is our capacity problem, not a
+        // failed source. Keep the exact lease fence and ordinary network cooldown.
+        self.finish_download_probe_lease(
+            guard.token(),
+            source,
+            &guard.hash().to_string(),
+            lease,
+            deferred || local_capacity,
+        )
+        .await;
+    }
+
     pub(crate) async fn prepare_download_sources(
         &self,
         guard: &DownloadAttemptGuard,
@@ -183,12 +214,12 @@ impl EmulebbCore {
                 if let Ok(DownloadPreparation::Direct(_)) = &result {
                     return result;
                 }
-                self.finish_download_probe_lease(
-                    guard.token(),
+                self.settle_download_preparation_probe(
+                    guard,
                     source,
-                    &target.hash,
                     lease_id,
                     not_started,
+                    &result,
                 )
                 .await;
                 if let Err(error) = result {

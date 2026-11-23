@@ -141,6 +141,85 @@ async fn native_probe_capacity_refusal_releases_only_its_exact_core_reservation(
 }
 
 #[tokio::test]
+async fn availability_persistence_capacity_preserves_source_without_peer_cooldown() {
+    use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+    for (error, immediate) in [
+        (anyhow::Error::new(LocalMutationError::Busy), true),
+        (anyhow::Error::new(LocalMutationError::Closing), true),
+        (
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into(),
+            false,
+        ),
+        (
+            std::io::Error::from(std::io::ErrorKind::InvalidData).into(),
+            false,
+        ),
+    ] {
+        let root = unique_runtime_dir("core-probe-availability-capacity");
+        let (core, _) = local_preparation_core(&root, [0x65; 16], None);
+        let hash = Ed2kHash::from_bytes([0x66; 16]);
+        let file = hash.to_string();
+        let owner = a4af_test_owner(&core, &file);
+        let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41012);
+        core.state
+            .lock()
+            .await
+            .download_source_registry
+            .add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
+                    file_hash: file.clone(),
+                    source: source.clone(),
+                    last_seen: Instant::now(),
+                },
+            );
+        let (leased, _, _) = core
+            .acquire_direct_download_source_leases(
+                owner.token(),
+                &file,
+                std::slice::from_ref(&source),
+            )
+            .await;
+        assert_eq!(leased.len(), 1);
+        let lease = core
+            .capture_download_probe_lease(owner.token(), &source, &file)
+            .await
+            .unwrap();
+        core.settle_download_preparation_probe(
+            &owner,
+            &source,
+            lease,
+            false,
+            &Err(error.context("persisting probe availability")),
+        )
+        .await;
+        assert!(
+            core.state
+                .lock()
+                .await
+                .active_download_peer_endpoints
+                .is_empty()
+        );
+        let (leased, _, retry) = core
+            .acquire_direct_download_source_leases(
+                owner.token(),
+                &file,
+                std::slice::from_ref(&source),
+            )
+            .await;
+        assert_eq!(leased.len(), usize::from(immediate));
+        if immediate {
+            assert!(retry.is_none());
+        } else {
+            assert!(retry.unwrap() > Duration::from_secs(1190));
+        }
+        drop(owner);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_reask() {
     let root = unique_runtime_dir("core-prepared-hydration-recovery");
     let library = root.join("library");
