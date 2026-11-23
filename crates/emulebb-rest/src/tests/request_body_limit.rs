@@ -19,9 +19,24 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::{
+    envelope::{optional_json_body, parse_required_json_body},
     request_body_policy::{MAX_API_REQUEST_BODY_BYTES, enforce_api_request_body_limit},
     rest_test_support::test_router,
 };
+
+#[test]
+fn typed_json_parsers_enforce_the_transport_limit() {
+    let mut body = vec![b' '; MAX_API_REQUEST_BODY_BYTES];
+    body[0] = b'1';
+    assert_eq!(parse_required_json_body::<u64>(&body).unwrap(), 1);
+    assert_eq!(optional_json_body::<u64>(b"").unwrap(), 0);
+    assert_eq!(optional_json_body::<u64>(&body).unwrap(), 1);
+    body.push(b' ');
+    let required = parse_required_json_body::<u64>(&body).unwrap_err();
+    let optional = optional_json_body::<u64>(&body).unwrap_err();
+    assert_eq!(required.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(optional.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
 
 fn counting_router(handler_calls: Arc<AtomicUsize>) -> Router {
     Router::new()
