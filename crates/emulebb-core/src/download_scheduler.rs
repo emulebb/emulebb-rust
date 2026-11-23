@@ -98,6 +98,17 @@ impl EmulebbCore {
                 &shutdown,
             )
             .await;
+            // WHY: source-less preparations retire without retaining a wake.
+            // Refill their bounded slots during this cursor pass; once the
+            // pass is exhausted, keep the retry clock instead of hot rescanning.
+            if cursor.is_some()
+                && self.download_attempts.available().1 > 0
+                && let Err(error) = self
+                    .select_download_page(&mut cursor, &mut preparations, &shutdown)
+                    .await
+            {
+                tracing::warn!(%error, "download selection deferred");
+            }
             // Connection admission precedes metadata exchange. Tests of cohort
             // ordering must synchronize on ready ownership, not socket count.
             #[cfg(test)]

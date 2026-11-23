@@ -954,6 +954,73 @@ async fn explicit_link_source_dials_without_server_config() {
 }
 
 #[tokio::test]
+async fn sourced_job_behind_source_less_jobs_uses_retired_preparation_capacity() {
+    let root = unique_runtime_dir("scheduler-source-less-predecessors");
+    let mut network = test_network_config_with_store(
+        &root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.p2p_bind_ip = Some(Ipv4Addr::LOCALHOST);
+    network.ed2k.server_entries.clear();
+    network.ed2k.server_endpoints.clear();
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &root,
+        Some(network),
+    )
+    .unwrap();
+    for index in 1..=100 {
+        drop(
+            core.create_download(DownloadCreate {
+                source: DownloadCreateSource::Content {
+                    hash: format!("{index:032x}"),
+                    name: format!("Waiting-{index}.bin"),
+                    size_bytes: Some(4096),
+                },
+                category: None,
+                intent: emulebb_metadata::DownloadIntent::Started,
+                redownload: false,
+            })
+            .await
+            .unwrap(),
+        );
+    }
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(
+        core.create_download(DownloadCreate {
+            source: DownloadCreateSource::Ed2kLink {
+                link: format!(
+                    "ed2k://|file|Ready.bin|4096|{}|sources,127.0.0.1:{port}|/",
+                    "fa".repeat(16)
+                ),
+            },
+            category: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            redownload: false,
+        })
+        .await
+        .unwrap(),
+    );
+    core.start_download_scheduler();
+    let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+    let connected = matches!(&accepted, Ok(Ok(_)));
+    drop(accepted);
+    let shutdown = core
+        .ed2k_download_tasks
+        .stop_and_drain(async { Ok(0) })
+        .await;
+    assert_eq!(shutdown.forced_task_count, 0);
+    assert!(
+        connected,
+        "source-less jobs left free preparation capacity idle before the sourced job"
+    );
+}
+
+#[tokio::test]
 async fn removal_cancels_but_retains_peer_ownership_until_worker_retirement() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     let request = DownloadCreate {
