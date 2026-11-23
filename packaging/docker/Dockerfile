@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 ARG VERSION=0.1.0-beta.2
-FROM ghcr.io/linuxserver/baseimage-ubuntu:resolute@sha256:2607002007f92888e46e60c981fbdf315a39e56018bb9ce651dd72ec1376c7a0
+FROM ghcr.io/linuxserver/baseimage-ubuntu:resolute@sha256:e044df9763cfadf3081e6b7a2e949809661c9e751b6ce65040075972c9b35587
 
 ARG VERSION
 ARG TARGETARCH
