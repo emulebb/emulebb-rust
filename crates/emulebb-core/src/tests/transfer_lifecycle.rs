@@ -976,6 +976,95 @@ async fn delivered_job_retains_history_and_removal_preserves_output() {
 }
 
 #[tokio::test]
+async fn destructive_completed_job_removal_retires_library_presence() {
+    assert_destructive_completed_job_removal(false).await;
+}
+
+#[tokio::test]
+async fn destructive_completed_job_removal_preserves_other_library_copy() {
+    assert_destructive_completed_job_removal(true).await;
+}
+
+async fn assert_destructive_completed_job_removal(keep_copy: bool) {
+    let root = unique_runtime_dir("core-completed-job-delete-presence");
+    let incoming = root.join("incoming");
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        root.join("transfers"),
+    )
+    .unwrap()
+    .with_incoming_dir(incoming.clone());
+    let payload = b"Sample completed deletion payload".repeat(64);
+    let hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+    let token = ready_download_for_delivery(&core, &root, "Sample.bin", &payload).await;
+    assert!(core.deliver_completed_download(token).await.unwrap());
+    let alias = incoming.join("Alias.bin");
+    if keep_copy {
+        std::fs::copy(incoming.join("Sample.bin"), &alias).unwrap();
+        core.share_local_file(LocalShareCreate {
+            path: alias.to_string_lossy().into_owned(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    }
+    assert!(core.library_file(&hash).await.unwrap().unwrap().present);
+    let manifest = core
+        .metadata_store
+        .download_job_manifest(token.job_id)
+        .unwrap()
+        .unwrap();
+    let delivered = crate::long_path(manifest.delivered_path.as_ref().unwrap());
+    let cached = core
+        .metadata_store
+        .local_file_instance(&delivered)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Some(&cached.verified_fingerprint),
+        manifest.source_fingerprint.as_ref(),
+        "delivery ownership and library admission must describe the same file generation"
+    );
+    assert!(
+        core.metadata_store
+            .local_file_has_root_membership(&delivered)
+            .unwrap()
+    );
+    assert!(
+        core.ed2k_transfers
+            .remove_download_job(token.job_id, true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        core.ed2k_transfers
+            .cleanup_removed_download_job(token.job_id)
+            .await
+            .unwrap()
+    );
+    assert!(!incoming.join("Sample.bin").exists());
+    assert_eq!(
+        core.library_file(&hash).await.unwrap().unwrap().present,
+        keep_copy
+    );
+    assert_eq!(core.share(&hash).await.is_some(), keep_copy);
+    let catalog = core.ed2k_transfers.shared_catalog();
+    assert_eq!(
+        catalog
+            .read()
+            .await
+            .entry_by_hash(&hash.parse().unwrap())
+            .is_some(),
+        keep_copy
+    );
+    if keep_copy {
+        assert_eq!(std::fs::read(&alias).unwrap(), payload);
+    }
+    core.drain_persistence().await.unwrap();
+}
+
+#[tokio::test]
 async fn completed_history_survives_restart_without_recreating_replaced_output() {
     let root = unique_runtime_dir("core-persisted-completed-history");
     let incoming = root.join("incoming");
