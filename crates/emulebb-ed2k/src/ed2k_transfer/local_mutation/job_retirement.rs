@@ -47,8 +47,7 @@ impl LocalMutationRegistry {
         let publication_gate = state.publication_gate.take();
         Self::spawn_unit_reply(&mut state, capacity_lease, sender, move |capacity| {
             let _lease = lease;
-            let _lifecycle = lifecycle;
-            let _job = job_guard;
+            let job_guards = (job_guard, lifecycle);
             let mut committed = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let cleanup = if removed {
@@ -115,20 +114,28 @@ impl LocalMutationRegistry {
                     // before dropping the durable row that permits cleanup retry.
                     committed = true;
                     let hash: emulebb_kad_proto::Ed2kHash = cleanup.file_hash.parse()?;
-                    let content =
-                        transfer::store::scoped_lock(&content_locks, cleanup.file_hash.clone())
-                            .blocking_lock_owned();
+                    let token = cleanup.token;
+                    let delete_output = cleanup.delete_output;
+                    let content = transfer::store::scoped_lock(&content_locks, cleanup.file_hash)
+                        .blocking_lock_owned();
+                    drop(cleanup.owned_output);
                     let stripe = eligibility.begin_mutation(&[hash.0])?;
-                    publication.publish_terminal(
-                        hash,
-                        super::publication::PublicationGuards {
-                            content,
-                            stripe,
-                            job: None,
-                        },
-                    )?;
+                    let guards = super::publication::PublicationGuards {
+                        content,
+                        stripe,
+                        job: None,
+                    };
+                    if delete_output {
+                        // WHY: the deleted output may have masked a newer verified
+                        // payload for this hash. Recheck it without holding the
+                        // retired job's guards during physical publication.
+                        drop(job_guards);
+                        publication.publish(hash, capacity, guards)?;
+                    } else {
+                        publication.publish_terminal(hash, guards)?;
+                    }
                     ensure!(
-                        metadata.finalize_removed_download_job(cleanup.token)?,
+                        metadata.finalize_removed_download_job(token)?,
                         "removed job changed before final settlement"
                     );
                 }

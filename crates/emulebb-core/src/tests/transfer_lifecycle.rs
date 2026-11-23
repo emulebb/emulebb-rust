@@ -985,6 +985,55 @@ async fn destructive_completed_job_removal_preserves_other_library_copy() {
     assert_destructive_completed_job_removal(true).await;
 }
 
+#[tokio::test]
+async fn destructive_completed_job_removal_publishes_verified_redownload() {
+    let root = unique_runtime_dir("core-completed-job-delete-redownload");
+    let incoming = root.join("incoming");
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        root.join("transfers"),
+    )
+    .unwrap()
+    .with_incoming_dir(incoming.clone());
+    let payload = b"Sample verified redownload payload".repeat(64);
+    let hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let first = ready_download_for_delivery(&core, &root, "Sample.bin", &payload).await;
+    assert!(core.deliver_completed_download(first).await.unwrap());
+    let second = ready_download_for_delivery(&core, &root, "Repeat.bin", &payload).await;
+    assert_ne!(first.job_id, second.job_id);
+
+    let catalog = core.ed2k_transfers.shared_catalog();
+    assert_eq!(
+        catalog
+            .read()
+            .await
+            .entry_by_hash(&hash)
+            .unwrap()
+            .display_name,
+        "Sample.bin"
+    );
+    assert!(
+        core.ed2k_transfers
+            .remove_download_job(first.job_id, true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        core.ed2k_transfers
+            .cleanup_removed_download_job(first.job_id)
+            .await
+            .unwrap()
+    );
+    assert!(!incoming.join("Sample.bin").exists());
+    let catalog = catalog.read().await;
+    let entry = catalog.entry_by_hash(&hash).unwrap();
+    assert_eq!(entry.display_name, "Repeat.bin");
+    assert!(entry.verified_complete);
+    drop(catalog);
+    core.drain_persistence().await.unwrap();
+}
+
 async fn assert_destructive_completed_job_removal(keep_copy: bool) {
     let root = unique_runtime_dir("core-completed-job-delete-presence");
     let incoming = root.join("incoming");
