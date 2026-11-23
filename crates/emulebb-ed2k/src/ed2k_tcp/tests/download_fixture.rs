@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn test_peer_secure_ident() -> Arc<Ed2kSecureIdent> {
     Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     )
 }
 

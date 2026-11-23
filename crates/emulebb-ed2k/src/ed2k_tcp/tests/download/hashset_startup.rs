@@ -413,7 +413,7 @@ async fn run_hashset_startup_case(case: StartupAichCase) {
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,

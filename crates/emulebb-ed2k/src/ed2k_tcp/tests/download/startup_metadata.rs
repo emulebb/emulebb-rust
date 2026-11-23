@@ -135,7 +135,7 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,
@@ -270,7 +270,7 @@ async fn nofile_answer_for_requested_file_is_file_not_found_not_error() {
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,
@@ -389,7 +389,7 @@ async fn a4af_switch_requests_two_files_on_one_peer_connection() {
                 direct_udp_callback: false,
             },
             secure_ident: &Arc::new(
-                Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+                Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                     .unwrap(),
             ),
             transfer_runtime: &transfer_runtime,
@@ -492,7 +492,7 @@ async fn legacy_peer_without_aich_support_does_not_receive_aich_hash_request() {
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,

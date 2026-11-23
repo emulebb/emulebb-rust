@@ -168,7 +168,7 @@ async fn large_file_download_falls_back_to_upload_request_when_hashset_stalls() 
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,

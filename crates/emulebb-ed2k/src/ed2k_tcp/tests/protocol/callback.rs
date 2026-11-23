@@ -1243,7 +1243,7 @@ async fn udp_firewall_check_request_completes_hello_exchange_before_request() {
             direct_udp_callback: false,
         },
         Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         FirewallCheckUdpRequest {
@@ -1315,7 +1315,7 @@ async fn udp_firewall_check_request_skips_silent_helper_before_request() {
             direct_udp_callback: false,
         },
         Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         FirewallCheckUdpRequest {

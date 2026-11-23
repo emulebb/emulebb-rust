@@ -128,7 +128,7 @@ async fn stale_block_packet_dropped_without_ending_session() {
         &stale_test_source(file_hash, peer_addr.port()),
         stale_test_identity(),
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,
@@ -196,7 +196,7 @@ async fn sustained_stale_block_packets_cancel_transfer() {
         &stale_test_source(file_hash, peer_addr.port()),
         stale_test_identity(),
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,
@@ -278,7 +278,7 @@ async fn duplicate_block_payload_consumed_without_error() {
         &stale_test_source(file_hash, peer_addr.port()),
         stale_test_identity(),
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,
@@ -347,7 +347,7 @@ async fn inflate_error_skips_stream_but_session_continues() {
         &stale_test_source(file_hash, peer_addr.port()),
         stale_test_identity(),
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+            Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap())
                 .unwrap(),
         ),
         &transfer_runtime,

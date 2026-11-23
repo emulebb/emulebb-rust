@@ -145,7 +145,7 @@ async fn unsolicited_queue_rank_bursts_disconnect_then_ban() {
 
     let peer = source(file_hash, peer_addr);
     let secure_ident = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     );
     let first_error = run_download(&transfer_runtime, &peer, &secure_ident, file_size)
         .await
@@ -218,7 +218,7 @@ async fn repeated_out_of_part_requests_suppress_later_accept_with_cancel() {
 
     let peer = source(file_hash, peer_addr);
     let secure_ident = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     );
     for _ in 0..3 {
         assert_eq!(

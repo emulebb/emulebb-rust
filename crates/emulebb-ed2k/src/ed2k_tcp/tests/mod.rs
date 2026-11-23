@@ -1,5 +1,6 @@
 use super::codec::encode_port_test_result;
 use super::dump;
+use super::identity::generate_stock_ed2k_ident_keypair;
 use super::{
     CT_EMULE_BUDDYIP, CT_EMULE_BUDDYUDP, CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2,
     CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_NAME, CT_VERSION, DownloadSessionOptions,
@@ -82,13 +83,12 @@ use flate2::Decompress;
 use hex::decode;
 use md4::{Digest, Md4};
 use rsa::{
-    RsaPrivateKey, RsaPublicKey,
+    PublicKey,
     pkcs1v15::{Signature, VerifyingKey},
     pkcs8::EncodePublicKey,
-    rand_core::OsRng,
     signature::Verifier,
 };
-use sha1_legacy::Sha1;
+use sha1::Sha1;
 use std::collections::VecDeque;
 use std::io::{self, Write as _};
 use std::{

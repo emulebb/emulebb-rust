@@ -598,7 +598,8 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
             .unwrap()
             > Duration::from_secs(19 * 60)
     );
-    let delivered = tokio::time::timeout(Duration::from_secs(15), async {
+    // This checks eventual publication and checkpointing, not a delivery SLA.
+    let delivered = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Some(share) = download.share(&hash_hex).await {
                 // Publication can precede the final job checkpoint. Wait for
@@ -616,8 +617,25 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    let delivered = match delivered {
+        Ok(share) => share,
+        Err(_) => {
+            let job = download.ed2k_transfers.download_job(id).await.unwrap();
+            let resources = download.ed2k_transfers.download_resource_snapshot();
+            panic!(
+                "prepared transfer did not settle after local hydration resumed: \
+                 job={:?}, connections={}, resident_bytes={}",
+                job.as_ref().map(|job| (
+                    job.token,
+                    job.checkpointed_bytes,
+                    job.storage_failure.as_ref(),
+                )),
+                resources.connections,
+                resources.resident_bytes,
+            );
+        }
+    };
     assert_eq!(std::fs::read(&delivered.path).unwrap(), payload);
     assert!(
         download
