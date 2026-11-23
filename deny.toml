@@ -15,6 +15,9 @@ ignore = [
     # timing measurements against an attacker-chosen ciphertext oracle, which our
     # usage does not expose. Revisit and drop this ignore once `rsa` ships a fix.
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2026-0543 reports Chrono's maintenance status for every version.
+    # Remove this exception after the migration to time in RUST-REF-025 (#350).
+    "RUSTSEC-2026-0543",
 ]
 
 [bans]
