@@ -223,6 +223,54 @@ async fn received_page_conversion_retains_charge_after_reap() {
 }
 
 #[tokio::test]
+async fn local_serving_read_releases_manifest_guard_while_waiting_for_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(root.path()).unwrap());
+    let hash = emulebb_kad_proto::Ed2kHash([0x6c; 16]);
+    let job = runtime
+        .metadata
+        .admit_download_job(&emulebb_metadata::DownloadJobRequest {
+            file_hash: hash.to_string(),
+            display_name: "Sample.bin".into(),
+            expected_size_bytes: Some(transfer::ED2K_PART_SIZE),
+            category_id: None,
+            intent: emulebb_metadata::DownloadIntent::Stopped,
+            piece_size: transfer::ED2K_PART_SIZE,
+        })
+        .unwrap()
+        .job;
+    let registry = Arc::clone(&runtime.local_mutations);
+    let (started, ready) = oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    registry.install_publication_gate(started, gate);
+    let page = registry
+        .submit_job_read(&runtime, JobRead::Page(None, 1, false))
+        .unwrap();
+    ready.await.unwrap();
+
+    let waiting = registry.signal_next_pending_wait();
+    let serving = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.local_serving_view(&hash).await })
+    };
+    let test_timeout = std::time::Duration::from_secs(5);
+    tokio::time::timeout(test_timeout, waiting)
+        .await
+        .expect("serving lookup must wait for read capacity")
+        .unwrap();
+    let guard = tokio::time::timeout(test_timeout, runtime.lock_manifest(job.token))
+        .await
+        .expect("serving lookup must drop the manifest guard before waiting");
+    drop(guard);
+    release.send(()).unwrap();
+    drop(page.await.unwrap().unwrap());
+
+    let view = serving.await.unwrap().unwrap().unwrap();
+    assert_eq!(view.job_token, Some(job.token));
+    assert!(!view.completed);
+}
+
+#[tokio::test]
 async fn cancelled_read_receiver_and_drain_keep_actual_worker_charged() {
     for (request, expected) in [
         (JobRead::Page(None, 1, false), 2 * 1024 * 1024 + 4096),

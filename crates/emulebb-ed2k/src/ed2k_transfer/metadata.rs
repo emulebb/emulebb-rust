@@ -1,6 +1,6 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
+use std::{net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
@@ -598,18 +598,52 @@ impl Ed2kTransferRuntime {
         file_hash: &Ed2kHash,
     ) -> Result<Option<super::Ed2kFileServingView>> {
         let hash_hex = file_hash.to_string();
-        let token = self
-            .resolve_protocol_job(&hash_hex)
+        let mut retry_deadline = None;
+        loop {
+            let mut capacity_revision = self.local_mutations.capacity_revision();
+            let view = async {
+                let token = self
+                    .resolve_protocol_job(&hash_hex)
+                    .await
+                    .context("failed to resolve job for local serving view")?;
+                let _guard = match token {
+                    Some(token) => Some(self.lock_manifest(token).await),
+                    None => None,
+                };
+                capacity_revision = self.local_mutations.capacity_revision();
+                self.load_serving_view_optional_unlocked(&hash_hex, token)
+                    .await
+                    .context("failed to load local serving view")
+            }
+            .await;
+            let error = match view {
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<super::LocalMutationError>(),
+                        Some(super::LocalMutationError::Busy)
+                    ) =>
+                {
+                    error
+                }
+                other => return other,
+            };
+            // WHY: a scheduler read can briefly exhaust capacity during an
+            // active upload. Wait without its manifest guard, then revalidate.
+            let now = tokio::time::Instant::now();
+            let deadline = *retry_deadline.get_or_insert(now + Duration::from_secs(5));
+            if now >= deadline {
+                return Err(error);
+            }
+            match tokio::time::timeout_at(
+                deadline,
+                self.local_mutations.wait_for_completion(capacity_revision),
+            )
             .await
-            .context("failed to resolve job for local serving view")?;
-        let _guard = if let Some(token) = token {
-            Some(self.lock_manifest(token).await)
-        } else {
-            None
-        };
-        self.load_serving_view_optional_unlocked(&hash_hex, token)
-            .await
-            .context("failed to load local serving view")
+            {
+                Ok(result) => result?,
+                Err(_) => return Err(error),
+            }
+        }
     }
 
     /// Like [`Self::local_entry`] but only returns an entry that may be served
