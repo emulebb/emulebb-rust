@@ -425,6 +425,16 @@ type TestWorkerGate = Arc<
     >,
 >;
 
+#[cfg(test)]
+type TestAsyncWorkerGate = Arc<
+    tokio::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+>;
+
 type CategoryProbeTask = JoinHandle<(
     emulebb_metadata::MetadataSharedCopyCandidate,
     bool,
@@ -524,6 +534,8 @@ pub struct EmulebbCore {
     download_hydration_busy: Arc<AtomicBool>,
     #[cfg(test)]
     download_ready_count: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    download_delivery_gate: TestAsyncWorkerGate,
     #[cfg(test)]
     category_probe_waiting: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     shared_root_change: Arc<shared_dir_monitor::RootChangeSignal>,
@@ -774,6 +786,8 @@ impl EmulebbCore {
             download_hydration_busy: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             download_ready_count: Arc::default(),
+            #[cfg(test)]
+            download_delivery_gate: Arc::default(),
             #[cfg(test)]
             category_probe_waiting: Arc::new(std::sync::Mutex::new(None)),
             shared_root_change: Arc::default(),

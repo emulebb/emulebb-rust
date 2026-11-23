@@ -6,13 +6,32 @@ const PEER_FRAME_BYTES: usize = 2_000_000;
 const INITIAL_ACTIVE: usize = 16;
 const INITIAL_PREPARING: usize = 2;
 
-pub(crate) struct MemorySampler(Option<sysinfo::System>);
+pub(crate) struct MemorySampler {
+    system: Option<sysinfo::System>,
+    #[cfg(test)]
+    available: Option<u64>,
+}
 impl MemorySampler {
     pub(crate) fn new() -> Self {
-        Self(Some(sysinfo::System::new()))
+        Self {
+            system: Some(sysinfo::System::new()),
+            #[cfg(test)]
+            available: None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn with_available(bytes: u64) -> Self {
+        Self {
+            system: None,
+            available: Some(bytes),
+        }
     }
     pub(crate) async fn available(&mut self) -> Option<u64> {
-        let mut system = self.0.take()?;
+        #[cfg(test)]
+        if let Some(bytes) = self.available {
+            return Some(bytes);
+        }
+        let mut system = self.system.take()?;
         let result = tokio::task::spawn_blocking(move || {
             system.refresh_memory();
             let available = if system.total_memory() == 0 {
@@ -33,11 +52,11 @@ impl MemorySampler {
         .await;
         match result {
             Ok((system, available)) => {
-                self.0 = Some(system);
+                self.system = Some(system);
                 available
             }
             Err(_) => {
-                self.0 = Some(sysinfo::System::new());
+                self.system = Some(sysinfo::System::new());
                 None
             }
         }

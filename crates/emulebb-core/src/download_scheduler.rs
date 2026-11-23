@@ -18,6 +18,8 @@ const IDLE_SELECTION_INTERVAL: Duration = Duration::from_secs(30);
 mod displacement;
 
 #[cfg(test)]
+mod pressure_tests;
+#[cfg(test)]
 mod retirement_tests;
 
 /// Only selected jobs own this scalar clock. Completed network rounds may yield
@@ -487,6 +489,14 @@ impl EmulebbCore {
             );
             match result {
                 Ok(Some("completed")) => {
+                    #[cfg(test)]
+                    {
+                        let gate = self.download_delivery_gate.lock().await.take();
+                        if let Some((reached, release)) = gate {
+                            let _ = reached.send(());
+                            let _ = release.await;
+                        }
+                    }
                     if let Err(error) = self.deliver_completed_download(guard.token()).await {
                         tracing::warn!(job_id = %guard.token().job_id, %error, "download delivery deferred");
                     }

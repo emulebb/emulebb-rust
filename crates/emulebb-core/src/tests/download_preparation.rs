@@ -1,7 +1,7 @@
 use super::*;
 use crate::download_preparation::DownloadPreparation;
 
-pub(super) fn local_preparation_core(
+pub(crate) fn local_preparation_core(
     root: &Path,
     user_hash: [u8; 16],
     max_concurrent: Option<u32>,
