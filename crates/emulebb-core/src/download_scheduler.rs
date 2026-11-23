@@ -18,6 +18,8 @@ const IDLE_SELECTION_INTERVAL: Duration = Duration::from_secs(30);
 mod displacement;
 
 #[cfg(test)]
+mod pressure_tests;
+#[cfg(test)]
 mod retirement_tests;
 
 /// Only selected jobs own this scalar clock. Completed network rounds may yield
@@ -98,6 +100,17 @@ impl EmulebbCore {
                 &shutdown,
             )
             .await;
+            // WHY: source-less preparations retire without retaining a wake.
+            // Refill their bounded slots during this cursor pass; once the
+            // pass is exhausted, keep the retry clock instead of hot rescanning.
+            if cursor.is_some()
+                && self.download_attempts.available().1 > 0
+                && let Err(error) = self
+                    .select_download_page(&mut cursor, &mut preparations, &shutdown)
+                    .await
+            {
+                tracing::warn!(%error, "download selection deferred");
+            }
             // Connection admission precedes metadata exchange. Tests of cohort
             // ordering must synchronize on ready ownership, not socket count.
             #[cfg(test)]
@@ -146,6 +159,9 @@ impl EmulebbCore {
         let token = ready.guard.token();
         let hash = ready.guard.hash().to_string();
         match ready.source {
+            crate::download_preparation::DownloadPreparation::Direct(source) => {
+                self.discard_prepared_source(source).await;
+            }
             crate::download_preparation::DownloadPreparation::Callback(source) => {
                 source.cancel_and_settle().await
             }
@@ -362,7 +378,7 @@ impl EmulebbCore {
         Ok(())
     }
 
-    async fn run_selected_download(
+    pub(crate) async fn run_selected_download(
         &self,
         mut guard: DownloadAttemptGuard,
         source: crate::download_preparation::DownloadPreparation,
@@ -380,18 +396,23 @@ impl EmulebbCore {
             DownloadPreparation::Finalization => None,
             DownloadPreparation::Waiting => return,
         };
-        let endpoint = prepared
-            .as_ref()
-            .map(|ready| crate::source_endpoint_key(&ready.source));
         let deadline = prepared
             .as_ref()
             .map(|ready| ready.admission_deadline)
             .or_else(|| callback.as_ref().map(|ready| ready.admission_deadline));
         let result = self
-            .wait_for_download_hydration(&mut guard, endpoint, deadline, &mut clock, &shutdown)
+            .wait_for_download_hydration(
+                &mut guard,
+                prepared.as_mut().map(|ready| &mut ready.reservation),
+                deadline,
+                &mut clock,
+                &shutdown,
+            )
             .await;
         if !matches!(result, Ok(Some(_))) {
-            drop(prepared.take());
+            if let Some(ready) = prepared.take() {
+                self.discard_prepared_source(ready).await;
+            }
             if let Some(ready) = callback.take() {
                 ready.cancel_and_settle().await;
             }
@@ -409,6 +430,9 @@ impl EmulebbCore {
             if shutdown.is_cancelled()
                 || cancel.is_cancelled()
                 || self.ed2k_transfers.download_yield_requested(guard.token())
+                || prepared
+                    .as_ref()
+                    .is_some_and(|ready| tokio::time::Instant::now() >= ready.admission_deadline)
             {
                 break;
             }
@@ -465,6 +489,14 @@ impl EmulebbCore {
             );
             match result {
                 Ok(Some("completed")) => {
+                    #[cfg(test)]
+                    {
+                        let gate = self.download_delivery_gate.lock().await.take();
+                        if let Some((reached, release)) = gate {
+                            let _ = reached.send(());
+                            let _ = release.await;
+                        }
+                    }
                     if let Err(error) = self.deliver_completed_download(guard.token()).await {
                         tracing::warn!(job_id = %guard.token().job_id, %error, "download delivery deferred");
                     }
@@ -505,7 +537,9 @@ impl EmulebbCore {
         if let Some(ready) = callback.take() {
             ready.cancel_and_settle().await;
         }
-        drop(prepared.take());
+        if let Some(ready) = prepared.take() {
+            self.discard_prepared_source(ready).await;
+        }
         self.retire_download_selection(&guard, &mut clock, &shutdown)
             .await;
     }
@@ -514,7 +548,7 @@ impl EmulebbCore {
     async fn wait_for_download_hydration(
         &self,
         guard: &mut DownloadAttemptGuard,
-        endpoint: Option<(std::net::Ipv4Addr, u16)>,
+        mut reservation: Option<&mut crate::download_preparation::PreparedSourceReservation>,
         deadline: Option<tokio::time::Instant>,
         clock: &mut watch::Receiver<()>,
         shutdown: &CancellationToken,
@@ -534,19 +568,14 @@ impl EmulebbCore {
                 ) > 0
                 && guard.promote()
             {
-                let previous = guard.token();
                 match self.begin_selected_download(guard).await {
                     Ok(Some(plan)) => {
-                        if let Some(endpoint) = endpoint {
-                            let mut state = self.state.lock().await;
-                            if state.active_download_peer_endpoints.get(&endpoint)
-                                != Some(&previous)
-                            {
-                                return Ok(None);
-                            }
-                            state
-                                .active_download_peer_endpoints
-                                .insert(endpoint, guard.token());
+                        if let Some(reservation) = reservation.as_deref_mut()
+                            && !self
+                                .rebind_prepared_source(reservation, guard.token())
+                                .await
+                        {
+                            return Ok(None);
                         }
                         selected = Some(plan);
                     }

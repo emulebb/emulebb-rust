@@ -32,6 +32,11 @@ impl LocalMutationRegistry {
         self.cleanup.store(true, Ordering::Release);
         let lease = CleanupLease(Arc::clone(&self.cleanup));
         let metadata = runtime.metadata.clone();
+        let publication = super::publication::ContentPublication::new(runtime);
+        let content_locks = Arc::clone(&runtime.content_locks);
+        let eligibility = Arc::clone(&runtime.share_eligibility);
+        let dirty = Arc::clone(&runtime.category_root_dirty);
+        let failed = Arc::clone(&runtime.share_publication_failed);
         let cache = Arc::clone(&runtime.manifest_cache);
         let checkpoints = Arc::clone(&runtime.manifest_checkpoint_state);
         let storage = Arc::clone(&runtime.job_storage);
@@ -40,7 +45,7 @@ impl LocalMutationRegistry {
         let (sender, receipt) = oneshot::channel();
         #[cfg(test)]
         let publication_gate = state.publication_gate.take();
-        Self::spawn_unit_reply(&mut state, capacity_lease, sender, move |_capacity| {
+        Self::spawn_unit_reply(&mut state, capacity_lease, sender, move |capacity| {
             let _lease = lease;
             let _lifecycle = lifecycle;
             let _job = job_guard;
@@ -103,6 +108,25 @@ impl LocalMutationRegistry {
                 committed = false;
                 if let Some(cleanup) = cleanup {
                     cleanup_removed_output(&metadata, &cleanup)?;
+                    // Refusal retains the durable removed row for the ordinary
+                    // cleanup retry, without waiting while holding job guards.
+                    capacity.try_enter_publication(PUBLICATION_WORKSPACE + 512 * 1024)?;
+                    // The retained owner also publishes the changed local view,
+                    // before dropping the durable row that permits cleanup retry.
+                    committed = true;
+                    let hash: emulebb_kad_proto::Ed2kHash = cleanup.file_hash.parse()?;
+                    let content =
+                        transfer::store::scoped_lock(&content_locks, cleanup.file_hash.clone())
+                            .blocking_lock_owned();
+                    let stripe = eligibility.begin_mutation(&[hash.0])?;
+                    publication.publish_terminal(
+                        hash,
+                        super::publication::PublicationGuards {
+                            content,
+                            stripe,
+                            job: None,
+                        },
+                    )?;
                     ensure!(
                         metadata.finalize_removed_download_job(cleanup.token)?,
                         "removed job changed before final settlement"
@@ -119,6 +143,10 @@ impl LocalMutationRegistry {
                 Ok(Err(error)) => (Err(error), 0),
                 Err(_) => (Err(LocalMutationError::Unknown.into()), 2),
             };
+            if outcome != 0 {
+                dirty.store(true, Ordering::Release);
+                failed.store(true, Ordering::Release);
+            }
             (result, outcome)
         });
         Ok(receipt)

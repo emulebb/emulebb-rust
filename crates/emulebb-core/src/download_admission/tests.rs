@@ -1,5 +1,57 @@
 use super::*;
 
+#[test]
+fn inactive_clean_cache_allows_admission_but_dirty_and_anonymous_memory_do_not() {
+    let mib = 1024 * 1024;
+    let stat = format!(
+        "anon {}\ninactive_file {}\nfile_dirty {}\nfile_writeback {}\n",
+        120 * mib,
+        300 * mib,
+        20 * mib,
+        10 * mib,
+    );
+    let cache = reclaimable_file_bytes(&stat, ["inactive_file", "file_dirty", "file_writeback"]);
+    assert_eq!(cache, 270 * mib);
+    let available = cgroup_available_memory(8 * 1024 * mib, 512 * mib, 0, cache);
+    let window = next_window(
+        AdmissionWindow::default(),
+        resources(),
+        Some(available),
+        1,
+        0,
+    );
+    assert!(window.active > 0 && window.preparing > 0);
+    assert_eq!(
+        cgroup_available_memory(40 * mib, 512 * mib, 0, cache),
+        40 * mib
+    );
+    assert_eq!(
+        cgroup_available_memory(u64::MAX, 512 * mib, u64::MAX, cache),
+        512 * mib
+    );
+    assert_eq!(
+        reclaimable_file_bytes(
+            "inactive_file 30\nfile_dirty 20\nfile_writeback 20\n",
+            ["inactive_file", "file_dirty", "file_writeback"]
+        ),
+        0
+    );
+    assert_eq!(
+        reclaimable_file_bytes(
+            "inactive_file 300\n",
+            ["inactive_file", "file_dirty", "file_writeback"]
+        ),
+        0
+    );
+    assert_eq!(
+        reclaimable_file_bytes(
+            "total_inactive_file 300\ntotal_dirty 20\ntotal_writeback 10\n",
+            ["total_inactive_file", "total_dirty", "total_writeback"]
+        ),
+        270
+    );
+}
+
 fn resources() -> DownloadResourceSnapshot {
     DownloadResourceSnapshot {
         resident_bytes: 0,

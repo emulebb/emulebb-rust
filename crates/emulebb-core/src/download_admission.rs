@@ -6,39 +6,106 @@ const PEER_FRAME_BYTES: usize = 2_000_000;
 const INITIAL_ACTIVE: usize = 16;
 const INITIAL_PREPARING: usize = 2;
 
-pub(crate) struct MemorySampler(Option<sysinfo::System>);
+pub(crate) struct MemorySampler {
+    system: Option<sysinfo::System>,
+    #[cfg(test)]
+    available: Option<u64>,
+}
 impl MemorySampler {
     pub(crate) fn new() -> Self {
-        Self(Some(sysinfo::System::new()))
+        Self {
+            system: Some(sysinfo::System::new()),
+            #[cfg(test)]
+            available: None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn with_available(bytes: u64) -> Self {
+        Self {
+            system: None,
+            available: Some(bytes),
+        }
     }
     pub(crate) async fn available(&mut self) -> Option<u64> {
-        let mut system = self.0.take()?;
+        #[cfg(test)]
+        if let Some(bytes) = self.available {
+            return Some(bytes);
+        }
+        let mut system = self.system.take()?;
         let result = tokio::task::spawn_blocking(move || {
             system.refresh_memory();
             let available = if system.total_memory() == 0 {
                 None
             } else {
                 let host = system.available_memory();
-                Some(
-                    system
-                        .cgroup_limits()
-                        .map_or(host, |limit| host.min(limit.free_memory)),
-                )
+                Some(system.cgroup_limits().map_or(host, |limit| {
+                    cgroup_available_memory(
+                        host,
+                        limit.total_memory,
+                        limit.free_memory,
+                        reclaimable_cgroup_file_bytes(),
+                    )
+                }))
             };
             (system, available)
         })
         .await;
         match result {
             Ok((system, available)) => {
-                self.0 = Some(system);
+                self.system = Some(system);
                 available
             }
             Err(_) => {
-                self.0 = Some(sysinfo::System::new());
+                self.system = Some(sysinfo::System::new());
                 None
             }
         }
     }
+}
+
+fn cgroup_available_memory(host: u64, total: u64, free: u64, reclaimable: u64) -> u64 {
+    host.min(free.saturating_add(reclaimable).min(total))
+}
+
+// File scans can fill a cgroup with clean cache without exhausting its working
+// memory. Count only inactive file cache, conservatively excluding dirty and
+// writeback bytes; never count anonymous memory or swap as available.
+#[cfg(any(target_os = "linux", test))]
+fn reclaimable_file_bytes(stat: &str, keys: [&str; 3]) -> u64 {
+    let mut values = [None; 3];
+    for line in stat.lines() {
+        let mut fields = line.split_whitespace();
+        if let Some(key) = fields.next()
+            && let Some(index) = keys.iter().position(|candidate| *candidate == key)
+        {
+            values[index] = fields.next().and_then(|value| value.parse::<u64>().ok());
+        }
+    }
+    match values {
+        [Some(inactive), Some(dirty), Some(writeback)] => {
+            inactive.saturating_sub(dirty.saturating_add(writeback))
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reclaimable_cgroup_file_bytes() -> u64 {
+    if let Ok(stat) = std::fs::read_to_string("/sys/fs/cgroup/memory.stat") {
+        reclaimable_file_bytes(&stat, ["inactive_file", "file_dirty", "file_writeback"])
+    } else if let Ok(stat) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.stat") {
+        reclaimable_file_bytes(
+            &stat,
+            ["total_inactive_file", "total_dirty", "total_writeback"],
+        )
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reclaimable_cgroup_file_bytes() -> u64 {
+    0
 }
 
 #[derive(Debug, Clone, Copy)]
