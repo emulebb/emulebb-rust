@@ -1,7 +1,7 @@
 use super::*;
 use crate::download_preparation::DownloadPreparation;
 
-pub(super) fn local_preparation_core(
+pub(crate) fn local_preparation_core(
     root: &Path,
     user_hash: [u8; 16],
     max_concurrent: Option<u32>,
@@ -141,8 +141,336 @@ async fn native_probe_capacity_refusal_releases_only_its_exact_core_reservation(
 }
 
 #[tokio::test]
-async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_reask() {
-    let root = unique_runtime_dir("core-prepared-hydration-recovery");
+async fn availability_persistence_capacity_preserves_source_without_peer_cooldown() {
+    use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+    for (error, immediate) in [
+        (anyhow::Error::new(LocalMutationError::Busy), true),
+        (anyhow::Error::new(LocalMutationError::Closing), true),
+        (
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into(),
+            false,
+        ),
+        (
+            std::io::Error::from(std::io::ErrorKind::InvalidData).into(),
+            false,
+        ),
+    ] {
+        let root = unique_runtime_dir("core-probe-availability-capacity");
+        let (core, _) = local_preparation_core(&root, [0x65; 16], None);
+        let hash = Ed2kHash::from_bytes([0x66; 16]);
+        let file = hash.to_string();
+        let owner = a4af_test_owner(&core, &file);
+        let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41012);
+        core.state
+            .lock()
+            .await
+            .download_source_registry
+            .add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
+                    file_hash: file.clone(),
+                    source: source.clone(),
+                    last_seen: Instant::now(),
+                },
+            );
+        let (leased, _, _) = core
+            .acquire_direct_download_source_leases(
+                owner.token(),
+                &file,
+                std::slice::from_ref(&source),
+            )
+            .await;
+        assert_eq!(leased.len(), 1);
+        let lease = core
+            .capture_download_probe_lease(owner.token(), &source, &file)
+            .await
+            .unwrap();
+        core.settle_source_reservation(
+            &crate::download_preparation::PreparedSourceReservation {
+                source: source.clone(),
+                token: owner.token(),
+                hash,
+                lease,
+            },
+            false,
+            Some(&error.context("persisting probe availability")),
+        )
+        .await;
+        assert!(
+            core.state
+                .lock()
+                .await
+                .active_download_peer_endpoints
+                .is_empty()
+        );
+        let (leased, _, retry) = core
+            .acquire_direct_download_source_leases(
+                owner.token(),
+                &file,
+                std::slice::from_ref(&source),
+            )
+            .await;
+        assert_eq!(leased.len(), usize::from(immediate));
+        if immediate {
+            assert!(retry.is_none());
+        } else {
+            assert!(retry.unwrap() > Duration::from_secs(1190));
+        }
+        drop(owner);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn prepared_execution_refusals_settle_exact_source_and_release_permits() {
+    use crate::download_preparation::PreparedSourceReservation;
+    use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+    for (error, immediate) in [
+        (anyhow::Error::new(LocalMutationError::Busy), true),
+        (anyhow::Error::new(LocalMutationError::Closing), true),
+        (
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into(),
+            false,
+        ),
+        (
+            std::io::Error::from(std::io::ErrorKind::InvalidData).into(),
+            false,
+        ),
+    ] {
+        let root = unique_runtime_dir("core-prepared-execution-refusal");
+        let (core, _) = local_preparation_core(&root, [0x65; 16], None);
+        let hash = Ed2kHash::from_bytes([0x66; 16]);
+        let file = hash.to_string();
+        let mut owner = a4af_test_owner(&core, &file);
+        let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41012);
+        core.state
+            .lock()
+            .await
+            .download_source_registry
+            .add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
+                    file_hash: file.clone(),
+                    source: source.clone(),
+                    last_seen: Instant::now(),
+                },
+            );
+        let (leased, _, _) = core
+            .acquire_direct_download_source_leases(
+                owner.token(),
+                &file,
+                std::slice::from_ref(&source),
+            )
+            .await;
+        assert_eq!(leased.len(), 1);
+        let lease = core
+            .capture_download_probe_lease(owner.token(), &source, &file)
+            .await
+            .unwrap();
+        let mut reservation = PreparedSourceReservation {
+            source: source.clone(),
+            token: owner.token(),
+            hash,
+            lease,
+        };
+        let selected = emulebb_metadata::JobToken {
+            generation: owner.token().generation + 1,
+            ..owner.token()
+        };
+        assert!(owner.rebind(selected));
+        assert!(
+            core.rebind_prepared_source(&mut reservation, selected)
+                .await
+        );
+        let permit = match core.ed2k_transfers.try_admit_source_connection() {
+            Ed2kSourceConnectionAdmission::Admitted { permit, .. } => permit,
+            _ => panic!("initial native admission refused"),
+        };
+        let result = core
+            .run_prepared_source(&reservation, async move {
+                let _permit = permit;
+                tokio::task::yield_now().await;
+                Err(error.context("prepared source persistence refused"))
+            })
+            .await;
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<LocalMutationError>()
+                .is_some(),
+            immediate
+        );
+        assert_eq!(
+            core.ed2k_transfers.download_resource_snapshot().connections,
+            0
+        );
+        assert!(
+            core.state
+                .lock()
+                .await
+                .active_download_peer_endpoints
+                .is_empty()
+        );
+        let (leased, _, retry) = core
+            .acquire_direct_download_source_leases(
+                owner.token(),
+                &file,
+                std::slice::from_ref(&source),
+            )
+            .await;
+        assert_eq!(leased.len(), usize::from(immediate));
+        if immediate {
+            assert!(retry.is_none());
+            let replacement = core
+                .capture_download_probe_lease(owner.token(), &source, &file)
+                .await
+                .unwrap();
+            assert_ne!(replacement, reservation.lease);
+            core.settle_source_reservation(&reservation, true, None)
+                .await;
+            assert!(
+                !core
+                    .rebind_prepared_source(&mut reservation, selected)
+                    .await
+            );
+            assert_eq!(
+                core.capture_download_probe_lease(owner.token(), &source, &file)
+                    .await,
+                Some(replacement)
+            );
+            core.finish_download_probe_lease(owner.token(), &source, &file, replacement, true)
+                .await;
+        } else {
+            assert!(retry.unwrap() > Duration::from_secs(1190));
+        }
+        drop(owner);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn prepared_udp_detachment_survives_completion_read_refusal() {
+    use crate::download_preparation::PreparedSourceReservation;
+    use emulebb_ed2k::ed2k_transfer::LocalMutationError;
+    let root = unique_runtime_dir("core-prepared-detached-read-refusal");
+    let (core, network) = local_preparation_core(&root, [0x65; 16], None);
+    let hash = Ed2kHash::from_bytes([0x66; 16]);
+    let file = hash.to_string();
+    let owner = a4af_test_owner(&core, &file);
+    let token = owner.token();
+    let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, 41012);
+    core.state
+        .lock()
+        .await
+        .download_source_registry
+        .add_candidate(
+            Instant::now(),
+            DownloadSourceCandidate {
+                file_hash: file.clone(),
+                source: source.clone(),
+                last_seen: Instant::now(),
+            },
+        );
+    let (leased, _, _) = core
+        .acquire_direct_download_source_leases(token, &file, std::slice::from_ref(&source))
+        .await;
+    assert_eq!(leased.len(), 1);
+    let lease = core
+        .capture_download_probe_lease(token, &source, &file)
+        .await
+        .unwrap();
+    let reservation = PreparedSourceReservation {
+        source: source.clone(),
+        token,
+        hash,
+        lease,
+    };
+    let permit = match core.ed2k_transfers.try_admit_source_connection() {
+        Ed2kSourceConnectionAdmission::Admitted { permit, .. } => permit,
+        _ => panic!("initial admission refused"),
+    };
+    let mut options = direct_download_options(
+        token,
+        Arc::clone(&core.ed2k_transfers),
+        Arc::clone(&network.secure_ident),
+        file.clone(),
+        "Sample.bin".into(),
+        1024,
+        Vec::new(),
+    );
+    options.completion_read_busy = true;
+    let producer = core.clone();
+    let captured = reservation.clone();
+    options.prepared = Some(crate::ed2k_direct_download_types::PreparedDirectDownload {
+        source: source.clone(),
+        download: Box::pin(async move {
+            producer
+                .run_prepared_source(&captured, async move {
+                    let _permit = permit;
+                    Ok(Ed2kPeerDownloadReport::single(
+                        token,
+                        hash,
+                        Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask,
+                    ))
+                })
+                .await
+        }),
+    });
+    let outcome = run_ed2k_direct_downloads(options, |_, _, _, _, _, _, _, _, _| async {
+        panic!("prepared source must not be redialed")
+    })
+    .await;
+    assert!(matches!(
+        outcome
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_ref()
+            .unwrap()
+            .downcast_ref(),
+        Some(LocalMutationError::Busy)
+    ));
+    core.settle_prepared_round(&reservation, &outcome).await;
+    assert_eq!(
+        core.ed2k_transfers.download_resource_snapshot().connections,
+        0
+    );
+    assert_eq!(
+        core.capture_download_probe_lease(token, &source, &file)
+            .await,
+        Some(lease)
+    );
+    let (leased, _, _) = core
+        .acquire_direct_download_source_leases(token, &file, std::slice::from_ref(&source))
+        .await;
+    assert!(
+        leased.is_empty(),
+        "UDP still owns this peer even though completion metadata was busy"
+    );
+    core.release_direct_download_source_leases(token, &[source_endpoint_key(&source)])
+        .await;
+    assert!(
+        core.capture_download_probe_lease(token, &source, &file)
+            .await
+            .is_none()
+    );
+    drop(owner);
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+async fn prepared_source_pair(
+    root: &std::path::Path,
+) -> (
+    EmulebbCore,
+    EmulebbCore,
+    Ed2kNetworkConfig,
+    String,
+    Vec<u8>,
+    emulebb_metadata::JobToken,
+) {
     let library = root.join("library");
     std::fs::create_dir_all(&library).unwrap();
     let payload = vec![0x61; 2048];
@@ -200,6 +528,14 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
         )
         .await
         .unwrap();
+    (seed, download, network, hash_hex, payload, original)
+}
+
+#[tokio::test]
+async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_reask() {
+    let root = unique_runtime_dir("core-prepared-hydration-recovery");
+    let (seed, download, network, hash_hex, payload, original) = prepared_source_pair(&root).await;
+    let id = original.job_id;
     let baseline = download
         .ed2k_transfers
         .download_resource_snapshot()
@@ -309,6 +645,85 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
     drop(job);
     download.disconnect_ed2k().await.unwrap();
     seed.disconnect_ed2k().await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_prepared_sources_settle_before_and_after_begin_handoff() {
+    for stage in 0..3 {
+        let root = unique_runtime_dir("core-prepared-expiry-handoff");
+        let (seed, download, network, hash_hex, _, original) = prepared_source_pair(&root).await;
+        let hash = hash_hex.parse().unwrap();
+        let mut guard = download
+            .download_attempts
+            .try_prepare(original, hash)
+            .unwrap();
+        let DownloadPreparation::Direct(mut ready) = download
+            .prepare_download_sources(&guard, &CancellationToken::new())
+            .await
+            .unwrap()
+        else {
+            panic!("live seed must supply a prepared connection");
+        };
+        if stage != 0 {
+            assert!(guard.promote());
+            assert!(
+                download
+                    .begin_selected_download(&mut guard)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_ne!(guard.token(), original);
+            if stage == 1 {
+                assert!(
+                    download
+                        .rebind_prepared_source(&mut ready.reservation, guard.token())
+                        .await
+                );
+            }
+        }
+        // Stage 2 mirrors a Begin that advances its guard then is cancelled
+        // before transferring the source. Its actual reservation still owns original.
+        assert_eq!(
+            ready.reservation.token,
+            if stage == 1 { guard.token() } else { original }
+        );
+        ready.admission_deadline = tokio::time::Instant::now() - Duration::from_millis(1);
+        let (_sender, clock) = tokio::sync::watch::channel(());
+        download
+            .run_selected_download(
+                guard,
+                DownloadPreparation::Direct(ready),
+                clock,
+                CancellationToken::new(),
+            )
+            .await;
+        let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, network.listen_port);
+        let state = download.state.lock().await;
+        assert!(state.active_download_peer_endpoints.is_empty());
+        assert!(
+            state
+                .download_source_registry
+                .endpoint_retry_delay(
+                    Instant::now(),
+                    Duration::from_secs(20 * 60),
+                    &source,
+                    &hash_hex,
+                )
+                .is_none(),
+            "unused connection expiry must not penalize its peer at stage {stage}"
+        );
+        drop(state);
+        assert_eq!(
+            download
+                .ed2k_transfers
+                .download_resource_snapshot()
+                .connections,
+            0
+        );
+        download.disconnect_ed2k().await.unwrap();
+        seed.disconnect_ed2k().await.unwrap();
+    }
 }
 
 #[tokio::test]

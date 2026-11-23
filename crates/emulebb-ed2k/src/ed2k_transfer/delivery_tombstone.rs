@@ -62,6 +62,11 @@ impl OutputCleanup<'_> {
                     match inspect_file(&authority.path)? {
                         InspectedFile::Missing => {
                             sync_parent_directory(&authority.path)?;
+                            self.metadata.withdraw_local_file_path_if_verified(
+                                &long_path(&authority.path),
+                                file_hash,
+                                &authority.fingerprint,
+                            )?;
                             return Ok(());
                         }
                         InspectedFile::Regular { fingerprint, .. }
@@ -93,8 +98,7 @@ impl OutputCleanup<'_> {
                     }
                 }
                 MetadataTransferDeletionTombstonePhase::Moved => {
-                    reap_moved_tombstone(&tombstone)?;
-                    return self.settle(&tombstone);
+                    return self.reap_and_settle(file_hash, &tombstone);
                 }
             }
         }
@@ -137,8 +141,7 @@ impl OutputCleanup<'_> {
                         })?;
                         let moved =
                             self.mark_deletion_tombstone_moved(tombstone, &verified_fingerprint)?;
-                        reap_moved_tombstone(&moved)?;
-                        self.settle(&moved)?;
+                        self.reap_and_settle(file_hash, &moved)?;
                         Ok(PreparedCleanupOutcome::Complete)
                     }
                     InspectedFile::Regular { .. } | InspectedFile::Foreign => {
@@ -185,8 +188,7 @@ impl OutputCleanup<'_> {
                         };
                         let moved =
                             self.mark_deletion_tombstone_moved(tombstone, &moved_fingerprint)?;
-                        reap_moved_tombstone(&moved)?;
-                        self.settle(&moved)?;
+                        self.reap_and_settle(file_hash, &moved)?;
                         Ok(PreparedCleanupOutcome::Complete)
                     }
                 }
@@ -235,6 +237,22 @@ impl OutputCleanup<'_> {
             )?
             .context("deletion tombstone disappeared before move committed")
     }
+    fn reap_and_settle(
+        &self,
+        file_hash: &str,
+        moved: &MetadataTransferDeletionTombstone,
+    ) -> Result<()> {
+        // WHY: watchers are optional. The retained deletion owner must withdraw
+        // the exact moved copy itself; a newer verified replacement is independent.
+        self.metadata.withdraw_local_file_path_if_verified(
+            &long_path(&moved.original_path),
+            file_hash,
+            &moved.source_fingerprint,
+        )?;
+        reap_moved_tombstone(moved)?;
+        self.settle(moved)
+    }
+
     fn settle(&self, expected: &MetadataTransferDeletionTombstone) -> Result<()> {
         anyhow::ensure!(
             self.metadata

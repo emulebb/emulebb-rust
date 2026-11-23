@@ -47,6 +47,8 @@ pub(crate) struct DirectDownloadOutcome {
 }
 
 pub(crate) struct DirectDownloadOptions {
+    #[cfg(test)]
+    pub(crate) completion_read_busy: bool,
     pub(crate) prepared: Option<PreparedDirectDownload>,
     pub(crate) job_token: emulebb_metadata::JobToken,
     pub(crate) bind_ip: Ipv4Addr,

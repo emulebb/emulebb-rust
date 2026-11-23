@@ -7,14 +7,23 @@ use anyhow::Result;
 use emulebb_ed2k::{
     ed2k_server::Ed2kFoundSource,
     ed2k_tcp::{
-        Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, Ed2kPreparedPeer, probe_file_from_peer,
+        Ed2kPeerDownloadReport, Ed2kPeerProbeOptions, Ed2kPeerProbeOutcome, Ed2kPreparedPeer,
+        probe_file_from_peer,
     },
 };
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) struct PreparedDownloadSource {
+#[derive(Clone)]
+pub(crate) struct PreparedSourceReservation {
     pub source: Ed2kFoundSource,
+    pub token: emulebb_metadata::JobToken,
+    pub hash: emulebb_kad_proto::Ed2kHash,
+    pub lease: crate::download_source_registry::DownloadSourceLeaseId,
+}
+
+pub(crate) struct PreparedDownloadSource {
+    pub reservation: PreparedSourceReservation,
     pub peer: Box<Ed2kPreparedPeer>,
     pub admission_deadline: tokio::time::Instant,
 }
@@ -27,6 +36,104 @@ pub(crate) enum DownloadPreparation {
 }
 
 impl EmulebbCore {
+    /// Settle only this probe's reservation. Local admission refusal does not
+    /// consume the peer's reask interval, even after a successful wire probe.
+    pub(crate) async fn settle_source_reservation(
+        &self,
+        reservation: &PreparedSourceReservation,
+        deferred: bool,
+        error: Option<&anyhow::Error>,
+    ) {
+        let local_capacity = error.is_some_and(|error| {
+            matches!(
+                error.downcast_ref(),
+                Some(
+                    emulebb_ed2k::ed2k_transfer::LocalMutationError::Busy
+                        | emulebb_ed2k::ed2k_transfer::LocalMutationError::Closing
+                )
+            )
+        });
+        // WHY: refused availability persistence is our capacity problem, not a
+        // failed source. Keep the exact lease fence and ordinary network cooldown.
+        self.finish_download_probe_lease(
+            reservation.token,
+            &reservation.source,
+            &reservation.hash.to_string(),
+            reservation.lease,
+            deferred || local_capacity,
+        )
+        .await;
+    }
+
+    /// Transfer the exact source reservation only after Begin has selected its
+    /// generation. A cancelled Begin may have advanced the guard without this handoff.
+    pub(crate) async fn rebind_prepared_source(
+        &self,
+        reservation: &mut PreparedSourceReservation,
+        token: emulebb_metadata::JobToken,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        let endpoint = crate::source_endpoint_key(&reservation.source);
+        if token.job_id != reservation.token.job_id
+            || state.active_download_peer_endpoints.get(&endpoint) != Some(&reservation.token)
+            || state
+                .download_source_registry
+                .source_lease_id(&reservation.source, &reservation.hash.to_string())
+                != Some(reservation.lease)
+        {
+            return false;
+        }
+        state.active_download_peer_endpoints.insert(endpoint, token);
+        reservation.token = token;
+        true
+    }
+
+    /// Dispose of an unused socket before making its reservation available again.
+    pub(crate) async fn discard_prepared_source(&self, ready: PreparedDownloadSource) {
+        let PreparedDownloadSource {
+            reservation, peer, ..
+        } = ready;
+        drop(peer);
+        self.settle_source_reservation(&reservation, true, None)
+            .await;
+    }
+
+    /// Settle raw local refusals before the direct runner aggregates peer errors.
+    /// The awaited producer (and its socket/permit) is dropped before settlement.
+    pub(crate) async fn run_prepared_source<F>(
+        &self,
+        reservation: &PreparedSourceReservation,
+        operation: F,
+    ) -> Result<Ed2kPeerDownloadReport>
+    where
+        F: std::future::Future<Output = Result<Ed2kPeerDownloadReport>>,
+    {
+        let result = operation.await;
+        if let Err(error) = &result {
+            self.settle_source_reservation(reservation, false, Some(error))
+                .await;
+        }
+        result
+    }
+
+    /// Round bookkeeping must not reinterpret a later metadata refusal as a
+    /// producer refusal, or release a connection already owned by UDP reask.
+    pub(crate) async fn settle_prepared_round(
+        &self,
+        reservation: &PreparedSourceReservation,
+        outcome: &Result<crate::ed2k_direct_download_types::DirectDownloadOutcome>,
+    ) {
+        let detached = outcome.as_ref().is_ok_and(|outcome| {
+            outcome
+                .detached_reask_endpoints
+                .contains(&crate::source_endpoint_key(&reservation.source))
+        });
+        if !detached {
+            self.settle_source_reservation(reservation, false, None)
+                .await;
+        }
+    }
+
     pub(crate) async fn prepare_download_sources(
         &self,
         guard: &DownloadAttemptGuard,
@@ -123,6 +230,12 @@ impl EmulebbCore {
                 else {
                     continue;
                 };
+                let reservation = PreparedSourceReservation {
+                    source: source.clone(),
+                    token: guard.token(),
+                    hash: guard.hash(),
+                    lease: lease_id,
+                };
                 let mut not_started = false;
                 let result: Result<DownloadPreparation> = async {
                     let outcome = tokio::select! {
@@ -152,7 +265,7 @@ impl EmulebbCore {
                                 .any(|(available, verified)| *available && !*verified)
                             {
                                 return Ok(DownloadPreparation::Direct(PreparedDownloadSource {
-                                    source: source.clone(),
+                                    reservation: reservation.clone(),
                                     peer,
                                     admission_deadline: tokio::time::Instant::now()
                                         + Duration::from_secs(
@@ -183,14 +296,8 @@ impl EmulebbCore {
                 if let Ok(DownloadPreparation::Direct(_)) = &result {
                     return result;
                 }
-                self.finish_download_probe_lease(
-                    guard.token(),
-                    source,
-                    &target.hash,
-                    lease_id,
-                    not_started,
-                )
-                .await;
+                self.settle_source_reservation(&reservation, not_started, result.as_ref().err())
+                    .await;
                 if let Err(error) = result {
                     tracing::debug!(job_id = %guard.token().job_id, %error, "source preparation deferred");
                 }

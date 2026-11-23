@@ -188,11 +188,38 @@ async fn local_hydration_busy_keeps_one_execution_and_lease_until_retry_or_cance
             .unwrap();
         drop(job);
         let endpoint = (Ipv4Addr::LOCALHOST, 41010);
-        core.state
-            .lock()
-            .await
+        let source = crate::tests::direct_test_source(guard.hash(), endpoint.0, endpoint.1);
+        let file = guard.hash().to_string();
+        let now = std::time::Instant::now();
+        let mut state = core.state.lock().await;
+        state.download_source_registry.add_candidate(
+            now,
+            crate::download_source_registry::DownloadSourceCandidate {
+                file_hash: file.clone(),
+                source: source.clone(),
+                last_seen: now,
+            },
+        );
+        assert!(
+            state
+                .download_source_registry
+                .lease_best_for_file(now, Duration::from_secs(1200), &source, &file)
+                .is_some()
+        );
+        let lease = state
+            .download_source_registry
+            .source_lease_id(&source, &file)
+            .unwrap();
+        state
             .active_download_peer_endpoints
             .insert(endpoint, original);
+        drop(state);
+        let mut reservation = crate::download_preparation::PreparedSourceReservation {
+            source,
+            token: original,
+            hash: guard.hash(),
+            lease,
+        };
         let baseline = core
             .ed2k_transfers
             .download_resource_snapshot()
@@ -205,7 +232,7 @@ async fn local_hydration_busy_keeps_one_execution_and_lease_until_retry_or_cance
             tokio::time::Instant::now() + Duration::from_secs(if action == 3 { 1 } else { 5 });
         let hydration = core.wait_for_download_hydration(
             &mut guard,
-            Some(endpoint),
+            Some(&mut reservation),
             Some(deadline),
             &mut clock,
             &shutdown,
@@ -261,6 +288,7 @@ async fn local_hydration_busy_keeps_one_execution_and_lease_until_retry_or_cance
         .await
         .unwrap();
         let result = result.unwrap();
+        assert_eq!(reservation.token, selected_token);
         assert_eq!(result.is_some(), action == 0);
         assert_eq!(
             guard.token(),
@@ -279,6 +307,8 @@ async fn local_hydration_busy_keeps_one_execution_and_lease_until_retry_or_cance
             );
         }
         drop(current);
+        core.settle_source_reservation(&reservation, true, None)
+            .await;
         core.retire_download_selection(&guard, &mut clock, &shutdown)
             .await;
         assert!(
