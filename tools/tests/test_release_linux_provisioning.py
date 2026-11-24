@@ -156,6 +156,17 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
         self.assertEqual(producer["with"]["ref"], "${{ env.EMULEBB_BUILD_REF }}")
         self.assertEqual(validator["with"]["ref"], "${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}")
 
+    def test_candidate_readers_verify_tool_data_from_the_pinned_producer(self):
+        for name in ("assemble-candidate", "publish-image", "publish-native"):
+            steps = self.workflow["jobs"][name]["steps"]
+            producer = next(step for step in steps if step.get("with", {}).get("path") == "emulebb-image-build")
+            self.assertEqual(producer["with"]["ref"], "${{ env.EMULEBB_BUILD_REF }}")
+            readers = [step for step in steps if "--build-repo " in step.get("run", "")]
+            self.assertTrue(readers)
+            for reader in readers:
+                self.assertLess(steps.index(producer), steps.index(reader))
+                self.assertIn("--producer-build-repo emulebb-image-build", reader["run"])
+
     def test_musl_and_image_consumers_select_mirrors_without_changing_runtime_base(self):
         for job, command in (("musl-package", "package-emulebb-rust-linux-ci"),
                              ("image-candidate", "package-emulebb-rust-image-ci")):
