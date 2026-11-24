@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import io
@@ -304,6 +305,39 @@ class TestDraftAssetValidation(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(RuntimeError, "identity changed"):
                     self.validate(complete=True, release_id=value)
+
+    def test_interrupted_publisher_recovers_only_the_same_complete_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate = Path(temp_dir) / "candidate.json"
+            candidate.write_bytes(b"candidate")
+            output = Path(temp_dir) / "github-output"
+            candidate_asset = {"name": candidate.name, "size": candidate.stat().st_size,
+                               "digest": "sha256:" + hashlib.sha256(b"candidate").hexdigest(), "state": "uploaded"}
+            assets = [*self.assets, candidate_asset]
+            args = argparse.Namespace(release_version=self.tag.removeprefix("rust-v"), repository="example/project",
+                                      source_sha=self.source, phase="after-upload", release_id="42",
+                                      github_output=output)
+            data = {"artifacts": self.expected}
+            with mock.patch.object(PUBLISH, "gh_rows", side_effect=[[self.release], assets] * 3) as rows, \
+                    mock.patch.object(PUBLISH, "require_publication_source",
+                                      side_effect=[RuntimeError("source gate interrupted"), None, None]) as gate:
+                with self.assertRaisesRegex(RuntimeError, "source gate interrupted"):
+                    PUBLISH.verify_release_assets(args, data, candidate)
+                self.assertFalse(output.exists())
+                args.phase, args.release_id = "before-upload", None
+                PUBLISH.verify_release_assets(args, data, candidate)
+                self.assertEqual(output.read_text(encoding="utf-8"), "complete_draft_id=42\n")
+                args.phase, args.release_id = "after-upload", "42"
+                PUBLISH.verify_release_assets(args, data, candidate)
+                self.assertEqual(gate.call_args_list, [mock.call(args.repository, self.source)] * 3)
+                self.assertEqual([call.args[0] for call in rows.call_args_list[1::2]],
+                                 ["repos/example/project/releases/42/assets?per_page=100"] * 3)
+            corrupted = {**candidate_asset, "digest": "sha256:" + "0" * 64}
+            with mock.patch.object(PUBLISH, "gh_rows", side_effect=[[self.release], [*self.assets, corrupted]]), \
+                    mock.patch.object(PUBLISH, "require_publication_source") as gate:
+                with self.assertRaisesRegex(RuntimeError, "Draft asset bytes differ"):
+                    PUBLISH.verify_release_assets(args, data, candidate)
+                gate.assert_not_called()
 
 
 class TestGitHubReleaseRows(unittest.TestCase):

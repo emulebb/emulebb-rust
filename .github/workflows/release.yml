@@ -1411,6 +1411,7 @@ jobs:
           name: emulebb-rust-release-candidate
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Recheck source eligibility and existing draft bytes
+        id: draft-preflight
         env:
           RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1418,13 +1419,14 @@ jobs:
           set -euo pipefail
           python -B emulebb-rust/tools/release_publish.py release-assets \
             --release-dir "$RELEASE_DIR" --build-repo emulebb-build --producer-build-repo emulebb-image-build --apk-harness-repo emulebb-apk-tests \
-            --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase before-upload
+            --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase before-upload --github-output "$GITHUB_OUTPUT"
       - name: Attest the exact native release candidate
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
       - name: Upload immutable assets to a draft prerelease
         id: draft-release
+        if: steps.draft-preflight.outputs.complete_draft_id == ''
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: rust-v${{ env.RELEASE_VERSION }}
@@ -1439,7 +1441,7 @@ jobs:
         env:
           RELEASE_DIR: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.draft-release.outputs.id }}
+          RELEASE_ID: ${{ steps.draft-preflight.outputs.complete_draft_id || steps.draft-release.outputs.id }}
         run: |
           set -euo pipefail
           python -B emulebb-rust/tools/release_publish.py release-assets \
