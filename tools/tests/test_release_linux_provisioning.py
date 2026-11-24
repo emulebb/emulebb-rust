@@ -146,6 +146,16 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
             self.assertIn("${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}", smoke["run"])
             self.assertNotIn("continue-on-error", smoke)
 
+    def test_image_evidence_assembly_uses_the_producer_checkout(self):
+        steps = self.workflow["jobs"]["assemble-candidate"]["steps"]
+        assemble = next(step for step in steps if "assemble-emulebb-rust-image-evidence-ci" in step.get("run", ""))
+        producer = next(step for step in steps if step.get("with", {}).get("path") == assemble["working-directory"])
+        validator = next(step for step in steps if step.get("with", {}).get("path") == "emulebb-build")
+        self.assertLess(steps.index(producer), steps.index(assemble))
+        self.assertEqual(producer["with"]["repository"], "emulebb/emulebb-build")
+        self.assertEqual(producer["with"]["ref"], "${{ env.EMULEBB_BUILD_REF }}")
+        self.assertEqual(validator["with"]["ref"], "${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}")
+
     def test_musl_and_image_consumers_select_mirrors_without_changing_runtime_base(self):
         for job, command in (("musl-package", "package-emulebb-rust-linux-ci"),
                              ("image-candidate", "package-emulebb-rust-image-ci")):
