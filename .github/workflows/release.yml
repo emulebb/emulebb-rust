@@ -53,10 +53,10 @@ env:
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
   EMULEBB_BUILD_REF: 00ef942397ad7e069813f3ff5d0d6bcb9bc58acb
   EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:182090666a847a8c49e4e782f172ab845e295646eb2f246e75ff3ad989519237
-  EMULEBB_BUILD_TESTS_REF: 4a1834c460727d8d5f0c42c74229099ed6fdd537
+  EMULEBB_BUILD_TESTS_REF: 135930dcbf350cc37477baf528f9d29ff4a573e9
   EMULEBB_TOOLING_REF: ac8609756b097d1294308abeef962fe1592e4e38
   EMULEBB_RELEASE_VALIDATOR_REF: 00ef942397ad7e069813f3ff5d0d6bcb9bc58acb
-  EMULEBB_APK_BUILD_REF: 69f0652944d80c4f48f57245c851e80b04895d6e
+  EMULEBB_APK_BUILD_REF: 82e1dc96d84f8e5f7f0f6fad1f6babd3c902c712
   EMULEBB_APK_BUILD_TESTS_REF: 4a1834c460727d8d5f0c42c74229099ed6fdd537
   EMULEBB_ANDROID_SIGNER_SHA256: 9edc742d7230a714a0149c20eb2afb235b8ad5237166090f10e7ac69e2bb359f
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
@@ -203,7 +203,8 @@ jobs:
           repository: emulebb/emulebb-build
           ref: ${{ env.EMULEBB_BUILD_REF }}
           path: .ci/emulebb-build
-      - name: Checkout pinned release documentation
+      - &checkout-release-tooling
+        name: Checkout pinned release documentation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -324,10 +325,13 @@ jobs:
           repository: emulebb/emulebb-build-tests
           ref: ${{ env.EMULEBB_BUILD_TESTS_REF }}
           path: .ci/emulebb-build-tests
+      - *checkout-release-tooling
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15.2"
+      - name: Install pinned package smoke dependencies
+        run: python -m pip install -r tools/requirements-ci.txt psutil==7.2.2
       - name: Install pinned rendered WebUI smoke dependency
         if: matrix.os == 'windows' && matrix.arch == 'x64'
         run: python -m pip install playwright==1.59.0 && python -m playwright install chromium
@@ -338,6 +342,7 @@ jobs:
           path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Prove packaged lifecycle, local transfer, and embedded WebUI
         env:
+          EMULEBB_REST_OPENAPI_CONTRACT_PATH: ${{ github.workspace }}/.ci/emulebb-tooling/docs/products/emulebb-rust/api/REST-API-OPENAPI.yaml
           EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --rust-repo .ci/candidate --expected-source-sha "${{ needs.prepare.outputs.source_sha }}" --expected-channel "${{ env.RELEASE_CHANNEL }}" --report-path "${{ runner.temp }}/emulebb-rust-out/evidence/emulebb-rust-v${{ env.RELEASE_VERSION }}-package-smoke-${{ matrix.slug }}.json" --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} ${{ matrix.os != 'macos' && '--verify-profile-ownership' || '' }} ${{ matrix.os == 'windows' && matrix.arch == 'x64' && '--render-webui' || '' }}
