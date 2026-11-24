@@ -124,9 +124,20 @@ class ReleaseLinuxProvisioningTests(unittest.TestCase):
 
     def test_native_smoke_proves_identity_and_owns_profile_contention_scratch(self):
         for name in ("native-package-smoke", "optional-macos-smoke"):
-            job = self.workflow["jobs"][name]
-            smoke = next(step for step in job["steps"]
+            steps = self.workflow["jobs"][name]["steps"]
+            dependencies = next(step for step in steps
+                                if step.get("run") == "python -m pip install -r tools/requirements-ci.txt psutil==7.2.2")
+            smoke = next(step for step in steps
                          if "smoke-rust-release-package.py" in step.get("run", ""))
+            contract_checkout = next(step for step in steps
+                                     if step.get("with", {}).get("repository") == "emulebb/emulebb-tooling")
+            self.assertLess(steps.index(contract_checkout), steps.index(smoke))
+            self.assertEqual(contract_checkout["with"]["ref"], "${{ env.EMULEBB_TOOLING_REF }}")
+            self.assertEqual(smoke["env"]["EMULEBB_REST_OPENAPI_CONTRACT_PATH"],
+                             "${{ github.workspace }}/" + contract_checkout["with"]["path"]
+                             + "/docs/products/emulebb-rust/api/REST-API-OPENAPI.yaml")
+            self.assertNotIn("if", dependencies)
+            self.assertLess(steps.index(dependencies), steps.index(smoke))
             self.assertEqual(smoke["env"]["EMULEBB_WORKSPACE_OUTPUT_ROOT"],
                              "${{ runner.temp }}/emulebb-rust-out")
             self.assertIn("--expected-source-sha", smoke["run"])
