@@ -713,6 +713,18 @@ jobs:
       - name: Install CI test dependencies
         run: python -m pip install -r tools/requirements-ci.txt
 
+      - name: Configure Ubuntu downloads for browser dependencies
+        if: ${{ needs.change-scope.outputs.scope == 'full' }}
+        run: |
+          set -euo pipefail
+          # Playwright installs native Chromium and WebKit dependencies through apt.
+          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          if [[ -f "$ubuntu_sources" ]]; then
+            sudo sed -i 's|^URIs:.*$|URIs: https://azure.archive.ubuntu.com/ubuntu/|' "$ubuntu_sources"
+          fi
+          printf '%s\n' 'Acquire::Retries "2";' 'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' | sudo tee /etc/apt/apt.conf.d/99emulebb-webui > /dev/null
+
       - name: Rust quality gate
         if: ${{ needs.change-scope.outputs.scope == 'full' }}
         env:
