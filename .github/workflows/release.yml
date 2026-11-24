@@ -1091,6 +1091,13 @@ jobs:
           ref: ${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}
           path: emulebb-build
           persist-credentials: false
+      - name: Checkout the pinned image producer for evidence assembly
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: ${{ env.EMULEBB_BUILD_REF }}
+          path: emulebb-image-build
+          persist-credentials: false
       - name: Checkout pinned image evidence reader
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1178,7 +1185,7 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/emulebb-rust-out/image-evidence/alpine
       - name: Bind both native CPU proofs to each exact OCI archive
-        working-directory: emulebb-build
+        working-directory: emulebb-image-build
         shell: bash
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
