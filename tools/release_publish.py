@@ -650,6 +650,10 @@ def verify_release_assets(args: argparse.Namespace, data: dict, candidate: Path)
         source_sha=args.source_sha, complete=args.phase == "after-upload", release_id=args.release_id,
     )
     require_publication_source(args.repository, args.source_sha)
+    if args.phase == "before-upload" and args.github_output is not None:
+        with args.github_output.open("a", encoding="utf-8", newline="\n") as stream:
+            if identifier is not None and len(assets) == len(expected):
+                stream.write(f"complete_draft_id={identifier}\n")
     print(json.dumps({"phase": args.phase, "releaseId": identifier, "verifiedAssets": len(assets)}, sort_keys=True))
 
 

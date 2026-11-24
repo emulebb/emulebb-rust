@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -618,10 +619,49 @@ class TestSourceQualificationWait(unittest.TestCase):
             self.assertEqual(NIGHTLY._action_rows("synthetic", "workflow_runs", deadline=10), [])
         self.assertEqual(run.call_args.kwargs["timeout"], 2)
 
-    def test_actions_timeout_is_terminal_for_this_qualification(self):
-        with mock.patch.object(NIGHTLY, "run", side_effect=subprocess.TimeoutExpired("gh", 120)):
+    def test_actions_timeout_is_terminal_after_bounded_retries(self):
+        with mock.patch.object(NIGHTLY, "run", side_effect=subprocess.TimeoutExpired("gh", 15)) as run, \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep:
             with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "Actions request timed out"):
                 NIGHTLY._action_rows("synthetic", "workflow_runs")
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_rate_limit_retries_and_reads_all_success_pages(self):
+        throttled = subprocess.CalledProcessError(
+            1, "gh", output="Retry-After: 3\nX-GitHub-Request-Id: 123:ABC\n",
+            stderr="gh: secondary rate limit (HTTP 403)",
+        )
+        payload = '[HTTP/2.0 200 OK\nHeader: value\n\n{"jobs":[{"id":1}]},HTTP/2.0 200 OK\n\n{"jobs":[{"id":2}]}]'
+        response = subprocess.CompletedProcess([], 0, stdout=payload)
+        with mock.patch.object(NIGHTLY, "run", side_effect=[throttled, response]), \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep:
+            self.assertEqual(NIGHTLY._action_rows("synthetic", "jobs"), [{"id": 1}, {"id": 2}])
+        sleep.assert_called_once_with(3)
+
+    def test_forbidden_reports_safe_context_without_retry(self):
+        forbidden = subprocess.CalledProcessError(
+            1, "gh", output="Authorization: secret\nX-GitHub-Request-Id: 123:ABC\n",
+            stderr="gh: Resource not accessible (HTTP 403)",
+        )
+        with mock.patch.object(NIGHTLY, "run", side_effect=forbidden) as run, \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep:
+            with self.assertRaisesRegex(NIGHTLY.SourceChecksNotReady, "HTTP 403 .*123:ABC.*synthetic") as error:
+                NIGHTLY._action_rows("synthetic", "jobs")
+        self.assertNotIn("secret", str(error.exception))
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_interrupted_transport_retries_without_printing_cli_diagnostics(self):
+        interrupted = subprocess.CalledProcessError(1, "gh", stderr="connection reset by peer: private context")
+        response = subprocess.CompletedProcess([], 0, stdout='[{"jobs":[]}]')
+        with mock.patch.object(NIGHTLY, "run", side_effect=[interrupted, response]), \
+                mock.patch.object(NIGHTLY.time, "sleep") as sleep, \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as log:
+            self.assertEqual(NIGHTLY._action_rows("synthetic", "jobs"), [])
+        sleep.assert_called_once_with(1)
+        self.assertIn("transport interruption", log.getvalue())
+        self.assertNotIn("private context", log.getvalue())
 
     def test_success_after_the_deadline_cannot_qualify_source(self):
         with mock.patch.object(NIGHTLY, "verify_source_checks", return_value={}), \

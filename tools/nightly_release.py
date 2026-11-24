@@ -525,17 +525,67 @@ def write_release_documents(*, version: str, channel: str, source_sha: str, sour
             stream.write(content)
 
 
+def _github_api_failure(error: subprocess.CalledProcessError) -> tuple[str, bool, float]:
+    """Summarize only known response metadata and classify retryable read failures."""
+    stderr = error.stderr or ""
+    status = re.search(r"\(HTTP ([1-5][0-9]{2})\)", stderr)
+    headers = {
+        key.lower(): value for key, value in re.findall(
+            r"(?im)^(x-github-request-id|retry-after|x-ratelimit-remaining|x-ratelimit-reset):[ \t]*([a-z0-9:-]{1,80})[ \t]*$",
+            error.stdout or "",
+        )
+    }
+    code = int(status[1]) if status else None
+    retry_after = headers.get("retry-after", "")
+    delay = float(retry_after) if re.fullmatch(r"[0-9]{1,10}", retry_after) else 0
+    remaining = headers.get("x-ratelimit-remaining")
+    reset = headers.get("x-ratelimit-reset", "")
+    if remaining == "0" and re.fullmatch(r"[0-9]{1,10}", reset):
+        delay = max(delay, int(reset) - time.time())
+    retryable = code in {408, 429, 500, 502, 503, 504} or (
+        code == 403 and (remaining == "0" or bool(delay)
+                         or re.search(r"(?:secondary|API) rate limit", stderr, re.IGNORECASE) is not None)
+    )
+    label = f"HTTP {code}" if code is not None else f"gh exited {error.returncode}"
+    if code is None and re.search(r"i/o timeout|TLS handshake timeout|connection reset by peer|unexpected EOF",
+                                  stderr, re.IGNORECASE):
+        retryable = True
+        label = "GitHub transport interruption"
+    detail = ", ".join(f"{key}={value}" for key, value in sorted(headers.items()))
+    return label + (f" ({detail})" if detail else ""), retryable, delay
+
+
 def _action_rows(endpoint: str, field: str, *, deadline: float | None = None) -> list[dict[str, object]]:
-    """Read every Actions page, rejecting incomplete or malformed inventories."""
-    # WHY: the qualification deadline must also bound a stalled API request.
-    timeout = 120 if deadline is None else min(120, deadline - time.monotonic())
-    if timeout <= 0:
-        raise SourceChecksNotReady("Exact-source qualification timed out before an Actions request")
-    try:
-        response = run(("gh", "api", "--paginate", "--slurp", endpoint), timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        raise SourceChecksNotReady("Exact-source qualification Actions request timed out") from error
-    pages = json.loads(response.stdout)
+    """Read every Actions page with a bounded retry for transient failures."""
+    request_deadline = time.monotonic() + 45
+    if deadline is not None:
+        request_deadline = min(deadline, request_deadline)
+    failure = "Exact-source qualification timed out before an Actions request"
+    for attempt in range(1, 4):
+        timeout = min(15, request_deadline - time.monotonic())
+        if timeout <= 0:
+            raise SourceChecksNotReady(f"{failure}: {endpoint}")
+        delay = 0.0
+        try:
+            response = run(("gh", "api", "--paginate", "--slurp", "--include", endpoint), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            failure = "Exact-source qualification Actions request timed out"
+        except subprocess.CalledProcessError as error:
+            detail, retryable, delay = _github_api_failure(error)
+            failure = f"Exact-source qualification Actions request failed ({detail})"
+            if not retryable:
+                raise SourceChecksNotReady(f"{failure}: {endpoint}") from None
+        else:
+            break
+        delay = max(delay, 2 ** (attempt - 1))
+        if attempt == 3 or time.monotonic() + delay >= request_deadline:
+            raise SourceChecksNotReady(f"{failure}: {endpoint}") from None
+        print(f"{failure}: {endpoint}; retrying in {delay:.1f}s", file=sys.stderr, flush=True)
+        time.sleep(delay)
+    # gh interleaves the response headers inside the slurped JSON array.
+    payload = re.sub(r"(?<=[\[,])HTTP/\d+(?:\.\d+)? 2\d\d[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n",
+                     "", response.stdout)
+    pages = json.loads(payload)
     if not isinstance(pages, list) or not pages:
         raise RuntimeError("Actions eligibility requires a paginated response")
     rows = []
