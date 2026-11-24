@@ -540,10 +540,33 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
         .ed2k_transfers
         .download_resource_snapshot()
         .resident_bytes;
+    let hash = hash_hex.parse().unwrap();
+    let guard = download
+        .download_attempts
+        .try_prepare(original, hash)
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    let DownloadPreparation::Direct(ready) = download
+        .prepare_download_sources(&guard, &shutdown)
+        .await
+        .unwrap()
+    else {
+        panic!("live seed must supply a prepared connection");
+    };
+    // Own the retry clock so the injected refusal stays observable until the
+    // fixture releases it. The seed and payload session still use a live socket.
+    let (retry, clock) = tokio::sync::watch::channel(());
     download
         .download_hydration_busy
         .store(true, Ordering::Release);
-    download.connect_ed2k().await.unwrap();
+    let execution = tokio::spawn({
+        let download = download.clone();
+        async move {
+            download
+                .run_selected_download(guard, DownloadPreparation::Direct(ready), clock, shutdown)
+                .await;
+        }
+    });
     tokio::time::timeout(Duration::from_secs(10), async {
         while download.download_hydration_busy.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
@@ -582,11 +605,7 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
         1,
         "the prepared socket must remain owned during the local wait"
     );
-    let source = direct_test_source(
-        hash_hex.parse().unwrap(),
-        Ipv4Addr::LOCALHOST,
-        network.listen_port,
-    );
+    let source = direct_test_source(hash, Ipv4Addr::LOCALHOST, network.listen_port);
     let cooldown = crate::ed2k_download_retry::ED2K_DIRECT_SOURCE_RETRY_COOLDOWN;
     assert!(
         download
@@ -598,6 +617,9 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
             .unwrap()
             > Duration::from_secs(19 * 60)
     );
+    retry
+        .send(())
+        .expect("selected owner is waiting for local retry");
     // This checks eventual publication and checkpointing, not a delivery SLA.
     let delivered = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -661,6 +683,10 @@ async fn prepared_connection_survives_local_hydration_busy_and_delivers_without_
         "only final retirement may follow the single begin"
     );
     drop(job);
+    tokio::time::timeout(Duration::from_secs(10), execution)
+        .await
+        .unwrap()
+        .unwrap();
     download.disconnect_ed2k().await.unwrap();
     seed.disconnect_ed2k().await.unwrap();
 }
