@@ -55,8 +55,8 @@ env:
   EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:182090666a847a8c49e4e782f172ab845e295646eb2f246e75ff3ad989519237
   EMULEBB_BUILD_TESTS_REF: 135930dcbf350cc37477baf528f9d29ff4a573e9
   EMULEBB_TOOLING_REF: ac8609756b097d1294308abeef962fe1592e4e38
-  EMULEBB_RELEASE_VALIDATOR_REF: 79bdc2d240fcb3b11a9e3e937df16dec2121eee6
-  EMULEBB_APK_BUILD_REF: 79bdc2d240fcb3b11a9e3e937df16dec2121eee6
+  EMULEBB_RELEASE_VALIDATOR_REF: f9fd190ed6236c6ebb3a71aac8ff0e73e7a06b84
+  EMULEBB_APK_BUILD_REF: f9fd190ed6236c6ebb3a71aac8ff0e73e7a06b84
   EMULEBB_APK_BUILD_TESTS_REF: 5a082f4542a74aad3d36ed9b3e17640028ed47f9
   EMULEBB_ANDROID_SIGNER_SHA256: 9edc742d7230a714a0149c20eb2afb235b8ad5237166090f10e7ac69e2bb359f
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
@@ -1091,7 +1091,8 @@ jobs:
           ref: ${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}
           path: emulebb-build
           persist-credentials: false
-      - name: Checkout the pinned image producer for evidence assembly
+      - &release-producer-checkout
+        name: Checkout the pinned producer for release evidence
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-build
@@ -1241,7 +1242,7 @@ jobs:
           --release-dir "$RELEASE_DIR"
           --output "$RELEASE_DIR/emulebb-rust-v$RELEASE_VERSION-candidate-manifest.json"
           --archives-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/artifacts"
-          --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests --harness-repo emulebb-build-tests
+          --build-repo emulebb-build --producer-build-repo emulebb-image-build --apk-harness-repo emulebb-apk-tests --harness-repo emulebb-build-tests
           --github-output "$GITHUB_OUTPUT"
       - name: Retain the exact public release candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1288,6 +1289,7 @@ jobs:
           ref: ${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}
           path: emulebb-build
           persist-credentials: false
+      - *release-producer-checkout
       - name: Checkout pinned OCI graph reader
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1340,7 +1342,7 @@ jobs:
         run: >-
           python -B emulebb-rust/tools/release_publish.py publish-images
           --release-dir "$RELEASE_DIR" --archives-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/artifacts"
-          --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests --harness-repo emulebb-build-tests
+          --build-repo emulebb-build --producer-build-repo emulebb-image-build --apk-harness-repo emulebb-apk-tests --harness-repo emulebb-build-tests
           --assembled-candidate-sha256 "$ASSEMBLED_CANDIDATE_SHA" --github-output "$GITHUB_OUTPUT"
       - name: Attest the published Ubuntu digest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -1388,6 +1390,7 @@ jobs:
           ref: ${{ env.EMULEBB_RELEASE_VALIDATOR_REF }}
           path: emulebb-build
           persist-credentials: false
+      - *release-producer-checkout
       - name: Checkout independently pinned APK evidence reader
         if: ${{ inputs.channel == 'nightly' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1414,7 +1417,7 @@ jobs:
         run: |
           set -euo pipefail
           python -B emulebb-rust/tools/release_publish.py release-assets \
-            --release-dir "$RELEASE_DIR" --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests \
+            --release-dir "$RELEASE_DIR" --build-repo emulebb-build --producer-build-repo emulebb-image-build --apk-harness-repo emulebb-apk-tests \
             --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase before-upload
       - name: Attest the exact native release candidate
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -1440,7 +1443,7 @@ jobs:
         run: |
           set -euo pipefail
           python -B emulebb-rust/tools/release_publish.py release-assets \
-            --release-dir "$RELEASE_DIR" --build-repo emulebb-build --apk-harness-repo emulebb-apk-tests \
+            --release-dir "$RELEASE_DIR" --build-repo emulebb-build --producer-build-repo emulebb-image-build --apk-harness-repo emulebb-apk-tests \
             --verified-candidate-sha256 "$VERIFIED_CANDIDATE_SHA" --phase after-upload --release-id "$RELEASE_ID"
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false
 

@@ -318,6 +318,7 @@ def candidate_context(args: argparse.Namespace, owner):
                   "runAttempt": args.run_attempt, "workflowSha": args.workflow_sha},
         platform_profile=args.platform_profile,
         release_validator_build_sha=args.release_validator_build_ref,
+        producer_build_root=getattr(args, "producer_build_repo", None),
         **apk,
     ).checked()
 
@@ -706,6 +707,7 @@ def build_parser() -> argparse.ArgumentParser:
             candidate.add_argument("--" + flag, default=default, required=not default,
                                    help=f"Expected identity; defaults to the caller's {environment}.")
         candidate.add_argument("--build-repo", required=True, type=Path)
+        candidate.add_argument("--producer-build-repo", type=Path)
         for flag, environment in {"apk-build-ref": "EMULEBB_APK_BUILD_REF", "apk-harness-ref": "EMULEBB_APK_BUILD_TESTS_REF",
                                   "apk-signer-sha256": "EMULEBB_ANDROID_SIGNER_SHA256"}.items():
             candidate.add_argument("--" + flag, default=os.environ.get(environment))
