@@ -6062,6 +6062,15 @@ async fn handle_kad_local_store_packet(
                 );
                 return Ok(());
             }
+            // WHY: A source backed only by an excluded relay is unusable.
+            // Stock checks the relay at admission, before indexing or replying.
+            let bans = runtime.transfer_runtime.ban_store();
+            if kad_buddy::source_publish_buddy_ips(&req.tags)
+                .any(|ip| network.ip_filter.is_filtered(ip) || bans.is_banned(Some(ip), None))
+            {
+                tracing::debug!("dropping Kad PUBLISH_SOURCE_REQ from {from}: relay excluded");
+                return Ok(());
+            }
             let load = if let IpAddr::V4(source_ip) = from.ip() {
                 let mut store = local_store.lock().await;
                 store.record_source_publish(

@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn source_publish_relay_addresses_use_stock_ipv4_byte_order() {
+    let tags = [
+        Tag::new_short(tag_name::SOURCEIP, TagValue::U32(0xC000_020A)),
+        Tag::new_short(tag_name::SERVERIP, TagValue::String("ignored".into())),
+        Tag::new_short(tag_name::SERVERIP, TagValue::U32(0x8864_33C6)),
+    ];
+    assert_eq!(
+        kad_buddy::source_publish_buddy_ips(&tags).collect::<Vec<_>>(),
+        [Ipv4Addr::new(198, 51, 100, 136)]
+    );
+}
+
+#[test]
 fn source_type_switches_to_large_file_variant_at_old_max_emule_file_size() {
     // Oracle IsLargeFile(): strictly greater than OLD_MAX_EMULE_FILE_SIZE
     // (4290048000), not the raw u32 ceiling.

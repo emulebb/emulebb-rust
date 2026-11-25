@@ -24,7 +24,24 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use emulebb_kad_proto::{Ed2kHash, NodeId};
+use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
+
+/// Read the advertised relay addresses in the stock IPv4 DWORD byte order.
+pub(crate) fn source_publish_buddy_ips(tags: &[Tag]) -> impl Iterator<Item = Ipv4Addr> + '_ {
+    tags.iter().filter_map(|tag| {
+        if tag.name != TagName::Short(tag_name::SERVERIP) {
+            return None;
+        }
+        let value = match tag.value {
+            TagValue::UInt(value) | TagValue::U64(value) => (value & u64::from(u32::MAX)) as u32,
+            TagValue::U32(value) => value,
+            TagValue::U16(value) => u32::from(value),
+            TagValue::U8(value) => u32::from(value),
+            _ => return None,
+        };
+        Some(Ipv4Addr::from(value.to_le_bytes()))
+    })
+}
 
 /// Interval between buddy searches while we still need a buddy, mirroring the
 /// oracle `MIN2S(20)` cadence on `m_tNextFindBuddy`.
