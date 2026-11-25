@@ -166,7 +166,7 @@ impl EmulebbCore {
             () = cancel.cancelled() => return Ok(DownloadPreparation::Waiting),
             result = self.acquire_ed2k_sources(network, &target, guard.hash(), target.size_bytes, true, false) => result?,
         };
-        discovered.retain(|source| !source.is_direct_dialable());
+        discovered.retain(|source| source.low_id && source.source_server.is_none());
         if !guard.preparation_has_headroom(crate::download_admission::construction_starts(
             self.ed2k_transfers.download_resource_snapshot(),
         )) {
@@ -200,6 +200,7 @@ impl EmulebbCore {
                 let mut sources = page
                     .iter()
                     .map(|endpoint| found_source_from_endpoint(hash, endpoint))
+                    .filter(Ed2kFoundSource::is_direct_dialable)
                     .collect::<Vec<_>>();
                 drop_self_sources(&mut sources, &own);
                 sources.retain(|source| {
@@ -318,6 +319,37 @@ impl EmulebbCore {
                 .await?
             {
                 return Ok(DownloadPreparation::Callback(Box::new(prepared)));
+            }
+        }
+        let mut after = 0;
+        loop {
+            if cancel.is_cancelled() || shutdown.is_cancelled() {
+                break;
+            }
+            let page = self
+                .ed2k_transfers
+                .download_server_callback_endpoints_after(guard.token(), after, 256)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().expect("nonempty callback endpoint page").id;
+            for entry in page.iter() {
+                if cancel.is_cancelled() || shutdown.is_cancelled() {
+                    return Ok(DownloadPreparation::Waiting);
+                }
+                let source = found_source_from_endpoint(guard.hash(), entry);
+                if own.matches(&source) || bans.is_banned(None, source.user_hash.as_ref()) {
+                    continue;
+                }
+                self.register_download_source_candidates(&target, std::slice::from_ref(&source))
+                    .await;
+                if let Some(prepared) = self
+                    .prepare_callback_source(guard, &source, &parts.verified_parts, shutdown)
+                    .await?
+                {
+                    return Ok(DownloadPreparation::Callback(Box::new(prepared)));
+                }
             }
         }
         Ok(DownloadPreparation::Waiting)

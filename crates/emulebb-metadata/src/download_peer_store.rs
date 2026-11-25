@@ -1,4 +1,6 @@
 //! Small peer/name deltas and byte-bounded diagnostic pages, independent of geometry.
+use std::net::{Ipv4Addr, SocketAddrV4};
+
 use crate::{JobToken, MetadataStore, MetadataTransferFileNameObservation, MetadataTransferSource};
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -21,6 +23,10 @@ pub enum MetadataDownloadPeerDelta {
     Source {
         source: MetadataTransferSource,
         description_only: bool,
+    },
+    RoutedSource {
+        source: MetadataTransferSource,
+        route: MetadataDownloadSourceRoute,
     },
     ObserveName {
         observation: MetadataTransferFileNameObservation,
@@ -72,6 +78,17 @@ pub enum MetadataDownloadSourceSelector {
     UserHash([u8; 16]),
     Endpoint(std::net::Ipv4Addr, u16),
 }
+
+/// Server provenance for a direct peer or the callback identity of a LowID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataDownloadSourceRoute {
+    DirectWithServer(SocketAddrV4),
+    ServerLowId {
+        client_id: u32,
+        server: SocketAddrV4,
+    },
+}
+
 #[derive(Debug)]
 pub struct MetadataDownloadSourceEndpoint {
     pub id: i64,
@@ -79,6 +96,7 @@ pub struct MetadataDownloadSourceEndpoint {
     pub tcp_port: u16,
     pub user_hash: Option<[u8; 16]>,
     pub connect_options: Option<u8>,
+    pub route: Option<MetadataDownloadSourceRoute>,
 }
 #[derive(Debug)]
 pub struct MetadataDownloadNameEntry {
@@ -282,7 +300,7 @@ impl MetadataDownloadInitialPeers {
     }
     pub(crate) fn insert(&self, conn: &Connection, token: JobToken) -> Result<()> {
         for source in &self.sources {
-            upsert_source(conn, token, source, false)?;
+            upsert_source(conn, token, source, false, None)?;
         }
         for observation in &self.observations {
             insert_observation(conn, token, observation)?;
@@ -316,7 +334,9 @@ impl MetadataDownloadPeerDelta {
                 );
                 source_bytes(source)? + available_parts.capacity() + 128
             }
-            Self::Source { source, .. } => source_bytes(source)?,
+            Self::Source { source, .. } | Self::RoutedSource { source, .. } => {
+                source_bytes(source)?
+            }
             Self::ObserveName {
                 observation: value,
                 source,
@@ -341,6 +361,7 @@ fn upsert_source(
     token: JobToken,
     source: &MetadataTransferSource,
     description: bool,
+    route: Option<MetadataDownloadSourceRoute>,
 ) -> Result<bool> {
     let hash = source
         .user_hash
@@ -354,7 +375,8 @@ fn upsert_source(
         }
         let existing: Option<i64> = conn.query_row(
             "SELECT min(id) FROM (
-                SELECT id FROM (SELECT id FROM download_job_sources WHERE job_id=?1 AND ip=?2 AND tcp_port=?3 LIMIT 1)
+                SELECT id FROM (SELECT id FROM download_job_sources
+                    WHERE job_id=?1 AND ip=?2 AND tcp_port=?3 AND low_client_id IS NULL LIMIT 1)
                 UNION ALL SELECT id FROM (SELECT id FROM download_job_sources WHERE job_id=?1 AND user_hash=?4 ORDER BY id LIMIT 1))",
             params![token.job_id, source.ip, source.tcp_port, hash], |row| row.get(0),
         )?;
@@ -364,15 +386,28 @@ fn upsert_source(
                 params![id, source.file_comment, source.file_rating, hash, source.connect_options, now])? != 0);
         }
     }
-    Ok(conn.execute("INSERT INTO download_job_sources(job_id,ip,tcp_port,user_hash,connect_options,file_comment,file_rating,first_seen_at_s,last_seen_at_s)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8)
-        ON CONFLICT(job_id,ip,tcp_port) DO UPDATE SET
+    let (low_client_id, server) = match route {
+        Some(MetadataDownloadSourceRoute::DirectWithServer(server)) => (None, Some(server)),
+        Some(MetadataDownloadSourceRoute::ServerLowId { client_id, server }) => {
+            (Some(client_id), Some(server))
+        }
+        None => (None, None),
+    };
+    Ok(conn.execute("INSERT INTO download_job_sources(job_id,ip,tcp_port,user_hash,connect_options,file_comment,file_rating,first_seen_at_s,last_seen_at_s,
+            low_client_id,server_ip,server_port)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8,?9,?10,?11)
+        ON CONFLICT DO UPDATE SET
+            tcp_port=excluded.tcp_port,
+            server_ip=coalesce(excluded.server_ip,download_job_sources.server_ip),
+            server_port=coalesce(excluded.server_port,download_job_sources.server_port),
             user_hash=coalesce(excluded.user_hash,download_job_sources.user_hash),
             connect_options=coalesce(excluded.connect_options,download_job_sources.connect_options),
             file_comment=CASE WHEN excluded.file_comment<>'' OR excluded.file_rating<>0 THEN excluded.file_comment ELSE download_job_sources.file_comment END,
             file_rating=CASE WHEN excluded.file_comment<>'' OR excluded.file_rating<>0 THEN excluded.file_rating ELSE download_job_sources.file_rating END,
             last_seen_at_s=excluded.last_seen_at_s",
-        params![token.job_id, source.ip, source.tcp_port, hash, source.connect_options, source.file_comment, source.file_rating, now])? != 0)
+        params![token.job_id, source.ip, source.tcp_port, hash, source.connect_options, source.file_comment,
+            source.file_rating, now, low_client_id, server.map(|addr| u32::from(*addr.ip())),
+            server.map(|addr| addr.port())])? != 0)
 }
 
 fn insert_observation(
@@ -439,13 +474,16 @@ impl MetadataStore {
             MetadataDownloadPeerDelta::Source {
                 source,
                 description_only,
-            } => upsert_source(&tx, token, source, *description_only)?,
+            } => upsert_source(&tx, token, source, *description_only, None)?,
+            MetadataDownloadPeerDelta::RoutedSource { source, route } => {
+                upsert_source(&tx, token, source, false, Some(*route))?
+            }
             MetadataDownloadPeerDelta::ObserveName {
                 observation: value,
                 source,
             } => {
                 if let Some(source) = source {
-                    upsert_source(&tx, token, source, false)?;
+                    upsert_source(&tx, token, source, false, None)?;
                 }
                 insert_observation(&tx, token, value)?;
                 true
@@ -457,7 +495,7 @@ impl MetadataStore {
                 let endpoint = endpoint.map(|(ip, port)| (ip.to_string(), port));
                 tx.execute(
                     "DELETE FROM download_job_sources WHERE job_id=?1 AND
-                    ((ip=?2 AND tcp_port=?3) OR user_hash=?4)",
+                    ((ip=?2 AND tcp_port=?3 AND low_client_id IS NULL) OR user_hash=?4)",
                     params![
                         token.job_id,
                         endpoint.as_ref().map(|v| &v.0),
@@ -492,17 +530,42 @@ impl MetadataStore {
         after: i64,
         limit: usize,
     ) -> Result<Vec<MetadataDownloadSourceEndpoint>> {
+        self.source_endpoints_after(token, after, limit, false)
+    }
+
+    pub fn download_job_server_callback_endpoints_after(
+        &self,
+        token: JobToken,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<MetadataDownloadSourceEndpoint>> {
+        self.source_endpoints_after(token, after, limit, true)
+    }
+
+    fn source_endpoints_after(
+        &self,
+        token: JobToken,
+        after: i64,
+        limit: usize,
+        server_callbacks_only: bool,
+    ) -> Result<Vec<MetadataDownloadSourceEndpoint>> {
         ensure!(
             after >= 0 && (1..=256).contains(&limit),
             "invalid source endpoint page"
         );
         let conn = self.connection()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT s.id,s.ip,s.tcp_port,s.user_hash,s.connect_options
+        let predicate = if server_callbacks_only {
+            "AND s.low_client_id IS NOT NULL"
+        } else {
+            ""
+        };
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT s.id,s.ip,s.tcp_port,s.user_hash,s.connect_options,
+                    s.low_client_id,s.server_ip,s.server_port
             FROM download_job_sources s JOIN download_jobs j ON j.id=s.job_id
             WHERE s.job_id=?1 AND s.id>?2 AND j.execution_generation=?3 AND j.removed_at_s IS NULL
-            ORDER BY s.id LIMIT ?4",
-        )?;
+            {predicate} ORDER BY s.id LIMIT ?4"
+        ))?;
         let mut rows = stmt.query(params![
             token.job_id,
             after,
@@ -519,12 +582,24 @@ impl MetadataStore {
             } else {
                 Some(hash.as_blob()?.try_into()?)
             };
+            let route = if let Some(server_ip) = row.get::<_, Option<u32>>(6)? {
+                let server = SocketAddrV4::new(Ipv4Addr::from(server_ip), row.get(7)?);
+                Some(match row.get::<_, Option<u32>>(5)? {
+                    Some(client_id) => {
+                        MetadataDownloadSourceRoute::ServerLowId { client_id, server }
+                    }
+                    None => MetadataDownloadSourceRoute::DirectWithServer(server),
+                })
+            } else {
+                None
+            };
             result.push(MetadataDownloadSourceEndpoint {
                 id: row.get(0)?,
                 ip: ip.parse()?,
                 tcp_port: row.get(2)?,
                 user_hash: hash,
                 connect_options: row.get(4)?,
+                route,
             });
         }
         Ok(result)
@@ -633,7 +708,7 @@ impl MetadataStore {
             ),
             Some(MetadataDownloadSourceSelector::Endpoint(ip, port)) => (
                 "download_job_sources_identity_idx",
-                "AND s.ip=?5 AND s.tcp_port=?6",
+                "AND s.ip=?5 AND s.tcp_port=?6 AND s.low_client_id IS NULL",
                 rusqlite::types::Value::Text(ip.to_string()),
                 rusqlite::types::Value::Integer(port.into()),
             ),

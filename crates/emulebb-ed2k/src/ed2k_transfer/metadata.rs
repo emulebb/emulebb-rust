@@ -1,16 +1,23 @@
 //! Manifest metadata reconciliation and read views for ED2K transfers.
 
-use std::{net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::{
-    JobToken, MetadataLocalShareEntry, MetadataSharedFilePage, MetadataSharedFileQuery,
-    MetadataVerifiedLocalContent, NativeFileFingerprint,
+    JobToken, MetadataDownloadPeerDelta, MetadataDownloadSourceRoute, MetadataLocalShareEntry,
+    MetadataSharedFilePage, MetadataSharedFileQuery, MetadataVerifiedLocalContent,
+    NativeFileFingerprint,
 };
 use uuid::Uuid;
 
+use crate::ed2k_server::Ed2kFoundSource;
 use crate::{long_path::long_path, normalize_ed2k_file_name};
 
 use super::hashset::{decode_aich_hash_hex, validate_aich_hashset};
@@ -402,6 +409,61 @@ impl Ed2kTransferRuntime {
             },
         )
         .await?;
+        Ok(())
+    }
+
+    /// Retain source identities that can be reconstructed for a later connection.
+    pub async fn remember_discovered_source(
+        &self,
+        token: JobToken,
+        source: &Ed2kFoundSource,
+    ) -> Result<()> {
+        if source.tcp_port == 0 {
+            return Ok(());
+        }
+        let server = match source.source_server {
+            Some(SocketAddr::V4(server)) if server.port() != 0 && !server.ip().is_unspecified() => {
+                Some(server)
+            }
+            _ => None,
+        };
+        let route = if source.low_id {
+            let Some(server) = server else {
+                return Ok(());
+            };
+            if source.client_id == 0 || source.client_id >= 0x0100_0000 {
+                return Ok(());
+            }
+            Some(MetadataDownloadSourceRoute::ServerLowId {
+                client_id: source.client_id,
+                server,
+            })
+        } else {
+            if !source.is_direct_dialable() || source.ip.is_unspecified() {
+                return Ok(());
+            }
+            server.map(MetadataDownloadSourceRoute::DirectWithServer)
+        };
+        let source = Ed2kSourceHint {
+            ip: source.ip.to_string(),
+            tcp_port: source.tcp_port,
+            user_hash: source.user_hash.map(hex::encode),
+            connect_options: source.obfuscation_options,
+            file_comment: String::new(),
+            file_rating: 0,
+        };
+        if let Some(route) = route {
+            self.apply_peer_delta(
+                token,
+                MetadataDownloadPeerDelta::RoutedSource {
+                    source: source_to_metadata(source),
+                    route,
+                },
+            )
+            .await?;
+        } else {
+            self.remember_source(token, source).await?;
+        }
         Ok(())
     }
 

@@ -45,7 +45,7 @@ pub(in crate::ed2k_transfer) enum JobRead {
         emulebb_metadata::JobToken,
         emulebb_metadata::MetadataDownloadSourceSelector,
     ),
-    Endpoints(emulebb_metadata::JobToken, i64, usize),
+    Endpoints(emulebb_metadata::JobToken, i64, usize, bool),
     Names(emulebb_metadata::JobToken, i64, usize),
     Latest([u8; 16]),
     Publish(Option<[u8; 16]>, usize),
@@ -176,7 +176,7 @@ impl LocalMutationRegistry {
                 );
                 1024 * 1024 + 4096
             }
-            JobRead::Endpoints(_, after, limit) => {
+            JobRead::Endpoints(_, after, limit, _) => {
                 ensure!(
                     after >= 0 && (1..=256).contains(&limit),
                     "invalid source endpoint page"
@@ -350,11 +350,16 @@ impl LocalMutationRegistry {
                         )
                     })
                 }
-                JobRead::Endpoints(token, after, limit) => metadata
-                    .download_job_source_endpoints_after(token, after, limit)
-                    .map(|value| {
+                JobRead::Endpoints(token, after, limit, callbacks_only) => {
+                    let rows = if callbacks_only {
+                        metadata.download_job_server_callback_endpoints_after(token, after, limit)
+                    } else {
+                        metadata.download_job_source_endpoints_after(token, after, limit)
+                    };
+                    rows.map(|value| {
                         JobReadResult::Endpoints(RetainedRead::new(value, capacity.take_result()))
-                    }),
+                    })
+                }
                 JobRead::Sources(token, after, limit) => metadata
                     .download_job_sources_after(token, after, limit)
                     .map(|value| {
@@ -745,8 +750,29 @@ impl transfer::Ed2kTransferRuntime {
         after: i64,
         limit: usize,
     ) -> Result<RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>> {
+        self.source_endpoints_after(token, after, limit, false)
+            .await
+    }
+
+    /// Bounded, generation-fenced server LowID candidates ordered by source row ID.
+    pub async fn download_server_callback_endpoints_after(
+        &self,
+        token: emulebb_metadata::JobToken,
+        after: i64,
+        limit: usize,
+    ) -> Result<RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>> {
+        self.source_endpoints_after(token, after, limit, true).await
+    }
+
+    async fn source_endpoints_after(
+        &self,
+        token: emulebb_metadata::JobToken,
+        after: i64,
+        limit: usize,
+        callbacks_only: bool,
+    ) -> Result<RetainedRead<Vec<emulebb_metadata::MetadataDownloadSourceEndpoint>>> {
         let JobReadResult::Endpoints(page) = self
-            .read_job_metadata(JobRead::Endpoints(token, after, limit))
+            .read_job_metadata(JobRead::Endpoints(token, after, limit, callbacks_only))
             .await?
         else {
             unreachable!()

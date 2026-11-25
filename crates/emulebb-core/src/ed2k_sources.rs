@@ -184,18 +184,30 @@ pub(crate) fn found_source_from_endpoint(
     file_hash: Ed2kHash,
     endpoint: &emulebb_metadata::MetadataDownloadSourceEndpoint,
 ) -> Ed2kFoundSource {
+    use emulebb_metadata::MetadataDownloadSourceRoute;
+    let (client_id, low_id, source_server) = match endpoint.route {
+        Some(MetadataDownloadSourceRoute::ServerLowId { client_id, server }) => {
+            (client_id, true, Some(server.into()))
+        }
+        Some(MetadataDownloadSourceRoute::DirectWithServer(server)) => (
+            u32::from_be_bytes(endpoint.ip.octets()),
+            false,
+            Some(server.into()),
+        ),
+        None => (u32::from_be_bytes(endpoint.ip.octets()), false, None),
+    };
     Ed2kFoundSource {
         file_hash,
         ip: endpoint.ip,
         tcp_port: endpoint.tcp_port,
-        client_id: u32::from_be_bytes(endpoint.ip.octets()),
-        low_id: false,
+        client_id,
+        low_id,
         obfuscated: endpoint
             .connect_options
             .is_some_and(|options| options & 0x01 != 0),
         obfuscation_options: endpoint.connect_options,
         user_hash: endpoint.user_hash,
-        source_server: None,
+        source_server,
         buddy_id: None,
         buddy_endpoint: None,
         source_udp_port: None,

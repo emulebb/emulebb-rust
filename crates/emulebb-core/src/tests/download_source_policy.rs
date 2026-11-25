@@ -136,6 +136,25 @@ async fn callback_preparation_dispatches_udp_routes_without_hydration_or_udp_rea
     source.source_udp_port = None;
     source.obfuscation_options = None;
     source.user_hash = Some([0x54; 16]);
+    core.ed2k_transfers
+        .remember_discovered_source(token, &source)
+        .await
+        .unwrap();
+    let saved = core
+        .ed2k_transfers
+        .download_server_callback_endpoints_after(token, 0, 1)
+        .await
+        .unwrap();
+    let mut source = found_source_from_endpoint(file_hash, &saved[0]);
+    assert_eq!(
+        source.identity_key(),
+        emulebb_ed2k::ed2k_server::Ed2kFoundSourceKey::ServerLowId {
+            server_endpoint,
+            client_id: 0x1234,
+        }
+    );
+    assert!(!source.is_direct_dialable());
+    drop(saved);
     let config = Ed2kRuntimeConfig {
         server_endpoints: vec![server_endpoint.to_string()],
         ..network.ed2k.clone()
@@ -1259,6 +1278,7 @@ fn remembered_source_endpoint_becomes_direct_dial_source() {
             tcp_port: 4662,
             user_hash: Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             connect_options: Some(0x07),
+            route: None,
         },
     );
 
@@ -1374,6 +1394,7 @@ fn remembered_source_endpoint_does_not_fabricate_crypt_options_from_user_hash() 
         tcp_port: 4662,
         user_hash: Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
         connect_options: None,
+        route: None,
     };
     let source = found_source_from_endpoint(file_hash, &hint);
 
@@ -1395,6 +1416,7 @@ fn remembered_source_endpoint_preserves_every_crypt_bit_combination() {
                 tcp_port: 4662,
                 user_hash: Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
                 connect_options: Some(connect_options),
+                route: None,
             },
         );
 

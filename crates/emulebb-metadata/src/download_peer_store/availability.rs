@@ -68,9 +68,10 @@ pub(super) fn store(
         geometry == Some((i64::try_from(size)?, i64::try_from(parts.len())?)),
         "peer availability contradicts job geometry"
     );
-    upsert_source(tx, token, source, false)?;
+    upsert_source(tx, token, source, false, None)?;
     let source_id: i64 = tx.query_row(
-        "SELECT id FROM download_job_sources WHERE job_id=?1 AND ip=?2 AND tcp_port=?3",
+        "SELECT id FROM download_job_sources WHERE job_id=?1 AND ip=?2 AND tcp_port=?3
+         AND low_client_id IS NULL",
         params![token.job_id, source.ip, source.tcp_port],
         |row| row.get(0),
     )?;

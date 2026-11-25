@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
+    ed2k_server::Ed2kFoundSource,
     ed2k_string::Ed2kStringEncoding,
     ed2k_transfer::{
         Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kTransferState, diag_bad_peer,
@@ -1828,19 +1829,40 @@ async fn remember_source_exchange_sources(
         .await;
 
     for source in sources {
-        if source.tcp_port == 0 || source.ip == [0, 0, 0, 0] {
+        let server = (source.server_ip != 0 && source.server_port != 0).then(|| {
+            SocketAddr::from((
+                Ipv4Addr::from(source.server_ip.to_le_bytes()),
+                source.server_port,
+            ))
+        });
+        let ip = Ipv4Addr::from(source.ip);
+        let user_hash = source.user_hash.filter(|hash| *hash != [0; 16]);
+        let filter_ip = source.low_client_id.is_none().then_some(ip);
+        if source.tcp_port == 0
+            || ip.is_unspecified()
+            || source.low_client_id.is_some() && server.is_none()
+            || transfer_runtime
+                .ban_store()
+                .is_banned(filter_ip, user_hash.as_ref())
+        {
             continue;
         }
         transfer_runtime
-            .remember_source(
+            .remember_discovered_source(
                 job_token,
-                Ed2kSourceHint {
-                    ip: Ipv4Addr::from(source.ip).to_string(),
+                &Ed2kFoundSource {
+                    file_hash: expected_hash,
+                    ip,
                     tcp_port: source.tcp_port,
-                    user_hash: source.user_hash.map(hex::encode),
-                    connect_options: Some(source.connect_options),
-                    file_comment: String::new(),
-                    file_rating: 0,
+                    client_id: source.low_client_id.unwrap_or_else(|| u32::from(ip)),
+                    low_id: source.low_client_id.is_some(),
+                    obfuscated: false,
+                    obfuscation_options: source.connect_options,
+                    user_hash,
+                    source_server: server,
+                    buddy_id: None,
+                    buddy_endpoint: None,
+                    source_udp_port: None,
                 },
             )
             .await?;

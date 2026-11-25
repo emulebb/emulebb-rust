@@ -2607,21 +2607,8 @@ impl EmulebbCore {
         sources: &[Ed2kFoundSource],
     ) -> Result<()> {
         for source in sources {
-            if !source.is_direct_dialable() {
-                continue;
-            }
             self.ed2k_transfers
-                .remember_source(
-                    token,
-                    Ed2kSourceHint {
-                        ip: source.ip.to_string(),
-                        tcp_port: source.tcp_port,
-                        user_hash: source.user_hash.map(hex::encode),
-                        connect_options: source.obfuscation_options,
-                        file_comment: String::new(),
-                        file_rating: 0,
-                    },
-                )
+                .remember_discovered_source(token, source)
                 .await?;
         }
         Ok(())

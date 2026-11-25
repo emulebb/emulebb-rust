@@ -876,11 +876,12 @@ fn legacy_source_answer_v1_uses_peer_advertised_sx1_version() {
     let file_hash = Ed2kHash([0x58; 16]);
     let source = SourceExchangePeer {
         ip: [192, 0, 2, 44],
+        low_client_id: None,
         tcp_port: 4662,
         server_ip: u32::from_le_bytes([203, 0, 113, 7]),
         server_port: 4242,
         user_hash: None,
-        connect_options: 0,
+        connect_options: None,
     };
 
     let packet = encode_answer_sources(&file_hash, &[source]);
@@ -898,11 +899,12 @@ fn legacy_source_answer_rejects_v4_shape_from_v3_peer() {
     let file_hash = Ed2kHash([0x59; 16]);
     let source = SourceExchangePeer {
         ip: [198, 51, 100, 9],
+        low_client_id: None,
         tcp_port: 4662,
         server_ip: u32::from_le_bytes([203, 0, 113, 8]),
         server_port: 4242,
         user_hash: Some([0x7B; 16]),
-        connect_options: 0x03,
+        connect_options: Some(0x03),
     };
     let mut payload = Vec::with_capacity(16 + 2 + 29);
     payload.extend_from_slice(&file_hash.0);
@@ -912,7 +914,7 @@ fn legacy_source_answer_rejects_v4_shape_from_v3_peer() {
     payload.extend_from_slice(&source.server_ip.to_le_bytes());
     payload.extend_from_slice(&source.server_port.to_le_bytes());
     payload.extend_from_slice(&source.user_hash.unwrap());
-    payload.push(source.connect_options);
+    payload.push(source.connect_options.unwrap());
 
     assert!(decode_answer_sources_payload(&payload, 3).is_err());
     let (decoded_hash, decoded_sources) = decode_answer_sources_payload(&payload, 4).unwrap();
@@ -929,11 +931,12 @@ fn source_exchange2_v1_through_v4_preserve_their_wire_capabilities() {
         for connect_options in 0u8..=0x07 {
             let source = SourceExchangePeer {
                 ip: [198, 51, 100, 20 + connect_options],
+                low_client_id: None,
                 tcp_port: 4662,
                 server_ip: u32::from_le_bytes([203, 0, 113, 8]),
                 server_port: 4242,
                 user_hash: (version >= 2).then_some([0x70 + connect_options; 16]),
-                connect_options,
+                connect_options: (version >= 4).then_some(connect_options),
             };
             let packet = encode_answer_sources2(&file_hash, version, &[source]).unwrap();
             assert_eq!(packet[0], OP_EMULEPROT);
@@ -945,8 +948,7 @@ fn source_exchange2_v1_through_v4_preserve_their_wire_capabilities() {
             assert_eq!(decoded_sources[0].ip, source.ip);
             assert_eq!(decoded_sources[0].user_hash, source.user_hash);
             assert_eq!(
-                decoded_sources[0].connect_options,
-                if version >= 4 { connect_options } else { 0 },
+                decoded_sources[0].connect_options, source.connect_options,
                 "SX2 version {version} options 0x{connect_options:02x}"
             );
         }
@@ -960,17 +962,47 @@ fn source_exchange2_v1_through_v4_preserve_their_wire_capabilities() {
     }
 }
 
+#[test]
+fn sx2_v4_advertises_hybrid_high_id_and_omits_server_low_id() {
+    let file_hash = Ed2kHash([0x5B; 16]);
+    let high = SourceExchangePeer {
+        ip: [198, 51, 100, 0],
+        low_client_id: None,
+        tcp_port: 4662,
+        server_ip: u32::from_le_bytes([203, 0, 113, 8]),
+        server_port: 4242,
+        user_hash: Some([0x7B; 16]),
+        connect_options: Some(0x0F),
+    };
+    let low = SourceExchangePeer {
+        ip: [0x34, 0x12, 0, 0],
+        low_client_id: Some(0x1234),
+        ..high
+    };
+    let packet = encode_answer_sources2(&file_hash, 4, &[low, high]).unwrap();
+    assert_eq!(&packet[25..29], &[0, 100, 51, 198]);
+    let (_, sources) = decode_answer_sources2_payload(&packet[6..]).unwrap();
+    assert_eq!(
+        sources,
+        [SourceExchangePeer {
+            connect_options: Some(0x07),
+            ..high
+        }]
+    );
+}
+
 /// Build `count` SX2 v4 sources (each carries a user hash so it survives the
 /// version>=2 filter) with slowly varying, highly compressible bytes.
 fn sx2_test_sources(count: u16) -> Vec<SourceExchangePeer> {
     (0..count)
         .map(|index| SourceExchangePeer {
             ip: [45, 82, 80, (index % 250 + 1) as u8],
+            low_client_id: None,
             tcp_port: 4662,
             server_ip: u32::from_le_bytes([203, 0, 113, 7]),
             server_port: 4242,
             user_hash: Some([0x5A; 16]),
-            connect_options: 0,
+            connect_options: Some(0),
         })
         .collect()
 }
