@@ -4,13 +4,78 @@ use crate::ed2k_tcp::codec::encode_file_desc;
 use crate::ed2k_tcp::decode_answer_sources2_payload;
 
 #[test]
+fn filename_request_versions_divide_each_envelope_at_the_stock_boundary() {
+    let hash = Ed2kHash::from_bytes([0x44; 16]);
+    let file_size = ED2K_PART_SIZE + 1;
+    let identifier = Ed2kFileIdentifier {
+        file_hash: hash,
+        file_size: Some(file_size),
+        aich_root: None,
+    };
+    for (version, tail) in [
+        (0, &[][..]),
+        (1, &[2, 0, 1][..]),
+        (2, &[2, 0, 1, 0x34, 0x12][..]),
+    ] {
+        let extension = crate::ed2k_tcp::codec::FilenameRequestExtension {
+            version,
+            complete_source_count: 0x1234,
+        };
+        let standalone =
+            super::encode_request_filename(&hash, file_size, extension, [true, false].into_iter());
+        assert_eq!(&standalone[22..], tail);
+        let legacy = encode_multipacket_request(
+            &hash,
+            file_size,
+            extension,
+            [true, false].into_iter(),
+            false,
+            PeerSourceExchangeRequest::None,
+            false,
+        );
+        let extended = encode_multipacket_request(
+            &hash,
+            file_size,
+            extension,
+            [true, false].into_iter(),
+            true,
+            PeerSourceExchangeRequest::None,
+            false,
+        );
+        let ext2 = super::encode_multipacket_ext2_request(
+            &identifier,
+            file_size,
+            extension,
+            [true, false].into_iter(),
+            PeerSourceExchangeRequest::None,
+        );
+        let subrequests = [&[OP_REQUESTFILENAME][..], tail, &[OP_SETREQFILEID]].concat();
+        for packet in [legacy, extended, ext2] {
+            assert!(packet.ends_with(&subrequests));
+            let (decoded, rest) =
+                decode_request_filename_ext_info(&subrequests[1..], file_size, version).unwrap();
+            assert_eq!(rest, [OP_SETREQFILEID]);
+            assert_eq!(
+                decoded.part_status,
+                (version > 0).then(|| vec![true, false])
+            );
+            assert_eq!(
+                decoded.complete_source_count,
+                if version >= 2 { 0x1234 } else { 0 }
+            );
+        }
+    }
+}
+
+#[test]
 fn compact_request_status_preserves_verified_bits_and_exact_multiple_eof() {
     let status = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
         ED2K_PART_SIZE * 8,
+        FILENAME_EXTENSION_V2,
         [true, false, false, true, false, false, false, true].into_iter(),
     );
     assert_eq!(status, [9, 0, 0b1000_1001, 1, 0, 0]);
-    let (decoded, rest) = decode_request_filename_ext_info(&status, ED2K_PART_SIZE * 8).unwrap();
+    let (decoded, rest) = decode_request_filename_ext_info(&status, ED2K_PART_SIZE * 8, 2).unwrap();
     assert!(rest.is_empty());
     assert_eq!(decoded.complete_source_count, 0);
     assert_eq!(
@@ -23,11 +88,13 @@ fn compact_request_status_preserves_verified_bits_and_exact_multiple_eof() {
 fn compact_status_does_not_invent_verified_data_when_bits_are_absent() {
     let status = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
         ED2K_PART_SIZE * 2,
+        FILENAME_EXTENSION_V2,
         std::iter::empty(),
     );
     assert_eq!(status, [3, 0, 0b100, 0, 0]);
     let short = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
         ED2K_PART_SIZE + 1,
+        FILENAME_EXTENSION_V2,
         [true].into_iter(),
     );
     assert_eq!(short, [2, 0, 1, 0, 0]);
@@ -38,6 +105,7 @@ fn compact_request_status_bounds_output_and_consumption_by_file_geometry() {
     let mut consumed = 0usize;
     let status = crate::ed2k_tcp::codec::encode_request_filename_ext_info(
         ED2K_PART_SIZE * 28_258,
+        FILENAME_EXTENSION_V2,
         std::iter::repeat_with(|| {
             consumed += 1;
             false
@@ -181,7 +249,7 @@ fn request_filename_ext_info_preserves_bitmap_count_and_multipacket_tail() {
     let payload = [0x03, 0x00, 0b0000_0101, 0x09, 0x00, OP_SETREQFILEID];
 
     let (decoded, remaining) =
-        decode_request_filename_ext_info(&payload, file_size).expect("decode ext info");
+        decode_request_filename_ext_info(&payload, file_size, 2).expect("decode ext info");
 
     assert_eq!(decoded.part_status, Some(vec![true, false, true]));
     assert_eq!(decoded.complete_source_count, 9);
@@ -193,7 +261,7 @@ fn request_filename_ext_info_accepts_stock_no_status_sentinel() {
     let payload = [0x00, 0x00, 0x34, 0x12];
 
     let (decoded, remaining) =
-        decode_request_filename_ext_info(&payload, ED2K_PART_SIZE * 4).unwrap();
+        decode_request_filename_ext_info(&payload, ED2K_PART_SIZE * 4, 2).unwrap();
 
     assert_eq!(decoded.part_status, None);
     assert_eq!(decoded.complete_source_count, 0x1234);
@@ -203,9 +271,9 @@ fn request_filename_ext_info_accepts_stock_no_status_sentinel() {
 #[test]
 fn request_filename_ext_info_rejects_wrong_count_and_truncation() {
     let file_size = ED2K_PART_SIZE * 2;
-    assert!(decode_request_filename_ext_info(&[2, 0, 0, 0, 0], file_size).is_err());
-    assert!(decode_request_filename_ext_info(&[3, 0, 0, 0], file_size).is_err());
-    assert!(decode_request_filename_ext_info(&[0, 0, 0], file_size).is_err());
+    assert!(decode_request_filename_ext_info(&[2, 0, 0, 0, 0], file_size, 2).is_err());
+    assert!(decode_request_filename_ext_info(&[3, 0, 0, 0], file_size, 2).is_err());
+    assert!(decode_request_filename_ext_info(&[0, 0, 0], file_size, 2).is_err());
 }
 
 #[test]
@@ -640,6 +708,7 @@ fn multipacket_ext2_source_request_matches_peer_source_exchange_version() {
     let sx2 = super::encode_multipacket_ext2_request(
         &file_identifier,
         ED2K_PART_SIZE + 1,
+        FILENAME_EXTENSION_V2,
         [false, false].into_iter(),
         PeerSourceExchangeRequest::V2,
     );
@@ -650,6 +719,7 @@ fn multipacket_ext2_source_request_matches_peer_source_exchange_version() {
     let sx1 = super::encode_multipacket_ext2_request(
         &file_identifier,
         ED2K_PART_SIZE + 1,
+        FILENAME_EXTENSION_V2,
         [false, false].into_iter(),
         PeerSourceExchangeRequest::V1,
     );
@@ -659,6 +729,7 @@ fn multipacket_ext2_source_request_matches_peer_source_exchange_version() {
     let no_sx = super::encode_multipacket_ext2_request(
         &file_identifier,
         ED2K_PART_SIZE + 1,
+        FILENAME_EXTENSION_V2,
         [false, false].into_iter(),
         PeerSourceExchangeRequest::None,
     );
@@ -780,6 +851,7 @@ fn legacy_multipacket_request_uses_ext_envelope_for_sized_peer() {
     let packet = encode_multipacket_request(
         &file_hash,
         ED2K_PART_SIZE + 1,
+        FILENAME_EXTENSION_V2,
         [false, false].into_iter(),
         true,
         PeerSourceExchangeRequest::V2,

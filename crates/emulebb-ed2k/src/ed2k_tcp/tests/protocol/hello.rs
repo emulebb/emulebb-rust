@@ -415,12 +415,12 @@ fn emule_info_decode_preserves_stock_capability_tags() {
     let packet = encode_emule_info_request(41000);
     let profile = decode_emule_info_profile(&packet[6..]).unwrap();
 
-    assert_eq!(profile.data_compression_version, 1);
+    assert_eq!(profile.data_compression_version, Some(1));
     assert_eq!(profile.udp_version, 4);
     assert_eq!(profile.udp_port, 41000);
     assert_eq!(profile.source_exchange_version, 0);
     assert!(!profile.supports_source_exchange);
-    assert_eq!(profile.extended_requests_version, 2);
+    assert_eq!(profile.extended_requests_version, Some(2));
     assert!(profile.accepts_comments);
     assert!(profile.supports_secure_ident);
     assert!(!profile.supports_preview);
@@ -435,6 +435,28 @@ fn hello_answer_payload_with_raw_tags(tag_count: u32, raw_tags: &[u8]) -> Vec<u8
     payload.extend_from_slice(raw_tags);
     payload.extend_from_slice(&[0; 6]);
     payload
+}
+
+#[test]
+fn legacy_info_before_hello_answer_preserves_extended_request_negotiation() {
+    use crate::ed2k_tcp::{ET_COMPRESSION, ET_EXTENDEDREQUEST, hello::ExtendedRequestNegotiation};
+
+    let mut info = vec![0x30, EMULE_PROTOCOL_VERSION, 2, 0, 0, 0];
+    info.extend_from_slice(&[TAGTYPE_UINT32, 1, 0, ET_COMPRESSION, 1, 0, 0, 0]);
+    info.extend_from_slice(&[TAGTYPE_UINT32, 1, 0, ET_EXTENDEDREQUEST, 2, 0, 0, 0]);
+    let mut requests = ExtendedRequestNegotiation::default();
+    requests.apply_info(&decode_emule_info_profile(&info).unwrap());
+    let legacy_answer =
+        decode_hello_answer_profile(&hello_answer_payload_with_raw_tags(0, &[])).unwrap();
+    requests.apply_hello_answer(&legacy_answer);
+    assert_eq!(requests.version, 2);
+
+    let empty_info = [0x30, EMULE_PROTOCOL_VERSION, 0, 0, 0, 0];
+    requests.apply_info(&decode_emule_info_profile(&empty_info).unwrap());
+    assert_eq!(requests.version, 2);
+    info[10] = 0;
+    requests.apply_info(&decode_emule_info_profile(&info).unwrap());
+    assert_eq!(requests.version, 0);
 }
 
 fn push_unknown_short_hello_tag(raw: &mut Vec<u8>, tag_type: u8, encoded_value: &[u8]) {

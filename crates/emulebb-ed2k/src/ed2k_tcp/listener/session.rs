@@ -43,9 +43,9 @@ use super::super::established_peer::{
     record_established_kad_firewall_ack, tolerates_unknown_established_opcode,
 };
 use super::super::hello::{
-    DecodedHelloProfile, build_hello_responses, decode_emule_info_profile,
-    decode_hello_answer_profile, decode_hello_profile, encode_emule_info_answer,
-    encode_hello_request,
+    DecodedHelloProfile, ExtendedRequestNegotiation, build_hello_responses,
+    decode_emule_info_profile, decode_hello_answer_profile, decode_hello_profile,
+    encode_emule_info_answer, encode_hello_request,
 };
 use super::super::identity::{Ed2kPeerSecureIdentState, begin_secure_ident_probe};
 use super::super::{
@@ -309,6 +309,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     let mut peer_supports_secure_ident = false;
     let mut peer_supports_file_identifiers = false;
     let mut peer_supports_large_files = false;
+    let mut peer_extended_requests = ExtendedRequestNegotiation::default();
     let mut peer_supports_unicode = false;
     // Peer's advertised comment-acceptance version (oracle m_byAcceptCommentVer);
     // gates whether we propagate our user-set comment/rating via OP_FILEDESC.
@@ -515,10 +516,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         let file_request_capabilities = PeerFileRequestCapabilities {
             string_encoding: Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
             supports_large_files: peer_supports_large_files,
+            extended_requests_version: peer_extended_requests.version,
         };
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
                 let hello_profile = decode_hello_profile(&packet.payload)?;
+                peer_extended_requests = ExtendedRequestNegotiation::from_hello(&hello_profile);
                 if !outbound_hello_identity_matches(
                     session_phase,
                     outbound_expected_user_hash,
@@ -810,6 +813,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             }
             (OP_EDONKEYPROT, OP_HELLOANSWER) => {
                 let hello_profile = decode_hello_answer_profile(&packet.payload)?;
+                peer_extended_requests.apply_hello_answer(&hello_profile);
                 if !outbound_hello_identity_matches(
                     session_phase,
                     outbound_expected_user_hash,
@@ -1183,6 +1187,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 // UDP reask reply (OP_REASKACK) can gate its leading partstatus on
                 // the peer's udp_version, mirroring eMule's GetUDPVersion() > 3.
                 if let Ok(profile) = decode_emule_info_profile(&packet.payload) {
+                    peer_extended_requests.apply_info(&profile);
                     peer_upload_identity.udp_version = profile.udp_version;
                     if peer_upload_identity.udp_port.is_none() && profile.udp_port != 0 {
                         peer_upload_identity.udp_port = Some(profile.udp_port);
@@ -1214,6 +1219,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     "received eMule OP_EMULEINFOANSWER from {peer_addr} transport={}",
                     transport.mode.as_str()
                 );
+                if let Ok(profile) = decode_emule_info_profile(&packet.payload) {
+                    peer_extended_requests.apply_info(&profile);
+                }
             }
             (OP_EMULEPROT, OP_SECIDENTSTATE) => {
                 secure_ident::handle_secident_state(

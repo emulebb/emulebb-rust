@@ -383,6 +383,7 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
         .write_all(&super::encode_request_filename(
             &file_hash,
             manifest.file_size,
+            FILENAME_EXTENSION_V2,
             manifest
                 .pieces
                 .iter()
@@ -518,6 +519,7 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     let request_filename = super::encode_request_filename(
         &file_hash,
         manifest.file_size,
+        FILENAME_EXTENSION_V2,
         manifest
             .pieces
             .iter()

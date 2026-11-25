@@ -10,8 +10,8 @@ use super::super::{
     OP_REQUESTSOURCES2, OP_SETREQFILEID,
 };
 use super::{
-    encode_packet, encode_request_filename_answer_body, encode_request_filename_ext_info,
-    encode_request_sources2_subpayload,
+    FilenameRequestExtension, encode_packet, encode_request_filename_answer_body,
+    encode_request_filename_ext_info, encode_request_sources2_subpayload,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,13 +24,18 @@ pub(in crate::ed2k_tcp) enum PeerSourceExchangeRequest {
 pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_request(
     file_identifier: &Ed2kFileIdentifier,
     file_size: u64,
+    extension: FilenameRequestExtension,
     verified_parts: impl Iterator<Item = bool>,
     source_exchange_request: PeerSourceExchangeRequest,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(64);
     file_identifier.encode_into(&mut payload);
     payload.push(OP_REQUESTFILENAME);
-    payload.extend_from_slice(&encode_request_filename_ext_info(file_size, verified_parts));
+    payload.extend_from_slice(&encode_request_filename_ext_info(
+        file_size,
+        extension,
+        verified_parts,
+    ));
     if file_size > ED2K_PART_SIZE {
         payload.push(OP_SETREQFILEID);
     }
@@ -48,6 +53,7 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_request(
 pub(in crate::ed2k_tcp) fn encode_multipacket_request(
     file_hash: &Ed2kHash,
     file_size: u64,
+    extension: FilenameRequestExtension,
     verified_parts: impl Iterator<Item = bool>,
     use_ext_envelope: bool,
     source_exchange_request: PeerSourceExchangeRequest,
@@ -59,7 +65,11 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_request(
         payload.extend_from_slice(&file_size.to_le_bytes());
     }
     payload.push(OP_REQUESTFILENAME);
-    payload.extend_from_slice(&encode_request_filename_ext_info(file_size, verified_parts));
+    payload.extend_from_slice(&encode_request_filename_ext_info(
+        file_size,
+        extension,
+        verified_parts,
+    ));
     if file_size > ED2K_PART_SIZE {
         payload.push(OP_SETREQFILEID);
     }

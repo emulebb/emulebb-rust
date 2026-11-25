@@ -247,6 +247,7 @@ impl EmulebbCore {
                             peer: source, hello_identity: self.ed2k_hello_identity(network),
                             secure_ident: std::sync::Arc::clone(&network.secure_ident),
                             transfer_runtime: std::sync::Arc::clone(&self.ed2k_transfers),
+                            job_token: Some(guard.token()),
                             file_size: target.size_bytes, verified_parts: &parts.verified_parts,
                             timeout: Duration::from_secs(network.ed2k.connect_timeout_secs.max(10)),
                         }) => result?,

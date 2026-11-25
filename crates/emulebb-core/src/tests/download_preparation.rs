@@ -93,6 +93,7 @@ async fn native_probe_capacity_refusal_releases_only_its_exact_core_reservation(
         hello_identity: core.ed2k_hello_identity(&network),
         secure_ident: Arc::clone(&network.secure_ident),
         transfer_runtime: Arc::clone(&core.ed2k_transfers),
+        job_token: Some(owner.token()),
         file_size: 1024,
         verified_parts: &[false],
         timeout: Duration::from_secs(1),

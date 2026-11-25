@@ -66,6 +66,7 @@ pub(in crate::ed2k_tcp) struct PeerUploadFacet {
     peer_supports_secure_ident: bool,
     peer_supports_file_identifiers: bool,
     peer_supports_large_files: bool,
+    pub(in crate::ed2k_tcp) extended_requests_version: u8,
     peer_supports_unicode: bool,
     peer_accept_comment_version: u8,
     peer_upload_identity: Ed2kUploadPeerIdentity,
@@ -87,6 +88,7 @@ impl PeerUploadFacet {
             peer_supports_secure_ident: false,
             peer_supports_file_identifiers: false,
             peer_supports_large_files: false,
+            extended_requests_version: 0,
             peer_supports_unicode: false,
             peer_accept_comment_version: 0,
             peer_upload_identity,
@@ -216,6 +218,7 @@ impl PeerUploadFacet {
         let file_request_capabilities = PeerFileRequestCapabilities {
             string_encoding,
             supports_large_files: self.peer_supports_large_files,
+            extended_requests_version: self.extended_requests_version,
         };
         match (packet.protocol, packet.opcode) {
             (OP_EMULEPROT, OP_MULTIPACKET | OP_MULTIPACKET_EXT) => {

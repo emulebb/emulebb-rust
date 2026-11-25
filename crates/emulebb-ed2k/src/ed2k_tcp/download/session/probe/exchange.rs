@@ -1,12 +1,16 @@
 //! Metadata-only exchange shared by outbound and accepted callback connections.
 use super::*;
-use crate::ed2k_tcp::hello::DecodedHelloProfile;
+use crate::ed2k_tcp::{
+    codec::FilenameRequestExtension,
+    hello::{DecodedHelloProfile, ExtendedRequestNegotiation},
+};
 
 pub(super) struct ProbeExchangeOptions<'a> {
     pub peer_addr: SocketAddr,
     pub file_hash: Ed2kHash,
     pub file_size: u64,
     pub verified_parts: &'a [bool],
+    pub job_token: Option<emulebb_metadata::JobToken>,
     pub hello_identity: Ed2kHelloIdentity,
     pub secure_ident: &'a Ed2kSecureIdent,
     pub runtime: &'a Ed2kTransferRuntime,
@@ -99,6 +103,12 @@ pub(super) async fn exchange_probe(
                 state.peer_user_hash = Some(profile.identity.user_hash);
                 state.peer_secure_ident.peer_sec_ident = profile.misc_options1.secure_ident;
                 state.remote_supports_unicode = profile.misc_options1.unicode_support;
+                let mut extended_requests = state.extended_requests;
+                if packet.opcode == OP_HELLOANSWER {
+                    extended_requests.apply_hello_answer(&profile);
+                } else {
+                    extended_requests = ExtendedRequestNegotiation::from_hello(&profile);
+                }
                 state.hello_complete = true;
                 let connection = DownloadConnectionState::from_inbound_hello(
                     &profile,
@@ -113,6 +123,7 @@ pub(super) async fn exchange_probe(
                     Some(profile.connect_options),
                     Some(&connection),
                 );
+                state.extended_requests = extended_requests;
                 if profile.supports_secure_ident && !state.peer_secure_ident.requested_peer_key {
                     let challenge = begin_secure_ident_probe(&mut state.peer_secure_ident);
                     transport
@@ -232,6 +243,19 @@ async fn request_metadata(
     let peer_addr = options.peer_addr;
     let verified = options.verified_parts.iter().copied();
     let hash = options.file_hash;
+    let version = state.extended_requests.version;
+    let extension = FilenameRequestExtension {
+        version,
+        complete_source_count: if version >= 2 {
+            options.job_token.map_or(0, |token| {
+                options
+                    .runtime
+                    .known_complete_source_count(token, options.parts)
+            })
+        } else {
+            0
+        },
+    };
     let request = if state.remote_supports_file_identifiers {
         encode_multipacket_ext2_request(
             &Ed2kFileIdentifier {
@@ -240,6 +264,7 @@ async fn request_metadata(
                 aich_root: None,
             },
             options.file_size,
+            extension,
             verified,
             PeerSourceExchangeRequest::None,
         )
@@ -247,13 +272,14 @@ async fn request_metadata(
         encode_multipacket_request(
             &hash,
             options.file_size,
+            extension,
             verified,
             state.remote_supports_ext_multipacket,
             PeerSourceExchangeRequest::None,
             false,
         )
     } else {
-        encode_request_filename(&hash, options.file_size, verified)
+        encode_request_filename(&hash, options.file_size, extension, verified)
     };
     transport
         .write_all_diagnostic("source_probe", peer_addr, "file_request", &request)

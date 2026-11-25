@@ -6,10 +6,11 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::{
     ed2k_tcp::{
         Ed2kFileIdentifier, Ed2kHashsetRequestOptions, Ed2kSecureIdent, Ed2kTransport,
-        PeerSourceExchangeRequest, begin_secure_ident_probe, dump_ed2k_tcp_download_meta,
-        encode_aich_file_hash_request, encode_hashset_request, encode_hashset_request2,
-        encode_multipacket_ext2_request, encode_multipacket_request, encode_request_filename,
-        encode_request_sources2, encode_set_req_file_id, encode_start_upload_req,
+        PeerSourceExchangeRequest, begin_secure_ident_probe, codec::FilenameRequestExtension,
+        dump_ed2k_tcp_download_meta, encode_aich_file_hash_request, encode_hashset_request,
+        encode_hashset_request2, encode_multipacket_ext2_request, encode_multipacket_request,
+        encode_request_filename, encode_request_sources2, encode_set_req_file_id,
+        encode_start_upload_req,
     },
     ed2k_transfer::{ED2K_PART_SIZE, Ed2kTransferRuntime, Ed2kTransferState, ResidentManifest},
 };
@@ -66,11 +67,21 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
         && session_state.hello_complete
         && !session_state.startup_file_requests_sent
     {
+        let version = session_state.extended_requests.version;
+        let extension = FilenameRequestExtension {
+            version,
+            complete_source_count: if version >= 2 {
+                transfer_runtime.known_complete_source_count(manifest.token, manifest.pieces.len())
+            } else {
+                0
+            },
+        };
         if session_state.remote_supports_file_identifiers {
             let source_exchange_request = source_exchange_request_for_peer(session_state);
             let multipacket_ext2 = encode_multipacket_ext2_request(
                 request_file_identifier,
                 manifest.file_size,
+                extension,
                 manifest
                     .pieces
                     .iter()
@@ -95,6 +106,7 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
             let multipacket = encode_multipacket_request(
                 file_hash,
                 manifest.file_size,
+                extension,
                 manifest
                     .pieces
                     .iter()
@@ -119,6 +131,7 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
             let request_filename = encode_request_filename(
                 file_hash,
                 manifest.file_size,
+                extension,
                 manifest
                     .pieces
                     .iter()

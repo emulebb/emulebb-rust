@@ -565,7 +565,7 @@ fn assert_legacy_multipacket_omits_aich_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                remaining = decode_request_filename_ext_info(remaining, file_size)
+                remaining = decode_request_filename_ext_info(remaining, file_size, 2)
                     .unwrap()
                     .1;
                 saw_request_filename = true;

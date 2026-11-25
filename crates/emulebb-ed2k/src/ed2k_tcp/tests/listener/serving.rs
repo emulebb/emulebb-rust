@@ -394,6 +394,7 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
         .write_all(&super::encode_request_filename(
             &file_hash,
             manifest.file_size,
+            FILENAME_EXTENSION_V2,
             manifest
                 .pieces
                 .iter()

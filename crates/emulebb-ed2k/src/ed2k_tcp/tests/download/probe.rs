@@ -367,6 +367,7 @@ fn options<'request>(
         hello_identity: peer_hello_identity(),
         secure_ident: Arc::clone(secure),
         transfer_runtime: Arc::clone(runtime),
+        job_token: None,
         file_size: ED2K_PART_SIZE + 1,
         verified_parts: &[],
         timeout: Duration::from_secs(3),
@@ -691,13 +692,22 @@ async fn prepared_status_is_applied_before_cached_hashes_can_join_the_queue() {
             .await
             .unwrap(),
     );
+    assert!(runtime.note_download_source_part_bitmap(
+        job.token,
+        addr,
+        Some([0x42; 16]),
+        None,
+        vec![true],
+    ));
     let hash = source.file_hash;
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         assert_eq!(read_packet(&mut stream).await[5], OP_HELLO);
         stream.write_all(&test_peer_hello(addr)).await.unwrap();
         assert_eq!(read_packet(&mut stream).await[5], OP_SECIDENTSTATE);
-        assert_eq!(read_packet(&mut stream).await[5], OP_MULTIPACKET_EXT2);
+        let request = read_packet(&mut stream).await;
+        assert_eq!(request[5], OP_MULTIPACKET_EXT2);
+        assert!(request.ends_with(&[OP_REQUESTFILENAME, 1, 0, 0, 1, 0]));
         let answer = crate::ed2k_tcp::encode_multipacket_ext2_answer(
             &Ed2kFileIdentifier {
                 file_hash: hash,
@@ -723,6 +733,7 @@ async fn prepared_status_is_applied_before_cached_hashes_can_join_the_queue() {
     });
     let mut input = options(&runtime, &source, &secure);
     input.file_size = 16;
+    input.job_token = Some(job.token);
     let Ed2kPeerProbeOutcome::Available(prepared) = probe_file_from_peer(input).await.unwrap()
     else {
         panic!("missing prepared peer")
