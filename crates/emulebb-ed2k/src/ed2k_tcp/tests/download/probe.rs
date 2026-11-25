@@ -581,6 +581,12 @@ async fn probe_retires_under_unrelated_control_packet_flood() {
 
 #[tokio::test]
 async fn prepared_peer_persists_status_and_downloads_on_the_original_socket() {
+    for envelope in [OP_MULTIPACKET_EXT2, OP_MULTIPACKET_EXT, OP_MULTIPACKET] {
+        prepared_peer_download_with_envelope(envelope).await;
+    }
+}
+
+async fn prepared_peer_download_with_envelope(envelope: u8) {
     let root = unique_test_dir("prepared-peer-download");
     let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
     let secure = test_peer_secure_ident();
@@ -607,24 +613,54 @@ async fn prepared_peer_persists_status_and_downloads_on_the_original_socket() {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         assert_eq!(read_packet(&mut stream).await[5], OP_HELLO);
-        stream.write_all(&test_peer_hello(addr)).await.unwrap();
+        let mut hello = test_peer_hello(addr);
+        if envelope != OP_MULTIPACKET_EXT2 {
+            let mut flags = emule_misc_options2(emule_connect_options(false), false) & !(1 << 13);
+            if envelope == OP_MULTIPACKET {
+                flags &= !(1 << 5);
+            }
+            super::startup_metadata::replace_short_u32_tag(
+                &mut hello,
+                CT_EMULE_MISCOPTIONS2,
+                flags,
+            );
+        }
+        stream.write_all(&hello).await.unwrap();
         assert_eq!(read_packet(&mut stream).await[5], OP_SECIDENTSTATE);
-        assert_eq!(read_packet(&mut stream).await[5], OP_MULTIPACKET_EXT2);
-        stream
-            .write_all(&encode_startup_multipacket_ext2_answer(
+        assert_eq!(read_packet(&mut stream).await[5], envelope);
+        let response = if envelope == OP_MULTIPACKET_EXT2 {
+            encode_startup_multipacket_ext2_answer(&hash, size, "Sample.bin", false)
+        } else {
+            crate::ed2k_tcp::codec::encode_multipacket_answer(
                 &hash,
-                size,
                 "Sample.bin",
-                false,
-            ))
-            .await
-            .unwrap();
+                crate::ed2k_string::Ed2kStringEncoding::Utf8,
+                true,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        stream.write_all(&response).await.unwrap();
         // Preparation omitted SX2. Admission sends it once before joining the
         // upload queue, without another HELLO or metadata request on this socket.
-        assert_eq!(
-            read_packet(&mut stream).await,
+        let expected = if envelope == OP_MULTIPACKET_EXT2 {
             encode_request_sources2(&hash)
-        );
+        } else {
+            let mut body = hash.0.to_vec();
+            if envelope == OP_MULTIPACKET_EXT {
+                body.extend_from_slice(&size.to_le_bytes());
+            }
+            body.extend_from_slice(&[OP_REQUESTSOURCES2, 4, 0, 0]);
+            encode_packet(OP_EMULEPROT, envelope, &body)
+        };
+        assert_eq!(read_packet(&mut stream).await, expected);
+        if envelope != OP_MULTIPACKET_EXT2 {
+            assert_eq!(
+                read_packet(&mut stream).await,
+                encode_aich_file_hash_request(&hash)
+            );
+        }
         let (requested_hash, ranges) =
             accept_upload_and_read_parts_request(&mut stream, false).await;
         assert_eq!(requested_hash, hash);
