@@ -51,8 +51,8 @@ permissions:
 env:
   RELEASE_PLATFORM_PROFILE: ${{ inputs.platform_profile || 'full' }}
   RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/rust-v') && 'beta') || 'candidate' }}
-  EMULEBB_BUILD_REF: 9f26eebf14c770f6114629e2eb6cee5546130b56
-  EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:fd19ffe79681c8f05fc991e02bea1431bec0b486389b795bdb9072a794915e70
+  EMULEBB_BUILD_REF: d2ccbf7016b4ae96c366235553eff7bcdd5d4ec3
+  EMULEBB_LINUX_PREPARED_IMAGE: ghcr.io/emulebb/emulebb-build-ci/ubuntu-rust@sha256:ec8e833bd0db64ce14a7f3155502c89d456cdabbd0121f634a3e5a749b129e19
   EMULEBB_BUILD_TESTS_REF: 135930dcbf350cc37477baf528f9d29ff4a573e9
   EMULEBB_TOOLING_REF: ac8609756b097d1294308abeef962fe1592e4e38
   EMULEBB_RELEASE_VALIDATOR_REF: f9fd190ed6236c6ebb3a71aac8ff0e73e7a06b84
