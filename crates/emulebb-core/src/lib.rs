@@ -2359,14 +2359,20 @@ impl EmulebbCore {
             };
             if !claimed_batch.targets.is_empty() {
                 let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
-                match search_source_batch_via_background_session(
+                let mut capability_skipped = Vec::new();
+                let result = search_source_batch_via_background_session(
                     handle,
                     &claimed_batch.targets,
                     timeout,
                     &cancel,
+                    &mut capability_skipped,
                 )
-                .await
-                {
+                .await;
+                if !capability_skipped.is_empty() {
+                    let mut state = self.state.lock().await;
+                    claimed_batch.release_capability_skips(&mut state, &capability_skipped);
+                }
+                match result {
                     Ok(results_by_hash) => {
                         for (result_hash, mut result) in results_by_hash {
                             let wire_source_count = result.sources.len();
@@ -2439,22 +2445,30 @@ impl EmulebbCore {
                 let dead_server_endpoints = self
                     .ed2k_dead_server_endpoints(config.dead_server_retries)
                     .await;
-                match search_source_udp_server_batches(Ed2kUdpSourceBatchSearchOptions {
-                    bind_ip: network.bind_ip,
-                    config: &config,
-                    preferred_endpoint,
-                    excluded_endpoint: global_udp_source_search_excluded_endpoint(
-                        has_background_search,
+                let mut capability_skipped = Vec::new();
+                let result = search_source_udp_server_batches(
+                    Ed2kUdpSourceBatchSearchOptions {
+                        bind_ip: network.bind_ip,
+                        config: &config,
                         preferred_endpoint,
-                    ),
-                    dead_server_endpoints: &dead_server_endpoints,
-                    max_attempts: global_udp_source_batch_server_attempts(&config),
-                    targets: &claimed_batch.targets,
-                    timeout: Duration::from_secs(config.connect_timeout_secs.max(15)),
-                    cancel: &cancel,
-                })
-                .await
-                {
+                        excluded_endpoint: global_udp_source_search_excluded_endpoint(
+                            has_background_search,
+                            preferred_endpoint,
+                        ),
+                        dead_server_endpoints: &dead_server_endpoints,
+                        max_attempts: global_udp_source_batch_server_attempts(&config),
+                        targets: &claimed_batch.targets,
+                        timeout: Duration::from_secs(config.connect_timeout_secs.max(15)),
+                        cancel: &cancel,
+                    },
+                    &mut capability_skipped,
+                )
+                .await;
+                if !capability_skipped.is_empty() {
+                    let mut state = self.state.lock().await;
+                    claimed_batch.release_capability_skips(&mut state, &capability_skipped);
+                }
+                match result {
                     Ok(results_by_hash) => {
                         for (result_hash, results) in results_by_hash {
                             for mut result in results {

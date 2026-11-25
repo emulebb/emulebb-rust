@@ -193,6 +193,7 @@ pub(super) enum BackgroundServerSearchRequest {
     SourceBatch {
         targets: Vec<Ed2kServerSourceBatchTarget>,
         timeout: Duration,
+        capability_skipped: oneshot::Sender<Vec<Ed2kHash>>,
         response: oneshot::Sender<BackgroundSourceBatchSearchResponse>,
     },
     Callback {
@@ -350,33 +351,41 @@ pub async fn search_source_via_background_session(
 /// Requests source searches for several files on the already-connected ED2K
 /// background session. Each file is carried in its own oracle-style TCP frame;
 /// TCP may still coalesce those frames on the wire.
+/// Appends the hashes excluded by the dispatching session's size capability,
+/// including when another target in the batch fails.
 pub async fn search_source_batch_via_background_session(
     handle: &Ed2kServerSearchHandle,
     targets: &[Ed2kServerSourceBatchTarget],
     timeout: Duration,
     cancel: &CancellationToken,
+    capability_skipped: &mut Vec<Ed2kHash>,
 ) -> Result<HashMap<Ed2kHash, Ed2kServerSourceSearchResult>> {
     if targets.is_empty() {
         return Ok(HashMap::new());
     }
     let (response, receive_response) = oneshot::channel();
+    let (report_skips, mut receive_skips) = oneshot::channel();
     handle
         .sender
         .send(BackgroundServerSearchRequest::SourceBatch {
             targets: targets.to_vec(),
             timeout,
+            capability_skipped: report_skips,
             response,
         })
         .await
         .context("ED2K background search channel is closed")?;
 
-    tokio::select! {
+    let result = tokio::select! {
         _ = cancel.cancelled() => Ok(HashMap::new()),
-        response = receive_response => {
-            let response = response.context("ED2K background source-batch responder dropped")?;
-            response.map_err(BackgroundSearchFailure::into_anyhow)
-        }
+        response = receive_response => response
+            .context("ED2K background source-batch responder dropped")
+            .and_then(|response| response.map_err(BackgroundSearchFailure::into_anyhow)),
+    };
+    if let Ok(skipped) = receive_skips.try_recv() {
+        capability_skipped.extend(skipped);
     }
+    result
 }
 
 /// Requests an ED2K server callback for a LowID peer on the current
@@ -889,12 +898,17 @@ pub(super) async fn start_background_server_search(
         BackgroundServerSearchRequest::SourceBatch {
             targets,
             timeout,
+            capability_skipped,
             response,
         } => {
-            if !targets
+            let skipped: Vec<_> = targets
                 .iter()
-                .any(|target| supports_tcp_source_size(session.server_flags, target.file_size))
-            {
+                .filter(|target| !supports_tcp_source_size(session.server_flags, target.file_size))
+                .map(|target| target.file_hash)
+                .collect();
+            let all_skipped = skipped.len() == targets.len();
+            let _ = capability_skipped.send(skipped);
+            if all_skipped {
                 let _ = response.send(Ok(HashMap::new()));
                 return Ok(None);
             }
