@@ -45,7 +45,7 @@ use size_tags::{
 };
 use source::{
     StoredSourcePublish, is_stock_source_publish, source_dedup_key, source_entry_id,
-    source_result_tags, stock_source_publish_load, stock_source_tcp_port,
+    source_result_tags, stock_source_publish_load, stock_source_tcp_port, stock_source_udp_port,
     stock_stored_source_publish_tags, upsert_source_entry,
 };
 
@@ -224,6 +224,7 @@ impl KadLocalStore {
         if !is_stock_source_publish(tags) {
             return None;
         }
+        let source_udp_port = stock_source_udp_port(tags, source_udp_port);
         if source_ip.octets() == [0, 0, 0, 0] || source_udp_port == 0 {
             return None;
         }
@@ -564,10 +565,11 @@ impl KadLocalStore {
             );
         }
         for entry in snapshot.source_publishes {
+            let source_udp_port = stock_source_udp_port(&entry.tags, entry.source_udp_port);
             if entry.observed_at + self.config.source_ttl <= now
                 || entry.source_ip.octets() == [0, 0, 0, 0]
                 || entry.source_tcp_port == 0
-                || entry.source_udp_port == 0
+                || source_udp_port == 0
             {
                 continue;
             }
@@ -581,13 +583,13 @@ impl KadLocalStore {
                     publisher_id: entry.publisher_id,
                     source_ip: entry.source_ip,
                     source_tcp_port: entry.source_tcp_port,
-                    source_udp_port: entry.source_udp_port,
+                    source_udp_port,
                     tags: entry.tags,
                     dedup_key: source_dedup_key(
                         entry.target,
                         entry.source_ip,
                         entry.source_tcp_port,
-                        entry.source_udp_port,
+                        source_udp_port,
                     ),
                 },
             );

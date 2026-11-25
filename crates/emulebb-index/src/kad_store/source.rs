@@ -79,6 +79,12 @@ pub(super) fn stock_source_tcp_port(tags: &[Tag]) -> Option<u16> {
     })
 }
 
+pub(super) fn stock_source_udp_port(tags: &[Tag], observed_port: u16) -> u16 {
+    tags.iter()
+        .find_map(source_udp_port_tag_value)
+        .unwrap_or(observed_port)
+}
+
 pub(super) fn source_result_tags(entry: &StoredSourcePublish) -> Vec<Tag> {
     let mut tags = Vec::new();
     if let Some(size) = stock_first_keyword_source_file_size(&entry.tags) {
@@ -105,13 +111,19 @@ pub(super) fn source_result_tags(entry: &StoredSourcePublish) -> Vec<Tag> {
                 }
             }
             TagName::Short(name) if name == tag_name::SOURCEUPORT => {
-                if !saw_source_udp_port && let Some(tag) = normalized_source_udp_port_tag(tag) {
-                    tags.push(tag);
+                if !saw_source_udp_port && source_udp_port_tag_value(tag).is_some() {
+                    tags.push(tag.clone());
                     saw_source_udp_port = true;
                 }
             }
             _ => tags.push(tag.clone()),
         }
+    }
+    if !saw_source_udp_port {
+        tags.push(Tag::new_short(
+            tag_name::SOURCEUPORT,
+            TagValue::UInt(u64::from(entry.source_udp_port)),
+        ));
     }
     tags
 }
@@ -133,19 +145,20 @@ fn normalized_source_port_tag(tag: &Tag) -> Tag {
     tag
 }
 
-fn normalized_source_udp_port_tag(tag: &Tag) -> Option<Tag> {
-    let port = match tag.value {
-        TagValue::UInt(value) => u16::try_from(value).ok()?,
-        TagValue::U64(value) => u16::try_from(value).ok()?,
-        TagValue::U32(value) => u16::try_from(value).ok()?,
-        TagValue::U16(value) => value,
-        TagValue::U8(value) => u16::from(value),
-        _ => return None,
-    };
-    if port == 0 {
+fn source_udp_port_tag_value(tag: &Tag) -> Option<u16> {
+    if tag.name != TagName::Short(tag_name::SOURCEUPORT) {
         return None;
     }
-    Some(Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(port)))
+    let value = match tag.value {
+        TagValue::UInt(value) | TagValue::U64(value) => value,
+        TagValue::U32(value) => u64::from(value),
+        TagValue::U16(value) => u64::from(value),
+        TagValue::U8(value) => u64::from(value),
+        _ => return None,
+    };
+    // Stock takes the low 16 bits for indexing while retaining the original tag.
+    let port = (value & u64::from(u16::MAX)) as u16;
+    (port != 0).then_some(port)
 }
 
 pub(super) fn source_entry_id(publisher_id: NodeId) -> Ed2kHash {

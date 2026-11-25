@@ -1010,7 +1010,8 @@ fn source_search_materializes_stock_source_tag_shape() {
         Tag::new_short(tag_name::SOURCETYPE, TagValue::UInt(1)),
         Tag::new_short(tag_name::SOURCEPORT, TagValue::UInt(4662)),
         Tag::new_short(tag_name::SOURCEIP, TagValue::U32(0x0202_0202)),
-        Tag::new_short(tag_name::SOURCEUPORT, TagValue::UInt(4672)),
+        Tag::new_short(tag_name::SOURCEUPORT, TagValue::U32(0)),
+        Tag::new_short(tag_name::SOURCEUPORT, TagValue::U32(4672)),
         Tag::filesize(456),
         Tag::new_short(tag_name::SOURCEPORT, TagValue::UInt(9999)),
         Tag::new_short(tag_name::SOURCEUPORT, TagValue::UInt(9999)),
@@ -1066,12 +1067,12 @@ fn source_search_materializes_stock_source_tag_shape() {
     ));
     assert!(matches!(
         result_tags[5].value,
-        TagValue::U16(value) if value == 4672
+        TagValue::U32(value) if value == 4672
     ));
 }
 
 #[test]
-fn source_search_does_not_backfill_missing_udp_port_tag_like_stock() {
+fn source_search_backfills_missing_udp_port_from_datagram() {
     let mut store = KadLocalStore::new(config());
     let target = NodeId::from_bytes([3; 16]);
     let tags = vec![
@@ -1101,7 +1102,48 @@ fn source_search_does_not_backfill_missing_udp_port_tag_like_stock() {
         )
         .expect("source response");
 
-    assert!(!short_tag_names(&response.results[0].tags).contains(&tag_name::SOURCEUPORT));
+    assert_eq!(
+        response.results[0].tags.last(),
+        Some(&Tag::new_short(tag_name::SOURCEUPORT, TagValue::UInt(4672)))
+    );
+}
+
+#[test]
+fn advertised_source_udp_port_survives_restore_and_keys_refresh() {
+    let mut store = KadLocalStore::new(config());
+    let target = NodeId::from_bytes([3; 16]);
+    let source_ip = Ipv4Addr::new(192, 0, 2, 10);
+    let advertised_port = 4672;
+    let mut tags = [
+        Tag::new_short(tag_name::SOURCETYPE, TagValue::UInt(1)),
+        Tag::new_short(tag_name::SOURCEPORT, TagValue::U16(4662)),
+        Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(advertised_port)),
+    ];
+    store.record_source_publish(
+        target,
+        NodeId::from_bytes([4; 16]),
+        source_ip,
+        5000,
+        &tags,
+        ts(1),
+    );
+    let mut snapshot = store.publish_snapshot(ts(1));
+    assert_eq!(
+        snapshot.source_publishes[0].source_udp_port,
+        advertised_port
+    );
+    // Earlier runtimes saved the observed port alongside the advertised tag.
+    snapshot.source_publishes[0].source_udp_port = 5000;
+    let mut restored = KadLocalStore::new(config());
+    restored.merge_publish_snapshot(snapshot, ts(2));
+    tags[1].value = TagValue::U16(4663);
+    let next_publisher = NodeId::from_bytes([5; 16]);
+    restored.record_source_publish(target, next_publisher, source_ip, 5001, &tags, ts(3));
+
+    let entries = restored.publish_snapshot(ts(3)).source_publishes;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].publisher_id, next_publisher);
+    assert_eq!(entries[0].source_udp_port, advertised_port);
 }
 
 #[test]
