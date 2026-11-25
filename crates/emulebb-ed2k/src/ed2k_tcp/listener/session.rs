@@ -892,7 +892,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 .await?;
             }
             (OP_EDONKEYPROT, OP_REQUESTFILENAME) => {
-                requested_file_hash = handle_request_filename(
+                if let Some(requested) = handle_request_filename(
                     transfer_runtime,
                     &mut transport,
                     peer_addr,
@@ -901,16 +901,22 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
                     &mut requester_file_state,
                 )
-                .await?;
+                .await?
+                {
+                    requested_file_hash = Some(requested);
+                }
             }
             (OP_EDONKEYPROT, OP_SETREQFILEID) => {
-                requested_file_hash = handle_set_req_file_id(
+                if let Some(requested) = handle_set_req_file_id(
                     transfer_runtime,
                     &mut transport,
                     peer_addr,
                     &packet.payload,
                 )
-                .await?;
+                .await?
+                {
+                    requested_file_hash = Some(requested);
+                }
             }
             (OP_EDONKEYPROT, OP_STARTUPLOADREQ) => {
                 let requested =

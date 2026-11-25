@@ -1164,7 +1164,16 @@ impl Ed2kSharedEntry {
     /// (ListenSocket.cpp `OP_FILEREQUEST`), i.e. at least one complete part.
     #[must_use]
     pub fn is_servable(&self) -> bool {
-        self.verified_complete || self.complete_parts.iter().any(|complete| *complete)
+        // WHY: The trailing virtual EOF bit is true at exact part boundaries
+        // even when no payload is verified. It must never confer serving access.
+        self.verified_complete
+            || self
+                .complete_parts
+                .iter()
+                .enumerate()
+                .any(|(part, complete)| {
+                    *complete && (part as u64) * ED2K_PART_SIZE < self.file_size
+                })
     }
 
     /// Encode the OP_FILESTATUS body for this entry (the bytes after the file

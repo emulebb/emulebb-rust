@@ -14,7 +14,7 @@ use crate::{
         OP_MULTIPACKET_EXT, OP_REQUESTFILENAME, OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
         OP_SETREQFILEID,
     },
-    ed2k_transfer::{Ed2kSharedEntry, Ed2kTransferRuntime},
+    ed2k_transfer::{ED2K_PART_SIZE, Ed2kSharedEntry, Ed2kTransferRuntime},
 };
 
 use super::super::super::codec::{
@@ -330,33 +330,32 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
-    let shared = transfer_runtime.local_servable_entry(&requested).await?;
-    let reply = if let Some(shared) = shared.as_ref() {
-        let ext_info = if payload.len() == 16 {
-            None
-        } else {
-            let (ext_info, remaining) =
-                decode_request_filename_ext_info(&payload[16..], shared.file_size)?;
-            if !remaining.is_empty() {
-                anyhow::bail!(
-                    "unexpected trailing OP_REQUESTFILENAME bytes {}",
-                    remaining.len()
-                );
-            }
-            Some(ext_info)
-        };
-        *requester_file_state = Some(RequesterFileState {
-            file_hash: requested,
-            part_status: ext_info.as_ref().and_then(|info| info.part_status.clone()),
-            complete_source_count: ext_info
-                .as_ref()
-                .map_or(0, |info| info.complete_source_count),
-        });
-        encode_request_filename_answer(&requested, &shared.display_name, string_encoding)?
-    } else {
-        *requester_file_state = None;
-        encode_file_req_ans_nofil(&requested)
+    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
+        // WHY: Stock ignores an unknown standalone filename request. The
+        // subsequent status request owns the file-not-found response.
+        return Ok(None);
     };
+    let ext_info = if payload.len() == 16 {
+        None
+    } else {
+        let (ext_info, remaining) =
+            decode_request_filename_ext_info(&payload[16..], shared.file_size)?;
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "unexpected trailing OP_REQUESTFILENAME bytes {}",
+                remaining.len()
+            );
+        }
+        Some(ext_info)
+    };
+    *requester_file_state = Some(RequesterFileState {
+        file_hash: requested,
+        part_status: ext_info.as_ref().and_then(|info| info.part_status.clone()),
+        complete_source_count: ext_info
+            .as_ref()
+            .map_or(0, |info| info.complete_source_count),
+    });
+    let reply = encode_request_filename_answer(&requested, &shared.display_name, string_encoding)?;
     transport
         .write_all_diagnostic("listener", peer_addr, "request_filename", &reply)
         .await
@@ -388,12 +387,14 @@ pub(in crate::ed2k_tcp) async fn handle_set_req_file_id(
     payload: &[u8],
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_exact_file_hash_payload(payload, "OP_SETREQFILEID")?;
-    // OP_SETREQFILEID answers the live part-status: a complete file collapses to
-    // the master "complete" sentinel, while an in-progress partfile reports its
-    // verified parts (master ListenSocket.cpp: IsPartFile() -> WritePartStatus,
-    // else WriteUInt16(0)). A partfile is only a valid requested file once it
-    // holds at least one complete part.
-    let reply = if let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? {
+    // WHY: Stock answers status for a known multipart download before it has
+    // verified data. Reporting file-not-found would discard a future source.
+    // Only the status lookup uses this broader eligibility.
+    let shared = transfer_runtime
+        .local_entry(&requested)
+        .await?
+        .filter(|entry| entry.is_servable() || entry.file_size > ED2K_PART_SIZE);
+    let reply = if let Some(shared) = &shared {
         encode_file_status(&requested, &shared.encode_part_status_body())
     } else {
         encode_file_req_ans_nofil(&requested)
@@ -402,7 +403,7 @@ pub(in crate::ed2k_tcp) async fn handle_set_req_file_id(
         .write_all_diagnostic("listener", peer_addr, "set_req_file_id", &reply)
         .await
         .with_context(|| format!("failed to send OP_SETREQFILEID response to {peer_addr}"))?;
-    Ok(Some(requested))
+    Ok(shared.map(|_| requested))
 }
 
 pub(in crate::ed2k_tcp) async fn handle_hashset_request(
