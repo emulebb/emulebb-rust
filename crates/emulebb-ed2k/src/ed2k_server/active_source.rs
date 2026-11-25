@@ -24,7 +24,7 @@ use super::{
     decode_found_sources, encode_login_request, encode_source_request,
     login_identity_for_server_transport, merge_found_sources, resolve_server_entry,
     send_connected_server_startup, should_use_server_obfuscation, source_request_opcode,
-    validate_found_sources,
+    supports_tcp_source_size, validate_found_sources,
 };
 
 /// Inputs for a one-shot ED2K source search across configured servers.
@@ -262,6 +262,9 @@ async fn search_sources_on_server(
                     );
                 }
                 session.assigned_client_id = Some(id_change.client_id);
+                if !supports_tcp_source_size(session.server_flags, file_size) {
+                    return Ok(Vec::new());
+                }
                 // Ephemeral source-query session: never solicit the server list
                 // (stock only issues OP_GETSERVERLIST from its single persistent
                 // ServerConnect, and only when AddServersFromServer is set).

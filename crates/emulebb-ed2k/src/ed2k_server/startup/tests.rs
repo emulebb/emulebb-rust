@@ -385,10 +385,9 @@ fn offered_files_catalog_honors_server_soft_limit() {
 #[test]
 fn large_file_offered_only_to_largefiles_server() {
     let mut small = shared_entry(1);
-    small.file_size = 1_000;
+    small.file_size = ED2K_LEGACY_FILE_SIZE_MAX;
     let mut large = shared_entry(2);
-    // > 4 GiB: high dword is non-zero, so eMule treats it as a large file.
-    large.file_size = u64::from(u32::MAX) + 4_096;
+    large.file_size = ED2K_LEGACY_FILE_SIZE_MAX + 1;
     let catalog = vec![small.clone(), large.clone()];
     let small_hash = popular_hash_offer_file(&small).unwrap().0;
 
@@ -426,6 +425,25 @@ fn large_file_offered_only_to_largefiles_server() {
         u32::from_le_bytes(with_largefiles[0..4].try_into().unwrap()),
         2
     );
+
+    let large_offer = encode_offer_files_payload(
+        &[large],
+        Some(u32::from_le_bytes([192, 168, 1, 5])),
+        Ipv4Addr::new(192, 168, 1, 5),
+        4662,
+        Some(SERVER_TCP_FLAG_LARGEFILES),
+    );
+    let tag_count = u32::from_le_bytes(large_offer[26..30].try_into().unwrap());
+    let mut tags = &large_offer[30..];
+    let mut high_size = None;
+    for _ in 0..tag_count {
+        let (name, value, rest) = decode_tag_value(tags, Ed2kStringEncoding::Legacy).unwrap();
+        if name == Some(FT_FILESIZE_HI) {
+            high_size = value;
+        }
+        tags = rest;
+    }
+    assert_eq!(high_size, Some(DecodedTagValue::Unsigned(0)));
 }
 
 #[test]

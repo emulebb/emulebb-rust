@@ -350,6 +350,13 @@ const SERVER_TCP_FLAG_UNICODE: u32 = 0x0000_0010;
 const SERVER_TCP_FLAG_RELATEDSEARCH: u32 = 0x0000_0040;
 const SERVER_TCP_FLAG_TYPETAGINTEGER: u32 = 0x0000_0080;
 const SERVER_TCP_FLAG_LARGEFILES: u32 = 0x0000_0100;
+
+/// Whether the TCP server session can understand a source request for this size.
+#[must_use]
+pub fn supports_tcp_source_size(server_flags: Option<u32>, file_size: u64) -> bool {
+    file_size <= crate::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX
+        || server_flags.unwrap_or_default() & SERVER_TCP_FLAG_LARGEFILES != 0
+}
 const SERVER_TCP_FLAG_TCPOBFUSCATION: u32 = 0x0000_0400;
 const SERVER_UDP_FLAG_EXT_GETSOURCES: u32 = 0x0000_0001;
 const SERVER_UDP_FLAG_EXT_GETFILES: u32 = 0x0000_0002;

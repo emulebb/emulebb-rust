@@ -13,7 +13,9 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::{
     ed2k_string::Ed2kStringEncoding,
     ed2k_tcp::Ed2kHelloIdentity,
-    ed2k_transfer::{Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry},
+    ed2k_transfer::{
+        ED2K_LEGACY_FILE_SIZE_MAX, Ed2kMediaMetadata, Ed2kSharedCatalog, Ed2kSharedEntry,
+    },
     shared_publish_rank::{
         SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
     },
@@ -177,12 +179,13 @@ fn encode_offered_files_catalog(
             );
         let lower_file_size = *file_size as u32;
         let upper_file_size = u32::try_from(file_size >> 32).unwrap_or(u32::MAX);
+        let has_high_size_tag = *file_size > ED2K_LEGACY_FILE_SIZE_MAX;
         // FT_FILETYPE per stock (SharedFileList::CreateOfferedFilePacket): an
         // integer search-ID to TYPETAGINTEGER servers, else the string term; an
         // ANY (unknown) type publishes no FT_FILETYPE tag at all.
         let has_type_tag = *file_type != ED2K_FILETYPE_ANY;
         let mut tag_count = 2u32; // FT_FILENAME + FT_FILESIZE
-        if upper_file_size != 0 {
+        if has_high_size_tag {
             tag_count += 1;
         }
         if has_type_tag {
@@ -208,7 +211,7 @@ fn encode_offered_files_catalog(
         // Stock down-sizes integer tags via WriteNewEd2kTag, so a small file's size
         // is a u8/u16, not always u32.
         push_short_int_tag(&mut payload, FT_FILESIZE, u64::from(lower_file_size));
-        if upper_file_size != 0 {
+        if has_high_size_tag {
             push_short_int_tag(&mut payload, FT_FILESIZE_HI, u64::from(upper_file_size));
         }
         if has_type_tag {
@@ -323,7 +326,7 @@ pub(super) fn encode_source_request(file_hash: Ed2kHash, file_size: u64) -> Vec<
     }
     let mut payload = Vec::with_capacity(28);
     payload.extend_from_slice(&file_hash.0);
-    if file_size > u64::from(u32::MAX) {
+    if file_size > ED2K_LEGACY_FILE_SIZE_MAX {
         payload.extend_from_slice(&0u32.to_le_bytes());
         payload.extend_from_slice(&file_size.to_le_bytes());
     } else {
@@ -357,7 +360,7 @@ pub(super) fn encode_udp_source_request_batch(
         ) {
             break;
         }
-        let is_large_file = target.file_size > u64::from(u32::MAX);
+        let is_large_file = target.file_size > ED2K_LEGACY_FILE_SIZE_MAX;
         if is_large_file && !supports_large_files {
             continue;
         }
@@ -606,7 +609,7 @@ pub(super) fn ranked_offer_files(
             // pCurServer->SupportsLargeFilesTCP()`). Never advertise a >4GB file
             // to a non-LARGEFILES server (the forced FT_FILESIZE=0 fallback is a
             // stock ASSERT(0) path we avoid by simply not offering the file).
-            if !server_supports_large_files && entry.file_size > u64::from(u32::MAX) {
+            if !server_supports_large_files && entry.file_size > ED2K_LEGACY_FILE_SIZE_MAX {
                 return None;
             }
             let offered = popular_hash_offer_file(entry)?;
