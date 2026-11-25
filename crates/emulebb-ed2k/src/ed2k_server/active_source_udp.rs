@@ -10,14 +10,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::config::Ed2kRuntimeConfig;
+use crate::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    Ed2kFoundSource, Ed2kServerUdpEvidence, OP_GLOBFOUNDSOURCES, annotate_found_sources_server,
-    bind_server_udp_socket, configured_server_entries, decode_udp_found_source_sets,
-    merge_found_sources, read_server_udp_packet, read_server_udp_packet_from_any,
-    resolve_server_entry, retain_live_servers, send_udp_source_search,
-    send_udp_source_search_batch, validate_found_sources,
+    Ed2kFoundSource, Ed2kServerUdpEvidence, OP_GLOBFOUNDSOURCES, SERVER_UDP_FLAG_LARGEFILES,
+    annotate_found_sources_server, bind_server_udp_socket, configured_server_entries,
+    decode_udp_found_source_sets, merge_found_sources, read_server_udp_packet,
+    read_server_udp_packet_from_any, resolve_server_entry, retain_live_servers,
+    send_udp_source_search, send_udp_source_search_batch, validate_found_sources,
 };
 
 /// Inputs for an ED2K server UDP source search.
@@ -393,12 +394,14 @@ async fn drain_source_udp_responses(
 /// pacing one server per ~1s tick. This API preserves that packet shape *and*
 /// cadence for callers that can coalesce scarce active transfers before issuing
 /// the UDP walk.
+/// Appends large-file hashes excluded by every usable server in a completed walk.
 #[expect(
     clippy::cognitive_complexity,
     reason = "linear protocol orchestration flow"
 )]
 pub async fn search_source_udp_server_batches(
     options: Ed2kUdpSourceBatchSearchOptions<'_>,
+    capability_skipped: &mut Vec<Ed2kHash>,
 ) -> Result<HashMap<Ed2kHash, Vec<Ed2kUdpSourceSearchResult>>> {
     let Ed2kUdpSourceBatchSearchOptions {
         bind_ip,
@@ -461,6 +464,8 @@ pub async fn search_source_udp_server_batches(
     let per_server_timeout = timeout.max(Duration::from_secs(5));
     let mut queried_servers = Vec::new();
     let mut request_opcodes = HashMap::new();
+    let mut saw_legacy_server = false;
+    let mut large_file_eligibility_unknown_or_supported = false;
 
     // Oracle `CDownloadQueue::SendNextUDPPacket`: trickle one server's batched request
     // per interval instead of fanning out to every configured server at once. After each
@@ -484,6 +489,7 @@ pub async fn search_source_udp_server_batches(
                     configured_server.display_name()
                 );
                 last_error = Some(error);
+                large_file_eligibility_unknown_or_supported = true;
                 continue;
             }
         };
@@ -494,6 +500,11 @@ pub async fn search_source_udp_server_batches(
                 targets.len()
             );
             continue;
+        }
+        if resolved_server.entry.udp_flags & SERVER_UDP_FLAG_LARGEFILES == 0 {
+            saw_legacy_server = true;
+        } else {
+            large_file_eligibility_unknown_or_supported = true;
         }
         debug!(
             "ED2K UDP source batch search attempt={}/{} endpoint={} name={} target_count={}",
@@ -536,28 +547,31 @@ pub async fn search_source_udp_server_batches(
         }
     }
 
-    if queried_servers.is_empty() {
-        if let Some(error) = last_error {
-            return Err(error);
-        }
-        return Ok(HashMap::new());
-    }
-
     // Final listen tail after the last server was queried (the reask response window is
     // independent of the send cadence).
     let deadline = TokioInstant::now() + per_server_timeout;
-    if let Some(error) = drain_source_udp_responses(
-        &socket,
-        &queried_servers,
-        &request_opcodes,
-        deadline,
-        &requested_hashes,
-        &mut results_by_hash,
-        cancel,
-    )
-    .await
+    if !queried_servers.is_empty()
+        && let Some(error) = drain_source_udp_responses(
+            &socket,
+            &queried_servers,
+            &request_opcodes,
+            deadline,
+            &requested_hashes,
+            &mut results_by_hash,
+            cancel,
+        )
+        .await
     {
         last_error = Some(error);
+    }
+
+    if saw_legacy_server && !large_file_eligibility_unknown_or_supported && !cancel.is_cancelled() {
+        capability_skipped.extend(
+            targets
+                .iter()
+                .filter(|target| target.file_size > ED2K_LEGACY_FILE_SIZE_MAX)
+                .map(|target| target.file_hash),
+        );
     }
 
     if !results_by_hash.is_empty() {
@@ -581,6 +595,40 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use super::*;
+
+    #[tokio::test]
+    async fn completed_legacy_server_walk_reports_large_file_capability_skip() {
+        let bind_ip = crate::test_bind_ip();
+        let config = Ed2kRuntimeConfig {
+            server_endpoints: vec![SocketAddr::from((bind_ip, 4661)).to_string()],
+            ..Ed2kRuntimeConfig::default()
+        };
+        let hash = Ed2kHash([0x55; 16]);
+        let targets = [Ed2kUdpSourceBatchTarget {
+            file_hash: hash,
+            file_size: ED2K_LEGACY_FILE_SIZE_MAX + 1,
+        }];
+        let cancel = CancellationToken::new();
+        let mut skipped = Vec::new();
+        let results = search_source_udp_server_batches(
+            Ed2kUdpSourceBatchSearchOptions {
+                bind_ip,
+                config: &config,
+                preferred_endpoint: None,
+                excluded_endpoint: None,
+                dead_server_endpoints: &[],
+                max_attempts: 1,
+                targets: &targets,
+                timeout: Duration::from_secs(1),
+                cancel: &cancel,
+            },
+            &mut skipped,
+        )
+        .await
+        .unwrap();
+        assert!(results.is_empty());
+        assert_eq!(skipped, [hash]);
+    }
 
     #[test]
     fn resolved_endpoint_exclusion_matches_ip_even_when_configured_host_differs() {

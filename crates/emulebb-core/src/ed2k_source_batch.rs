@@ -39,12 +39,60 @@ const ED2K_KAD_SOURCE_REASK_MAX_MULTIPLIER: u8 = 7;
 pub(crate) struct ClaimedEd2kUdpSourceBatch {
     pub targets: Vec<Ed2kUdpSourceBatchTarget>,
     pub transfers: HashMap<Ed2kHash, DownloadSourceTarget>,
+    claimed_at: Instant,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedConnectedServerSourceBatch {
     pub targets: Vec<Ed2kServerSourceBatchTarget>,
     pub transfers: HashMap<Ed2kHash, DownloadSourceTarget>,
+    claimed_at: Instant,
+}
+
+impl ClaimedEd2kUdpSourceBatch {
+    pub(crate) fn release_capability_skips(&self, state: &mut CoreState, skipped: &[Ed2kHash]) {
+        release_skipped_reservations(
+            &mut state.ed2k_udp_source_batch_last_queried,
+            &self.transfers,
+            self.claimed_at,
+            skipped,
+        );
+    }
+}
+
+impl ClaimedConnectedServerSourceBatch {
+    pub(crate) fn release_capability_skips(&self, state: &mut CoreState, skipped: &[Ed2kHash]) {
+        release_skipped_reservations(
+            &mut state.ed2k_server_source_last_queried,
+            &self.transfers,
+            self.claimed_at,
+            skipped,
+        );
+        if !self.targets.is_empty()
+            && state.ed2k_server_source_last_frame_at == Some(self.claimed_at)
+            && self
+                .targets
+                .iter()
+                .all(|target| skipped.contains(&target.file_hash))
+        {
+            state.ed2k_server_source_last_frame_at = None;
+        }
+    }
+}
+
+fn release_skipped_reservations(
+    reservations: &mut HashMap<String, Instant>,
+    transfers: &HashMap<Ed2kHash, DownloadSourceTarget>,
+    claimed_at: Instant,
+    skipped: &[Ed2kHash],
+) {
+    for hash in skipped {
+        if let Some(transfer) = transfers.get(hash)
+            && reservations.get(&transfer.hash) == Some(&claimed_at)
+        {
+            reservations.remove(&transfer.hash);
+        }
+    }
 }
 
 pub(crate) fn claim_ed2k_udp_source_batch(
@@ -107,7 +155,11 @@ pub(crate) fn claim_ed2k_udp_source_batch(
         transfers.insert(file_hash, transfer);
     }
 
-    ClaimedEd2kUdpSourceBatch { targets, transfers }
+    ClaimedEd2kUdpSourceBatch {
+        targets,
+        transfers,
+        claimed_at: now,
+    }
 }
 
 pub(crate) fn claim_connected_server_source_batch(
@@ -131,6 +183,7 @@ pub(crate) fn claim_connected_server_source_batch(
         return ClaimedConnectedServerSourceBatch {
             targets: Vec::new(),
             transfers: HashMap::new(),
+            claimed_at: now,
         };
     }
 
@@ -172,7 +225,11 @@ pub(crate) fn claim_connected_server_source_batch(
     if !targets.is_empty() {
         state.ed2k_server_source_last_frame_at = Some(now);
     }
-    ClaimedConnectedServerSourceBatch { targets, transfers }
+    ClaimedConnectedServerSourceBatch {
+        targets,
+        transfers,
+        claimed_at: now,
+    }
 }
 
 pub(crate) fn claim_kad_source_refresh(
@@ -389,6 +446,60 @@ mod tests {
             claim_connected_server_source_batch(&mut state, &target, hash, Some(0x100), now);
         assert_eq!(capable.targets.len(), 1);
         assert_eq!(capable.targets[0].file_size, file_size);
+    }
+
+    #[test]
+    fn capability_skip_releases_only_the_original_file_and_frame_reservations() {
+        let hash = Ed2kHash::from_bytes([0x43; 16]);
+        let other_hash = Ed2kHash::from_bytes([0x44; 16]);
+        let file_size = emulebb_ed2k::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX + 1;
+        let current = transfer(hash, "downloading", file_size);
+        let other = transfer(other_hash, "queued", 1024);
+        let target = DownloadSourceTarget::from(&current);
+        let mut state = core_state_with_transfers([current, other]);
+        let now = Instant::now();
+        let tcp = claim_connected_server_source_batch(&mut state, &target, hash, Some(0x100), now);
+        let udp = claim_ed2k_udp_source_batch(&mut state, &target, hash, 0, 0, now);
+        tcp.release_capability_skips(&mut state, &[hash]);
+        udp.release_capability_skips(&mut state, &[hash]);
+        assert!(
+            !state
+                .ed2k_server_source_last_queried
+                .contains_key(&target.hash)
+        );
+        assert!(
+            !state
+                .ed2k_udp_source_batch_last_queried
+                .contains_key(&target.hash)
+        );
+        assert_eq!(state.ed2k_server_source_last_frame_at, Some(now));
+        assert_eq!(
+            state.ed2k_server_source_last_queried[&other_hash.to_string()],
+            now
+        );
+        assert_eq!(
+            state.ed2k_udp_source_batch_last_queried[&other_hash.to_string()],
+            now
+        );
+
+        let later = now + ED2K_SERVER_UDP_SOURCE_BATCH_COOLDOWN;
+        let tcp_later =
+            claim_connected_server_source_batch(&mut state, &target, hash, Some(0x100), later);
+        let udp_later = claim_ed2k_udp_source_batch(&mut state, &target, hash, 0, 0, later);
+        tcp.release_capability_skips(&mut state, &[hash, other_hash]);
+        udp.release_capability_skips(&mut state, &[hash, other_hash]);
+        assert_eq!(state.ed2k_server_source_last_frame_at, Some(later));
+        assert_eq!(state.ed2k_server_source_last_queried[&target.hash], later);
+        assert_eq!(
+            state.ed2k_udp_source_batch_last_queried[&target.hash],
+            later
+        );
+
+        tcp_later.release_capability_skips(&mut state, &[hash, other_hash]);
+        udp_later.release_capability_skips(&mut state, &[hash, other_hash]);
+        assert_eq!(state.ed2k_server_source_last_frame_at, None);
+        assert!(state.ed2k_server_source_last_queried.is_empty());
+        assert!(state.ed2k_udp_source_batch_last_queried.is_empty());
     }
 
     #[test]

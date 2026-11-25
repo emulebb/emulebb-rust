@@ -514,6 +514,7 @@ async fn background_source_batch_search_channel_round_trips_results_by_hash() {
         ],
         Duration::from_secs(1),
         &cancel,
+        &mut Vec::new(),
     )
     .await
     .unwrap();
@@ -2191,6 +2192,7 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
     let file_hash_a = Ed2kHash([0x71; 16]);
     let file_hash_b = Ed2kHash([0x72; 16]);
     let stale_hash = Ed2kHash([0x73; 16]);
+    let large_hash = Ed2kHash([0x74; 16]);
     let server_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         read_login_request(&mut stream).await;
@@ -2204,7 +2206,9 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
         while requested.len() < 2 {
             let (opcode, payload) = read_client_frame(&mut stream).await;
             if matches!(opcode, OP_GETSOURCES | OP_GETSOURCES_OBFU) {
-                requested.insert(Ed2kHash(payload[..16].try_into().unwrap()));
+                let hash = Ed2kHash(payload[..16].try_into().unwrap());
+                assert_ne!(hash, large_hash);
+                requested.insert(hash);
             }
         }
         assert_eq!(requested, HashSet::from([file_hash_a, file_hash_b]));
@@ -2244,6 +2248,7 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
         .await
         .expect("background session should accept login");
 
+        let mut capability_skipped = Vec::new();
         let results = search_source_batch_via_background_session(
             &handle,
             &[
@@ -2255,12 +2260,18 @@ async fn malformed_batch_reply_preserves_partial_results_and_pending_hashes() {
                     file_hash: file_hash_b,
                     file_size: 456,
                 },
+                Ed2kServerSourceBatchTarget {
+                    file_hash: large_hash,
+                    file_size: crate::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX + 1,
+                },
             ],
             Duration::from_secs(1),
             &cancel,
+            &mut capability_skipped,
         )
         .await
         .expect("valid replies must complete the original batch");
+        assert_eq!(capability_skipped, [large_hash]);
         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         results
     };
