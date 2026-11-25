@@ -78,6 +78,7 @@ fn apply_emule_info_profile(
     session_state: &mut DownloadSessionState,
     profile: DecodedEmuleInfoProfile,
 ) {
+    session_state.extended_requests.apply_info(&profile);
     session_state.remote_source_exchange_version = profile.source_exchange_version;
     session_state.remote_supports_source_exchange = profile.supports_source_exchange;
     session_state.remote_supports_source_exchange2 = false;
@@ -577,6 +578,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
             };
             let upload_dispatch = if let Some(upload_facet) = upload_facet.as_deref_mut() {
+                upload_facet.extended_requests_version = session_state.extended_requests.version;
                 upload_facet.note_packet();
                 upload_facet
                     .handle_packet(
@@ -672,6 +674,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         hello_profile.supports_ext_multipacket;
                     session_state.remote_supports_unicode =
                         hello_profile.misc_options1.unicode_support;
+                    session_state.extended_requests =
+                        super::super::hello::ExtendedRequestNegotiation::from_hello(&hello_profile);
                     session_state.remote_source_exchange_version =
                         hello_profile.source_exchange_version;
                     session_state.remote_supports_source_exchange = hello_profile.supports_source_exchange;
@@ -741,6 +745,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         hello_profile.supports_ext_multipacket;
                     session_state.remote_supports_unicode =
                         hello_profile.misc_options1.unicode_support;
+                    session_state.extended_requests.apply_hello_answer(&hello_profile);
                     session_state.remote_source_exchange_version =
                         hello_profile.source_exchange_version;
                     session_state.remote_supports_source_exchange = hello_profile.supports_source_exchange;

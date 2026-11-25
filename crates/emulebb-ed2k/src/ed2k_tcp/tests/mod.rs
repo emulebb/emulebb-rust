@@ -249,7 +249,7 @@ fn assert_startup_multipacket_ext2_with_source_exchange(
         remaining = rest;
         match sub_opcode {
             super::OP_REQUESTFILENAME => {
-                remaining = super::decode_request_filename_ext_info(remaining, file_size)
+                remaining = super::decode_request_filename_ext_info(remaining, file_size, 2)
                     .unwrap()
                     .1;
                 saw_request_filename = true;
@@ -315,6 +315,11 @@ mod download;
 mod download_fixture;
 mod listener;
 mod listener_fixture;
+const FILENAME_EXTENSION_V2: super::codec::FilenameRequestExtension =
+    super::codec::FilenameRequestExtension {
+        version: 2,
+        complete_source_count: 0,
+    };
 mod protocol;
 
 use common::*;

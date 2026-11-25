@@ -88,6 +88,7 @@ impl RequesterFileState {
 pub(in crate::ed2k_tcp) struct PeerFileRequestCapabilities {
     pub(in crate::ed2k_tcp) string_encoding: Ed2kStringEncoding,
     pub(in crate::ed2k_tcp) supports_large_files: bool,
+    pub(in crate::ed2k_tcp) extended_requests_version: u8,
 }
 
 impl PeerFileRequestCapabilities {
@@ -136,8 +137,11 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                let (ext_info, rest) =
-                    decode_request_filename_ext_info(remaining, shared.file_size)?;
+                let (ext_info, rest) = decode_request_filename_ext_info(
+                    remaining,
+                    shared.file_size,
+                    peer.extended_requests_version,
+                )?;
                 remaining = rest;
                 *requester_file_state = Some(RequesterFileState {
                     file_hash: requested,
@@ -271,8 +275,11 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                let (ext_info, rest) =
-                    decode_request_filename_ext_info(remaining, shared.file_size)?;
+                let (ext_info, rest) = decode_request_filename_ext_info(
+                    remaining,
+                    shared.file_size,
+                    peer.extended_requests_version,
+                )?;
                 remaining = rest;
                 *requester_file_state = Some(RequesterFileState {
                     file_hash: requested,
@@ -361,25 +368,21 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
         // subsequent status request owns the file-not-found response.
         return Ok(None);
     };
-    let ext_info = if payload.len() == 16 {
-        None
-    } else {
-        let (ext_info, remaining) =
-            decode_request_filename_ext_info(&payload[16..], shared.file_size)?;
-        if !remaining.is_empty() {
-            anyhow::bail!(
-                "unexpected trailing OP_REQUESTFILENAME bytes {}",
-                remaining.len()
-            );
-        }
-        Some(ext_info)
-    };
+    let (ext_info, remaining) = decode_request_filename_ext_info(
+        &payload[16..],
+        shared.file_size,
+        peer.extended_requests_version,
+    )?;
+    if !remaining.is_empty() {
+        anyhow::bail!(
+            "unexpected trailing OP_REQUESTFILENAME bytes {}",
+            remaining.len()
+        );
+    }
     *requester_file_state = Some(RequesterFileState {
         file_hash: requested,
-        part_status: ext_info.as_ref().and_then(|info| info.part_status.clone()),
-        complete_source_count: ext_info
-            .as_ref()
-            .map_or(0, |info| info.complete_source_count),
+        part_status: ext_info.part_status,
+        complete_source_count: ext_info.complete_source_count,
     });
     let reply =
         encode_request_filename_answer(&requested, &shared.display_name, peer.string_encoding)?;

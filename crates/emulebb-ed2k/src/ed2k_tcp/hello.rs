@@ -257,18 +257,58 @@ pub(super) fn encode_emule_info_answer(kad_udp_port: u16) -> Vec<u8> {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct DecodedEmuleInfoProfile {
-    pub(super) data_compression_version: u8,
+    pub(super) data_compression_version: Option<u8>,
     pub(super) udp_version: u8,
     pub(super) udp_port: u16,
     pub(super) source_exchange_version: u8,
     pub(super) supports_source_exchange: bool,
-    pub(super) extended_requests_version: u8,
+    pub(super) extended_requests_version: Option<u8>,
+    supported_protocol: bool,
     pub(super) accepts_comments: bool,
     pub(super) supports_secure_ident: bool,
     pub(super) supports_preview: bool,
     /// Peer eMule compatibility version byte (eMule `m_byEmuleVersion`, leading
     /// byte of OP_EMULEINFO); feeds the old-client upload-score penalty.
     pub(super) emule_version: u8,
+}
+
+/// File-request capabilities fixed by HELLO and amended by legacy eMule INFO.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct ExtendedRequestNegotiation {
+    compression_version: u8,
+    pub(super) version: u8,
+}
+
+impl ExtendedRequestNegotiation {
+    pub(super) fn from_hello(profile: &DecodedHelloProfile) -> Self {
+        Self {
+            compression_version: profile.misc_options1.data_compression_version,
+            version: profile.misc_options1.extended_requests_version,
+        }
+    }
+
+    pub(super) fn apply_hello_answer(&mut self, profile: &DecodedHelloProfile) {
+        // Legacy eMule can send INFO before a HELLOANSWER without this tag.
+        if profile.has_misc_options1 {
+            *self = Self::from_hello(profile);
+        }
+    }
+
+    pub(super) fn apply_info(&mut self, profile: &DecodedEmuleInfoProfile) {
+        if !profile.supported_protocol {
+            return;
+        }
+        if let Some(compression) = profile.data_compression_version {
+            self.compression_version = compression;
+        }
+        // Stock applies the compression veto after the INFO tags update the
+        // existing connection state. Absent tags cannot erase HELLO values.
+        if self.compression_version == 0 {
+            self.version = 0;
+        } else if let Some(version) = profile.extended_requests_version {
+            self.version = version;
+        }
+    }
 }
 
 struct DecodedHelloTag<'a> {
@@ -440,6 +480,7 @@ pub(super) struct DecodedHelloProfile {
     pub(super) connect_options: u8,
     pub(super) gpl_evildoer: bool,
     pub(super) misc_options1: MiscOptions1,
+    has_misc_options1: bool,
     pub(super) buddy: Option<super::hello_buddy::DecodedHelloBuddy>,
     /// Peer software string derived from CT_EMULE_VERSION (e.g. `eMule v0.60.0`).
     /// `None` for pure-eDonkey peers that send no eMule version tag.
@@ -475,13 +516,14 @@ pub(super) fn decode_emule_info_profile(payload: &[u8]) -> Result<DecodedEmuleIn
 
     let mut profile = DecodedEmuleInfoProfile {
         emule_version,
+        supported_protocol: true,
         ..DecodedEmuleInfoProfile::default()
     };
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
         if let Some(value) = decode_hello_tag_u32(&tag) {
             match tag.tag_name {
-                Some(ET_COMPRESSION) => profile.data_compression_version = value as u8,
+                Some(ET_COMPRESSION) => profile.data_compression_version = Some(value as u8),
                 Some(ET_UDPVER) => profile.udp_version = value as u8,
                 Some(ET_UDPPORT) => profile.udp_port = value as u16,
                 Some(ET_SOURCEEXCHANGE) => {
@@ -489,7 +531,7 @@ pub(super) fn decode_emule_info_profile(payload: &[u8]) -> Result<DecodedEmuleIn
                     profile.supports_source_exchange = value != 0;
                 }
                 Some(ET_COMMENTS) => profile.accepts_comments = value != 0,
-                Some(ET_EXTENDEDREQUEST) => profile.extended_requests_version = value as u8,
+                Some(ET_EXTENDEDREQUEST) => profile.extended_requests_version = Some(value as u8),
                 Some(ET_FEATURES) => {
                     profile.supports_secure_ident = (value & 0x03) != 0;
                     profile.supports_preview = ((value >> 7) & 1) != 0;
@@ -499,10 +541,9 @@ pub(super) fn decode_emule_info_profile(payload: &[u8]) -> Result<DecodedEmuleIn
         }
         cursor = tag.remaining;
     }
-    if profile.data_compression_version == 0 {
+    if profile.data_compression_version.unwrap_or_default() == 0 {
         profile.source_exchange_version = 0;
         profile.supports_source_exchange = false;
-        profile.extended_requests_version = 0;
         profile.accepts_comments = false;
         profile.udp_port = 0;
     }
@@ -546,6 +587,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let mut connect_options = 0;
     let mut gpl_evildoer = false;
     let mut misc_options1 = MiscOptions1::default();
+    let mut has_misc_options1 = false;
     let (mut buddy_ip, mut buddy_udp) = (None, None);
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
@@ -577,6 +619,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             && let Some(misc_options1_value) = decode_hello_tag_u32(&tag)
         {
             misc_options1 = decode_misc_options1(misc_options1_value);
+            has_misc_options1 = true;
             source_exchange_version = ((misc_options1_value >> 12) & 0x0F) as u8;
             supports_source_exchange = source_exchange_version != 0;
         }
@@ -620,6 +663,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         connect_options,
         gpl_evildoer,
         misc_options1,
+        has_misc_options1,
         buddy: super::hello_buddy::DecodedHelloBuddy::from_tag_values(buddy_ip, buddy_udp),
         client_software,
     })

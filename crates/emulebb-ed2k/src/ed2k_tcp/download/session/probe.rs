@@ -25,6 +25,8 @@ pub struct Ed2kPeerProbeOptions<'request> {
     pub hello_identity: Ed2kHelloIdentity,
     pub secure_ident: std::sync::Arc<Ed2kSecureIdent>,
     pub transfer_runtime: std::sync::Arc<Ed2kTransferRuntime>,
+    /// Exact job authority for the optional complete-source observation.
+    pub job_token: Option<emulebb_metadata::JobToken>,
     pub file_size: u64,
     /// One bit per data part, or empty when no local part is verified.
     pub verified_parts: &'request [bool],
@@ -342,6 +344,7 @@ async fn run_probe(
             file_hash: options.peer.file_hash,
             file_size: options.file_size,
             verified_parts: options.verified_parts,
+            job_token: options.job_token,
             hello_identity: options.hello_identity,
             secure_ident: options.secure_ident.as_ref(),
             runtime,

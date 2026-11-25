@@ -113,6 +113,7 @@ pub(in crate::ed2k_tcp) async fn probe_accepted_file(
                 file_hash: options.file_hash,
                 file_size: options.file_size,
                 verified_parts: &parts.verified_parts,
+                job_token: Some(options.job_token),
                 hello_identity: options.hello_identity,
                 secure_ident: options.secure_ident,
                 runtime: options.runtime,

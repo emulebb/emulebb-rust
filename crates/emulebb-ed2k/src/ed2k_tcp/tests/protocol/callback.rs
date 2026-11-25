@@ -347,7 +347,9 @@ async fn stop_callback_supervisor(
 }
 
 #[tokio::test]
-async fn adopted_callback_session_serves_after_hello_answer() {
+async fn adopted_callback_session_serves_v1_after_legacy_info_and_hello_answer() {
+    use crate::ed2k_tcp::{ET_COMPRESSION, ET_EXTENDEDREQUEST};
+
     let runtime = ListenerTestRuntime::new(
         "ed2k-callback-adopted-session",
         listener_hello_identity(),
@@ -370,15 +372,31 @@ async fn adopted_callback_session_serves_after_hello_answer() {
     assert_eq!(hello[0], OP_EDONKEYPROT);
     assert_eq!(hello[5], OP_HELLO);
 
+    let mut info = vec![0x30, EMULE_PROTOCOL_VERSION, 2, 0, 0, 0];
+    info.extend_from_slice(&[TAGTYPE_UINT32, 1, 0, ET_COMPRESSION, 1, 0, 0, 0]);
+    info.extend_from_slice(&[TAGTYPE_UINT32, 1, 0, ET_EXTENDEDREQUEST, 1, 0, 0, 0]);
     stream
-        .write_all(&encode_hello_answer(peer_hello_identity()))
+        .write_all(&encode_packet(OP_EMULEPROT, OP_EMULEINFO, &info))
+        .await
+        .unwrap();
+    let identity = peer_hello_identity();
+    let mut answer = identity.user_hash.to_vec();
+    answer.extend_from_slice(&identity.client_id.to_le_bytes());
+    answer.extend_from_slice(&identity.tcp_port.to_le_bytes());
+    answer.extend_from_slice(&[0; 10]); // zero tags and no server endpoint
+    stream
+        .write_all(&encode_packet(OP_EDONKEYPROT, OP_HELLOANSWER, &answer))
         .await
         .unwrap();
     stream
-        .write_all(&encode_packet(
-            OP_EDONKEYPROT,
-            OP_REQUESTFILENAME,
-            &file.file_hash.0,
+        .write_all(&super::encode_request_filename(
+            &file.file_hash,
+            file.payload.len() as u64,
+            crate::ed2k_tcp::codec::FilenameRequestExtension {
+                version: 1,
+                complete_source_count: 0,
+            },
+            std::iter::empty(),
         ))
         .await
         .unwrap();
@@ -462,10 +480,11 @@ async fn adopted_callback_session_accepts_simultaneous_hello() {
     let _hello_answer = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLOANSWER).await;
 
     stream
-        .write_all(&encode_packet(
-            OP_EDONKEYPROT,
-            OP_REQUESTFILENAME,
-            &file.file_hash.0,
+        .write_all(&super::encode_request_filename(
+            &file.file_hash,
+            file.payload.len() as u64,
+            FILENAME_EXTENSION_V2,
+            std::iter::empty(),
         ))
         .await
         .unwrap();

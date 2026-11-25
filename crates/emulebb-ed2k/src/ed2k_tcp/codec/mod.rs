@@ -398,8 +398,12 @@ pub(super) fn encode_start_upload_req(file_hash: &Ed2kHash) -> Vec<u8> {
 /// status without constructing or pinning a resident execution manifest.
 pub(super) fn encode_request_filename_ext_info(
     file_size: u64,
+    extension: FilenameRequestExtension,
     mut verified_parts: impl Iterator<Item = bool>,
 ) -> Vec<u8> {
+    if extension.version == 0 {
+        return Vec::new();
+    }
     let ed2k_part_count = ed2k_part_count(file_size);
     let data_part_count = file_size.div_ceil(ED2K_PART_SIZE);
     let bitfield_len = usize::from(ed2k_part_count).div_ceil(8);
@@ -421,8 +425,16 @@ pub(super) fn encode_request_filename_ext_info(
     if !ed2k_part_count.is_multiple_of(8) {
         payload.push(current_byte);
     }
-    payload.extend_from_slice(&0u16.to_le_bytes());
+    if extension.version >= 2 {
+        payload.extend_from_slice(&extension.complete_source_count.to_le_bytes());
+    }
     payload
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::ed2k_tcp) struct FilenameRequestExtension {
+    pub(in crate::ed2k_tcp) version: u8,
+    pub(in crate::ed2k_tcp) complete_source_count: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,7 +451,17 @@ pub(super) struct RequestFilenameExtInfo {
 pub(super) fn decode_request_filename_ext_info(
     payload: &[u8],
     file_size: u64,
+    version: u8,
 ) -> Result<(RequestFilenameExtInfo, &[u8])> {
+    if version == 0 {
+        return Ok((
+            RequestFilenameExtInfo {
+                part_status: None,
+                complete_source_count: 0,
+            },
+            payload,
+        ));
+    }
     if payload.len() < 2 {
         anyhow::bail!("short OP_REQUESTFILENAME ext-info payload");
     }
@@ -455,7 +477,8 @@ pub(super) fn decode_request_filename_ext_info(
         );
     }
     let bitfield_len = part_count.div_ceil(8);
-    let expected_len = 2 + bitfield_len + 2;
+    let count_offset = 2 + bitfield_len;
+    let expected_len = count_offset + if version >= 2 { 2 } else { 0 };
     if payload.len() < expected_len {
         anyhow::bail!(
             "short OP_REQUESTFILENAME ext-info payload {} expected at least {}",
@@ -469,9 +492,11 @@ pub(super) fn decode_request_filename_ext_info(
             .map(|index| (bitfield[index / 8] >> (index % 8)) & 1 == 1)
             .collect()
     });
-    let count_offset = 2 + bitfield_len;
-    let complete_source_count =
-        u16::from_le_bytes([payload[count_offset], payload[count_offset + 1]]);
+    let complete_source_count = if version >= 2 {
+        u16::from_le_bytes([payload[count_offset], payload[count_offset + 1]])
+    } else {
+        0
+    };
     Ok((
         RequestFilenameExtInfo {
             part_status,
@@ -484,9 +509,10 @@ pub(super) fn decode_request_filename_ext_info(
 pub(super) fn encode_request_filename(
     file_hash: &Ed2kHash,
     file_size: u64,
+    extension: FilenameRequestExtension,
     verified_parts: impl Iterator<Item = bool>,
 ) -> Vec<u8> {
-    let ext_info = encode_request_filename_ext_info(file_size, verified_parts);
+    let ext_info = encode_request_filename_ext_info(file_size, extension, verified_parts);
     let mut payload = Vec::with_capacity(16 + ext_info.len());
     payload.extend_from_slice(&file_hash.0);
     payload.extend_from_slice(&ext_info);
