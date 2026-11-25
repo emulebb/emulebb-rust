@@ -259,6 +259,15 @@ impl super::MetadataStore {
 
     /// Write a friend and report connection wait and statement/commit time.
     pub fn upsert_friend_timed(&self, friend: &MetadataFriend) -> Result<FriendWriteTiming> {
+        self.upsert_friend_with_browse_key(friend, None)
+    }
+
+    /// Record a friend and, when supplied by the operator, its browse key fingerprint.
+    pub fn upsert_friend_with_browse_key(
+        &self,
+        friend: &MetadataFriend,
+        browse_key_sha256: Option<[u8; 32]>,
+    ) -> Result<FriendWriteTiming> {
         let now = unix_s();
         let user_hash = decode_fixed_hex(&friend.user_hash, 16, "friend user hash")?;
         let waiting = std::time::Instant::now();
@@ -267,13 +276,15 @@ impl super::MetadataStore {
         let execution = std::time::Instant::now();
         conn.execute(
             r#"
-            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_s, last_seen_at_s, deleted_at_s)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+            INSERT INTO friends(user_hash, name, last_address, last_port, first_seen_at_s,
+                last_seen_at_s, deleted_at_s, browse_key_sha256)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)
             ON CONFLICT(user_hash) DO UPDATE SET
                 name = excluded.name,
                 last_address = excluded.last_address,
                 last_port = excluded.last_port,
                 last_seen_at_s = excluded.last_seen_at_s,
+                browse_key_sha256 = coalesce(excluded.browse_key_sha256, friends.browse_key_sha256),
                 deleted_at_s = NULL
             "#,
             params![
@@ -287,6 +298,7 @@ impl super::MetadataStore {
                     now
                 },
                 friend.last_seen_s,
+                browse_key_sha256.as_ref().map(|value| value.as_slice()),
             ],
         )?;
         Ok(FriendWriteTiming {
@@ -303,6 +315,21 @@ impl super::MetadataStore {
             [user_hash],
             |row| row.get(0),
         ).map_err(Into::into)
+    }
+
+    pub fn has_friend_browse_key(
+        &self,
+        user_hash: &[u8; 16],
+        fingerprint: &[u8; 32],
+    ) -> Result<bool> {
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM friends WHERE user_hash=?1 AND deleted_at_s IS NULL
+             AND browse_key_sha256=?2)",
+                params![user_hash.as_slice(), fingerprint.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// Compare one durable friend against a candidate without loading its strings.
@@ -334,7 +361,7 @@ impl super::MetadataStore {
         let connection_wait = waiting.elapsed();
         let execution = std::time::Instant::now();
         conn.execute(
-            "UPDATE friends SET deleted_at_s = ?1 WHERE user_hash = ?2",
+            "UPDATE friends SET deleted_at_s = ?1, browse_key_sha256 = NULL WHERE user_hash = ?2",
             params![unix_s(), user_hash],
         )?;
         Ok(FriendWriteTiming {

@@ -1,4 +1,6 @@
 use super::*;
+use crate::ed2k_string::Ed2kStringEncoding;
+use crate::ed2k_tcp::{OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILESDIRANS};
 use crate::ed2k_transfer::Ed2kTransferState;
 
 async fn close_hello_session(mut stream: TcpStream) {
@@ -766,6 +768,20 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
         ))
         .await
         .unwrap();
+    use crate::ed2k_tcp::codec::shared_browse::{
+        PeerBrowseEncoding, PeerBrowseFile, decode_browse_dirs, decode_browse_files,
+        encode_browse_dir_request, encode_browse_dirs, encode_browse_files, split_browse_directory,
+    };
+    let library = root.join("private-library");
+    std::fs::create_dir_all(&library).unwrap();
+    let share = library.join("résumé.bin");
+    std::fs::write(&share, b"shared browse fixture").unwrap();
+    let local = transfer_runtime
+        .ingest_local_file(&share, "résumé.bin")
+        .await
+        .unwrap();
+    crate::ed2k_transfer::test_support::admit_local_share(&transfer_runtime, &library, &share)
+        .await;
     stream
         .write_all(&super::encode_packet(
             OP_EDONKEYPROT,
@@ -778,10 +794,101 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     assert_eq!(shared_files_answer[0], OP_EDONKEYPROT);
     assert_eq!(shared_files_answer[5], OP_ASKSHAREDFILESANSWER);
     let shared_files =
-        super::decode_shared_files_answer_payload(&shared_files_answer[6..]).unwrap();
-    assert_eq!(shared_files.file_count, 0);
-    assert_eq!(shared_files.entry_bytes, 0);
+        decode_browse_files(&shared_files_answer[6..], Ed2kStringEncoding::Utf8, 8).unwrap();
+    let local_hash = local.file_hash.parse().unwrap();
+    assert!(
+        shared_files
+            .iter()
+            .any(|file| file.file_hash == local_hash && file.display_name == "résumé.bin")
+    );
+    assert!(
+        !shared_files
+            .iter()
+            .any(|file| file.display_name.contains("private-library"))
+    );
 
+    stream
+        .write_all(&super::encode_packet(OP_EDONKEYPROT, OP_ASKSHAREDDIRS, &[]))
+        .await
+        .unwrap();
+    let dirs = read_packet(&mut stream).await;
+    assert_eq!(dirs[5], OP_ASKSHAREDDIRSANS);
+    let labels = decode_browse_dirs(&dirs[6..], 8).unwrap();
+    let label = labels
+        .iter()
+        .find(|label| label.starts_with(b"Shared "))
+        .unwrap();
+    stream
+        .write_all(&encode_browse_dir_request(label).unwrap())
+        .await
+        .unwrap();
+    let dir_reply = read_packet(&mut stream).await;
+    assert_eq!(dir_reply[5], OP_ASKSHAREDFILESDIRANS);
+    let (echo, files) = split_browse_directory(&dir_reply[6..]).unwrap();
+    assert_eq!(echo, label);
+    assert!(
+        decode_browse_files(files, Ed2kStringEncoding::Utf8, 8)
+            .unwrap()
+            .iter()
+            .any(|file| file.file_hash == local_hash)
+    );
+
+    // The same established connection can be browsed in the reverse direction.
+    let registry = transfer_runtime.peer_browse_registry();
+    let advertised_peer = SocketAddr::new(peer_addr.ip(), peer_identity.tcp_port);
+    let started = registry
+        .start(Some(peer_identity.user_hash), advertised_peer)
+        .unwrap();
+    let request = read_packet(&mut stream).await;
+    assert_eq!(request[5], OP_ASKSHAREDDIRS);
+    let remote_label = b"Music".to_vec();
+    stream
+        .write_all(&encode_browse_dirs(std::slice::from_ref(&remote_label)).unwrap())
+        .await
+        .unwrap();
+    let request = read_packet(&mut stream).await;
+    assert_eq!(request[5], OP_ASKSHAREDFILESDIR);
+    assert_eq!(
+        split_browse_directory(&request[6..]).unwrap().0,
+        remote_label
+    );
+    let remote_file = PeerBrowseFile {
+        file_hash,
+        display_name: "peer-only.bin".into(),
+        file_size: 42,
+    };
+    stream
+        .write_all(
+            &encode_browse_files(
+                std::slice::from_ref(&remote_file),
+                Some(&remote_label),
+                PeerBrowseEncoding {
+                    strings: Ed2kStringEncoding::Utf8,
+                    compact_tags: true,
+                    emule_family: true,
+                    supports_large_files: true,
+                    local_endpoint: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let page = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let page = registry.page(started.search_id, 0, 8).unwrap();
+            if page.status == crate::ed2k_tcp::PeerBrowseStatus::Complete {
+                break page;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(page.files[0].file, remote_file);
+
+    transfer_runtime
+        .set_shared_files_visibility(emulebb_settings::product::SharedFilesVisibility::Off);
     stream
         .write_all(&super::encode_packet(OP_EDONKEYPROT, OP_ASKSHAREDDIRS, &[]))
         .await

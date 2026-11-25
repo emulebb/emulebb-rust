@@ -147,6 +147,9 @@ pub(super) fn leaf_schema<T: SettingType>(rule: Rule) -> Value {
             json!({"type":"string","format":"ipv4","description":"Unicast IPv4 address."})
         }
         Rule::VpnMode => json!({"type":"string","enum":[VpnMode::Off,VpnMode::Block]}),
+        Rule::SharedFilesVisibility => json!({"type":"string","enum":[
+            SharedFilesVisibility::Everyone, SharedFilesVisibility::Friends, SharedFilesVisibility::Off
+        ]}),
         Rule::DnsServers | Rule::NatBackends | Rule::Ipv4Cidrs => {
             let (min, max) = rule.list_bounds().expect("list rule has bounds");
             let items = match rule {

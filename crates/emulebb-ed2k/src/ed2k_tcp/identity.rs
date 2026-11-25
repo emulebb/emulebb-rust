@@ -182,6 +182,7 @@ pub(super) struct Ed2kPeerSecureIdentState {
     /// (and thus its credit-store identity) is cryptographically proven. eMule's
     /// `IS_IDENTIFIED`. Credits must only be attributed when this is true.
     pub(super) peer_ident_verified: bool,
+    pub(super) verified_user_hash: Option<[u8; 16]>,
     pub(super) requested_peer_key: bool,
     /// The peer's advertised secure-ident level (`m_bySupportSecIdent`, the
     /// CT_EMULE_MISCOPTIONS1 sub-field / ET_FEATURES low bits). Drives our
@@ -194,6 +195,17 @@ pub(super) struct Ed2kPeerSecureIdentState {
     /// reachability through every signature call site. `None` = LowID / unknown.
     pub(super) our_external_ip: Option<Ipv4Addr>,
     signature_verification_attempt: Option<SecureIdentVerificationAttempt>,
+}
+
+impl Ed2kPeerSecureIdentState {
+    pub(super) fn verified_browse_key(&self) -> Option<([u8; 16], &[u8])> {
+        let (hash, key) = (self.verified_user_hash?, self.pinned_public_key.as_deref()?);
+        if self.peer_ident_verified && self.peer_public_key.as_deref() == Some(key) {
+            Some((hash, key))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

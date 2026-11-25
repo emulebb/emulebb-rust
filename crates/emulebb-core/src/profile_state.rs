@@ -73,18 +73,22 @@ pub(crate) fn load_core_state(
 pub(crate) fn persist_friend(
     metadata: &MetadataStore,
     friend: &Friend,
+    browse_key_sha256: Option<[u8; 32]>,
 ) -> Result<emulebb_metadata::FriendWriteTiming> {
-    metadata.upsert_friend_timed(&MetadataFriend {
-        user_hash: friend.user_hash.clone(),
-        name: friend.name.clone(),
-        last_address: friend.address.clone(),
-        last_port: friend.port,
-        first_seen_s: friend
-            .last_seen
-            .map(|last_seen| last_seen.timestamp())
-            .unwrap_or_default(),
-        last_seen_s: friend.last_seen.map(|last_seen| last_seen.timestamp()),
-    })
+    metadata.upsert_friend_with_browse_key(
+        &MetadataFriend {
+            user_hash: friend.user_hash.clone(),
+            name: friend.name.clone(),
+            last_address: friend.address.clone(),
+            last_port: friend.port,
+            first_seen_s: friend
+                .last_seen
+                .map(|last_seen| last_seen.timestamp())
+                .unwrap_or_default(),
+            last_seen_s: friend.last_seen.map(|last_seen| last_seen.timestamp()),
+        },
+        browse_key_sha256,
+    )
 }
 
 pub(crate) fn persist_server(
@@ -206,7 +210,7 @@ mod tests {
                 address: None,
                 port: 0,
             };
-            persist_friend(&store, &friend).unwrap();
+            persist_friend(&store, &friend, None).unwrap();
             assert!(
                 store
                     .friend_matches(

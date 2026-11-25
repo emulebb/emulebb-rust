@@ -29,7 +29,7 @@ fn failure_messages_preserve_utf8_and_report_actual_truncation() {
 #[test]
 fn application_status_is_bounded_by_unique_catalog_keys() {
     let keys: Vec<_> = setting_specs().iter().map(|spec| key(spec.key)).collect();
-    assert_eq!(keys.len(), 59);
+    assert_eq!(keys.len(), 60);
     let failures: Vec<_> = keys
         .iter()
         .map(|key| SettingApplyFailure::new(*key, "failure"))

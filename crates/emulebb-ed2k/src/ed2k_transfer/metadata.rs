@@ -27,6 +27,37 @@ use super::{
 };
 
 impl Ed2kTransferRuntime {
+    /// Run a path-free peer browse fold on the blocking SQLite worker. The
+    /// caller bounds retained state and can stop before the next result.
+    pub(crate) async fn read_peer_browse_catalog<T: Send + 'static>(
+        &self,
+        view: emulebb_metadata::MetadataPeerBrowseView,
+        ids: std::ops::RangeInclusive<i64>,
+        max_file_size: u64,
+        mut state: T,
+        mut visit: impl FnMut(&mut T, emulebb_metadata::MetadataPeerBrowseFile) -> Result<bool>
+        + Send
+        + 'static,
+    ) -> Result<(T, bool)> {
+        let metadata = self.metadata.clone();
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let _cancel_on_drop = cancelled.clone().drop_guard();
+        tokio::task::spawn_blocking(move || {
+            if cancelled.is_cancelled() {
+                return Ok((state, false));
+            }
+            let has_queue =
+                metadata.visit_verified_peer_files(view, ids, max_file_size, |file| {
+                    if cancelled.is_cancelled() {
+                        return Ok(false);
+                    }
+                    visit(&mut state, file)
+                })?;
+            Ok((state, has_queue))
+        })
+        .await?
+    }
+
     /// Return REST shared-file summaries without hydrating every manifest.
     pub async fn share_entries(&self) -> Result<Vec<MetadataLocalShareEntry>> {
         let metadata = self.metadata.clone();

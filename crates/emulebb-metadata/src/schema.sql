@@ -61,7 +61,8 @@ CREATE TABLE friends (
     last_port INTEGER NOT NULL DEFAULT 0 CHECK(last_port BETWEEN 0 AND 65535),
     first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
     last_seen_at_s INTEGER CHECK(last_seen_at_s IS NULL OR last_seen_at_s >= 0),
-    deleted_at_s INTEGER CHECK(deleted_at_s IS NULL OR deleted_at_s >= 0)
+    deleted_at_s INTEGER CHECK(deleted_at_s IS NULL OR deleted_at_s >= 0),
+    browse_key_sha256 BLOB CHECK(length(browse_key_sha256) = 32)
 ) STRICT;
 
 CREATE TABLE known_files (

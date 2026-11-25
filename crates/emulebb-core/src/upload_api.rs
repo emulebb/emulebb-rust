@@ -151,6 +151,7 @@ impl EmulebbCore {
         self.add_friend(FriendCreate {
             user_hash: hex::encode(user_hash),
             name: Some(std::net::SocketAddr::new(upload.ip, upload.tcp_port).to_string()),
+            browse_key_sha256: None,
         })
         .await
         .map(Some)

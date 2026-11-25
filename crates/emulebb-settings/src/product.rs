@@ -106,6 +106,14 @@ pub enum VpnMode {
     Off,
     Block,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum SharedFilesVisibility {
+    Everyone,
+    Friends,
+    Off,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ApplyMode {
@@ -137,6 +145,7 @@ pub enum Rule {
     NatBackends,
     Ipv4Cidrs,
     VpnMode,
+    SharedFilesVisibility,
 }
 
 impl Rule {
@@ -165,7 +174,8 @@ setting_types!(
     Vec<SocketAddrV4>,
     Vec<NatBackend>,
     Vec<Ipv4Net>,
-    VpnMode
+    VpnMode,
+    SharedFilesVisibility
 );
 impl<T: SettingType> SettingType for Option<T> {
     const NULLABLE: bool = true;
@@ -268,7 +278,7 @@ fn validate_field<T: SettingType>(
         return;
     }
     let valid = match rule {
-        Rule::Boolean | Rule::VpnMode => true,
+        Rule::Boolean | Rule::VpnMode | Rule::SharedFilesVisibility => true,
         Rule::Integer { min, max, step } => value
             .as_u64()
             .is_some_and(|n| n >= min && n <= max && n % step == 0),

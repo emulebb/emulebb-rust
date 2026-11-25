@@ -35,7 +35,7 @@ fn complete_schemas_match_actual_serde_shapes_and_all_canonical_keys() {
         &schemas["SavedSettings"],
     );
     let keys = schemas["SettingKey"]["enum"].as_array().unwrap();
-    assert_eq!(keys.len(), 59);
+    assert_eq!(keys.len(), 60);
     for spec in setting_specs() {
         assert!(keys.iter().any(|key| key == spec.key));
         assert!(leaf(&schemas["SettingsValues"], spec.key).is_object());

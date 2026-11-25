@@ -207,7 +207,7 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     let fields = value["data"]["fields"].as_array().unwrap();
-    assert_eq!(fields.len(), 59);
+    assert_eq!(fields.len(), 60);
     assert_eq!(
         value["data"]["schemas"],
         emulebb_settings::product::settings_schemas()
@@ -216,7 +216,7 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
         .iter()
         .map(|field| field["key"].as_str().unwrap())
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(keys.len(), 59);
+    assert_eq!(keys.len(), 60);
     assert!(fields.iter().any(
         |field| field["key"] == "transfers.uploadLimitBytesPerSecond"
             && field["application"] == "live"

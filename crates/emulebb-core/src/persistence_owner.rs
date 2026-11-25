@@ -113,8 +113,14 @@ enum Command {
     Servers(servers::ServerCommand),
     RootRead(crate::library_roots::Query),
     RootLoss(i64),
-    Add { hash: String, name: String },
-    Delete { hash: String },
+    Add {
+        hash: String,
+        name: String,
+        browse_key_sha256: Option<[u8; 32]>,
+    },
+    Delete {
+        hash: String,
+    },
     Category(category::CategoryCommand),
     ContentObservations(Box<content_observations::ObservationCommand>),
     SearchSessions(search_sessions::SearchCommand),
@@ -128,8 +134,14 @@ enum Command {
     KadLoad,
     KadIdentity,
     KadAttach(DhtNode),
-    KadCheckpoint { dht: DhtNode, final_snapshot: bool },
-    KadImport { input: KadInput, pending_only: bool },
+    KadCheckpoint {
+        dht: DhtNode,
+        final_snapshot: bool,
+    },
+    KadImport {
+        input: KadInput,
+        pending_only: bool,
+    },
 }
 
 enum Response {
@@ -331,7 +343,7 @@ enum DbCommand {
     SearchUpdate(i64, emulebb_metadata::MetadataSearchData, Vec<String>),
     SearchRemove(Option<i64>),
     SearchStop(i64),
-    Add(Friend),
+    Add(Friend, Option<[u8; 32]>),
     Delete(Friend),
     Category(category::CategoryDbCommand),
     ContentObservations {
@@ -791,7 +803,9 @@ impl PersistenceOwner {
                         #[cfg(test)]
                         worker_started_signal.notify_one();
                         let result = match &request.command {
-                            DbCommand::Add(friend) => profile_state::persist_friend(&store, friend),
+                            DbCommand::Add(friend, fingerprint) => {
+                                profile_state::persist_friend(&store, friend, *fingerprint)
+                            }
                             DbCommand::Delete(friend) => {
                                 store.delete_friend_timed(&friend.user_hash)
                             }
@@ -837,13 +851,19 @@ impl PersistenceOwner {
                             // established absent/add or present/delete before SQL.
                             // Query only this key, never the unbounded friend list.
                             let postcondition = || match &request.command {
-                                DbCommand::Add(friend) => store.friend_matches(
-                                    &friend.user_hash,
-                                    &friend.name,
-                                    friend.address.as_deref(),
-                                    friend.port,
-                                    friend.last_seen.map(|time| time.timestamp()),
-                                ),
+                                DbCommand::Add(friend, fingerprint) => {
+                                    let matches = store.friend_matches(
+                                        &friend.user_hash, &friend.name, friend.address.as_deref(),
+                                        friend.port, friend.last_seen.map(|time| time.timestamp()),
+                                    )?;
+                                    if let (true, Some(fingerprint)) = (matches, fingerprint) {
+                                        let mut user_hash = [0; 16];
+                                        hex::decode_to_slice(&friend.user_hash, &mut user_hash)?;
+                                        store.has_friend_browse_key(&user_hash, fingerprint)
+                                    } else {
+                                        Ok(matches)
+                                    }
+                                }
                                 DbCommand::Delete(friend) => {
                                     store.has_friend(&friend.user_hash).map(|present| !present)
                                 }
@@ -879,7 +899,7 @@ impl PersistenceOwner {
                     }
                     .map(|recovered| {
                         let friend = match request.command {
-                            DbCommand::Add(friend) | DbCommand::Delete(friend) => friend,
+                            DbCommand::Add(friend, _) | DbCommand::Delete(friend) => friend,
                             DbCommand::RootLoss(_) | DbCommand::RootRead(_) | DbCommand::SearchRead(_) | DbCommand::Settings(_)
                             | DbCommand::SearchUpdate(..)
                             | DbCommand::SearchCreate(_)
@@ -1118,17 +1138,31 @@ impl PersistenceOwner {
         }))
     }
 
-    pub(crate) async fn add(&self, hash: String, name: String) -> Result<Friend, PersistenceError> {
-        self.submit(Command::Add { hash, name })
-            .await?
-            .ok_or(PersistenceError::Worker)
+    #[cfg(test)]
+    async fn add(&self, hash: String, name: String) -> Result<Friend, PersistenceError> {
+        self.add_with_browse_key(hash, name, None).await
+    }
+
+    pub(crate) async fn add_with_browse_key(
+        &self,
+        hash: String,
+        name: String,
+        browse_key_sha256: Option<[u8; 32]>,
+    ) -> Result<Friend, PersistenceError> {
+        self.submit(Command::Add {
+            hash,
+            name,
+            browse_key_sha256,
+        })
+        .await?
+        .ok_or(PersistenceError::Worker)
     }
     pub(crate) async fn delete(&self, hash: String) -> Result<Option<Friend>, PersistenceError> {
         self.submit(Command::Delete { hash }).await
     }
     async fn submit(&self, command: Command) -> Result<Option<Friend>, PersistenceError> {
         let payload = match &command {
-            Command::Add { hash, name } => hash
+            Command::Add { hash, name, .. } => hash
                 .capacity()
                 .checked_add(name.capacity())
                 .ok_or(PersistenceError::TooLarge)?,
@@ -1439,18 +1473,29 @@ async fn process(
     let prepared = {
         let state = state.lock().await;
         match &request.command {
-            Command::Add { hash, name } => {
+            Command::Add {
+                hash,
+                name,
+                browse_key_sha256,
+            } => {
                 if let Some(existing) = state.friends.get(hash) {
                     request.permit.extend(friend_charge(existing)?)?;
-                    return Ok(Response::Friend(Some(existing.clone())));
+                    if browse_key_sha256.is_none() {
+                        return Ok(Response::Friend(Some(existing.clone())));
+                    }
+                    DbCommand::Add(existing.clone(), *browse_key_sha256)
+                } else {
+                    DbCommand::Add(
+                        Friend {
+                            user_hash: hash.clone(),
+                            name: name.clone(),
+                            last_seen: None,
+                            address: None,
+                            port: 0,
+                        },
+                        *browse_key_sha256,
+                    )
                 }
-                DbCommand::Add(Friend {
-                    user_hash: hash.clone(),
-                    name: name.clone(),
-                    last_seen: None,
-                    address: None,
-                    port: 0,
-                })
             }
             Command::Delete { hash } => {
                 let Some(existing) = state.friends.get(hash) else {

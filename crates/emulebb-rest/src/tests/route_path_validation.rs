@@ -151,6 +151,28 @@ async fn resource_path_parameters_use_canonical_identity_validation() {
 }
 
 #[tokio::test]
+async fn download_source_browse_page_validates_ids_and_paging() {
+    let app = test_router();
+    let route = "/api/v1/downloads/1/sources/11111111111111111111111111111111/operations/browse";
+    let (status, body) = request(&app, "GET", &format!("{route}/01"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"]["message"],
+        "searchId must be a positive decimal u64 string"
+    );
+
+    let (status, _) = request(&app, "GET", &format!("{route}/1?limit=201"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = request(&app, "GET", &format!("{route}/1?offset=0&limit=1"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body["error"]["message"],
+        "download source or browse request not found"
+    );
+}
+
+#[tokio::test]
 async fn valid_path_parameters_still_reach_handlers() {
     let accepted_routes = [
         ("GET", "/api/v1/categories/Media"),

@@ -256,6 +256,10 @@
         "mode": "default",
         "value": 90
       },
+      "sharedFilesVisibility": {
+        "mode": "default",
+        "value": "everyone"
+      },
       "targetClientRateBytesPerSecond": {
         "mode": "default",
         "value": 32768

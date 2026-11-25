@@ -38,7 +38,7 @@ mod session;
 mod session_driver;
 mod source_utils;
 mod startup;
-mod tag_codec;
+pub(crate) mod tag_codec;
 mod types;
 mod udp;
 mod udp_callback;
@@ -166,6 +166,7 @@ use startup::{
     login_identity_for_server_transport, send_connected_server_startup,
     send_due_offer_files_advertisement, source_request_opcode, wait_for_offer_files_settle,
 };
+pub(crate) use startup::{ed2k_file_type_search_term, ed2k_offer_file_type};
 #[cfg(test)]
 use startup::{encode_offer_files_payload, offer_files_catalog_fingerprint, server_capabilities};
 use tag_codec::decode_ed2k_string;
@@ -324,7 +325,7 @@ const TAGTYPE_BOOLARRAY: u8 = 0x06;
 const TAGTYPE_BLOB: u8 = 0x07;
 const TAGTYPE_UINT16: u8 = 0x08;
 const TAGTYPE_UINT8: u8 = 0x09;
-const TAGTYPE_UINT64: u8 = 0x0B;
+pub(crate) const TAGTYPE_UINT64: u8 = 0x0B;
 const TAGTYPE_STR1: u8 = 0x11;
 const TAG_SHORT_NAME_MASK: u8 = 0x80;
 
@@ -372,9 +373,9 @@ const ST_HARDFILES: u8 = 0x89;
 const ST_DYNIP: u8 = 0x85;
 const ST_VERSION: u8 = 0x91;
 const ST_AUXPORTSLIST: u8 = 0x93;
-const FT_FILENAME: u8 = 0x01;
-const FT_FILESIZE: u8 = 0x02;
-const FT_FILETYPE: u8 = 0x03;
+pub(crate) const FT_FILENAME: u8 = 0x01;
+pub(crate) const FT_FILESIZE: u8 = 0x02;
+pub(crate) const FT_FILETYPE: u8 = 0x03;
 const FT_SOURCES: u8 = 0x15;
 const FT_AICH_HASH: u8 = 0x27;
 const FT_COMPLETE_SOURCES: u8 = 0x30;

@@ -59,8 +59,9 @@ pub(crate) use categories::{
 pub(crate) use downloads::{
     create_download, download, download_comments, download_parts, download_remove, download_source,
     download_source_add_friend, download_source_ban, download_source_browse,
-    download_source_remove, download_source_remove_friend, download_source_unban, download_sources,
-    download_start, download_stop, download_verify, downloads, update_download,
+    download_source_browse_page, download_source_remove, download_source_remove_friend,
+    download_source_unban, download_sources, download_start, download_stop, download_verify,
+    downloads, update_download,
 };
 pub(crate) use friends::{create_friend, delete_friend, friends};
 pub(crate) use ip_filter::{ip_filter, reload_ip_filter};

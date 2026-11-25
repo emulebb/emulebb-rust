@@ -211,6 +211,10 @@ pub fn router_with_shutdown(
             post(download_source_browse),
         )
         .route(
+            "/api/v1/downloads/{id}/sources/{clientId}/operations/browse/{searchId}",
+            get(download_source_browse_page),
+        )
+        .route(
             "/api/v1/downloads/{id}/sources/{clientId}/operations/add-friend",
             post(download_source_add_friend),
         )

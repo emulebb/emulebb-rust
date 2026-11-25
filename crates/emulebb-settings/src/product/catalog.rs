@@ -1,4 +1,4 @@
-//! Canonical 59-leaf product declaration. Types, defaults and metadata share this owner.
+//! Canonical product settings with their types, defaults, and metadata.
 use super::*;
 
 setting_group!(SecurityTcpErrorFloodDetectionValues,SavedSecurityTcpErrorFloodDetection,SecurityTcpErrorFloodDetectionPartial,"security.tcpErrorFloodDetection", { leaves {
@@ -44,6 +44,7 @@ setting_group!(TransfersUploadValues,SavedTransfersUpload,TransfersUploadPartial
     session_transfer_percent:u32 = 90 => ("sessionTransferPercent",Rule::Integer {min:0,max:100,step:1},Restart,"percent of requested file"),
     session_time_limit_seconds:u64 = 7200 => ("sessionTimeLimitSeconds",Rule::Integer {min:0,max:86400,step:1},Restart,"seconds"),
     credit_system_enabled:bool = true => ("creditSystemEnabled",Rule::Boolean,Live,"none"),
+    shared_files_visibility:SharedFilesVisibility = SharedFilesVisibility::Everyone => ("sharedFilesVisibility",Rule::SharedFilesVisibility,Live,"none"),
 } branches {
 }});
 

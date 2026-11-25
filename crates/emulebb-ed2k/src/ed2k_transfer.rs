@@ -17,13 +17,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use emulebb_metadata::{JobId, JobToken, MetadataStore};
+use emulebb_settings::product::SharedFilesVisibility;
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig};
@@ -317,6 +318,9 @@ pub struct Ed2kTransferRuntime {
     source_probe_slots: Arc<tokio::sync::Semaphore>,
     source_discovery_session: [u8; 16],
     shared_catalog_generation: Arc<AtomicU64>,
+    shared_files_visibility: AtomicU8,
+    peer_browse: crate::ed2k_tcp::PeerBrowseRegistry,
+    browse_catalog_reads: tokio::sync::Semaphore,
     /// Keyset cursor for a persisted catalog intentionally loaded only through
     /// the first publishable startup cohort. `pending` is claimed atomically so
     /// at most one background hydration pass can append the remaining pages.
@@ -687,6 +691,48 @@ impl Ed2kSharedPublishDemandSignal {
 }
 
 impl Ed2kTransferRuntime {
+    /// Apply the admitted share visibility to new and established peers.
+    pub fn set_shared_files_visibility(&self, visibility: SharedFilesVisibility) {
+        self.shared_files_visibility
+            .store(visibility as u8, Ordering::Release);
+    }
+
+    pub(crate) fn shared_files_visibility(&self) -> SharedFilesVisibility {
+        match self.shared_files_visibility.load(Ordering::Acquire) {
+            value if value == SharedFilesVisibility::Everyone as u8 => {
+                SharedFilesVisibility::Everyone
+            }
+            value if value == SharedFilesVisibility::Friends as u8 => {
+                SharedFilesVisibility::Friends
+            }
+            _ => SharedFilesVisibility::Off,
+        }
+    }
+
+    pub(crate) fn advertises_shared_files(&self) -> bool {
+        self.shared_files_visibility() != SharedFilesVisibility::Off
+    }
+
+    /// Access the daemon's live peer browse operations and retained results.
+    pub fn peer_browse_registry(&self) -> &crate::ed2k_tcp::PeerBrowseRegistry {
+        &self.peer_browse
+    }
+
+    pub(crate) fn try_browse_catalog_read(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        self.browse_catalog_reads.try_acquire().ok()
+    }
+
+    pub(crate) async fn authorizes_friend_browse(
+        &self,
+        identity: [u8; 16],
+        fingerprint: [u8; 32],
+    ) -> bool {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.has_friend_browse_key(&identity, &fingerprint))
+            .await
+            .is_ok_and(|result| result.unwrap_or(false))
+    }
+
     /// Load any persisted transfer manifests and create the runtime root if it
     /// does not exist yet.
     pub fn load_or_create(root_dir: &Path) -> Result<Self> {
@@ -902,6 +948,9 @@ impl Ed2kTransferRuntime {
             shared_publish_demand_notify: Arc::new(Notify::new()),
             shared_source_invalidations: Ed2kSharedSourceInvalidationSignal::default(),
             credit_system_enabled: AtomicBool::new(true),
+            shared_files_visibility: AtomicU8::new(SharedFilesVisibility::Everyone as u8),
+            peer_browse: crate::ed2k_tcp::PeerBrowseRegistry::default(),
+            browse_catalog_reads: tokio::sync::Semaphore::new(2),
             ich_enabled: AtomicBool::new(true),
             #[cfg(test)]
             raw_part_read_attempts: AtomicUsize::new(0),

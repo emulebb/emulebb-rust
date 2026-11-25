@@ -15,6 +15,17 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
         payload.len() as u64,
     );
     transfer_runtime.ensure_job(&job).await.unwrap();
+    let library = root.join("outbound-browse-library");
+    std::fs::create_dir_all(&library).unwrap();
+    let local_file = library.join("own-share.bin");
+    std::fs::write(&local_file, b"outbound browse fixture").unwrap();
+    let shared = transfer_runtime
+        .ingest_local_file(&local_file, "own-share.bin")
+        .await
+        .unwrap();
+    crate::ed2k_transfer::test_support::admit_local_share(&transfer_runtime, &library, &local_file)
+        .await;
+    let shared_hash = shared.file_hash.parse::<Ed2kHash>().unwrap();
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -104,6 +115,19 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
         let (requested_hash, ranges) =
             accept_upload_and_read_parts_request(&mut stream, false).await;
         assert_eq!(requested_hash, file_hash);
+        stream
+            .write_all(&encode_packet(OP_EDONKEYPROT, OP_ASKSHAREDFILES, &[]))
+            .await
+            .unwrap();
+        let browse_reply =
+            read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER).await;
+        let files = crate::ed2k_tcp::codec::shared_browse::decode_browse_files(
+            &browse_reply[6..],
+            crate::ed2k_string::Ed2kStringEncoding::Utf8,
+            8,
+        )
+        .unwrap();
+        assert!(files.iter().any(|file| file.file_hash == shared_hash));
         let (start, end) = ranges[0];
 
         let packet = encode_sending_part(

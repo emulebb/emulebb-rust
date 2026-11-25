@@ -94,6 +94,10 @@ async fn friend_create_body_uses_canonical_validation() {
             format!(r#"{{"userHash":"{user_hash}","name":"{long_name}"}}"#),
             "name must be at most 128 characters",
         ),
+        (
+            format!(r#"{{"userHash":"{user_hash}","browseKeySha256":"bad"}}"#),
+            "browseKeySha256 must be a 64-character hex string",
+        ),
     ];
 
     for (body, expected_message) in cases {

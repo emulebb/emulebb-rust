@@ -171,6 +171,40 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
     assert_eq!(affected_next.len(), 128);
     assert_eq!(affected_first[0].0, 1);
     assert!(affected_next[0].0 > affected_first.last().unwrap().0);
+    // Browse is one row per currently eligible content. Private root names
+    // never enter the consumer and a withdrawn membership disappears at once.
+    let mut browsed = 0;
+    store
+        .visit_verified_peer_files(MetadataPeerBrowseView::Flat, 0..=i64::MAX, 32, |file| {
+            assert_ne!(file.id, 1);
+            assert_eq!(file.name, format!("sample-{:06}.bin", file.id));
+            assert_eq!(file.size, 32);
+            browsed += 1;
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(browsed, 99_999);
+    assert_peer_partial_views(&store);
+    store
+        .visit_verified_peer_files(MetadataPeerBrowseView::Flat, 1..=10, 31, |_| {
+            panic!("peer size ceiling must exclude every 32-byte file")
+        })
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute("UPDATE known_files SET sharing_enabled=0 WHERE id=2", [])
+        .unwrap();
+    store
+        .visit_verified_peer_files(MetadataPeerBrowseView::Flat, 2..=2, 32, |_| {
+            panic!("individual sharing disable must override physical library presence")
+        })
+        .unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute("UPDATE known_files SET sharing_enabled=1 WHERE id=2", [])
+        .unwrap();
     store.connection().unwrap().execute("UPDATE shared_file_memberships SET removed_at_s=NULL WHERE root_id=1 AND known_file_id=1", []).unwrap();
     let first = store
         .query_active_local_share_entries(&MetadataSharedFileQuery {
@@ -590,4 +624,68 @@ fn large_catalog_uses_hash_seeks_and_path_cursors() {
             .entries
             .is_empty()
     );
+}
+
+// Reuse the physically verified sample at known_file_id 2 to exercise both
+// authorities for one hash, including the independent stopped download source.
+fn assert_peer_partial_views(store: &MetadataStore) {
+    use MetadataPeerBrowseView::{DirectoryList, Flat, IncompleteDirectory};
+    let token = store
+        .admit_download_job(&crate::DownloadJobRequest {
+            file_hash: hex::encode(b"0000000000000002"),
+            display_name: "Partial Sample.bin".into(),
+            expected_size_bytes: Some(32),
+            category_id: None,
+            intent: crate::DownloadIntent::Stopped,
+            piece_size: 16,
+        })
+        .unwrap()
+        .job
+        .token;
+    let read = |view| {
+        let mut found = Vec::new();
+        let queue = store
+            .visit_verified_peer_files(view, 2..=2, 32, |file| {
+                found.push((file.partial, file.name));
+                Ok(true)
+            })
+            .unwrap();
+        (queue, found)
+    };
+    assert!(read(DirectoryList).0);
+    assert!(read(IncompleteDirectory).1.is_empty());
+    let change = |sql: &str| {
+        store
+            .connection()
+            .unwrap()
+            .execute(sql, [token.job_id])
+            .unwrap();
+    };
+    change("INSERT INTO download_job_verified_ranges VALUES(?1,0,16,0)");
+    assert!(read(IncompleteDirectory).1.is_empty());
+    change("UPDATE download_jobs SET md4_hashset_acquired=1 WHERE id=?1");
+    let partial = (true, "Partial Sample.bin".to_owned());
+    let complete = (false, "sample-000002.bin".to_owned());
+    assert_eq!(read(IncompleteDirectory).1, std::slice::from_ref(&partial));
+    assert_eq!(read(Flat).1, std::slice::from_ref(&complete));
+    assert_eq!(read(DirectoryList).1, [complete, partial.clone()]);
+    store
+        .connection()
+        .unwrap()
+        .execute("UPDATE known_files SET sharing_enabled=0 WHERE id=2", [])
+        .unwrap();
+    assert_eq!(read(Flat).1, [partial]);
+    change("DELETE FROM download_job_verified_ranges WHERE job_id=?1");
+    assert!(read(Flat).1.is_empty());
+    change("INSERT INTO download_job_verified_ranges VALUES(?1,0,16,0)");
+    change("UPDATE download_jobs SET final_rehash_pending=1 WHERE id=?1");
+    assert!(read(Flat).1.is_empty());
+    change("UPDATE download_jobs SET final_rehash_pending=0,removed_at_s=1 WHERE id=?1");
+    assert!(read(Flat).1.is_empty());
+    assert!(!read(DirectoryList).0);
+    store
+        .connection()
+        .unwrap()
+        .execute("UPDATE known_files SET sharing_enabled=1 WHERE id=2", [])
+        .unwrap();
 }

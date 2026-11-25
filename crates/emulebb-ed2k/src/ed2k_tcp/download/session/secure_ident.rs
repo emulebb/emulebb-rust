@@ -151,6 +151,9 @@ pub(super) fn handle_signature(
                     }
                 }
             }
+            if verified && verification.newly_verified() {
+                session_state.peer_secure_ident.verified_user_hash = session_state.peer_user_hash;
+            }
             dump_ed2k_tcp_download_meta(
                 peer_addr,
                 Some(transport.mode),

@@ -15,6 +15,7 @@ use crate::{
     },
 };
 
+use super::super::browse::{BrowseIdentity, BrowsePeer, PeerOrBrowse, read_peer_or_browse};
 use super::super::established_peer::{
     handle_established_kad_callback, record_established_kad_firewall_ack,
     tolerates_unknown_established_opcode,
@@ -34,9 +35,9 @@ use super::super::{
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER, OP_REQUESTPREVIEW,
     OP_SECIDENTSTATE, OP_SENDINGPART, OP_SENDINGPART_I64, OP_SETREQFILEID, OP_SIGNATURE,
     PeerUploadDispatch, PeerUploadFacet, SourceExchangePeer, begin_secure_ident_probe,
-    build_hello_responses, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
-    decode_aich_recovery_request_payload, decode_answer_sources_payload,
-    decode_answer_sources2_payload, decode_client_message_payload,
+    build_hello_responses_with_share_policy, decode_aich_file_hash_answer,
+    decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
+    decode_answer_sources_payload, decode_answer_sources2_payload, decode_client_message_payload,
     decode_edonkey_queue_rank_payload, decode_emule_info_profile,
     decode_emule_queue_ranking_payload, decode_exact_file_hash_payload,
     decode_file_status_availability, decode_file_status_body_availability, decode_hashset_answer,
@@ -53,7 +54,6 @@ use super::{
     next_download_read_timeout, pump_aich_recovery_requests, pump_download_request_window,
     reconcile_download_manifest_metadata,
 };
-mod browse;
 mod notify;
 mod parts;
 mod probe;
@@ -327,6 +327,16 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         )
     };
     session_state.pending_aich_recovery_parts = initial_aich_recovery_parts(&manifest);
+    if session_state.hello_complete
+        && let (Some(peer), Some(hash)) = (session_state.browse_peer, session_state.peer_user_hash)
+    {
+        peer.bind(
+            transfer_runtime,
+            hash,
+            peer_addr,
+            &mut transport.browse.session,
+        );
+    }
 
     let session_result = async {
         loop {
@@ -453,18 +463,22 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     tracing::debug!(%peer_addr, job_id = %job_token.job_id, "closing redundant download peer after part verification");
                     return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
                 },
-                result = tokio::time::timeout(
-                read_timeout,
-                async {
+                event = async {
                     // WHY: apply already-received metadata through the normal
                     // AICH/name/availability handlers, without another wire ask.
                     if let Some(packet) = prepared_metadata.pop_front() {
-                        Ok(Some(packet))
+                        PeerOrBrowse::Packet(Ok(Ok(Some(packet))))
                     } else {
-                        transport.read_packet_diagnostic("native_download", peer_addr, "session").await
+                        read_peer_or_browse(transport, read_timeout, "native_download", peer_addr).await
                     }
-                },
-                ) => result,
+                } => event,
+            };
+            let read_result = match read_result {
+                PeerOrBrowse::Browse(frame) => {
+                    transport.write_all_diagnostic("native_download", peer_addr, "peer_browse_request", &frame).await?;
+                    continue;
+                }
+                PeerOrBrowse::Packet(read) => read,
             };
             let packet = match read_result {
                 Ok(Ok(Some(packet))) => packet,
@@ -614,6 +628,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             match (packet.protocol, packet.opcode) {
                 (OP_EDONKEYPROT, OP_HELLO) => {
                     let hello_profile = decode_hello_profile(&packet.payload)?;
+                    anyhow::ensure!(
+                        !session_state.hello_complete || session_state.peer_user_hash.is_none_or(|hash| hash == hello_profile.identity.user_hash),
+                        "eD2k peer {peer_addr} changed its established user hash",
+                    );
                     if let Some(upload_facet) = upload_facet.as_deref_mut()
                         && !upload_facet
                             .bind_hello(
@@ -634,7 +652,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         );
                         session_state.peer_client_software = software.clone();
                     }
-                    for reply in build_hello_responses(&packet.payload, hello_identity)? {
+                    for reply in build_hello_responses_with_share_policy(
+                        &packet.payload, hello_identity, !transfer_runtime.advertises_shared_files(),
+                    )? {
                         transport
                             .write_all_diagnostic(
                                 "native_download",
@@ -651,6 +671,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    let peer = BrowsePeer::from_hello(&hello_profile);
+                    peer.bind(transfer_runtime, hello_profile.identity.user_hash, peer_addr, &mut transport.browse.session);
+                    session_state.browse_peer = Some(peer);
                     // WHY: server search/source rows may not carry a user hash.
                     // The TCP hello is the first durable identity proof for that
                     // endpoint, so upgrade the remembered source before REST
@@ -701,6 +724,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EDONKEYPROT, OP_HELLOANSWER) => {
                     let hello_profile = decode_hello_answer_profile(&packet.payload)?;
+                    anyhow::ensure!(
+                        !session_state.hello_complete || session_state.peer_user_hash.is_none_or(|hash| hash == hello_profile.identity.user_hash),
+                        "eD2k peer {peer_addr} changed its established user hash",
+                    );
                     if let Some(upload_facet) = upload_facet.as_deref_mut()
                         && !upload_facet
                             .bind_hello(
@@ -722,6 +749,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    let peer = BrowsePeer::from_hello(&hello_profile);
+                    peer.bind(transfer_runtime, hello_profile.identity.user_hash, peer_addr, &mut transport.browse.session);
+                    session_state.browse_peer = Some(peer);
                     // WHY: server search/source rows may not carry a user hash.
                     // The TCP hello answer is the first durable identity proof
                     // for that endpoint, so upgrade the remembered source before
@@ -1545,54 +1575,25 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         ),
                     );
                 }
-                (OP_EDONKEYPROT, OP_ASKSHAREDFILES) => {
-                    browse::handle_ask_shared_files(transport, peer_addr, packet.payload.len())
-                        .await?;
+                (OP_EDONKEYPROT, OP_ASKSHAREDFILES | OP_ASKSHAREDDIRS | OP_ASKSHAREDFILESDIR) => {
+                    if let Some(peer) = session_state.browse_peer {
+                        let frame = transport.browse.serving.reply(
+                            transfer_runtime, packet.opcode, &packet.payload, peer, hello_identity,
+                            BrowseIdentity {
+                                user_hash: session_state.peer_user_hash,
+                                secure_ident: &session_state.peer_secure_ident,
+                            },
+                        ).await?;
+                        transport.write_all_diagnostic("native_download", peer_addr, "peer_browse_reply", &frame).await?;
+                    }
                 }
-                (OP_EDONKEYPROT, OP_ASKSHAREDDIRS) => {
-                    browse::handle_ask_shared_dirs(transport, peer_addr, packet.payload.len())
-                        .await?;
-                }
-                (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR) => {
-                    browse::handle_ask_shared_files_dir(
-                        transport,
-                        peer_addr,
-                        &packet.payload,
-                        Ed2kStringEncoding::from_unicode_support(
-                            session_state.remote_supports_unicode,
-                        ),
-                    )
-                    .await?;
-                }
-                (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER) => {
-                    browse::handle_ask_shared_files_answer(transport, peer_addr, &packet.payload)?;
-                }
-                (OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS) => {
-                    browse::handle_ask_shared_dirs_answer(
-                        transport,
-                        peer_addr,
-                        &packet.payload,
-                        Ed2kStringEncoding::from_unicode_support(
-                            session_state.remote_supports_unicode,
-                        ),
-                    )?;
-                }
-                (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIRANS) => {
-                    browse::handle_ask_shared_files_dir_answer(
-                        transport,
-                        peer_addr,
-                        &packet.payload,
-                        Ed2kStringEncoding::from_unicode_support(
-                            session_state.remote_supports_unicode,
-                        ),
-                    )?;
-                }
-                (OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS) => {
-                    browse::handle_ask_shared_denied_answer(
-                        transport,
-                        peer_addr,
-                        packet.payload.len(),
-                    );
+                (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER | OP_ASKSHAREDDIRSANS
+                    | OP_ASKSHAREDFILESDIRANS | OP_ASKSHAREDDENIEDANS) => {
+                    if let Some(session) = &transport.browse.session
+                        && let Some(frame) = session.handle_reply_async(packet.opcode, packet.payload).await
+                    {
+                        transport.write_all_diagnostic("native_download", peer_addr, "peer_browse_request", &frame).await?;
+                    }
                 }
                 (OP_EMULEPROT, OP_FILEDESC) => {
                     notify::handle_file_desc(

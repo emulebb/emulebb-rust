@@ -960,6 +960,9 @@ pub struct FriendCreate {
     pub user_hash: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// Operator-verified SHA-256 fingerprint of the peer's SecureIdent public key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browse_key_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
