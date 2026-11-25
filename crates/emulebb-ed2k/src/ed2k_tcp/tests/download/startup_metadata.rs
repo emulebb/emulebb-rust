@@ -597,7 +597,7 @@ fn legacy_hello_answer_without_aich(peer_addr: SocketAddr) -> Vec<u8> {
     packet
 }
 
-fn replace_short_u32_tag(packet: &mut [u8], tag_name: u8, value: u32) {
+pub(super) fn replace_short_u32_tag(packet: &mut [u8], tag_name: u8, value: u32) {
     let header = [TAGTYPE_UINT32, 0x01, 0x00, tag_name];
     let offset = packet
         .windows(header.len())

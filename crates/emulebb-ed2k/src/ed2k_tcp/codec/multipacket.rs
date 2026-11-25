@@ -146,3 +146,21 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_answer(
     }
     Ok(encode_packet(OP_EMULEPROT, OP_MULTIPACKETANSWER, &payload))
 }
+
+pub(in crate::ed2k_tcp) fn encode_multipacket_source_request(
+    file_hash: &Ed2kHash,
+    file_size: u64,
+    use_ext_envelope: bool,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(28);
+    payload.extend_from_slice(&file_hash.0);
+    let opcode = if use_ext_envelope {
+        payload.extend_from_slice(&file_size.to_le_bytes());
+        OP_MULTIPACKET_EXT
+    } else {
+        OP_MULTIPACKET
+    };
+    payload.push(OP_REQUESTSOURCES2);
+    payload.extend_from_slice(&encode_request_sources2_subpayload());
+    encode_packet(OP_EMULEPROT, opcode, &payload)
+}

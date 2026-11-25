@@ -6,7 +6,8 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::{
     ed2k_tcp::{
         Ed2kFileIdentifier, Ed2kHashsetRequestOptions, Ed2kSecureIdent, Ed2kTransport,
-        PeerSourceExchangeRequest, begin_secure_ident_probe, codec::FilenameRequestExtension,
+        PeerSourceExchangeRequest, begin_secure_ident_probe,
+        codec::{FilenameRequestExtension, encode_multipacket_source_request},
         dump_ed2k_tcp_download_meta, encode_aich_file_hash_request, encode_hashset_request,
         encode_hashset_request2, encode_multipacket_ext2_request, encode_multipacket_request,
         encode_request_filename, encode_request_sources2, encode_set_req_file_id,
@@ -176,14 +177,25 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
         && session_state.source_exchange_allowed
         && session_state.remote_supports_source_exchange2
     {
-        let source_request = encode_request_sources2(file_hash);
-        transport
-            .write_all_diagnostic(
-                "native_download",
-                peer_addr,
-                "request_sources2",
-                &source_request,
+        // aMule 3.0.1 accepts embedded SX2 but disconnects on the valid
+        // standalone length. Use the negotiated legacy multipacket after a
+        // metadata probe, without repeating the filename or status requests.
+        let (source_request, label) = if session_state.remote_supports_multipacket
+            && !session_state.remote_supports_file_identifiers
+        {
+            (
+                encode_multipacket_source_request(
+                    file_hash,
+                    manifest.file_size,
+                    session_state.remote_supports_ext_multipacket,
+                ),
+                "multipacket_request_sources2",
             )
+        } else {
+            (encode_request_sources2(file_hash), "request_sources2")
+        };
+        transport
+            .write_all_diagnostic("native_download", peer_addr, label, &source_request)
             .await
             .with_context(|| format!("failed to send OP_REQUESTSOURCES2 to {peer_addr}"))?;
         session_state.source_request_sent = true;

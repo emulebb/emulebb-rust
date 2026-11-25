@@ -60,7 +60,7 @@ pub(super) use hashset::{
 };
 pub(super) use multipacket::{
     PeerSourceExchangeRequest, encode_multipacket_answer, encode_multipacket_ext2_answer,
-    encode_multipacket_ext2_request, encode_multipacket_request,
+    encode_multipacket_ext2_request, encode_multipacket_request, encode_multipacket_source_request,
 };
 pub(super) use upload::{
     build_upload_part_packets, decode_compressed_part_fragment, decode_request_parts_payload,
