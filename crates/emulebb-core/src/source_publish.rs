@@ -20,8 +20,8 @@ use std::net::Ipv4Addr;
 use emulebb_ed2k::ed2k_tcp::emule_connect_options;
 use emulebb_kad_proto::{NodeId, Tag, TagValue, tag_name};
 
-use crate::EMULE_LARGE_FILE_SIZE_THRESHOLD;
 use crate::kad_buddy::buddy_search_target;
+use emulebb_ed2k::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX;
 
 /// Direct-UDP-callback bit of the connect-options byte
 /// (`GetMyConnectOptions`: `uDirectUDPCallback << 3`).
@@ -54,7 +54,7 @@ pub(crate) enum SourcePublishReachability {
 }
 
 pub(crate) fn emule_high_id_source_type(file_size: u64) -> u32 {
-    if file_size > EMULE_LARGE_FILE_SIZE_THRESHOLD {
+    if file_size > ED2K_LEGACY_FILE_SIZE_MAX {
         4
     } else {
         1
@@ -64,7 +64,7 @@ pub(crate) fn emule_high_id_source_type(file_size: u64) -> u32 {
 /// Buddy-relayed source type (oracle `pFile->GetFileSize() >
 /// OLD_MAX_EMULE_FILE_SIZE ? 5 : 3`).
 fn emule_buddy_source_type(file_size: u64) -> u8 {
-    if file_size > EMULE_LARGE_FILE_SIZE_THRESHOLD {
+    if file_size > ED2K_LEGACY_FILE_SIZE_MAX {
         5
     } else {
         3

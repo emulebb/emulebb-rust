@@ -3,7 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use emulebb_ed2k::ed2k_server::{Ed2kServerSourceBatchTarget, Ed2kUdpSourceBatchTarget};
+use emulebb_ed2k::ed2k_server::{
+    Ed2kServerSourceBatchTarget, Ed2kUdpSourceBatchTarget, supports_tcp_source_size,
+};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{CoreState, Transfer};
@@ -112,6 +114,7 @@ pub(crate) fn claim_connected_server_source_batch(
     state: &mut CoreState,
     current_transfer: &DownloadSourceTarget,
     current_file_hash: Ed2kHash,
+    server_flags: Option<u32>,
     now: Instant,
 ) -> ClaimedConnectedServerSourceBatch {
     state
@@ -149,7 +152,9 @@ pub(crate) fn claim_connected_server_source_batch(
     let mut targets = Vec::new();
     let mut transfers = HashMap::new();
     for (file_hash, transfer) in candidates {
-        if was_recently_queried_on_connected_server(state, &transfer.hash, now) {
+        if !supports_tcp_source_size(server_flags, transfer.size_bytes)
+            || was_recently_queried_on_connected_server(state, &transfer.hash, now)
+        {
             continue;
         }
         state
@@ -251,7 +256,8 @@ mod tests {
             hash: hash.to_string(),
             size_bytes: 4096,
         };
-        let batch = claim_connected_server_source_batch(&mut state, &target, hash, Instant::now());
+        let batch =
+            claim_connected_server_source_batch(&mut state, &target, hash, None, Instant::now());
         assert_eq!(batch.targets.len(), 1);
         assert_eq!(batch.transfers[&hash].token, target.token);
         assert!(state.transfers.is_empty());
@@ -326,6 +332,7 @@ mod tests {
             &mut state,
             &DownloadSourceTarget::from(&current),
             current_hash,
+            None,
             now,
         );
         assert_eq!(first.targets.len(), 2);
@@ -336,6 +343,7 @@ mod tests {
             &mut state,
             &DownloadSourceTarget::from(&current),
             current_hash,
+            None,
             now + Duration::from_secs(5),
         );
         assert!(frame_blocked.targets.is_empty());
@@ -344,6 +352,7 @@ mod tests {
             &mut state,
             &DownloadSourceTarget::from(&current),
             current_hash,
+            None,
             now + ED2K_CONNECTED_SERVER_SOURCE_FRAME_INTERVAL + Duration::from_secs(1),
         );
         assert!(per_file_blocked.targets.is_empty());
@@ -352,6 +361,7 @@ mod tests {
             &mut state,
             &DownloadSourceTarget::from(&current),
             current_hash,
+            None,
             now + ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN + Duration::from_secs(1),
         );
         assert!(
@@ -360,6 +370,25 @@ mod tests {
                 .iter()
                 .any(|target| target.file_hash == current_hash)
         );
+    }
+
+    #[test]
+    fn legacy_server_claim_skips_large_files_without_charging_their_cooldown() {
+        let hash = Ed2kHash::from_bytes([0x42; 16]);
+        let file_size = emulebb_ed2k::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX + 1;
+        let transfer = transfer(hash, "downloading", file_size);
+        let mut state = core_state_with_transfers([transfer.clone()]);
+        let target = DownloadSourceTarget::from(&transfer);
+        let now = Instant::now();
+        let legacy = claim_connected_server_source_batch(&mut state, &target, hash, Some(0), now);
+        assert!(legacy.targets.is_empty());
+        assert!(state.ed2k_server_source_last_queried.is_empty());
+        assert!(state.ed2k_server_source_last_frame_at.is_none());
+
+        let capable =
+            claim_connected_server_source_batch(&mut state, &target, hash, Some(0x100), now);
+        assert_eq!(capable.targets.len(), 1);
+        assert_eq!(capable.targets[0].file_size, file_size);
     }
 
     #[test]
@@ -377,6 +406,7 @@ mod tests {
             &mut state,
             &DownloadSourceTarget::from(&current),
             current_hash,
+            None,
             now,
         );
 

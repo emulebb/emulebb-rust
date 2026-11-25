@@ -22,8 +22,8 @@ use super::{
     SERVER_TCP_FLAG_LARGEFILES, SearchCriteria, ServerSession, ServerSessionPhase, ServerUdpPacket,
     decode_udp_found_source_sets, decode_udp_search_result_pages,
     encode_search_request_with_criteria, encode_source_request, is_low_id, merge_found_sources,
-    send_due_offer_files_advertisement, source_request_opcode, validate_found_sources,
-    wait_for_offer_files_settle,
+    send_due_offer_files_advertisement, source_request_opcode, supports_tcp_source_size,
+    validate_found_sources, wait_for_offer_files_settle,
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
 
@@ -864,6 +864,10 @@ pub(super) async fn start_background_server_search(
             timeout,
             response,
         } => {
+            if !supports_tcp_source_size(session.server_flags, file_size) {
+                let _ = response.send(Ok(Vec::new()));
+                return Ok(None);
+            }
             wait_for_offer_files_settle(session).await;
             session.set_phase(
                 ServerSessionPhase::SearchActive,
@@ -887,7 +891,10 @@ pub(super) async fn start_background_server_search(
             timeout,
             response,
         } => {
-            if targets.is_empty() {
+            if !targets
+                .iter()
+                .any(|target| supports_tcp_source_size(session.server_flags, target.file_size))
+            {
                 let _ = response.send(Ok(HashMap::new()));
                 return Ok(None);
             }
@@ -1004,8 +1011,12 @@ pub(super) async fn send_source_request_batch(
     connect_options: u8,
 ) -> Result<(u8, HashSet<Ed2kHash>)> {
     let opcode = source_request_opcode(connect_options, session.server_flags);
+    let server_flags = session.server_flags;
     let mut pending_hashes = HashSet::with_capacity(targets.len());
-    for target in targets {
+    for target in targets
+        .iter()
+        .filter(|target| supports_tcp_source_size(server_flags, target.file_size))
+    {
         // WHY: OP_GETSOURCES and OP_GETSOURCES_OBFU define exactly one file
         // record per ED2K frame. Concatenating several records into one payload
         // makes only the first request independently decodable by stock servers.

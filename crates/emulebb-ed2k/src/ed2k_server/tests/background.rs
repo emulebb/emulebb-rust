@@ -199,22 +199,32 @@ async fn background_callback_rejects_a_stale_or_ineligible_route_without_writing
 
 #[tokio::test]
 async fn background_source_batch_sends_one_complete_frame_per_target() {
+    use crate::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX;
+
     let small = Ed2kServerSourceBatchTarget {
         file_hash: Ed2kHash([0x31; 16]),
-        file_size: u64::from(u32::MAX),
+        file_size: ED2K_LEGACY_FILE_SIZE_MAX,
     };
     let large = Ed2kServerSourceBatchTarget {
         file_hash: Ed2kHash([0x32; 16]),
-        file_size: u64::from(u32::MAX) + 1,
+        file_size: ED2K_LEGACY_FILE_SIZE_MAX + 1,
     };
 
-    for (connect_options, server_flags, expected_opcode, targets) in [
-        (0, Some(0), OP_GETSOURCES, vec![small]),
-        (0, Some(0), OP_GETSOURCES, vec![small, large]),
+    for (connect_options, server_flags, expected_opcode, targets, sent_targets) in [
+        (0, None, OP_GETSOURCES, vec![large], vec![]),
+        (0, Some(0), OP_GETSOURCES, vec![small, large], vec![small]),
+        (
+            0,
+            Some(SERVER_TCP_FLAG_LARGEFILES),
+            OP_GETSOURCES,
+            vec![small, large],
+            vec![small, large],
+        ),
         (
             0x01,
-            Some(SERVER_TCP_FLAG_TCPOBFUSCATION),
+            Some(SERVER_TCP_FLAG_TCPOBFUSCATION | SERVER_TCP_FLAG_LARGEFILES),
             OP_GETSOURCES_OBFU,
+            vec![small, large],
             vec![small, large],
         ),
     ] {
@@ -227,8 +237,9 @@ async fn background_source_batch_sends_one_complete_frame_per_target() {
                 .unwrap();
 
         assert_eq!(opcode, expected_opcode);
-        assert_eq!(pending_hashes.len(), targets.len());
-        for target in targets {
+        assert_eq!(pending_hashes.len(), sent_targets.len());
+        for target in sent_targets {
+            assert!(pending_hashes.contains(&target.file_hash));
             let (wire_opcode, payload) = read_source_request_frame(&mut peer).await;
             assert_eq!(wire_opcode, expected_opcode);
             assert_eq!(

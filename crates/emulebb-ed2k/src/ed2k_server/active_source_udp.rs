@@ -190,16 +190,18 @@ pub async fn search_source_udp_servers(
             resolved_server.entry.display_name(),
             file_hash
         );
-        if let Err(error) =
-            send_udp_source_search(&socket, &resolved_server, file_hash, file_size).await
-        {
-            warn!(
-                "failed to send ED2K UDP source search file_hash={} endpoint={}: {error}",
-                file_hash,
-                resolved_server.base_endpoint()
-            );
-            last_error = Some(error);
-            continue;
+        match send_udp_source_search(&socket, &resolved_server, file_hash, file_size).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                warn!(
+                    "failed to send ED2K UDP source search file_hash={} endpoint={}: {error}",
+                    file_hash,
+                    resolved_server.base_endpoint()
+                );
+                last_error = Some(error);
+                continue;
+            }
         }
 
         let deadline = TokioInstant::now() + per_server_timeout;
@@ -503,7 +505,8 @@ pub async fn search_source_udp_server_batches(
         );
         let request_opcode =
             match send_udp_source_search_batch(&socket, &resolved_server, &request_targets).await {
-                Ok(request_opcode) => request_opcode,
+                Ok(Some(request_opcode)) => request_opcode,
+                Ok(None) => continue,
                 Err(error) => {
                     warn!(
                         "failed to send ED2K UDP source batch search endpoint={}: {error}",

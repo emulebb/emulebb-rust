@@ -235,27 +235,29 @@ pub(super) async fn send_udp_source_search(
     server: &ResolvedServerEntry,
     file_hash: Ed2kHash,
     file_size: u64,
-) -> Result<()> {
-    let encoded = encode_udp_source_request_batch(
+) -> Result<bool> {
+    let sent = send_udp_source_search_batch(
+        socket,
         server,
         &[Ed2kUdpSourceRequestTarget {
             file_hash,
             file_size,
         }],
     )
-    .context("ED2K UDP source search had no encodable target")?;
-    send_server_udp_packet(socket, server, encoded.opcode, &encoded.payload).await
+    .await?;
+    Ok(sent.is_some())
 }
 
 pub(super) async fn send_udp_source_search_batch(
     socket: &UdpSocket,
     server: &ResolvedServerEntry,
     targets: &[Ed2kUdpSourceRequestTarget],
-) -> Result<u8> {
-    let encoded = encode_udp_source_request_batch(server, targets)
-        .context("ED2K UDP source search batch had no encodable targets")?;
+) -> Result<Option<u8>> {
+    let Some(encoded) = encode_udp_source_request_batch(server, targets) else {
+        return Ok(None);
+    };
     send_server_udp_packet(socket, server, encoded.opcode, &encoded.payload).await?;
-    Ok(encoded.opcode)
+    Ok(Some(encoded.opcode))
 }
 
 pub(super) async fn read_server_udp_packet(

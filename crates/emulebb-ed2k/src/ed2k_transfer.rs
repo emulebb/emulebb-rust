@@ -209,6 +209,8 @@ impl Ed2kConnectionBudgetDenyReason {
 
 /// Canonical ED2K part size used by eMule-compatible file hashing.
 pub const ED2K_PART_SIZE: u64 = 9_728_000;
+/// Largest file supported by the stock pre-large-file protocol.
+pub const ED2K_LEGACY_FILE_SIZE_MAX: u64 = (u32::MAX as u64 / ED2K_PART_SIZE) * ED2K_PART_SIZE;
 
 /// Returns whether a display name is a synthetic placeholder for an unresolved
 /// hash-only ED2K link rather than peer- or index-provided metadata.

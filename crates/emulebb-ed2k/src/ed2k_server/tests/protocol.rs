@@ -130,7 +130,7 @@ fn udp_source_request_batch_encodes_getsources2_sizes() {
         0,
         SERVER_UDP_FLAG_EXT_GETSOURCES2 | SERVER_UDP_FLAG_LARGEFILES,
     );
-    let large_size = u64::from(u32::MAX) + 1;
+    let large_size = crate::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX + 1;
     let targets = [
         Ed2kUdpSourceRequestTarget {
             file_hash: Ed2kHash::from_bytes([0x44; 16]),
@@ -162,6 +162,20 @@ fn udp_source_request_batch_encodes_getsources2_sizes() {
         u64::from_le_bytes(encoded.payload[40..48].try_into().unwrap()),
         large_size
     );
+}
+
+#[test]
+fn udp_source_request_checks_large_file_and_sized_request_flags_independently() {
+    let target = Ed2kUdpSourceRequestTarget {
+        file_hash: Ed2kHash::from_bytes([0x55; 16]),
+        file_size: crate::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX + 1,
+    };
+    let sized_only = test_server(0, SERVER_UDP_FLAG_EXT_GETSOURCES2);
+    assert!(encode_udp_source_request_batch(&sized_only, &[target]).is_none());
+    let large_only = test_server(0, SERVER_UDP_FLAG_LARGEFILES);
+    let request = encode_udp_source_request_batch(&large_only, &[target]).unwrap();
+    assert_eq!(request.opcode, OP_GLOBGETSOURCES);
+    assert_eq!(request.payload, target.file_hash.0);
 }
 
 #[test]

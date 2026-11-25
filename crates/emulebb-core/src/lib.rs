@@ -367,10 +367,6 @@ const ED2K_LOCAL_SERVER_SEARCH_TIMEOUT_SECS: u64 = 50;
 /// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
 /// `GetClosestTo`), filtering out contacts staler than two age buckets.
 const KAD_REQ_MAX_TYPE: u8 = 2;
-/// Oracle `OLD_MAX_EMULE_FILE_SIZE` (Opcodes.h): `(4294967295/PARTSIZE)*PARTSIZE`,
-/// the pre-large-file limit. Kad source types switch to their large-file
-/// variants (4/5) strictly above this, NOT above the raw u32 ceiling.
-const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = 4_290_048_000;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 /// Upper bound on awaiting the initial UPnP reconcile before the first eD2k server
 /// login (connection ordering: bind -> VPN guard -> UPnP await -> connect). Covers
@@ -2343,20 +2339,23 @@ impl EmulebbCore {
         let cancel = CancellationToken::new();
         let config = self.effective_ed2k_config(&network.ed2k).await?;
         let mut sources = Vec::new();
-        let (preferred_endpoint, background_search) =
-            if let Some(handle) = self.connected_ed2k_search_handle().await {
-                (self.connected_ed2k_server_endpoint().await, Some(handle))
-            } else {
-                (None, None)
-            };
+        let background_search = self.connected_ed2k_search_session().await;
+        let preferred_endpoint = background_search
+            .as_ref()
+            .and_then(|(_, endpoint, _)| *endpoint);
         let has_background_search = background_search.is_some();
         if allow_server_source_refresh
-            && has_background_search
-            && let Some(handle) = background_search.as_ref()
+            && let Some((handle, _, server_flags)) = background_search.as_ref()
         {
             let claimed_batch = {
                 let mut state = self.state.lock().await;
-                claim_connected_server_source_batch(&mut state, transfer, file_hash, Instant::now())
+                claim_connected_server_source_batch(
+                    &mut state,
+                    transfer,
+                    file_hash,
+                    *server_flags,
+                    Instant::now(),
+                )
             };
             if !claimed_batch.targets.is_empty() {
                 let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
@@ -2665,6 +2664,14 @@ impl EmulebbCore {
     }
 
     async fn connected_ed2k_search_handle(&self) -> Option<Ed2kServerSearchHandle> {
+        self.connected_ed2k_search_session()
+            .await
+            .map(|(handle, _, _)| handle)
+    }
+
+    async fn connected_ed2k_search_session(
+        &self,
+    ) -> Option<(Ed2kServerSearchHandle, Option<SocketAddr>, Option<u32>)> {
         let (handle, server_state) = {
             let runtime_guard = self.ed2k_runtime.lock().await;
             let runtime = runtime_guard.as_ref()?;
@@ -2676,7 +2683,10 @@ impl EmulebbCore {
                 Arc::clone(&runtime.server_state),
             )
         };
-        server_state.read().await.connected.then_some(handle)
+        let state = server_state.read().await;
+        state
+            .connected
+            .then_some((handle, state.endpoint, state.server_flags))
     }
 
     async fn ed2k_dht_node(&self) -> Option<DhtNode> {

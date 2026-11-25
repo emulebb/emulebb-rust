@@ -115,7 +115,7 @@ fn source_publish_tags_buddy_relay_uses_large_file_type_5() {
             tcp_port: 41001,
             obfuscation_enabled: false,
         },
-        EMULE_LARGE_FILE_SIZE_THRESHOLD + 1,
+        emulebb_ed2k::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX + 1,
         SourcePublishReachability::BuddyRelay {
             buddy_ip: "198.51.100.136".parse().unwrap(),
             buddy_kad_port: 4672,
