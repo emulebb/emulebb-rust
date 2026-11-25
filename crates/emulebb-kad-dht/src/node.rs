@@ -36,7 +36,7 @@ use emulebb_kad_proto::{KadUdpKey, NodeId};
 use emulebb_kad_routing::{Contact, RoutingTable};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
@@ -59,6 +59,7 @@ struct DhtInner {
     /// cap). Acquired around every `run_traversal` invocation.
     search_concurrency: SearchConcurrency,
     bootstrapped: std::sync::atomic::AtomicBool,
+    bootstrap_cursor: AtomicUsize,
     /// Pending pre-v8 contact-verification challenges (oracle
     /// `CPacketTracking::listChallengeRequests`).
     legacy_challenges: Mutex<LegacyChallengeTracker>,
@@ -219,6 +220,7 @@ impl DhtNode {
                 config,
                 search_concurrency,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
+                bootstrap_cursor: AtomicUsize::new(0),
                 legacy_challenges: Mutex::new(LegacyChallengeTracker::default()),
                 ip_filter: std::sync::OnceLock::new(),
                 res_contact_tx,

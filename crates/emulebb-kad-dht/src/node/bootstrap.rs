@@ -8,8 +8,12 @@ use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::{KadPacket, KadUdpKey, NodeId, opcode};
 use emulebb_kad_routing::Contact;
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
+use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
+
+const BOOTSTRAP_ATTEMPTS_PER_ROUND: usize = 10;
 
 impl DhtNode {
     /// Join through the operator's chosen UDP endpoint, without substituting
@@ -67,8 +71,11 @@ impl DhtNode {
 
         let mut responded = 0usize;
 
-        // Send BOOTSTRAP_REQ to up to 10 contacts
-        for bc in contacts.iter().take(10) {
+        // WHY: Replaying the first batch can strand a reachable configured or
+        // restored contact behind silent seeds indefinitely. Stock and aMule
+        // advance their seed lists between attempts.
+        let round = next_bootstrap_round(&self.inner.bootstrap_cursor, contacts.len());
+        for bc in &contacts[round] {
             if self.bootstrap_contact(bc, work_class).await {
                 responded += 1;
             }
@@ -224,6 +231,18 @@ impl DhtNode {
     }
 }
 
+fn next_bootstrap_round(cursor: &AtomicUsize, contact_count: usize) -> Range<usize> {
+    let round_end = |start: usize| (start + BOOTSTRAP_ATTEMPTS_PER_ROUND).min(contact_count);
+    let round_start = cursor
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+            let end = round_end(previous % contact_count);
+            Some(end % contact_count)
+        })
+        .expect("bootstrap round reservation always advances")
+        % contact_count;
+    round_start..round_end(round_start)
+}
+
 fn bootstrap_contact_entry(entry: emulebb_kad_proto::packet::ContactEntry) -> Option<Contact> {
     if entry.ip == 0 || entry.udp_port == 0 {
         return None;
@@ -242,6 +261,18 @@ mod tests {
     use crate::{DhtConfig, DhtNode};
     use emulebb_kad_proto::NodeId;
     use emulebb_kad_routing::Contact;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn bootstrap_rounds_reach_later_candidates_and_wrap() {
+        let cursor = AtomicUsize::new(0);
+        assert_eq!(super::next_bootstrap_round(&cursor, 21), 0..10);
+        assert_eq!(super::next_bootstrap_round(&cursor, 21), 10..20);
+        assert_eq!(super::next_bootstrap_round(&cursor, 21), 20..21);
+        assert_eq!(super::next_bootstrap_round(&cursor, 21), 0..10);
+        assert_eq!(super::next_bootstrap_round(&cursor, 3), 1..3);
+        assert_eq!(super::next_bootstrap_round(&cursor, 3), 0..3);
+    }
 
     async fn empty_node() -> DhtNode {
         DhtNode::new(DhtConfig {
