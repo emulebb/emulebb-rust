@@ -1,6 +1,91 @@
 use super::*;
 use crate::ed2k_transfer::Ed2kTransferState;
 
+async fn read_next_edonkey_packet(stream: &mut TcpStream) -> Vec<u8> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let packet = read_packet(stream).await;
+            if packet[0] == OP_EDONKEYPROT {
+                break packet;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn listener_file_status_respects_stock_large_file_capability() {
+    use crate::ed2k_transfer::ED2K_LEGACY_FILE_SIZE_MAX;
+
+    let root = unique_test_dir("ed2k-large-file-capability");
+    let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let boundary = Ed2kHash::from_bytes([0x71; 16]);
+    let large = Ed2kHash::from_bytes([0x72; 16]);
+    for (hash, size) in [
+        (boundary, ED2K_LEGACY_FILE_SIZE_MAX),
+        (large, ED2K_LEGACY_FILE_SIZE_MAX + 1),
+    ] {
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
+            hash,
+            "sample.bin".to_string(),
+            size,
+        );
+        runtime.ensure_job(&job).await.unwrap();
+    }
+
+    for supports_large_files in [false, true] {
+        let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+        let server = spawn_single_listener_connection(
+            listener,
+            test_dht().await,
+            Arc::new(RwLock::new(Ed2kServerState::default())),
+            Arc::new(Mutex::new(KadFirewallState::default())),
+            listener_secure_ident(),
+            Arc::clone(&runtime),
+            listener_hello_identity(),
+        );
+        let mut hello = encode_hello_request(peer_hello_identity());
+        let misc_header = [TAGTYPE_UINT32, 1, 0, CT_EMULE_MISCOPTIONS2];
+        let tag_value = hello
+            .windows(4)
+            .position(|part| part == misc_header)
+            .unwrap()
+            + 4;
+        assert_ne!(hello[tag_value] & 0x10, 0);
+        if !supports_large_files {
+            hello[tag_value] &= !0x10;
+        }
+        let mut stream = TcpStream::connect(peer_addr).await.unwrap();
+        stream.write_all(&hello).await.unwrap();
+        read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_HELLOANSWER).await;
+
+        for (hash, opcode) in [
+            (boundary, OP_FILESTATUS),
+            (
+                large,
+                if supports_large_files {
+                    OP_FILESTATUS
+                } else {
+                    OP_FILEREQANSNOFIL
+                },
+            ),
+        ] {
+            stream
+                .write_all(&encode_packet(OP_EDONKEYPROT, OP_SETREQFILEID, &hash.0))
+                .await
+                .unwrap();
+            let packet = read_next_edonkey_packet(&mut stream).await;
+            assert_eq!(packet[5], opcode);
+            assert_eq!(&packet[6..22], &hash.0);
+        }
+        drop(stream);
+        server.await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn listener_distinguishes_unknown_filename_and_empty_partial_status() {
     let root = unique_test_dir("ed2k-standalone-file-status");
@@ -61,16 +146,7 @@ async fn listener_distinguishes_unknown_filename_and_empty_partial_status() {
             .write_all(&encode_packet(OP_EDONKEYPROT, OP_SETREQFILEID, &hash.0))
             .await
             .unwrap();
-        let reply = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let packet = read_packet(&mut stream).await;
-                if packet[0] == OP_EDONKEYPROT {
-                    break packet;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let reply = read_next_edonkey_packet(&mut stream).await;
         assert_eq!(reply[5], opcode);
         assert_eq!(&reply[6..22], &hash.0);
         assert_eq!(&reply[22..], body);

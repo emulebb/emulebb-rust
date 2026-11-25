@@ -23,10 +23,10 @@ use super::{
     listener::session::{
         PeerHelloStateRefs, apply_peer_hello_profile,
         shared_file::{
-            RequesterFileState, SourceExchangeResponseThrottle, handle_aich_file_hash_request,
-            handle_hashset_request, handle_hashset_request2, handle_multipacket_ext2_request,
-            handle_multipacket_request, handle_request_filename, handle_set_req_file_id,
-            handle_source_request,
+            PeerFileRequestCapabilities, RequesterFileState, SourceExchangeResponseThrottle,
+            handle_aich_file_hash_request, handle_hashset_request, handle_hashset_request2,
+            handle_multipacket_ext2_request, handle_multipacket_request, handle_request_filename,
+            handle_set_req_file_id, handle_source_request,
         },
         upload_firewall_context,
         upload_payload::{UploadPayloadOutcome, UploadPayloadRequest, serve_upload_payload},
@@ -65,6 +65,7 @@ pub(in crate::ed2k_tcp) struct PeerUploadFacet {
     peer_supports_aich: bool,
     peer_supports_secure_ident: bool,
     peer_supports_file_identifiers: bool,
+    peer_supports_large_files: bool,
     peer_supports_unicode: bool,
     peer_accept_comment_version: u8,
     peer_upload_identity: Ed2kUploadPeerIdentity,
@@ -85,6 +86,7 @@ impl PeerUploadFacet {
             peer_supports_aich: false,
             peer_supports_secure_ident: false,
             peer_supports_file_identifiers: false,
+            peer_supports_large_files: false,
             peer_supports_unicode: false,
             peer_accept_comment_version: 0,
             peer_upload_identity,
@@ -108,6 +110,7 @@ impl PeerUploadFacet {
                 supports_aich: &mut self.peer_supports_aich,
                 supports_secure_ident: &mut self.peer_supports_secure_ident,
                 supports_file_identifiers: &mut self.peer_supports_file_identifiers,
+                supports_large_files: &mut self.peer_supports_large_files,
                 supports_unicode: &mut self.peer_supports_unicode,
                 accept_comment_version: &mut self.peer_accept_comment_version,
                 upload_identity: &mut self.peer_upload_identity,
@@ -210,6 +213,10 @@ impl PeerUploadFacet {
         packet: &EmuleTcpPacket,
     ) -> Result<PeerUploadDispatch> {
         let string_encoding = Ed2kStringEncoding::from_unicode_support(self.peer_supports_unicode);
+        let file_request_capabilities = PeerFileRequestCapabilities {
+            string_encoding,
+            supports_large_files: self.peer_supports_large_files,
+        };
         match (packet.protocol, packet.opcode) {
             (OP_EMULEPROT, OP_MULTIPACKET | OP_MULTIPACKET_EXT) => {
                 self.requested_file_hash = handle_multipacket_request(
@@ -220,7 +227,7 @@ impl PeerUploadFacet {
                     &packet.payload,
                     self.peer_supports_aich,
                     self.peer_supports_file_identifiers,
-                    string_encoding,
+                    file_request_capabilities,
                     &mut self.requester_file_state,
                     &mut self.source_exchange_throttle,
                 )
@@ -232,7 +239,7 @@ impl PeerUploadFacet {
                     transport,
                     peer_addr,
                     &packet.payload,
-                    string_encoding,
+                    file_request_capabilities,
                     &mut self.requester_file_state,
                     &mut self.source_exchange_throttle,
                 )
@@ -245,7 +252,7 @@ impl PeerUploadFacet {
                     peer_addr,
                     &packet.payload,
                     self.peer_accept_comment_version,
-                    string_encoding,
+                    file_request_capabilities,
                     &mut self.requester_file_state,
                 )
                 .await?
@@ -254,9 +261,14 @@ impl PeerUploadFacet {
                 }
             }
             (OP_EDONKEYPROT, OP_SETREQFILEID) => {
-                if let Some(requested) =
-                    handle_set_req_file_id(transfer_runtime, transport, peer_addr, &packet.payload)
-                        .await?
+                if let Some(requested) = handle_set_req_file_id(
+                    transfer_runtime,
+                    transport,
+                    peer_addr,
+                    &packet.payload,
+                    file_request_capabilities,
+                )
+                .await?
                 {
                     self.requested_file_hash = Some(requested);
                 }

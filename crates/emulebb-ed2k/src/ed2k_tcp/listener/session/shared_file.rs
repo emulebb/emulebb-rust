@@ -14,7 +14,9 @@ use crate::{
         OP_MULTIPACKET_EXT, OP_REQUESTFILENAME, OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
         OP_SETREQFILEID,
     },
-    ed2k_transfer::{ED2K_PART_SIZE, Ed2kSharedEntry, Ed2kTransferRuntime},
+    ed2k_transfer::{
+        ED2K_LEGACY_FILE_SIZE_MAX, ED2K_PART_SIZE, Ed2kSharedEntry, Ed2kTransferRuntime,
+    },
 };
 
 use super::super::super::codec::{
@@ -82,12 +84,24 @@ impl RequesterFileState {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::ed2k_tcp) struct PeerFileRequestCapabilities {
+    pub(in crate::ed2k_tcp) string_encoding: Ed2kStringEncoding,
+    pub(in crate::ed2k_tcp) supports_large_files: bool,
+}
+
+impl PeerFileRequestCapabilities {
+    fn permits_size(self, size: u64) -> bool {
+        self.supports_large_files || size <= ED2K_LEGACY_FILE_SIZE_MAX
+    }
+}
+
 pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     transfer_runtime: &Ed2kTransferRuntime,
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
-    string_encoding: Ed2kStringEncoding,
+    peer: PeerFileRequestCapabilities,
     requester_file_state: &mut Option<RequesterFileState>,
     source_exchange_throttle: &mut SourceExchangeResponseThrottle,
 ) -> Result<Option<Ed2kHash>> {
@@ -96,7 +110,11 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     // A partfile is a valid requested file only once it holds at least one
     // complete part (master ListenSocket.cpp file-request fallback:
     // downloadqueue file with GetCompletedSize() >= PARTSIZE).
-    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
+    let Some(shared) = transfer_runtime
+        .local_servable_entry(&requested)
+        .await?
+        .filter(|entry| peer.permits_size(entry.file_size))
+    else {
         send_nofile(transport, peer_addr, &requested, "multipacket_ext2_nofil").await?;
         return Ok(Some(requested));
     };
@@ -185,7 +203,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     let reply = encode_multipacket_ext2_answer(
         &shared_identifier,
         &shared.display_name,
-        string_encoding,
+        peer.string_encoding,
         include_filename,
         status_body.as_deref(),
     )?;
@@ -208,7 +226,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     payload: &[u8],
     peer_supports_aich: bool,
     peer_supports_file_identifiers: bool,
-    string_encoding: Ed2kStringEncoding,
+    peer: PeerFileRequestCapabilities,
     requester_file_state: &mut Option<RequesterFileState>,
     source_exchange_throttle: &mut SourceExchangeResponseThrottle,
 ) -> Result<Option<Ed2kHash>> {
@@ -227,7 +245,11 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     } else {
         None
     };
-    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
+    let Some(shared) = transfer_runtime
+        .local_servable_entry(&requested)
+        .await?
+        .filter(|entry| peer.permits_size(entry.file_size))
+    else {
         send_nofile(transport, peer_addr, &requested, "multipacket_nofil").await?;
         return Ok(Some(requested));
     };
@@ -294,7 +316,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         let reply = encode_multipacket_answer(
             &requested,
             &shared.display_name,
-            string_encoding,
+            peer.string_encoding,
             include_filename,
             status_body.as_deref(),
             include_aich_root,
@@ -326,11 +348,15 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     peer_addr: SocketAddr,
     payload: &[u8],
     peer_accept_comment_version: u8,
-    string_encoding: Ed2kStringEncoding,
+    peer: PeerFileRequestCapabilities,
     requester_file_state: &mut Option<RequesterFileState>,
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
-    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
+    let Some(shared) = transfer_runtime
+        .local_servable_entry(&requested)
+        .await?
+        .filter(|entry| peer.permits_size(entry.file_size))
+    else {
         // WHY: Stock ignores an unknown standalone filename request. The
         // subsequent status request owns the file-not-found response.
         return Ok(None);
@@ -355,7 +381,8 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
             .as_ref()
             .map_or(0, |info| info.complete_source_count),
     });
-    let reply = encode_request_filename_answer(&requested, &shared.display_name, string_encoding)?;
+    let reply =
+        encode_request_filename_answer(&requested, &shared.display_name, peer.string_encoding)?;
     transport
         .write_all_diagnostic("listener", peer_addr, "request_filename", &reply)
         .await
@@ -371,7 +398,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
             &manifest.comment,
         )
     {
-        let desc = encode_file_desc(manifest.rating, &manifest.comment, string_encoding);
+        let desc = encode_file_desc(manifest.rating, &manifest.comment, peer.string_encoding);
         transport
             .write_all_diagnostic("listener", peer_addr, "file_desc", &desc)
             .await
@@ -385,6 +412,7 @@ pub(in crate::ed2k_tcp) async fn handle_set_req_file_id(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    peer: PeerFileRequestCapabilities,
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_exact_file_hash_payload(payload, "OP_SETREQFILEID")?;
     // WHY: Stock answers status for a known multipart download before it has
@@ -393,7 +421,10 @@ pub(in crate::ed2k_tcp) async fn handle_set_req_file_id(
     let shared = transfer_runtime
         .local_entry(&requested)
         .await?
-        .filter(|entry| entry.is_servable() || entry.file_size > ED2K_PART_SIZE);
+        .filter(|entry| {
+            peer.permits_size(entry.file_size)
+                && (entry.is_servable() || entry.file_size > ED2K_PART_SIZE)
+        });
     let reply = if let Some(shared) = &shared {
         encode_file_status(&requested, &shared.encode_part_status_body())
     } else {

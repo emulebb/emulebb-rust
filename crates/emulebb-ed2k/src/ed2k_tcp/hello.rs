@@ -430,6 +430,7 @@ pub(super) struct DecodedHelloProfile {
     pub(super) supports_source_exchange: bool,
     pub(super) supports_source_exchange2: bool,
     pub(super) supports_file_identifiers: bool,
+    pub(super) supports_large_files: bool,
     /// Peer advertises MISCOPTIONS2 bit 12 (eMule `m_fDirectUDPCallback`,
     /// BaseClient.cpp:559): it is firewalled but its UDP is open+verified, so a
     /// downloader/uploader may poke it with `OP_DIRECTCALLBACKREQ` to have it
@@ -540,6 +541,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let mut supports_source_exchange = false;
     let mut supports_source_exchange2 = false;
     let mut supports_file_identifiers = false;
+    let mut supports_large_files = false;
     let mut supports_direct_udp_callback = false;
     let mut connect_options = 0;
     let mut gpl_evildoer = false;
@@ -569,6 +571,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             supports_source_exchange2 = ((misc_options2 >> 10) & 1) != 0;
             connect_options = decode_misc_options2_connect_options(misc_options2);
             supports_ext_multipacket = ((misc_options2 >> 5) & 1) != 0;
+            supports_large_files = ((misc_options2 >> 4) & 1) != 0;
         }
         if tag.tag_name == Some(CT_EMULE_MISCOPTIONS1)
             && let Some(misc_options1_value) = decode_hello_tag_u32(&tag)
@@ -612,6 +615,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         supports_source_exchange,
         supports_source_exchange2,
         supports_file_identifiers,
+        supports_large_files,
         supports_direct_udp_callback,
         connect_options,
         gpl_evildoer,

@@ -73,9 +73,10 @@ pub(in crate::ed2k_tcp) mod upload_payload;
 pub(in crate::ed2k_tcp) mod upload_queue;
 
 use shared_file::{
-    SourceExchangeResponseThrottle, handle_aich_file_hash_request, handle_hashset_request,
-    handle_hashset_request2, handle_multipacket_ext2_request, handle_multipacket_request,
-    handle_request_filename, handle_set_req_file_id, handle_source_request,
+    PeerFileRequestCapabilities, SourceExchangeResponseThrottle, handle_aich_file_hash_request,
+    handle_hashset_request, handle_hashset_request2, handle_multipacket_ext2_request,
+    handle_multipacket_request, handle_request_filename, handle_set_req_file_id,
+    handle_source_request,
 };
 use upload_payload::{UploadPayloadOutcome, UploadPayloadRequest, serve_upload_payload};
 use upload_queue::{ListenerQueuePoll, ListenerUploadQueue};
@@ -307,6 +308,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // IS_NOTAVAILABLE legacy peers are still credited); see credit_accrual_allowed.
     let mut peer_supports_secure_ident = false;
     let mut peer_supports_file_identifiers = false;
+    let mut peer_supports_large_files = false;
     let mut peer_supports_unicode = false;
     // Peer's advertised comment-acceptance version (oracle m_byAcceptCommentVer);
     // gates whether we propagate our user-set comment/rating via OP_FILEDESC.
@@ -510,6 +512,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             break Ok(());
         }
 
+        let file_request_capabilities = PeerFileRequestCapabilities {
+            string_encoding: Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+            supports_large_files: peer_supports_large_files,
+        };
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
                 let hello_profile = decode_hello_profile(&packet.payload)?;
@@ -527,6 +533,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         supports_aich: &mut peer_supports_aich,
                         supports_secure_ident: &mut peer_supports_secure_ident,
                         supports_file_identifiers: &mut peer_supports_file_identifiers,
+                        supports_large_files: &mut peer_supports_large_files,
                         supports_unicode: &mut peer_supports_unicode,
                         accept_comment_version: &mut peer_accept_comment_version,
                         upload_identity: &mut peer_upload_identity,
@@ -817,6 +824,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         supports_aich: &mut peer_supports_aich,
                         supports_secure_ident: &mut peer_supports_secure_ident,
                         supports_file_identifiers: &mut peer_supports_file_identifiers,
+                        supports_large_files: &mut peer_supports_large_files,
                         supports_unicode: &mut peer_supports_unicode,
                         accept_comment_version: &mut peer_accept_comment_version,
                         upload_identity: &mut peer_upload_identity,
@@ -873,7 +881,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &packet.payload,
                     peer_supports_aich,
                     peer_supports_file_identifiers,
-                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+                    file_request_capabilities,
                     &mut requester_file_state,
                     &mut source_exchange_throttle,
                 )
@@ -885,7 +893,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &mut transport,
                     peer_addr,
                     &packet.payload,
-                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+                    file_request_capabilities,
                     &mut requester_file_state,
                     &mut source_exchange_throttle,
                 )
@@ -898,7 +906,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     &packet.payload,
                     peer_accept_comment_version,
-                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
+                    file_request_capabilities,
                     &mut requester_file_state,
                 )
                 .await?
@@ -912,6 +920,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &mut transport,
                     peer_addr,
                     &packet.payload,
+                    file_request_capabilities,
                 )
                 .await?
                 {
@@ -1728,6 +1737,7 @@ pub(in crate::ed2k_tcp) struct PeerHelloStateRefs<'a> {
     pub(in crate::ed2k_tcp) supports_aich: &'a mut bool,
     pub(in crate::ed2k_tcp) supports_secure_ident: &'a mut bool,
     pub(in crate::ed2k_tcp) supports_file_identifiers: &'a mut bool,
+    pub(in crate::ed2k_tcp) supports_large_files: &'a mut bool,
     pub(in crate::ed2k_tcp) supports_unicode: &'a mut bool,
     pub(in crate::ed2k_tcp) accept_comment_version: &'a mut u8,
     pub(in crate::ed2k_tcp) upload_identity: &'a mut Ed2kUploadPeerIdentity,
@@ -1794,6 +1804,7 @@ pub(in crate::ed2k_tcp) fn apply_peer_hello_profile(
     *state.supports_aich = profile.supports_aich;
     *state.supports_secure_ident = profile.supports_secure_ident;
     *state.supports_file_identifiers = profile.supports_file_identifiers;
+    *state.supports_large_files = profile.supports_large_files;
     *state.supports_unicode = profile.misc_options1.unicode_support;
     // The modern hello MISCOPTIONS1 carries m_byAcceptCommentVer (bits 4-7).
     *state.accept_comment_version = profile.misc_options1.accept_comment_version;
