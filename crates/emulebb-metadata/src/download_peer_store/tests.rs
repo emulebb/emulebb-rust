@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn server_low_id_rows_are_scoped_by_server_and_keep_the_latest_port() {
+    let store = MetadataStore::in_memory().unwrap();
+    let current = job(&store);
+    let server_a = "203.0.113.8:4242".parse().unwrap();
+    let server_b = "203.0.113.9:4242".parse().unwrap();
+    let mut candidate = source(0, String::new());
+    let direct = MetadataDownloadSourceRoute::DirectWithServer(server_a);
+    let callback = |server| MetadataDownloadSourceRoute::ServerLowId {
+        client_id: 0x0002_00C0,
+        server,
+    };
+    for route in [direct, callback(server_a), callback(server_b)] {
+        store
+            .apply_download_peer_delta(
+                current.token,
+                &MetadataDownloadPeerDelta::RoutedSource {
+                    source: candidate.clone(),
+                    route,
+                },
+            )
+            .unwrap();
+    }
+    store
+        .apply_download_peer_delta(
+            current.token,
+            &MetadataDownloadPeerDelta::Source {
+                source: candidate.clone(),
+                description_only: false,
+            },
+        )
+        .unwrap();
+    candidate.tcp_port = 4663;
+    store
+        .apply_download_peer_delta(
+            current.token,
+            &MetadataDownloadPeerDelta::RoutedSource {
+                source: candidate,
+                route: callback(server_a),
+            },
+        )
+        .unwrap();
+    let endpoints = store
+        .download_job_source_endpoints_after(current.token, 0, 10)
+        .unwrap();
+    assert_eq!(endpoints.len(), 3);
+    assert_eq!(endpoints[0].route, Some(direct));
+    assert_eq!(endpoints[0].tcp_port, 4662);
+    let callbacks = store
+        .download_job_server_callback_endpoints_after(current.token, 0, 10)
+        .unwrap();
+    assert_eq!(callbacks.len(), 2);
+    assert_eq!(callbacks[0].route, Some(callback(server_a)));
+    assert_eq!(callbacks[0].tcp_port, 4663);
+    assert_eq!(callbacks[1].route, Some(callback(server_b)));
+    assert_eq!(callbacks[1].tcp_port, 4662);
+}
+
+#[test]
 fn sparse_comment_pages_seek_the_comment_index_and_fence_old_generations() {
     let store = MetadataStore::in_memory().unwrap();
     let current = job(&store);

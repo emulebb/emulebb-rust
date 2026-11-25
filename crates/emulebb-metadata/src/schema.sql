@@ -810,17 +810,29 @@ CREATE TABLE download_job_sources (
     job_id INTEGER NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
     ip TEXT NOT NULL,
     tcp_port INTEGER NOT NULL CHECK(tcp_port BETWEEN 1 AND 65535),
+    low_client_id INTEGER CHECK(low_client_id BETWEEN 1 AND 16777215),
+    server_ip INTEGER CHECK(server_ip BETWEEN 1 AND 4294967295),
+    server_port INTEGER CHECK(server_port BETWEEN 1 AND 65535),
     user_hash BLOB CHECK(user_hash IS NULL OR length(user_hash) = 16),
     connect_options INTEGER CHECK(connect_options IS NULL OR connect_options BETWEEN 0 AND 255),
     file_comment TEXT NOT NULL DEFAULT '',
     file_rating INTEGER NOT NULL DEFAULT 0 CHECK(file_rating BETWEEN 0 AND 255),
     first_seen_at_s INTEGER NOT NULL CHECK(first_seen_at_s >= 0),
     last_seen_at_s INTEGER NOT NULL CHECK(last_seen_at_s >= 0),
-    last_outcome TEXT NOT NULL DEFAULT ''
+    last_outcome TEXT NOT NULL DEFAULT '',
+    CHECK((server_ip IS NULL) = (server_port IS NULL)),
+    CHECK(low_client_id IS NULL OR server_ip IS NOT NULL)
 ) STRICT;
 
 CREATE UNIQUE INDEX download_job_sources_identity_idx
-ON download_job_sources(job_id, ip, tcp_port);
+ON download_job_sources(job_id, ip, tcp_port) WHERE low_client_id IS NULL;
+
+CREATE UNIQUE INDEX download_job_sources_callback_idx
+ON download_job_sources(job_id, server_ip, server_port, low_client_id)
+WHERE low_client_id IS NOT NULL;
+
+CREATE INDEX download_job_sources_callback_page_idx ON download_job_sources(job_id, id)
+WHERE low_client_id IS NOT NULL;
 
 CREATE UNIQUE INDEX download_job_sources_page_idx ON download_job_sources(job_id, id);
 CREATE INDEX download_job_sources_comments_idx ON download_job_sources(job_id, id)

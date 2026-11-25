@@ -78,19 +78,28 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
             false,
         )
         .await;
-        let source_exchange_answer = encode_answer_sources2(
-            &file_hash,
-            ED2K_SOURCE_EXCHANGE2_VERSION,
-            &[SourceExchangePeer {
-                ip: [127, 0, 0, 2],
-                tcp_port: 4662,
-                server_ip: 0,
-                server_port: 0,
-                user_hash: Some([0x77; 16]),
-                connect_options: 0,
-            }],
-        )
-        .unwrap();
+        let mut source_exchange_payload = vec![4];
+        source_exchange_payload.extend_from_slice(&file_hash.0);
+        source_exchange_payload.extend_from_slice(&4u16.to_le_bytes());
+        for (id, server, user_hash) in [
+            (
+                u32::from_be_bytes([198, 51, 100, 0]),
+                [203, 0, 113, 8],
+                0x77,
+            ),
+            (0x1234, [203, 0, 113, 8], 0x78),
+            (0x1234, [203, 0, 113, 9], 0x79),
+            (0x1234, [0, 0, 0, 0], 0x7A),
+        ] {
+            source_exchange_payload.extend_from_slice(&id.to_le_bytes());
+            source_exchange_payload.extend_from_slice(&4662u16.to_le_bytes());
+            source_exchange_payload.extend_from_slice(&server);
+            source_exchange_payload.extend_from_slice(&4242u16.to_le_bytes());
+            source_exchange_payload.extend_from_slice(&[user_hash; 16]);
+            source_exchange_payload.push(0);
+        }
+        let source_exchange_answer =
+            encode_packet(OP_EMULEPROT, OP_ANSWERSOURCES2, &source_exchange_payload);
         stream.write_all(&source_exchange_answer).await.unwrap();
         let (requested_hash, ranges) =
             accept_upload_and_read_parts_request(&mut stream, false).await;
@@ -188,13 +197,46 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
         }));
     assert!(sources.iter().any(|entry| entry.source
         == emulebb_metadata::MetadataTransferSource {
-            ip: "127.0.0.2".to_string(),
+            ip: "198.51.100.0".to_string(),
             tcp_port: 4662,
             user_hash: Some(hex::encode([0x77; 16])),
             connect_options: Some(0),
             file_comment: String::new(),
             file_rating: 0,
         }));
+    let endpoints = transfer_runtime
+        .download_source_endpoints_after(job.token, 0, 10)
+        .await
+        .unwrap();
+    let hybrid = endpoints
+        .iter()
+        .find(|row| row.user_hash == Some([0x77; 16]))
+        .unwrap();
+    assert_eq!(
+        hybrid.route,
+        Some(
+            emulebb_metadata::MetadataDownloadSourceRoute::DirectWithServer(
+                "203.0.113.8:4242".parse().unwrap(),
+            )
+        )
+    );
+    let callbacks = transfer_runtime
+        .download_server_callback_endpoints_after(job.token, 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(callbacks.len(), 2);
+    for (entry, server) in callbacks
+        .iter()
+        .zip(["203.0.113.8:4242", "203.0.113.9:4242"])
+    {
+        assert_eq!(
+            entry.route,
+            Some(emulebb_metadata::MetadataDownloadSourceRoute::ServerLowId {
+                client_id: 0x1234,
+                server: server.parse().unwrap(),
+            })
+        );
+    }
     // FIX 3: the download path attributes credit only to a cryptographically
     // verified peer (eMule CClientCredits::AddDownloaded gates IS_IDFAILED/
     // IDNEEDED when crypto is available). This test peer never completes a secure

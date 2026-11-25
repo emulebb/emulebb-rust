@@ -61,7 +61,8 @@ pub use download_peer_store::{
     MetadataDownloadAvailabilityQuery, MetadataDownloadCommentEntry, MetadataDownloadCommentPage,
     MetadataDownloadInitialPeers, MetadataDownloadNameEntry, MetadataDownloadPeerChange,
     MetadataDownloadPeerDelta, MetadataDownloadScarcityQuery, MetadataDownloadSourceAvailability,
-    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry, MetadataDownloadSourceSelector,
+    MetadataDownloadSourceEndpoint, MetadataDownloadSourceEntry, MetadataDownloadSourceRoute,
+    MetadataDownloadSourceSelector,
 };
 mod identity_model;
 mod identity_store;

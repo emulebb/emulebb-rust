@@ -32,11 +32,30 @@ pub(in crate::ed2k_tcp) fn encode_request_sources(file_hash: &Ed2kHash) -> Vec<u
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ed2k_tcp) struct SourceExchangePeer {
     pub(in crate::ed2k_tcp) ip: [u8; 4],
+    pub(in crate::ed2k_tcp) low_client_id: Option<u32>,
     pub(in crate::ed2k_tcp) tcp_port: u16,
     pub(in crate::ed2k_tcp) server_ip: u32,
     pub(in crate::ed2k_tcp) server_port: u16,
     pub(in crate::ed2k_tcp) user_hash: Option<[u8; 16]>,
-    pub(in crate::ed2k_tcp) connect_options: u8,
+    pub(in crate::ed2k_tcp) connect_options: Option<u8>,
+}
+
+impl SourceExchangePeer {
+    fn wire_client_id(&self, version: u8) -> u32 {
+        self.low_client_id.unwrap_or_else(|| {
+            if version < 3 {
+                u32::from_le_bytes(self.ip)
+            } else {
+                u32::from_be_bytes(self.ip)
+            }
+        })
+    }
+
+    fn can_advertise(&self, version: u8) -> bool {
+        self.low_client_id.is_none()
+            && self.wire_client_id(version) >= 0x0100_0000
+            && (version < 2 || self.user_hash.is_some())
+    }
 }
 
 pub(in crate::ed2k_tcp) fn encode_answer_sources(
@@ -76,10 +95,9 @@ pub(in crate::ed2k_tcp) fn source_exchange_entry_count(
     version: u8,
     sources: &[SourceExchangePeer],
 ) -> usize {
-    let include_user_hash = version >= 2;
     sources
         .iter()
-        .filter(|source| !include_user_hash || source.user_hash.is_some())
+        .filter(|source| source.can_advertise(version))
         .take(501)
         .count()
 }
@@ -99,14 +117,10 @@ fn encode_source_exchange_entries(
     );
     for source in sources
         .iter()
-        .filter(|source| !include_user_hash || source.user_hash.is_some())
+        .filter(|source| source.can_advertise(version))
         .take(501)
     {
-        let client_id = if version < 3 {
-            u32::from_le_bytes(source.ip)
-        } else {
-            u32::from_be_bytes(source.ip)
-        };
+        let client_id = source.wire_client_id(version);
         payload.extend_from_slice(&client_id.to_le_bytes());
         payload.extend_from_slice(&source.tcp_port.to_le_bytes());
         payload.extend_from_slice(&source.server_ip.to_le_bytes());
@@ -115,7 +129,7 @@ fn encode_source_exchange_entries(
             payload.extend_from_slice(&source.user_hash.expect("filtered sources have user hash"));
         }
         if include_connect_options {
-            payload.push(source.connect_options);
+            payload.push(source.connect_options.unwrap_or_default() & 0x07);
         }
     }
 }
@@ -250,10 +264,12 @@ fn decode_source_exchange_entries(
 
     let mut sources = Vec::with_capacity(count);
     for entry in sources_payload.chunks_exact(entry_size) {
-        let ip = if version < 3 {
-            entry[..4].try_into().unwrap()
+        let client_id = u32::from_le_bytes(entry[..4].try_into().unwrap());
+        let low_client_id = (client_id < 0x0100_0000).then_some(client_id);
+        let ip = if version < 3 || low_client_id.is_some() {
+            client_id.to_le_bytes()
         } else {
-            u32::from_le_bytes(entry[..4].try_into().unwrap()).to_be_bytes()
+            client_id.to_be_bytes()
         };
         let tcp_port = u16::from_le_bytes(entry[4..6].try_into().unwrap());
         let server_ip = u32::from_le_bytes(entry[6..10].try_into().unwrap());
@@ -263,9 +279,10 @@ fn decode_source_exchange_entries(
         } else {
             None
         };
-        let connect_options = if version >= 4 { entry[28] } else { 0 };
+        let connect_options = (version >= 4).then(|| entry[28] & 0x07);
         sources.push(SourceExchangePeer {
             ip,
+            low_client_id,
             tcp_port,
             server_ip,
             server_port,

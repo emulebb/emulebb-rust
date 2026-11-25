@@ -1,13 +1,15 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::MetadataDownloadSourceRoute;
 
 use crate::{
+    ed2k_server::Ed2kFoundSourceKey,
     ed2k_string::Ed2kStringEncoding,
     ed2k_tcp::{
         ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kFileIdentifier, Ed2kTransport, OP_AICHFILEHASHREQ,
@@ -642,14 +644,28 @@ async fn source_exchange_source_count(
         .await?;
     let mut endpoints = page
         .iter()
-        .map(|entry| (entry.ip, entry.tcp_port))
+        .map(|entry| match entry.route {
+            Some(MetadataDownloadSourceRoute::ServerLowId { client_id, server }) => {
+                Ed2kFoundSourceKey::ServerLowId {
+                    server_endpoint: server.into(),
+                    client_id,
+                }
+            }
+            _ => Ed2kFoundSourceKey::HighIdEndpoint {
+                ip: entry.ip,
+                tcp_port: entry.tcp_port,
+            },
+        })
         .collect::<HashSet<_>>();
     if endpoints.len() > 50 {
         return Ok(51);
     }
     transfer_runtime.visit_live_source_protocol(token, |endpoint, _, _, _| {
         if let IpAddr::V4(ip) = endpoint.ip() {
-            endpoints.insert((ip, endpoint.port()));
+            endpoints.insert(Ed2kFoundSourceKey::HighIdEndpoint {
+                ip,
+                tcp_port: endpoint.port(),
+            });
         }
         endpoints.len() <= 50
     });
@@ -691,23 +707,9 @@ async fn source_exchange_peers(
 /// `CreateSrcInfoPacket` caps at `nCount > 500`, i.e. it emits up to 501).
 const MAX_SOURCE_EXCHANGE_ENTRIES: usize = 501;
 
-/// eMule LowID test for a source whose advertised IPv4 we treat as its client-id
-/// (`CUpDownClient::HasLowID`: `GetUserIDHybrid() < 16777216`). A LowID source is
-/// firewalled and not directly dialable, so it must never be offered as a source
-/// in a source-exchange reply (oracle `CreateSrcInfoPacket` skips `HasLowID()`).
-fn source_ip_is_low_id(ip: Ipv4Addr) -> bool {
-    // eMule encodes the client-id from the IP as little-endian octets, so a LowID
-    // (`GetUserIDHybrid() < 16777216`) is equivalently an IP whose final octet is
-    // zero. The unspecified address is never a valid direct-dial source.
-    let client_id = u32::from_le_bytes(ip.octets());
-    client_id < 0x0100_0000 || ip.is_unspecified()
-}
-
-/// `true` when a source is eligible to be offered in a source-exchange reply:
-/// direct-dialable (non-LowID, non-zero TCP port) and not the requester itself.
+/// Check the endpoint of a source already classified as directly reachable.
 fn source_exchange_eligible(ip: Ipv4Addr, tcp_port: u16, exclude_ipv4: Option<Ipv4Addr>) -> bool {
-    // Never echo the requester back to itself as a source.
-    tcp_port != 0 && exclude_ipv4 != Some(ip) && !source_ip_is_low_id(ip)
+    tcp_port != 0 && exclude_ipv4 != Some(ip) && !ip.is_unspecified()
 }
 
 /// Stock SX usefulness filter (`CKnownFile::CreateSrcInfoPacket`). A source with
@@ -745,28 +747,20 @@ async fn source_exchange_peers_excluding(
         return Ok(Vec::new());
     };
     let mut peers = Vec::with_capacity(MAX_SOURCE_EXCHANGE_ENTRIES);
-    let mut seen = std::collections::HashSet::<(Ipv4Addr, u16)>::new();
+    let mut live = HashMap::new();
     transfer_runtime.visit_live_source_protocol(token, |endpoint, user_hash, options, bitmap| {
         let IpAddr::V4(ip) = endpoint.ip() else {
             return true;
         };
-        if !source_exchange_eligible(ip, endpoint.port(), exclude_ipv4)
-            || !seen.insert((ip, endpoint.port()))
-        {
+        if !source_exchange_eligible(ip, endpoint.port(), exclude_ipv4) {
             return true;
         }
-        if !source_is_useful_to_requester(requester_part_status, bitmap) {
-            return true;
-        }
-        peers.push(SourceExchangePeer {
-            ip: ip.octets(),
-            tcp_port: endpoint.port(),
-            server_ip: 0,
-            server_port: 0,
-            user_hash,
-            connect_options: options.unwrap_or(0),
-        });
-        peers.len() < MAX_SOURCE_EXCHANGE_ENTRIES
+        live.insert(
+            (ip, endpoint.port()),
+            source_is_useful_to_requester(requester_part_status, bitmap)
+                .then_some((user_hash, options)),
+        );
+        true
     });
     let mut after = 0;
     while peers.len() < MAX_SOURCE_EXCHANGE_ENTRIES {
@@ -778,24 +772,51 @@ async fn source_exchange_peers_excluding(
         }
         for entry in &page {
             after = entry.id;
-            if !source_exchange_eligible(entry.ip, entry.tcp_port, exclude_ipv4)
-                || !seen.insert((entry.ip, entry.tcp_port))
-            {
+            let server = match entry.route {
+                Some(MetadataDownloadSourceRoute::DirectWithServer(server)) => Some(server),
+                Some(MetadataDownloadSourceRoute::ServerLowId { .. }) => continue,
+                None => None,
+            };
+            if !source_exchange_eligible(entry.ip, entry.tcp_port, exclude_ipv4) {
                 continue;
             }
+            let (user_hash, connect_options) = match live.remove(&(entry.ip, entry.tcp_port)) {
+                Some(Some((hash, options))) => {
+                    (hash.or(entry.user_hash), options.or(entry.connect_options))
+                }
+                Some(None) => continue,
+                None => (entry.user_hash, entry.connect_options),
+            };
             peers.push(SourceExchangePeer {
                 ip: entry.ip.octets(),
+                low_client_id: None,
                 tcp_port: entry.tcp_port,
-                server_ip: 0,
-                server_port: 0,
-                user_hash: entry.user_hash,
-                connect_options: entry.connect_options.unwrap_or(0),
+                server_ip: server.map_or(0, |addr| u32::from_le_bytes(addr.ip().octets())),
+                server_port: server.map_or(0, |addr| addr.port()),
+                user_hash,
+                connect_options,
             });
             if peers.len() == MAX_SOURCE_EXCHANGE_ENTRIES {
                 break;
             }
         }
     }
+    peers.extend(
+        live.into_iter()
+            .filter_map(|((ip, tcp_port), status)| {
+                let (user_hash, connect_options) = status?;
+                Some(SourceExchangePeer {
+                    ip: ip.octets(),
+                    low_client_id: None,
+                    tcp_port,
+                    server_ip: 0,
+                    server_port: 0,
+                    user_hash,
+                    connect_options,
+                })
+            })
+            .take(MAX_SOURCE_EXCHANGE_ENTRIES.saturating_sub(peers.len())),
+    );
     Ok(peers)
 }
 
@@ -891,18 +912,6 @@ mod tests {
     }
 
     #[test]
-    fn low_id_sources_are_filtered() {
-        // LowID: eMule GetUserIDHybrid() < 0x01000000, i.e. final octet zero.
-        assert!(source_ip_is_low_id(Ipv4Addr::new(5, 0, 0, 0)));
-        assert!(source_ip_is_low_id(Ipv4Addr::new(200, 1, 2, 0)));
-        assert!(source_ip_is_low_id(Ipv4Addr::UNSPECIFIED));
-        // A normal HighID source (non-zero final octet) is eligible — including
-        // LAN sources used by the test harness as stand-ins for real peers.
-        assert!(!source_ip_is_low_id(Ipv4Addr::new(45, 82, 80, 155)));
-        assert!(!source_ip_is_low_id(Ipv4Addr::new(10, 20, 30, 41)));
-    }
-
-    #[test]
     fn eligibility_requires_port_non_self_and_highid() {
         let public = Ipv4Addr::new(45, 82, 80, 155);
         // Eligible: public IP, real port, not the requester.
@@ -916,12 +925,13 @@ mod tests {
         assert!(!source_exchange_eligible(public, 0, None));
         // Never echo the requester back to itself.
         assert!(!source_exchange_eligible(public, 4662, Some(public)));
-        // LowID source is excluded even with a non-zero port.
-        assert!(!source_exchange_eligible(
+        // A direct IPv4 endpoint can have a zero final octet.
+        assert!(source_exchange_eligible(
             Ipv4Addr::new(7, 0, 0, 0),
             4662,
             None
         ));
+        assert!(!source_exchange_eligible(Ipv4Addr::UNSPECIFIED, 4662, None));
     }
 
     #[test]
