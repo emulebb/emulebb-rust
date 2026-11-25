@@ -26,8 +26,8 @@ pub(in crate::ed2k_tcp) enum Ed2kPeerConnectionOrigin {
 /// sessions the same ownership boundary. Protocol-specific state machines may
 /// temporarily borrow the transport through `DerefMut`, but cannot duplicate
 /// the socket owner.
-#[derive(Debug)]
 pub(in crate::ed2k_tcp) struct Ed2kPeerDispatcher {
+    pub(super) browse: super::browse::BrowseConnection,
     transport: Ed2kTransport,
     peer_addr: SocketAddr,
     origin: Ed2kPeerConnectionOrigin,
@@ -40,10 +40,25 @@ impl Ed2kPeerDispatcher {
         origin: Ed2kPeerConnectionOrigin,
     ) -> Self {
         Self {
+            browse: Default::default(),
             transport,
             peer_addr,
             origin,
         }
+    }
+
+    /// A command can interrupt only the cancellation-safe initial buffer fill.
+    /// None means the socket has bytes or EOF ready for the packet reader.
+    pub(super) async fn wait_for_input(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        if let Some(session) = &mut self.browse.session {
+            tokio::select! {
+                Some(frame) = session.recv() => return Ok(Some(frame)),
+                ready = self.transport.prefetch_frame() => ready?,
+            }
+        } else {
+            self.transport.prefetch_frame().await?;
+        }
+        Ok(None)
     }
 
     pub(in crate::ed2k_tcp) const fn peer_addr(&self) -> SocketAddr {
@@ -174,6 +189,43 @@ mod tests {
         assert_eq!(outbound.peer_addr(), outbound_peer);
         assert_eq!(inbound.mode(), Ed2kTransportMode::Plaintext);
         assert_eq!(outbound.mode(), Ed2kTransportMode::Plaintext);
+    }
+
+    #[tokio::test]
+    async fn readiness_preserves_a_fragmented_header_across_listener_events() {
+        use tokio::io::AsyncWriteExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (inbound, addr) = listener.accept().await.unwrap();
+        let mut dispatcher = Ed2kPeerDispatcher::new(
+            plaintext_transport(inbound),
+            addr,
+            Ed2kPeerConnectionOrigin::InboundAccepted,
+        );
+        let frame = encode_packet(OP_EDONKEYPROT, 0x58, b"payload");
+        sender.write_all(&frame[..2]).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                dispatcher.wait_for_input()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+        );
+        // A relay or port-test event can win before the listener accepts readiness.
+        assert!(dispatcher.wait_for_input().await.unwrap().is_none());
+        sender.write_all(&frame[2..]).await.unwrap();
+        let received = dispatcher
+            .read_packet_diagnostic("dispatcher_test", addr, "fragmented")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.opcode, 0x58);
+        assert_eq!(received.payload, b"payload");
     }
 
     #[tokio::test]

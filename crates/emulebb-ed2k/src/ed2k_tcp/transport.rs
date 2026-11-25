@@ -318,6 +318,14 @@ impl Ed2kTransportMode {
 }
 
 impl Ed2kTransport {
+    /// Wait for actual frame bytes without consuming them from the receive buffer.
+    pub(super) async fn prefetch_frame(&mut self) -> std::io::Result<()> {
+        if !self.prefetched.is_empty() || self.read_pos < self.read_buf.len() {
+            return Ok(());
+        }
+        self.fill_read_buf().await.map(|_| ())
+    }
+
     pub(super) fn from_parts(
         stream: TcpStream,
         prefetched: VecDeque<u8>,

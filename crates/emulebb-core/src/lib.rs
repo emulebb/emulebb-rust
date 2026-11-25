@@ -21,6 +21,7 @@ pub use discovery_fetch::{
 use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
+pub use emulebb_ed2k::ed2k_tcp::PeerBrowseStatus;
 pub use emulebb_ed2k::ed2k_transfer::LocalMutationError;
 pub use emulebb_ed2k::ed2k_transfer::RetainedRead;
 pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
@@ -701,6 +702,14 @@ impl EmulebbCore {
                 .transfers
                 .upload
                 .credit_system_enabled,
+        );
+        ed2k_transfers.set_shared_files_visibility(
+            core_state
+                .settings
+                .values()
+                .transfers
+                .upload
+                .shared_files_visibility,
         );
         let kad_local_store = ed2k_network.as_ref().map(|network| {
             let mut store = KadLocalStore::new(network.kad_local_store);

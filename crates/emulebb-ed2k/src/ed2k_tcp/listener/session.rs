@@ -27,6 +27,7 @@ use crate::{
     port_test::{PortTestRegistration, PortTestRegistry},
 };
 
+use super::super::browse::{BrowseIdentity, BrowsePeer, read_ready_packet};
 use super::super::codec::{
     decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
     decode_exact_file_hash_payload, decode_optional_file_hash_payload, encode_aich_recovery_answer,
@@ -42,10 +43,12 @@ use super::super::established_peer::{
     Ed2kEstablishedPeerContext, EstablishedPeerIdentity, handle_established_kad_callback,
     record_established_kad_firewall_ack, tolerates_unknown_established_opcode,
 };
+#[cfg(test)]
+use super::super::hello::encode_hello_request;
 use super::super::hello::{
-    DecodedHelloProfile, ExtendedRequestNegotiation, build_hello_responses,
+    DecodedHelloProfile, ExtendedRequestNegotiation, build_hello_responses_with_share_policy,
     decode_emule_info_profile, decode_hello_answer_profile, decode_hello_profile,
-    encode_emule_info_answer, encode_hello_request,
+    encode_emule_info_answer, encode_hello_request_with_share_policy,
 };
 use super::super::identity::{Ed2kPeerSecureIdentState, begin_secure_ident_probe};
 use super::super::{
@@ -65,7 +68,6 @@ use super::super::{
     OP_SIGNATURE, OP_STARTUPLOADREQ, enrich_hello_identity,
 };
 
-mod browse;
 mod notify;
 mod secure_ident;
 pub(in crate::ed2k_tcp) mod shared_file;
@@ -299,6 +301,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         });
     }
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
+    let mut browse_peer = None;
     let mut requested_file_hash: Option<Ed2kHash> = None;
     let mut requester_file_state: Option<shared_file::RequesterFileState> = None;
     let mut source_exchange_throttle = SourceExchangeResponseThrottle::default();
@@ -347,7 +350,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // dispatcher. Promoted uploads keep their grant pending until a valid live
     // HELLO identity is bound; only then may OP_ACCEPTUPLOADREQ be sent.
     if session_phase.sends_outbound_hello() {
-        let hello_packet = encode_hello_request(response_identity);
+        let hello_packet = encode_hello_request_with_share_policy(
+            response_identity,
+            !transfer_runtime.advertises_shared_files(),
+        );
         if let Err(error) = transport
             .write_all_diagnostic("listener", peer_addr, "hello_request", &hello_packet)
             .await
@@ -391,7 +397,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         }
         // While serving as an inbound buddy, also drain relay frames (OP_CALLBACK)
         // that handle_kad_callback_req pushes down this held socket.
-        let packet = if let Some(hold) = buddy_hold.as_mut() {
+        let deadline = now + read_timeout;
+        let input = if let Some(hold) = buddy_hold.as_mut() {
             tokio::select! {
                 biased;
                 event = port_test_events.recv() => {
@@ -427,19 +434,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         }
                     }
                 }
-                read = tokio::time::timeout(
-                    read_timeout,
-                    transport.read_packet_diagnostic("listener", peer_addr, "session"),
-                ) => {
-                    match read {
-                        Ok(packet) => packet
-                            .with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?,
-                        // A held buddy has its own ~25 minute receive lease. Do
-                        // not let the generic upload-queue poll close this
-                        // control-plane socket after its ordinary short timeout.
-                        Err(_) => break Ok(()),
-                    }
-                }
+                event = tokio::time::timeout_at(deadline, transport.wait_for_input()) => event,
             }
         } else {
             tokio::select! {
@@ -454,32 +449,25 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     .await?;
                     continue;
                 }
-                read = tokio::time::timeout(
-                    read_timeout,
-                    transport.read_packet_diagnostic("listener", peer_addr, "session"),
-                ) => {
-                    match read {
-                        Ok(packet) => packet.with_context(|| {
-                            format!("failed to read eD2k packet from {peer_addr}")
-                        })?,
-                        Err(_) => match upload_queue
-                            .poll_on_timeout(
-                                transfer_runtime,
-                                &mut transport,
-                                peer_addr,
-                                last_packet_at.elapsed(),
-                            )
-                            .await?
-                        {
-                            ListenerQueuePoll::Continue => continue,
-                            ListenerQueuePoll::Close => {
-                                debug!(%peer_addr, "closing eD2k peer after upload queue timeout poll");
-                                break Ok(());
-                            },
-                        },
-                    }
-                }
+                event = tokio::time::timeout_at(deadline, transport.wait_for_input()) => event,
             }
+        };
+        let packet = match input {
+            Ok(Ok(Some(frame))) => {
+                transport.write_all_diagnostic("listener", peer_addr, "peer_browse_request", &frame).await?;
+                continue;
+            }
+            Ok(Ok(None)) => read_ready_packet(&mut transport, deadline, "listener", peer_addr)
+                .await.with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?,
+            Ok(Err(error)) => return Err(error).with_context(|| format!("failed to read eD2k packet from {peer_addr}")),
+            Err(_) if buddy_hold.is_some() => break Ok(()),
+            Err(_) => match upload_queue.poll_on_timeout(transfer_runtime, &mut transport, peer_addr, last_packet_at.elapsed()).await? {
+                ListenerQueuePoll::Continue => continue,
+                ListenerQueuePoll::Close => {
+                    debug!(%peer_addr, "closing eD2k peer after upload queue timeout poll");
+                    break Ok(());
+                }
+            },
         };
         let Some(packet) = packet else {
             debug!(%peer_addr, "eD2k listener peer reached EOF");
@@ -549,6 +537,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     break Ok(());
                 }
                 peer_identity = EstablishedPeerIdentity::from_hello(&hello_profile);
+                let peer = BrowsePeer::from_hello(&hello_profile);
+                peer.bind(transfer_runtime, hello_profile.identity.user_hash, peer_addr, &mut transport.browse.session);
+                browse_peer = Some(peer);
                 session_phase = PeerSessionPhase::Established;
                 debug!(
                     "received eD2k OP_HELLO from {peer_addr} transport={} mule_hello={}",
@@ -590,7 +581,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         });
                     }
                 }
-                for reply in build_hello_responses(&packet.payload, response_identity)? {
+                for reply in build_hello_responses_with_share_policy(
+                    &packet.payload, response_identity, !transfer_runtime.advertises_shared_files(),
+                )? {
                     transport
                         .write_all_diagnostic("listener", peer_addr, "hello_reply", &reply)
                         .await
@@ -841,6 +834,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     break Ok(());
                 }
                 peer_identity = EstablishedPeerIdentity::from_hello(&hello_profile);
+                let peer = BrowsePeer::from_hello(&hello_profile);
+                peer.bind(transfer_runtime, hello_profile.identity.user_hash, peer_addr, &mut transport.browse.session);
+                browse_peer = Some(peer);
                 session_phase = PeerSessionPhase::Established;
                 debug!(
                     "received eD2k OP_HELLOANSWER from {peer_addr} transport={}",
@@ -1064,44 +1060,22 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             (OP_EDONKEYPROT, OP_MESSAGE) => {
                 notify::handle_client_message(&transport, peer_addr, &packet.payload)?;
             }
-            (OP_EDONKEYPROT, OP_ASKSHAREDFILES) => {
-                browse::handle_ask_shared_files(&mut transport, peer_addr, packet.payload.len())
-                    .await?;
+            (OP_EDONKEYPROT, OP_ASKSHAREDFILES | OP_ASKSHAREDDIRS | OP_ASKSHAREDFILESDIR) => {
+                if let Some(peer) = browse_peer {
+                    let frame = transport.browse.serving.reply(
+                        transfer_runtime, packet.opcode, &packet.payload, peer, response_identity,
+                        BrowseIdentity { user_hash: bound_user_hash, secure_ident: &peer_secure_ident },
+                    ).await?;
+                    transport.write_all_diagnostic("listener", peer_addr, "peer_browse_reply", &frame).await?;
+                }
             }
-            (OP_EDONKEYPROT, OP_ASKSHAREDDIRS) => {
-                browse::handle_ask_shared_dirs(&mut transport, peer_addr, packet.payload.len())
-                    .await?;
-            }
-            (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR) => {
-                browse::handle_ask_shared_files_dir(
-                    &mut transport,
-                    peer_addr,
-                    &packet.payload,
-                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
-                )
-                .await?;
-            }
-            (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER) => {
-                browse::handle_ask_shared_files_answer(&transport, peer_addr, &packet.payload)?;
-            }
-            (OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS) => {
-                browse::handle_ask_shared_dirs_answer(
-                    &transport,
-                    peer_addr,
-                    &packet.payload,
-                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
-                )?;
-            }
-            (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIRANS) => {
-                browse::handle_ask_shared_files_dir_answer(
-                    &transport,
-                    peer_addr,
-                    &packet.payload,
-                    Ed2kStringEncoding::from_unicode_support(peer_supports_unicode),
-                )?;
-            }
-            (OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS) => {
-                browse::handle_ask_shared_denied_answer(&transport, peer_addr, packet.payload.len());
+            (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER | OP_ASKSHAREDDIRSANS
+                | OP_ASKSHAREDFILESDIRANS | OP_ASKSHAREDDENIEDANS) => {
+                if let Some(session) = &transport.browse.session
+                    && let Some(frame) = session.handle_reply_async(packet.opcode, packet.payload).await
+                {
+                    transport.write_all_diagnostic("listener", peer_addr, "peer_browse_request", &frame).await?;
+                }
             }
             (OP_EDONKEYPROT, OP_QUEUERANK) => {
                 notify::handle_edonkey_queue_rank(&transport, peer_addr, &packet.payload)?;

@@ -1,19 +1,48 @@
 use super::*;
 
+use emulebb_ed2k::ed2k_tcp::{PeerBrowsePage, PeerBrowseStart};
+
 impl EmulebbCore {
     pub async fn browse_download_source(
         &self,
         id: emulebb_metadata::JobId,
         client_id: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<PeerBrowseStart>> {
         let Some(source) = self.download_source(id, client_id).await? else {
-            return Ok(false);
+            return Ok(None);
         };
         ensure!(
             source.view_shared_files,
-            "transfer source does not support shared-file browsing"
+            "transfer source is not connected for shared-file browsing"
         );
-        Ok(true)
+        self.ed2k_transfers
+            .peer_browse_registry()
+            .start(
+                parse_ban_hash(source.user_hash.as_deref()),
+                source.endpoint.parse()?,
+            )
+            .map(Some)
+    }
+
+    pub async fn download_source_browse_page(
+        &self,
+        id: emulebb_metadata::JobId,
+        client_id: &str,
+        search_id: u64,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<PeerBrowsePage>> {
+        ensure!((1..=200).contains(&limit), "invalid peer browse page limit");
+        let Some(source) = self.download_source(id, client_id).await? else {
+            return Ok(None);
+        };
+        Ok(self.ed2k_transfers.peer_browse_registry().page_for_peer(
+            parse_ban_hash(source.user_hash.as_deref()),
+            source.endpoint.parse()?,
+            search_id,
+            offset,
+            limit,
+        ))
     }
 
     pub async fn add_download_source_friend(
@@ -30,6 +59,7 @@ impl EmulebbCore {
         self.add_friend(FriendCreate {
             user_hash: user_hash.to_string(),
             name: Some(source_friend_name(&source)),
+            browse_key_sha256: None,
         })
         .await
         .map(Some)

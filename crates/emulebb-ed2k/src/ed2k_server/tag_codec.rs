@@ -9,7 +9,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum DecodedTagValue {
+pub(crate) enum DecodedTagValue {
     String(String),
     Unsigned(u64),
     Bool(bool),
@@ -32,7 +32,7 @@ pub(super) struct DecodedTag {
     pub(super) base_type: u8,
 }
 
-pub(super) fn push_u32_tag(payload: &mut Vec<u8>, name: u8, value: u32) {
+pub(crate) fn push_u32_tag(payload: &mut Vec<u8>, name: u8, value: u32) {
     payload.push(TAGTYPE_UINT32);
     payload.extend_from_slice(&1u16.to_le_bytes());
     payload.push(name);
@@ -70,7 +70,7 @@ pub(super) fn push_short_u8_tag(payload: &mut Vec<u8>, name: u8, value: u8) {
 /// UINT type that holds it (u8 <=255, u16 <=65535, u32 <=4G, else u64), short-name.
 /// Matches stock's OP_OFFERFILES FT_FILESIZE / FT_FILESIZE_HI encoding (a small
 /// file's size tag is a u8/u16, not always u32).
-pub(super) fn push_short_int_tag(payload: &mut Vec<u8>, name: u8, value: u64) {
+pub(crate) fn push_short_int_tag(payload: &mut Vec<u8>, name: u8, value: u64) {
     if value <= u64::from(u8::MAX) {
         payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT8);
         payload.push(name);
@@ -119,7 +119,7 @@ pub(super) fn ed2k_string_tag_type(len: usize) -> u8 {
     }
 }
 
-pub(super) fn push_string_tag(
+pub(crate) fn push_string_tag(
     payload: &mut Vec<u8>,
     name: u8,
     value: &str,
@@ -142,7 +142,7 @@ pub(super) fn push_string_tag(
     payload.extend_from_slice(&value_bytes);
 }
 
-pub(super) fn push_short_string_tag(
+pub(crate) fn push_short_string_tag(
     payload: &mut Vec<u8>,
     name: u8,
     value: &str,
@@ -214,7 +214,7 @@ pub(super) fn decode_tag(
     Ok((tag_name, string_value, rest))
 }
 
-pub(super) fn decode_tag_value(
+pub(crate) fn decode_tag_value(
     bytes: &[u8],
     encoding: Ed2kStringEncoding,
 ) -> Result<(Option<u8>, Option<DecodedTagValue>, &[u8])> {

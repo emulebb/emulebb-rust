@@ -1,10 +1,10 @@
 use tokio::time::Instant;
 
-use super::super::super::established_peer::EstablishedPeerIdentity;
 use super::super::super::{
     ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kPeerSecureIdentState,
     hello::{DecodedHelloProfile, ExtendedRequestNegotiation},
 };
+use super::super::super::{browse::BrowsePeer, established_peer::EstablishedPeerIdentity};
 use super::super::ActiveDownloadPiece;
 use super::super::stale_guard::StaleBlockPacketGuard;
 
@@ -14,6 +14,7 @@ use super::super::stale_guard::StaleBlockPacketGuard;
 #[derive(Debug, Clone, Default)]
 pub(in crate::ed2k_tcp) struct DownloadConnectionState {
     peer_secure_ident: Ed2kPeerSecureIdentState,
+    browse_peer: Option<BrowsePeer>,
     hello_complete: bool,
     secure_ident_started: bool,
     remote_supports_aich: bool,
@@ -48,6 +49,7 @@ impl DownloadConnectionState {
     ) -> Self {
         Self {
             peer_secure_ident: peer_secure_ident.clone(),
+            browse_peer: Some(BrowsePeer::from_hello(profile)),
             hello_complete: true,
             secure_ident_started,
             remote_supports_aich: profile.supports_aich,
@@ -73,6 +75,7 @@ impl DownloadConnectionState {
 
 pub(super) struct DownloadSessionState {
     pub(super) peer_secure_ident: Ed2kPeerSecureIdentState,
+    pub(super) browse_peer: Option<BrowsePeer>,
     pub(super) hello_complete: bool,
     pub(super) secure_ident_started: bool,
     pub(super) remote_supports_aich: bool,
@@ -182,6 +185,7 @@ impl DownloadSessionState {
                 });
         Self {
             peer_secure_ident: connection_state.peer_secure_ident,
+            browse_peer: connection_state.browse_peer,
             hello_complete: connection_state.hello_complete,
             secure_ident_started: connection_state.secure_ident_started,
             remote_supports_aich: connection_state.remote_supports_aich,
@@ -230,6 +234,7 @@ impl DownloadSessionState {
     pub(super) fn connection_state(&self) -> DownloadConnectionState {
         DownloadConnectionState {
             peer_secure_ident: self.peer_secure_ident.clone(),
+            browse_peer: self.browse_peer,
             hello_complete: self.hello_complete,
             secure_ident_started: self.secure_ident_started,
             remote_supports_aich: self.remote_supports_aich,

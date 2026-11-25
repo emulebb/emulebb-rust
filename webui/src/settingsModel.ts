@@ -11,7 +11,7 @@ export type SettingsReadData = {
 export type SettingsSnapshot = { data: SettingsReadData; meta: { settingsRevision: string; [key: string]: unknown } };
 export type SettingsPatch = { expectedRevision: string; set?: SettingsValues; reset?: string[] };
 export type SettingRule =
-  | { kind: "boolean" | "path" | "ipv4" | "dnsServers" | "natBackends" | "ipv4Cidrs" | "vpnMode" }
+  | { kind: "boolean" | "path" | "ipv4" | "dnsServers" | "natBackends" | "ipv4Cidrs" | "vpnMode" | "sharedFilesVisibility" }
   | { kind: "integer"; min: number; max: number; step: number }
   | { kind: "text"; minBytes: number; maxBytes: number; forbidControls: boolean };
 export type SettingField = { key: string; nullable: boolean; defaultValue: SettingsValue; application: "live" | "restart"; unit: string; rule: SettingRule };
@@ -91,7 +91,8 @@ export function parseSetting(field: SettingField, draft: SettingDraft): Settings
     case "dnsServers":
     case "natBackends":
     case "ipv4Cidrs": return draft.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    case "vpnMode": return draft.text;
+    case "vpnMode":
+    case "sharedFilesVisibility": return draft.text;
     default: throw new Error("This setting requires an updated WebUI.");
   }
 }

@@ -21,14 +21,18 @@ use crate::{
     route_body_metadata::validate_json_body_fields,
 };
 
+const PAGE: &[&str] = &["offset", "limit"];
+
 pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response {
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
-    let parameterized = request
+    let matched = request
         .extensions()
         .get::<MatchedPath>()
-        .is_none_or(|matched| matched.as_str().contains('{'));
-    let Some(allowed_query_fields) = route_query_fields(&method, &path, parameterized) else {
+        .map(MatchedPath::as_str);
+    let parameterized = matched.is_none_or(|template| template.contains('{'));
+    let route = matched.unwrap_or(&path);
+    let Some(allowed_query_fields) = route_query_fields(&method, route, parameterized) else {
         return next.run(request).await;
     };
     if let Err(response) = validate_path_parameters(&method, &path) {
@@ -364,6 +368,18 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             })?;
         }
         ("GET", ["downloads", id, "sources", client_id])
+        | (
+            "GET",
+            [
+                "downloads",
+                id,
+                "sources",
+                client_id,
+                "operations",
+                "browse",
+                _,
+            ],
+        )
         | ("POST", ["downloads", id, "sources", client_id, "operations", _]) => {
             let id = decode_path_parameter(id, "id")?;
             id.parse::<emulebb_core::JobId>().map_err(|_| {
@@ -500,7 +516,6 @@ fn route_query_fields(
     const SEARCH_PAGE: &[&str] = &["limit", "cursor"];
     const NONE: &[&str] = &[];
     const SNAPSHOT: &[&str] = &["limit"];
-    const PAGE: &[&str] = &["offset", "limit"];
     const LIBRARY_FILES: &[&str] = &[
         "limit",
         "cursor",
@@ -601,6 +616,8 @@ fn route_query_fields(
         ("GET", "/api/v1/library/files") => Some(LIBRARY_FILES),
         ("GET", "/api/v1/uploads") => Some(CURSOR_PAGE),
         ("GET", "/api/v1/kad/nodes") => Some(PAGE),
+        #[rustfmt::skip]
+        ("GET", "/api/v1/downloads/{id}/sources/{clientId}/operations/browse/{searchId}") => Some(PAGE),
         ("POST", "/api/v1/library/files/sharing") => Some(NONE),
         ("GET", "/api/v1/library/tags") => Some(LIBRARY_TAGS),
         ("GET", "/api/v1/library/roots") => Some(LIBRARY_TAGS),
@@ -653,6 +670,7 @@ fn route_query_fields_for_parameterized(
         | ("POST", ["vpn-guard", "operations", "probe"])
         | ("POST", ["searches", _, "results", _, "download"]) => Some(NONE),
         ("GET", ["downloads", _, "parts" | "comments" | "sources"]) => Some(&["cursor", "limit"]),
+        ("GET", ["downloads", _, "sources", _, "operations", "browse", _]) => Some(PAGE),
         ("POST", ["downloads", _, "sources", _, "operations", operation])
             if matches!(
                 *operation,

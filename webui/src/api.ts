@@ -195,10 +195,31 @@ export type DownloadSource = {
     observedAt: number;
   }>;
   reportedFileNamesHasMore?: boolean;
+  viewSharedFiles?: boolean;
+  sharedFilesRequestPending?: boolean;
   banned?: boolean;
   friend?: boolean;
   lowId?: boolean;
   [key: string]: unknown;
+};
+
+export type PeerBrowseStart = {
+  ok: true;
+  alreadyPending: boolean;
+  searchId: string;
+};
+
+export type PeerBrowsePage = {
+  searchId: string;
+  status: "pending" | "complete" | "denied" | "timeout" | "disconnected" | "malformed" | "limit";
+  total: number;
+  offset: number;
+  files: Array<{
+    directory: string | null;
+    fileHash: string;
+    displayName: string;
+    sizeBytes: number;
+  }>;
 };
 
 export type SearchResultMedia = {

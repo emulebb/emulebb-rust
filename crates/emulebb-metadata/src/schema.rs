@@ -16,7 +16,7 @@
 //! Every persisted shape change bumps the single current-shape version.
 
 pub const SCHEMA_ID: &str = "emulebb.metadata";
-pub const SCHEMA_VERSION: i64 = 118;
+pub const SCHEMA_VERSION: i64 = 119;
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 
 #[cfg(test)]

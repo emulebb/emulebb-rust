@@ -258,6 +258,15 @@ pub(super) fn validate_friend_create_body_fields(object: &JsonObject) -> Result<
     if let Some(name) = object.get("name") {
         validate_friend_name_body_field(name)?;
     }
+    if let Some(fingerprint) = object.get("browseKeySha256")
+        && !fingerprint.as_str().is_some_and(|value| {
+            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(invalid_body_error(
+            "browseKeySha256 must be a 64-character hex string",
+        ));
+    }
     Ok(())
 }
 

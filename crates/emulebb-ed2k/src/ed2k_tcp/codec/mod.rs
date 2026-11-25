@@ -15,6 +15,7 @@ mod file_desc;
 mod file_status;
 mod hashset;
 mod multipacket;
+pub(in crate::ed2k_tcp) mod shared_browse;
 mod source_exchange;
 mod upload;
 
@@ -615,6 +616,7 @@ pub(super) fn decode_shared_dirs_answer_payload(
     Ok(SharedDirsAnswer { dir_count, dirs })
 }
 
+#[cfg(test)]
 pub(super) fn decode_shared_files_dir_request_payload(
     payload: &[u8],
     encoding: Ed2kStringEncoding,

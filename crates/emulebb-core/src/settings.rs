@@ -122,6 +122,8 @@ impl EmulebbCore {
         );
         self.ed2k_transfers
             .set_credit_system_enabled(values.transfers.upload.credit_system_enabled);
+        self.ed2k_transfers
+            .set_shared_files_visibility(values.transfers.upload.shared_files_visibility);
         self.download_attempts
             .apply_concurrency_limit(values.transfers.max_concurrent_downloads);
     }

@@ -13,7 +13,7 @@ use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job
 use super::super::{
     Ed2kEstablishedPeerContext, Ed2kHelloIdentity, Ed2kPeerConnectionOrigin, Ed2kPeerDispatcher,
     Ed2kPeerUploadContext, Ed2kSecureIdent, Ed2kTransport, PeerUploadFacet,
-    dump_ed2k_tcp_download_meta, encode_hello_request,
+    dump_ed2k_tcp_download_meta, encode_hello_request_with_share_policy,
 };
 use super::session::{
     DownloadConnectionState, DownloadSessionOptions, Ed2kPeerDownloadOutcome,
@@ -212,7 +212,10 @@ pub async fn download_files_from_peer(
         // half-open to established (eMule `m_nHalfOpen` decrement on OnConnect),
         // freeing the half-open budget for the next pending source connect.
         transfer_runtime.mark_connection_established();
-        let hello = encode_hello_request(hello_identity);
+        let hello = encode_hello_request_with_share_policy(
+            hello_identity,
+            !transfer_runtime.advertises_shared_files(),
+        );
         transport
             .write_all_diagnostic("native_download", peer_addr, "hello", &hello)
             .await

@@ -45,6 +45,19 @@ async fn accepted_probe_preserves_listener_ownership_without_hydration_or_payloa
                     true,
                     false,
                 );
+                let browse = read_packet(&mut stream).await;
+                assert_eq!(
+                    browse,
+                    crate::ed2k_tcp::encode_packet(
+                        crate::ed2k_tcp::OP_EDONKEYPROT,
+                        crate::ed2k_tcp::OP_ASKSHAREDFILES,
+                        &[],
+                    )
+                );
+                stream
+                    .write_all(&crate::ed2k_tcp::codec::encode_empty_shared_files_answer())
+                    .await
+                    .unwrap();
                 stream
                     .write_all(
                         &crate::ed2k_tcp::encode_multipacket_ext2_answer(
@@ -91,6 +104,17 @@ async fn accepted_probe_preserves_listener_ownership_without_hydration_or_payloa
             &Ed2kPeerSecureIdentState::default(),
             true,
         );
+        let browse = runtime.peer_browse_registry();
+        let search = (mode == 0).then(|| {
+            dispatcher.browse.session = browse.register(
+                [0x42; 16],
+                peer_addr,
+                true,
+                false,
+                crate::ed2k_string::Ed2kStringEncoding::Utf8,
+            );
+            browse.start(Some([0x42; 16]), peer_addr).unwrap()
+        });
         let result = probe_accepted_file(AcceptedFileProbeOptions {
             dispatcher: &mut dispatcher,
             peer_addr,
@@ -124,6 +148,16 @@ async fn accepted_probe_preserves_listener_ownership_without_hydration_or_payloa
             (1, Ok(AcceptedFileProbeOutcome::Deferred)) => {}
             (2, Err(_)) => {}
             _ => panic!("unexpected accepted probe outcome"),
+        }
+        if let Some(search) = search {
+            let page = browse
+                .page_for_peer(Some([0x42; 16]), peer_addr, search.search_id, 0, 1)
+                .unwrap();
+            assert_eq!(
+                page.status,
+                crate::ed2k_tcp::browse::requests::PeerBrowseStatus::Complete
+            );
+            assert!(browse.supports(Some([0x42; 16]), peer_addr));
         }
         assert_eq!(
             runtime.download_resource_snapshot().resident_bytes,

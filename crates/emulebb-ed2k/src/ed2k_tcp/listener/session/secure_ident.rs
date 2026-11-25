@@ -192,6 +192,9 @@ pub(super) fn handle_signature(
             );
             peer_upload_identity.ident_verified = verified;
             peer_upload_identity.ident_bad_guy = !verified;
+            if verified && verification.newly_verified() {
+                peer_secure_ident.verified_user_hash = peer_upload_identity.user_hash;
+            }
         }
         Err(error) => {
             dump_ed2k_tcp_listener_meta(

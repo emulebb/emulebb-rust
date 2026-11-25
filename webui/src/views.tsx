@@ -36,6 +36,8 @@ import {
   NatStatus,
   NetworkStatus,
   Page,
+  PeerBrowsePage,
+  PeerBrowseStart,
   RestClient,
   RuntimeDiagnostics,
   SearchItem,
@@ -269,6 +271,13 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
   const [selectedId, setSelectedId] = useState("");
   const [details, setDetails] = useState<DownloadDetail | null>(null);
   const [detailError, setDetailError] = useState("");
+  const [browse, setBrowse] = useState<{ path: string; peer: string; request: number } | null>(null);
+  const selectDownload = (id: string) => {
+    if (id !== selectedId) {
+      setSelectedId(id);
+      setBrowse(null);
+    }
+  };
   const linksError = transferLinksValidationError(ed2kLinks);
   useEffect(() => {
     let cancelled = false;
@@ -302,7 +311,7 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
     }).catch((caught) => { if (!cancelled) setDetailError(errorMessage(caught)); });
     return () => { cancelled = true; };
   }, [props.client, selectedId, props.refreshGeneration]);
-  const changePage = (value: string | null) => { setPage(null); setCursor(value); setSelectedId(""); };
+  const changePage = (value: string | null) => { setPage(null); setCursor(value); selectDownload(""); };
   const createDownloads = async () => {
     const links = transferLinksFromText(ed2kLinks);
     if (!links.length) throw new Error("At least one eD2K link is required");
@@ -321,7 +330,7 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
       : `Remove "${job.name}"? Completed outputs are preserved; internal temporary pieces are retired.`)) return;
     void props.run(async () => {
       await props.client.controlDownloads("remove", [job.id], deleteData);
-      if (selectedId === job.id) setSelectedId("");
+      if (selectedId === job.id) selectDownload("");
     }, "Download removed");
   };
   return <section class="view-stack">
@@ -346,7 +355,7 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
       {linksError && <p class="field-error">{linksError}</p>}
       <TableScroll label="Transfers"><table class="table table-vcenter card-table"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
         {(page?.data ?? []).map((job) => <tr key={job.id} class={selectedId === job.id ? "selected-row" : ""}>
-          <td><button type="button" class="link-button" onClick={() => setSelectedId(job.id)}>{job.name}</button></td>
+          <td><button type="button" class="link-button" onClick={() => selectDownload(job.id)}>{job.name}</button></td>
           <td><DownloadStateLabel download={job} /></td><td>{formatProgress(job)}</td>
           <td><select class="form-select" aria-label={`Category for ${job.name}`} value={job.category ?? ""} onInput={(event) => void props.run(() => props.client.patch(`downloads/${job.id}`, { category: event.currentTarget.value || null }), "Category updated")}>
             <option value="">Uncategorized</option>{props.categories.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
@@ -367,18 +376,102 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
     </section>
     {selectedId && <>
       <DownloadEvidence<DownloadSource> key={`${selectedId}:sources`} path={`downloads/${selectedId}/sources`} label="Download sources" client={props.client} refreshGeneration={props.refreshGeneration} render={(sources) => <TableScroll label="Transfer sources"><table class="table table-vcenter card-table"><thead><tr><th>Source</th><th>State</th><th>Rate</th><th>Reported names</th><th>Actions</th></tr></thead><tbody>
-        {sources.map((source) => { const peer = source.clientId ?? ""; const path = `downloads/${selectedId}/sources/${encodeSegment(peer)}/operations`; return <tr key={peer}>
+        {sources.map((source) => {
+          const peer = source.clientId ?? "";
+          const path = `downloads/${selectedId}/sources/${encodeSegment(peer)}/operations`;
+          const canBrowse = Boolean(peer && source.viewSharedFiles);
+          const browseTitle = !canBrowse ? "Shared-file browsing unavailable" : source.sharedFilesRequestPending ? "View browse progress" : "Browse shared files";
+          return <tr key={peer}>
           <td>{source.userName ?? peer}</td><td><StatusPill value={source.downloadState ?? "unknown"} /></td><td>{formatRate(source.downloadRateBytesPerSecond)}</td>
           <td>{(source.reportedFileNames ?? []).map((name) => name.normalizedName).join(", ")}{source.reportedFileNamesHasMore ? " …" : ""}</td>
-          <td><div class="row-actions"><Action title="Browse" icon={<Search size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/browse`), "Browse requested")} />
+          <td><div class="row-actions"><Action title={browseTitle} icon={<Search size={15} />} disabled={!canBrowse} onClick={() => setBrowse((previous) => ({
+            path: `${path}/browse`, peer: source.userName || peer, request: (previous?.request ?? 0) + 1,
+          }))} />
             <Action title="Add friend" icon={<UserPlus size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/add-friend`), "Friend added")} />
             <Action title="Remove source" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/remove`), "Source removed")} />
             <Action title="Ban" icon={<Ban size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/ban`), "Source banned")} /></div></td>
         </tr>; })}{sources.length === 0 && <EmptyRow colSpan={5} text="No sources for this download." />}
       </tbody></table></TableScroll>} />
+      {browse && <SourceBrowsePanel key={`${browse.path}:${browse.request}`} path={browse.path} peer={browse.peer} client={props.client} close={() => setBrowse(null)} />}
       <DownloadEvidence<unknown> key={`${selectedId}:parts`} path={`downloads/${selectedId}/parts`} label="Download parts" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
       <DownloadEvidence<unknown> key={`${selectedId}:comments`} path={`downloads/${selectedId}/comments`} label="Download comments" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
     </>}
+  </section>;
+}
+
+const peerBrowsePageSize = 100;
+const peerBrowseStatus: Record<PeerBrowsePage["status"], string> = {
+  pending: "Waiting for shared files…",
+  complete: "Browse complete",
+  denied: "The peer denied the browse request.",
+  timeout: "The peer did not finish the browse request in time.",
+  disconnected: "The peer disconnected.",
+  malformed: "The peer sent an invalid browse response.",
+  limit: "The browse response reached the results limit.",
+};
+
+function SourceBrowsePanel(props: { path: string; peer: string; client: RestClient; close: () => void }) {
+  const [searchId, setSearchId] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<PeerBrowsePage | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void props.client.post<PeerBrowseStart>(props.path).then((value) => {
+      if (!cancelled) setSearchId(value.searchId);
+    }).catch((caught) => {
+      if (!cancelled) {
+        setError(errorMessage(caught));
+        setLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [props.client, props.path]);
+
+  useEffect(() => {
+    if (!searchId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const loadPage = async () => {
+      try {
+        const value = await props.client.get<PeerBrowsePage>(`${props.path}/${encodeSegment(searchId)}?offset=${offset}&limit=${peerBrowsePageSize}`);
+        if (cancelled) return;
+        setPage(value);
+        if (value.status === "pending") timer = setTimeout(() => void loadPage(), 1_000);
+      } catch (caught) {
+        if (!cancelled) setError(errorMessage(caught));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    setLoading(true);
+    setError("");
+    void loadPage();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [props.client, props.path, searchId, offset]);
+
+  const status = page ? peerBrowseStatus[page.status] : "Requesting shared files…";
+  return <section class="panel card">
+    <div class="section-title"><h2>Shared files from {props.peer}</h2>
+      <div class="row-actions">
+        <button type="button" class="btn" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0, offset - peerBrowsePageSize))}>Previous</button>
+        <button type="button" class="btn" disabled={loading || !page || offset + page.files.length >= page.total} onClick={() => setOffset(offset + peerBrowsePageSize)}>Next</button>
+        <button type="button" class="btn" onClick={props.close}>Close</button>
+      </div>
+    </div>
+    {error ? <div class="notice alert alert-danger" role="alert">{error}</div>
+      : <p role="status">{status}{page && page.total > 0 ? ` · ${page.total} files` : ""}</p>}
+    {page && <TableScroll label="Peer shared files"><table class="table table-vcenter card-table">
+      <thead><tr><th>Name</th><th>Directory</th><th>Size</th><th>File hash</th></tr></thead>
+      <tbody>
+        {page.files.map((file, index) => <tr key={`${page.offset + index}:${file.fileHash}`}>
+          <td>{file.displayName}</td><td>{file.directory ?? "—"}</td><td>{formatBytes(file.sizeBytes)}</td><td>{file.fileHash}</td>
+        </tr>)}
+        {page.status === "complete" && page.files.length === 0 && <EmptyRow colSpan={4} text="No shared files." />}
+      </tbody>
+    </table></TableScroll>}
   </section>;
 }
 
@@ -2309,16 +2402,22 @@ function CategoryRow(props: { category: Category; client: RestClient; run: RunFu
 export function FriendsView(props: { friends: Friend[]; client: RestClient; run: RunFunction }) {
   const [userHash, setUserHash] = useState("");
   const [name, setName] = useState("");
+  const [browseKeySha256, setBrowseKeySha256] = useState("");
   const userHashError = friendUserHashError(userHash);
   const nameError = friendNameError(name);
+  const fingerprint = browseKeySha256.trim();
+  const fingerprintError = fingerprint.length > 0 && !/^[a-fA-F0-9]{64}$/.test(fingerprint);
   const create = async () => {
     const normalizedUserHash = userHash.trim();
-    if (!normalizedUserHash || userHashError || nameError) {
+    if (!normalizedUserHash || userHashError || nameError || fingerprintError) {
       return;
     }
-    await props.client.post("friends", { userHash: normalizedUserHash, name: name || undefined });
+    await props.client.post("friends", {
+      userHash: normalizedUserHash, name: name || undefined, browseKeySha256: fingerprint || undefined,
+    });
     setUserHash("");
     setName("");
+    setBrowseKeySha256("");
   };
   return (
     <section class="panel card">
@@ -2332,10 +2431,12 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
       }}>
         <input class="form-control" value={userHash} placeholder="User hash" aria-invalid={userHashError ? "true" : "false"} onInput={(event) => setUserHash(event.currentTarget.value)} />
         <input class="form-control" value={name} placeholder="Name" aria-invalid={nameError ? "true" : "false"} onInput={(event) => setName(event.currentTarget.value)} />
-        <button class="btn" type="submit" disabled={!userHash.trim() || Boolean(userHashError) || Boolean(nameError)}><UserPlus size={16} />Add</button>
+        <input class="form-control" value={browseKeySha256} placeholder="Trusted SecureIdent key fingerprint" aria-label="Trusted SecureIdent key fingerprint (optional)" aria-invalid={fingerprintError} onInput={(event) => setBrowseKeySha256(event.currentTarget.value)} />
+        <button class="btn" type="submit" disabled={!userHash.trim() || Boolean(userHashError) || Boolean(nameError) || fingerprintError}><UserPlus size={16} />Add</button>
       </form>
       {userHashError && <p class="field-error">{userHashError}</p>}
       {nameError && <p class="field-error">{nameError}</p>}
+      {fingerprintError && <p class="field-error">Enter 64 hexadecimal characters for the trusted fingerprint.</p>}
       <TableScroll label="Friends">
         <table class="table table-vcenter card-table">
           <thead>

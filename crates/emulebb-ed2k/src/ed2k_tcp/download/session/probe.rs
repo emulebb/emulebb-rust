@@ -5,8 +5,8 @@ use super::*;
 use crate::ed2k_server::Ed2kFoundSource;
 use crate::ed2k_tcp::{
     Ed2kPeerConnectionOrigin, Ed2kTransport, EmuleTcpPacket, PeerSourceExchangeRequest,
-    encode_hello_request, encode_multipacket_ext2_request, encode_multipacket_request,
-    encode_request_filename, encode_set_req_file_id,
+    encode_hello_request_with_share_policy, encode_multipacket_ext2_request,
+    encode_multipacket_request, encode_request_filename, encode_set_req_file_id,
 };
 use crate::ed2k_transfer::{
     ED2K_PART_SIZE, Ed2kPeerConnectionGuard, Ed2kSourceConnectionAdmission,
@@ -326,7 +326,10 @@ async fn run_probe(
             "source_probe",
             peer_addr,
             "hello",
-            &encode_hello_request(options.hello_identity),
+            &encode_hello_request_with_share_policy(
+                options.hello_identity,
+                !options.transfer_runtime.advertises_shared_files(),
+            ),
         )
         .await?;
     let state = DownloadSessionState::new(

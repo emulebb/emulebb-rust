@@ -32,6 +32,7 @@ use crate::kad_firewall::KadFirewallState;
 use emulebb_kad_proto::Ed2kHash;
 
 mod aich_salvage;
+pub(crate) mod browse;
 mod buddy_link;
 mod buddy_liveness;
 mod client_software;
@@ -65,23 +66,23 @@ pub(in crate::ed2k_tcp) use codec::{
     decode_peer_payload, decode_preview_answer_payload, decode_preview_request_payload,
     decode_public_ip_answer_payload, decode_reask_callback_tcp_payload,
     decode_request_filename_answer, decode_request_filename_answer_body,
-    decode_sending_part_payload, decode_shared_dirs_answer_payload,
-    decode_shared_files_answer_payload, decode_shared_files_dir_answer_payload,
-    decode_shared_files_dir_request_payload, encode_aich_file_hash_request,
-    encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_aich_recovery_request,
-    encode_empty_shared_files_answer, encode_hashset_request, encode_hashset_request2,
-    encode_multipacket_ext2_request, encode_multipacket_request, encode_packet,
-    encode_port_test_answer, encode_public_ip_answer, encode_request_filename,
+    decode_sending_part_payload, encode_aich_file_hash_request, encode_aich_recovery_answer,
+    encode_aich_recovery_failure_answer, encode_aich_recovery_request, encode_hashset_request,
+    encode_hashset_request2, encode_multipacket_ext2_request, encode_multipacket_request,
+    encode_packet, encode_port_test_answer, encode_public_ip_answer, encode_request_filename,
     encode_request_parts_batch, encode_request_sources2, encode_set_req_file_id,
-    encode_shared_browse_denied_answer, encode_start_upload_req, inflate_compressed_part_fragment,
-    validate_file_status_part_count,
+    encode_start_upload_req, inflate_compressed_part_fragment, validate_file_status_part_count,
 };
 // Re-exported only for codec unit tests; the production decode path uses the
 // availability-returning variants above.
 pub(in crate::ed2k_tcp) use aich_salvage::handle_aich_recovery_answer;
+pub use browse::requests::{
+    PeerBrowsePage, PeerBrowseRegistry, PeerBrowseResult, PeerBrowseStart, PeerBrowseStatus,
+};
 pub use buddy_link::{BuddyLinkEnd, OutboundBuddyLinkOptions, run_outbound_buddy_link};
 #[cfg(test)]
 pub(in crate::ed2k_tcp) use codec::decode_file_status_payload;
+pub use codec::shared_browse::PeerBrowseFile;
 #[cfg(test)]
 #[expect(
     unused_imports,
@@ -90,12 +91,15 @@ pub(in crate::ed2k_tcp) use codec::decode_file_status_payload;
 use codec::{
     build_upload_part_packets, decode_client_id_change_payload, decode_file_hash_payload,
     decode_hashset_request2, decode_request_filename_ext_info, decode_request_parts_payload,
-    decode_request_sources_payload, encode_accept_upload_req, encode_aich_file_hash_answer,
-    encode_answer_sources, encode_answer_sources2, encode_compressed_part_fragment,
-    encode_file_req_ans_nofil, encode_file_status, encode_hashset_answer, encode_hashset_answer2,
-    encode_multipacket_answer, encode_multipacket_ext2_answer, encode_packed_packet,
-    encode_queue_ranking, encode_request_filename_answer, encode_request_sources,
-    encode_request_sources2_subpayload, encode_sending_part,
+    decode_request_sources_payload, decode_shared_dirs_answer_payload,
+    decode_shared_files_answer_payload, decode_shared_files_dir_answer_payload,
+    decode_shared_files_dir_request_payload, encode_accept_upload_req,
+    encode_aich_file_hash_answer, encode_answer_sources, encode_answer_sources2,
+    encode_compressed_part_fragment, encode_empty_shared_files_answer, encode_file_req_ans_nofil,
+    encode_file_status, encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
+    encode_multipacket_ext2_answer, encode_packed_packet, encode_queue_ranking,
+    encode_request_filename_answer, encode_request_sources, encode_request_sources2_subpayload,
+    encode_sending_part, encode_shared_browse_denied_answer,
 };
 pub(in crate::ed2k_tcp) use download::PendingCompressedPart;
 #[cfg(test)]
@@ -116,9 +120,9 @@ pub use firewall_helper::request_udp_firewall_check;
 pub use firewall_helper::send_kad_firewall_tcp_ack;
 pub use hello::set_publish_rust_identity;
 pub(in crate::ed2k_tcp) use hello::{
-    DecodedEmuleInfoProfile, build_hello_responses, decode_emule_info_profile,
+    DecodedEmuleInfoProfile, build_hello_responses_with_share_policy, decode_emule_info_profile,
     decode_hello_answer_profile, decode_hello_profile, encode_emule_info_answer,
-    encode_hello_request,
+    encode_hello_request, encode_hello_request_with_share_policy,
 };
 #[cfg(test)]
 #[expect(
@@ -128,7 +132,8 @@ pub(in crate::ed2k_tcp) use hello::{
 use hello::{DecodedHelloIdentity, encode_hello_answer, is_mule_hello};
 #[cfg(test)]
 use hello::{
-    emule_misc_options1, emule_misc_options2, emule_version_tag, encode_emule_info_request,
+    build_hello_responses, emule_misc_options1, emule_misc_options2, emule_version_tag,
+    encode_emule_info_request,
 };
 pub use hello_buddy::{HelloBuddySnapshot, set_hello_buddy_snapshot};
 pub use identity::Ed2kSecureIdent;

@@ -25,24 +25,25 @@ use super::{
 };
 
 pub(super) fn encode_hello_request(identity: Ed2kHelloIdentity) -> Vec<u8> {
+    encode_hello_request_with_share_policy(identity, false)
+}
+
+pub(super) fn encode_hello_request_with_share_policy(
+    identity: Ed2kHelloIdentity,
+    no_view_shared_files: bool,
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.push(16);
-    payload.extend_from_slice(&encode_hello_type_payload(
-        identity,
-        append_emule_hello_request_tags,
-    ));
+    payload.extend_from_slice(&encode_hello_type_payload(identity, no_view_shared_files));
     encode_packet(OP_EDONKEYPROT, OP_HELLO, &payload)
 }
 
-fn encode_hello_type_payload(
-    identity: Ed2kHelloIdentity,
-    append_tags: fn(&mut Vec<u8>, Ed2kHelloIdentity),
-) -> Vec<u8> {
+fn encode_hello_type_payload(identity: Ed2kHelloIdentity, no_view_shared_files: bool) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.extend_from_slice(&identity.user_hash);
     payload.extend_from_slice(&identity.client_id.to_le_bytes());
     payload.extend_from_slice(&identity.tcp_port.to_le_bytes());
-    append_tags(&mut payload, identity);
+    append_recent_emule_hello_tags(&mut payload, identity, no_view_shared_files);
     payload.extend_from_slice(&identity.server_ip.to_le_bytes());
     payload.extend_from_slice(&identity.server_port.to_le_bytes());
     payload
@@ -88,10 +89,6 @@ pub(super) fn emule_misc_options1() -> u32 {
     let comments_version = 1u32;
     // Recent stock eMule no longer advertises peer cache support.
     let peer_cache = 0u32;
-    // The listener deliberately returns an empty share list and denies
-    // directory browsing. Stock sets this bit when `CanSeeShares() ==
-    // vsfaNobody` (BaseClient.cpp:974), so advertise that effective policy.
-    let no_view_shared_files = 1u32;
     // Recent captures + local 0.72a advertise the packed/multipacket startup.
     let multipacket = 1u32;
     let preview_supported = 0u32;
@@ -104,7 +101,6 @@ pub(super) fn emule_misc_options1() -> u32 {
         | (extended_requests_version << 8)
         | (comments_version << 4)
         | (peer_cache << 3)
-        | (no_view_shared_files << 2)
         | (multipacket << 1)
         | preview_supported
 }
@@ -142,14 +138,6 @@ pub(super) fn emule_version_tag() -> u32 {
     (EMULE_VERSION_MAJOR << 17) | (EMULE_VERSION_MINOR << 10) | (EMULE_VERSION_UPDATE << 7)
 }
 
-fn append_emule_hello_request_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIdentity) {
-    append_recent_emule_hello_tags(payload, identity);
-}
-
-fn append_emule_hello_answer_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIdentity) {
-    append_recent_emule_hello_tags(payload, identity);
-}
-
 /// Mod-version string published only when the operator opts in to the real
 /// identity. Left off by default so the hello carries exactly the standard
 /// eMule tag set (i.e. an eMule Community 0.7-series client, which sends no
@@ -167,7 +155,11 @@ pub fn set_publish_rust_identity(publish_rust: bool) {
     PUBLISH_RUST_IDENTITY.store(publish_rust, Ordering::Relaxed);
 }
 
-fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIdentity) {
+fn append_recent_emule_hello_tags(
+    payload: &mut Vec<u8>,
+    identity: Ed2kHelloIdentity,
+    no_view_shared_files: bool,
+) {
     // Default: the exact standard eMule hello tag set (6 tags) so we appear as a
     // stock eMule Community 0.7-series client. Only when the operator opts in do
     // we append a CT_MOD_VERSION="emule-rust" tag to publish the real identity.
@@ -203,7 +195,11 @@ fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
         // Low 16 bits = buddy UDP port; high 16 reserved (eMule writes 0).
         push_ed2k_u32_tag(payload, CT_EMULE_BUDDYUDP, u32::from(buddy.udp_port));
     }
-    push_ed2k_u32_tag(payload, CT_EMULE_MISCOPTIONS1, emule_misc_options1());
+    push_ed2k_u32_tag(
+        payload,
+        CT_EMULE_MISCOPTIONS1,
+        emule_misc_options1() | (u32::from(no_view_shared_files) << 2),
+    );
     push_ed2k_u32_tag(
         payload,
         CT_EMULE_MISCOPTIONS2,
@@ -213,10 +209,17 @@ fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
 }
 
 pub(super) fn encode_hello_answer(identity: Ed2kHelloIdentity) -> Vec<u8> {
+    encode_hello_answer_with_share_policy(identity, false)
+}
+
+fn encode_hello_answer_with_share_policy(
+    identity: Ed2kHelloIdentity,
+    no_view_shared_files: bool,
+) -> Vec<u8> {
     encode_packet(
         OP_EDONKEYPROT,
         OP_HELLOANSWER,
-        &encode_hello_type_payload(identity, append_emule_hello_answer_tags),
+        &encode_hello_type_payload(identity, no_view_shared_files),
     )
 }
 
@@ -462,6 +465,7 @@ pub(super) struct DecodedHelloIdentity {
 pub(super) struct DecodedHelloProfile {
     pub(super) identity: DecodedHelloIdentity,
     pub(super) is_mule_hello: bool,
+    pub(super) emule_version_tag: Option<u32>,
     pub(super) supports_aich: bool,
     pub(super) supports_secure_ident: bool,
     pub(super) supports_multipacket: bool,
@@ -576,6 +580,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     cursor = &cursor[4..];
 
     let mut is_mule_hello = false;
+    let mut emule_version_tag = None;
     let mut client_software = None;
     let mut supports_ext_multipacket = false;
     let mut source_exchange_version = 0;
@@ -591,13 +596,14 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let (mut buddy_ip, mut buddy_udp) = (None, None);
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
-        if tag.tag_name == Some(CT_EMULE_VERSION) {
+        if tag.tag_name == Some(CT_EMULE_VERSION)
+            && let Some(version_tag) = decode_hello_tag_u32(&tag)
+        {
             is_mule_hello = true;
-            if let Some(version_tag) = decode_hello_tag_u32(&tag) {
-                client_software = Some(super::client_software::client_software_from_emule_version(
-                    version_tag,
-                ));
-            }
+            emule_version_tag = Some(version_tag);
+            client_software = Some(super::client_software::client_software_from_emule_version(
+                version_tag,
+            ));
         }
         if tag.tag_name == Some(CT_MOD_VERSION) {
             let mod_version = Ed2kStringEncoding::Utf8.decode(tag.value);
@@ -650,6 +656,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     Ok(DecodedHelloProfile {
         identity,
         is_mule_hello,
+        emule_version_tag,
         supports_aich: misc_options1.supports_aich(),
         supports_secure_ident: misc_options1.supports_secure_ident(),
         supports_multipacket: misc_options1.multipacket,
@@ -696,11 +703,22 @@ pub(super) fn build_hello_responses(
     incoming_payload: &[u8],
     response_identity: Ed2kHelloIdentity,
 ) -> Result<Vec<Vec<u8>>> {
+    build_hello_responses_with_share_policy(incoming_payload, response_identity, false)
+}
+
+pub(super) fn build_hello_responses_with_share_policy(
+    incoming_payload: &[u8],
+    response_identity: Ed2kHelloIdentity,
+    no_view_shared_files: bool,
+) -> Result<Vec<Vec<u8>>> {
     let is_mule_hello = is_mule_hello(incoming_payload)?;
     let mut replies = Vec::with_capacity(2);
     if !is_mule_hello {
         replies.push(encode_emule_info_request(response_identity.udp_port));
     }
-    replies.push(encode_hello_answer(response_identity));
+    replies.push(encode_hello_answer_with_share_policy(
+        response_identity,
+        no_view_shared_files,
+    ));
     Ok(replies)
 }

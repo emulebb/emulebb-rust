@@ -9,19 +9,19 @@ fn edit(value: Value) -> SettingsEdit {
 }
 
 #[test]
-fn complete_defaults_and_metadata_have_exactly_the_same_59_typed_leaves() {
+fn complete_defaults_and_metadata_have_exactly_the_same_60_typed_leaves() {
     let saved = SavedSettings::default();
     let values = saved.values();
     assert!(values.validate().is_empty());
     let specs = setting_specs();
-    assert_eq!(specs.len(), 59);
+    assert_eq!(specs.len(), 60);
     assert_eq!(
         specs
             .iter()
             .map(|spec| spec.key)
             .collect::<HashSet<_>>()
             .len(),
-        59
+        60
     );
     let plain = serde_json::to_value(values).unwrap();
     let document = serde_json::to_value(&saved).unwrap();

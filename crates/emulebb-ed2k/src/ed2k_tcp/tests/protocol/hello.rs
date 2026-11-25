@@ -335,11 +335,30 @@ fn hello_misc_options1_advertises_stock_comments_but_not_preview() {
     );
     assert_eq!(
         (misc_options1 >> 2) & 1,
-        1,
-        "the empty/denied shared-file browse policy is advertised"
+        0,
+        "shared-file browsing is enabled by default"
     );
     assert_eq!((misc_options1 >> 1) & 1, 1, "multipacket is implemented");
     assert_eq!(misc_options1 & 1, 0, "preview is not implemented");
+}
+
+#[test]
+fn hello_sets_the_stock_no_view_bit_only_for_off() {
+    let identity = Ed2kHelloIdentity {
+        user_hash: [0x51; 16],
+        client_id: 0,
+        tcp_port: 4662,
+        udp_port: 4672,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(false),
+        direct_udp_callback: false,
+    };
+    for off in [false, true] {
+        let packet = crate::ed2k_tcp::hello::encode_hello_request_with_share_policy(identity, off);
+        let hello = decode_hello_profile(&packet[6..]).unwrap();
+        assert_eq!(hello.misc_options1.no_view_shared_files, off);
+    }
 }
 
 #[test]
@@ -363,7 +382,7 @@ fn hello_answer_matches_truthful_plaintext_profile() {
     });
 
     let expected = decode(
-            "e3540000004c73bec566140e7e6083c450c9af026f8395581b524fb606000000020100010500654d756c65030100113c000000030100f951b651b6030100fa16021334030100fe3a240000030100fb00200100b07b02ef8810",
+            "e3540000004c73bec566140e7e6083c450c9af026f8395581b524fb606000000020100010500654d756c65030100113c000000030100f951b651b6030100fa12021334030100fe3a240000030100fb00200100b07b02ef8810",
         )
         .unwrap();
 

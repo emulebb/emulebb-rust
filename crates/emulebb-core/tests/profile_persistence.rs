@@ -44,6 +44,7 @@ async fn profile_state_survives_core_restart() {
         core.add_friend(FriendCreate {
             user_hash: "00112233445566778899aabbccddeeff".to_string(),
             name: Some("Peer One".to_string()),
+            browse_key_sha256: None,
         })
         .await
         .unwrap();

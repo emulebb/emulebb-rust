@@ -255,6 +255,14 @@ impl EmulebbCore {
             crate::parse_ban_hash(row.source.user_hash.as_deref()).as_ref(),
         );
         let mut source = crate::download_source_from_record(hash, row, banned, parts);
+        if !source.banned
+            && let Ok(endpoint) = source.endpoint.parse()
+        {
+            let registry = self.ed2k_transfers.peer_browse_registry();
+            let user_hash = crate::parse_ban_hash(source.user_hash.as_deref());
+            source.view_shared_files = registry.supports(user_hash, endpoint);
+            source.shared_files_request_pending = registry.pending(user_hash, endpoint);
+        }
         crate::apply_download_source_stats(
             &self.ed2k_transfers,
             token,

@@ -18,10 +18,21 @@ impl EmulebbCore {
     pub async fn add_friend(&self, request: FriendCreate) -> Result<Friend> {
         let user_hash = normalize_user_hash(&request.user_hash)?;
         let name = normalize_friend_name(request.name.as_deref())?;
+        let browse_key_sha256 = request
+            .browse_key_sha256
+            .as_deref()
+            .map(|fingerprint| {
+                let mut key = [0; 32];
+                hex::decode_to_slice(fingerprint, &mut key).map_err(|_| {
+                    anyhow::anyhow!("browse key fingerprint must be 64 hexadecimal digits")
+                })?;
+                Ok::<_, anyhow::Error>(key)
+            })
+            .transpose()?;
         Ok(self
             .persistence_owner
             .owner(&self.metadata_store, &self.state)?
-            .add(user_hash, name)
+            .add_with_browse_key(user_hash, name, browse_key_sha256)
             .await?)
     }
 

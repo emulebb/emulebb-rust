@@ -659,7 +659,7 @@ fn unix_time_ms() -> i64 {
 /// Classify a filename to its published ED2K search-ID (`GetED2KFileTypeSearchID`).
 /// Archives and CD/DVD images fold to PROGRAM ("Pro"); an unrecognized extension
 /// is ANY (0), which publishes no FT_FILETYPE tag at all.
-fn ed2k_offer_file_type(file_name: &str) -> u8 {
+pub(crate) fn ed2k_offer_file_type(file_name: &str) -> u8 {
     match file_name
         .rsplit('.')
         .next()
@@ -691,7 +691,7 @@ fn ed2k_offer_file_type(file_name: &str) -> u8 {
 
 /// The string FT_FILETYPE term (`GetED2KFileTypeSearchTerm`) for a search-ID, used
 /// for servers without `SRV_TCPFLG_TYPETAGINTEGER`. ANY has no term.
-fn ed2k_file_type_search_term(search_id: u8) -> Option<&'static str> {
+pub(crate) fn ed2k_file_type_search_term(search_id: u8) -> Option<&'static str> {
     match search_id {
         ED2K_FILETYPE_AUDIO => Some("Audio"),
         ED2K_FILETYPE_VIDEO => Some("Video"),

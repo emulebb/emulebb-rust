@@ -64,10 +64,23 @@ pub(super) async fn exchange_probe(
             request_metadata(transport, &options, &state).await?;
             requested = true;
         }
-        let packet = match transport
-            .read_packet_diagnostic("source_probe", peer_addr, "availability")
-            .await
-        {
+        // An accepted callback can already own a browse operation from the listener.
+        // Keep that operation on this socket while metadata is being negotiated.
+        let read = match transport.wait_for_input().await {
+            Ok(Some(frame)) => {
+                transport
+                    .write_all_diagnostic("source_probe", peer_addr, "peer_browse_request", &frame)
+                    .await?;
+                continue;
+            }
+            Ok(None) => {
+                transport
+                    .read_packet_diagnostic("source_probe", peer_addr, "availability")
+                    .await
+            }
+            Err(error) => Err(error.into()),
+        };
+        let packet = match read {
             Ok(Some(packet)) => packet,
             Ok(None) => return Ok(ProbeExchangeOutcome::Closed(None)),
             Err(error) if is_connection_shutdown_error(&error) => {
@@ -94,7 +107,13 @@ pub(super) async fn exchange_probe(
                     "probe peer changed identity"
                 );
                 if packet.opcode == OP_HELLO {
-                    for reply in build_hello_responses(&packet.payload, options.hello_identity)? {
+                    for reply in
+                        super::super::super::super::build_hello_responses_with_share_policy(
+                            &packet.payload,
+                            options.hello_identity,
+                            !runtime.advertises_shared_files(),
+                        )?
+                    {
                         transport
                             .write_all_diagnostic("source_probe", peer_addr, "hello_reply", &reply)
                             .await?;
@@ -176,6 +195,55 @@ pub(super) async fn exchange_probe(
                             peer_addr,
                             "emule_info_answer",
                             &encode_emule_info_answer(options.hello_identity.udp_port),
+                        )
+                        .await?;
+                }
+            }
+            (OP_EDONKEYPROT, OP_ASKSHAREDFILES | OP_ASKSHAREDDIRS | OP_ASKSHAREDFILESDIR) => {
+                if let Some(peer) = state.browse_peer {
+                    let frame = transport
+                        .browse
+                        .serving
+                        .reply(
+                            runtime,
+                            packet.opcode,
+                            &packet.payload,
+                            peer,
+                            options.hello_identity,
+                            BrowseIdentity {
+                                user_hash: state.peer_user_hash,
+                                secure_ident: &state.peer_secure_ident,
+                            },
+                        )
+                        .await?;
+                    transport
+                        .write_all_diagnostic(
+                            "source_probe",
+                            peer_addr,
+                            "peer_browse_reply",
+                            &frame,
+                        )
+                        .await?;
+                }
+            }
+            (
+                OP_EDONKEYPROT,
+                OP_ASKSHAREDFILESANSWER
+                | OP_ASKSHAREDDIRSANS
+                | OP_ASKSHAREDFILESDIRANS
+                | OP_ASKSHAREDDENIEDANS,
+            ) => {
+                if let Some(session) = &transport.browse.session
+                    && let Some(frame) = session
+                        .handle_reply_async(packet.opcode, packet.payload)
+                        .await
+                {
+                    transport
+                        .write_all_diagnostic(
+                            "source_probe",
+                            peer_addr,
+                            "peer_browse_request",
+                            &frame,
                         )
                         .await?;
                 }
