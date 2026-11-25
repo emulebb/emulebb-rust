@@ -239,7 +239,7 @@ impl PeerUploadFacet {
                 .await?;
             }
             (OP_EDONKEYPROT, OP_REQUESTFILENAME) => {
-                self.requested_file_hash = handle_request_filename(
+                if let Some(requested) = handle_request_filename(
                     transfer_runtime,
                     transport,
                     peer_addr,
@@ -248,12 +248,18 @@ impl PeerUploadFacet {
                     string_encoding,
                     &mut self.requester_file_state,
                 )
-                .await?;
+                .await?
+                {
+                    self.requested_file_hash = Some(requested);
+                }
             }
             (OP_EDONKEYPROT, OP_SETREQFILEID) => {
-                self.requested_file_hash =
+                if let Some(requested) =
                     handle_set_req_file_id(transfer_runtime, transport, peer_addr, &packet.payload)
-                        .await?;
+                        .await?
+                {
+                    self.requested_file_hash = Some(requested);
+                }
             }
             (OP_EDONKEYPROT, OP_STARTUPLOADREQ) => {
                 let requested =

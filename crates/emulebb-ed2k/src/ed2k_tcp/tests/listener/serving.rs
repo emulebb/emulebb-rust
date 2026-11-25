@@ -1,6 +1,84 @@
 use super::*;
 use crate::ed2k_transfer::Ed2kTransferState;
 
+#[tokio::test]
+async fn listener_distinguishes_unknown_filename_and_empty_partial_status() {
+    let root = unique_test_dir("ed2k-standalone-file-status");
+    let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let partial = Ed2kHash::from_bytes([0x41; 16]);
+    let exact = Ed2kHash::from_bytes([0x42; 16]);
+    let single = Ed2kHash::from_bytes([0x43; 16]);
+    let unknown = Ed2kHash::from_bytes([0x44; 16]);
+    for (hash, size) in [
+        (partial, ED2K_PART_SIZE + 1),
+        (exact, 2 * ED2K_PART_SIZE),
+        (single, ED2K_PART_SIZE),
+    ] {
+        let job = crate::ed2k_transfer::test_support::admit_download_job(
+            &runtime,
+            hash,
+            "partial.bin".to_string(),
+            size,
+        );
+        runtime.ensure_job(&job).await.unwrap();
+    }
+    assert!(
+        runtime
+            .local_servable_entry(&exact)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let server = spawn_single_listener_connection(
+        listener,
+        test_dht().await,
+        Arc::new(RwLock::new(Ed2kServerState::default())),
+        Arc::new(Mutex::new(KadFirewallState::default())),
+        listener_secure_ident(),
+        runtime,
+        listener_hello_identity(),
+    );
+    let mut stream = connect_peer_and_exchange_hello(peer_addr, peer_hello_identity()).await;
+
+    stream
+        .write_all(&encode_packet(
+            OP_EDONKEYPROT,
+            OP_REQUESTFILENAME,
+            &unknown.0,
+        ))
+        .await
+        .unwrap();
+    for (hash, opcode, body) in [
+        (partial, OP_FILESTATUS, &[2, 0, 0][..]),
+        (exact, OP_FILESTATUS, &[3, 0, 0b100][..]),
+        (single, OP_FILEREQANSNOFIL, &[][..]),
+        (unknown, OP_FILEREQANSNOFIL, &[][..]),
+    ] {
+        stream
+            .write_all(&encode_packet(OP_EDONKEYPROT, OP_SETREQFILEID, &hash.0))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let packet = read_packet(&mut stream).await;
+                if packet[0] == OP_EDONKEYPROT {
+                    break packet;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply[5], opcode);
+        assert_eq!(&reply[6..22], &hash.0);
+        assert_eq!(&reply[22..], body);
+    }
+    drop(stream);
+    server.await.unwrap();
+}
+
 #[test]
 fn upload_part_packets_split_large_uncompressed_ranges() {
     let file_hash = Ed2kHash::from_bytes([0x5A; 16]);
