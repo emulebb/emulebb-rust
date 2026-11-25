@@ -151,6 +151,38 @@ async fn listener_distinguishes_unknown_filename_and_empty_partial_status() {
         assert_eq!(&reply[6..22], &hash.0);
         assert_eq!(&reply[22..], body);
     }
+
+    // A rejected multipacket must not make the rejected hash the active file.
+    // A subsequent end notification for that hash must leave the session live.
+    let mut rejected_request = unknown.0.to_vec();
+    rejected_request.push(OP_SETREQFILEID);
+    stream
+        .write_all(&encode_packet(
+            OP_EMULEPROT,
+            OP_MULTIPACKET,
+            &rejected_request,
+        ))
+        .await
+        .unwrap();
+    let rejected = read_next_edonkey_packet(&mut stream).await;
+    assert_eq!(rejected[5], OP_FILEREQANSNOFIL);
+    assert_eq!(&rejected[6..], &unknown.0);
+    stream
+        .write_all(&encode_packet(
+            OP_EDONKEYPROT,
+            OP_END_OF_DOWNLOAD,
+            &unknown.0,
+        ))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(OP_EDONKEYPROT, OP_SETREQFILEID, &exact.0))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_next_edonkey_packet(&mut stream).await[5],
+        OP_FILESTATUS
+    );
     drop(stream);
     server.await.unwrap();
 }

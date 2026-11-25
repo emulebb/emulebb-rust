@@ -873,7 +873,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
             }
             (OP_EMULEPROT, OP_MULTIPACKET) | (OP_EMULEPROT, OP_MULTIPACKET_EXT) => {
-                requested_file_hash = handle_multipacket_request(
+                if let Some(requested) = handle_multipacket_request(
                     transfer_runtime,
                     &mut transport,
                     peer_addr,
@@ -885,10 +885,13 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &mut requester_file_state,
                     &mut source_exchange_throttle,
                 )
-                .await?;
+                .await?
+                {
+                    requested_file_hash = Some(requested);
+                }
             }
             (OP_EMULEPROT, OP_MULTIPACKET_EXT2) => {
-                requested_file_hash = handle_multipacket_ext2_request(
+                if let Some(requested) = handle_multipacket_ext2_request(
                     transfer_runtime,
                     &mut transport,
                     peer_addr,
@@ -897,7 +900,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &mut requester_file_state,
                     &mut source_exchange_throttle,
                 )
-                .await?;
+                .await?
+                {
+                    requested_file_hash = Some(requested);
+                }
             }
             (OP_EDONKEYPROT, OP_REQUESTFILENAME) => {
                 if let Some(requested) = handle_request_filename(

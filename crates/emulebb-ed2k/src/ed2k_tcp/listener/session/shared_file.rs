@@ -116,7 +116,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
         .filter(|entry| peer.permits_size(entry.file_size))
     else {
         send_nofile(transport, peer_addr, &requested, "multipacket_ext2_nofil").await?;
-        return Ok(Some(requested));
+        return Ok(None);
     };
     let shared_identifier = Ed2kFileIdentifier::from_shared_entry(&shared)?;
     if !shared_identifier.matches_relaxed(&requested_identifier) {
@@ -127,7 +127,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
             "multipacket_ext2_mismatch",
         )
         .await?;
-        return Ok(Some(requested));
+        return Ok(None);
     }
 
     let mut include_filename = false;
@@ -251,7 +251,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         .filter(|entry| peer.permits_size(entry.file_size))
     else {
         send_nofile(transport, peer_addr, &requested, "multipacket_nofil").await?;
-        return Ok(Some(requested));
+        return Ok(None);
     };
     if requested_size.is_some_and(|size| size != shared.file_size) {
         send_nofile(
@@ -261,7 +261,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
             "multipacket_size_mismatch",
         )
         .await?;
-        return Ok(Some(requested));
+        return Ok(None);
     }
 
     let mut include_filename = false;

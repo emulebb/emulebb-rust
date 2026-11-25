@@ -219,7 +219,7 @@ impl PeerUploadFacet {
         };
         match (packet.protocol, packet.opcode) {
             (OP_EMULEPROT, OP_MULTIPACKET | OP_MULTIPACKET_EXT) => {
-                self.requested_file_hash = handle_multipacket_request(
+                if let Some(requested) = handle_multipacket_request(
                     transfer_runtime,
                     transport,
                     peer_addr,
@@ -231,10 +231,13 @@ impl PeerUploadFacet {
                     &mut self.requester_file_state,
                     &mut self.source_exchange_throttle,
                 )
-                .await?;
+                .await?
+                {
+                    self.requested_file_hash = Some(requested);
+                }
             }
             (OP_EMULEPROT, OP_MULTIPACKET_EXT2) => {
-                self.requested_file_hash = handle_multipacket_ext2_request(
+                if let Some(requested) = handle_multipacket_ext2_request(
                     transfer_runtime,
                     transport,
                     peer_addr,
@@ -243,7 +246,10 @@ impl PeerUploadFacet {
                     &mut self.requester_file_state,
                     &mut self.source_exchange_throttle,
                 )
-                .await?;
+                .await?
+                {
+                    self.requested_file_hash = Some(requested);
+                }
             }
             (OP_EDONKEYPROT, OP_REQUESTFILENAME) => {
                 if let Some(requested) = handle_request_filename(
