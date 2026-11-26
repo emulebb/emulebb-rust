@@ -31,8 +31,8 @@
   "inputs": {
     "emulebb-miniupnp": "4e7a10948004ca2085ac8103e14fc77edb898b4c",
     "emulebb-libpcpnatpmp": "a6e787f837e507336a8774522c33b54264ef4a4b",
-    "emulebb-build-tests": "29450d0d1e75ac182614a55dcfae6fbae657ef80",
-    "emulebb-tooling": "2c54c2c1f21f89c13153d6fd4572d2dc53769673"
+    "emulebb-build-tests": "4f248cdf568cdbc08e7a7f285174793251248d54",
+    "emulebb-tooling": "f0a18a9bdd7fbafaeb26b1238be499c8971c5198"
   },
   "node": "26.13.0",
   "npm": "11.20.0",
