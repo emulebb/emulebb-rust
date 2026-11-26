@@ -224,6 +224,93 @@ async fn listener_and_requester_browse_one_hundred_thousand_files_over_tcp() {
     task.await.unwrap();
 }
 
+#[tokio::test]
+async fn listener_disconnects_browse_on_oversized_directory_answer() {
+    use crate::ed2k_string::Ed2kStringEncoding;
+    use crate::ed2k_tcp::{
+        OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILESDIRANS, PeerBrowseStatus,
+        codec::shared_browse::{
+            PeerBrowseEncoding, PeerBrowseFile, encode_browse_dirs, encode_browse_files,
+            split_browse_directory,
+        },
+    };
+
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-oversized-browse-answer",
+        listener_hello_identity(),
+        [0x69; 16],
+        0x1122_3344,
+    )
+    .await;
+    let connection = runtime.spawn_listener_results(1);
+    let peer = peer_hello_identity();
+    let mut stream = connect_peer_and_exchange_hello(runtime.peer_addr, peer).await;
+    let registry = runtime.transfer_runtime.peer_browse_registry();
+    let endpoint = SocketAddr::new(runtime.peer_addr.ip(), peer.tcp_port);
+    let browse = registry.start(Some(peer.user_hash), endpoint).unwrap();
+
+    let valid_dir = b"Music".to_vec();
+    let oversized_dir = b"Videos".to_vec();
+    let file = PeerBrowseFile {
+        file_hash: Ed2kHash::from_bytes([0x71; 16]),
+        display_name: "valid.bin".into(),
+        file_size: 42,
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_ASKSHAREDDIRS).await;
+        let directories = encode_browse_dirs(&[valid_dir.clone(), oversized_dir.clone()]).unwrap();
+        assert_eq!(directories[5], OP_ASKSHAREDDIRSANS);
+        stream.write_all(&directories).await.unwrap();
+
+        let request = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR).await;
+        assert_eq!(split_browse_directory(&request[6..]).unwrap().0, valid_dir);
+        let answer = encode_browse_files(
+            std::slice::from_ref(&file),
+            Some(&valid_dir),
+            PeerBrowseEncoding {
+                strings: Ed2kStringEncoding::Utf8,
+                compact_tags: true,
+                emule_family: true,
+                supports_large_files: true,
+                local_endpoint: None,
+            },
+        )
+        .unwrap();
+        stream.write_all(&answer).await.unwrap();
+
+        let request = read_until_opcode(&mut stream, OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR).await;
+        assert_eq!(
+            split_browse_directory(&request[6..]).unwrap().0,
+            oversized_dir
+        );
+        let interim = registry.page(browse.search_id, 0, 8).unwrap();
+        assert_eq!(interim.status, PeerBrowseStatus::Pending);
+        assert_eq!(interim.total, 1);
+
+        // The length field includes the opcode. Keep the socket open and omit
+        // the body so waiting for an oversized payload fails the deadline.
+        let payload_len = 2_000_001_u32;
+        let mut header = [OP_EDONKEYPROT, 0, 0, 0, 0, OP_ASKSHAREDFILESDIRANS];
+        header[1..5].copy_from_slice(&(payload_len + 1).to_le_bytes());
+        stream.write_all(&header).await.unwrap();
+
+        let mut remaining = Vec::new();
+        stream.read_to_end(&mut remaining).await.unwrap();
+        let results = connection.await.unwrap();
+        let error = results.into_iter().next().unwrap().unwrap_err();
+        assert!(format!("{error:#}").contains("oversized eD2k peer packet length 2000001"));
+    })
+    .await
+    .expect("browse connection did not reject the oversized directory header");
+
+    let page = registry.page(browse.search_id, 0, 8).unwrap();
+    assert_eq!(page.status, PeerBrowseStatus::Disconnected);
+    assert_eq!(page.total, 1);
+    assert_eq!(page.files.len(), 1);
+    assert_eq!(page.files[0].directory.as_deref(), Some("Music"));
+    assert_eq!(page.files[0].file, file);
+}
+
 async fn read_next_edonkey_packet(stream: &mut TcpStream) -> Vec<u8> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
