@@ -23,11 +23,11 @@ use crate::{
 
 use super::super::super::codec::{
     SourceExchangePeer, decode_exact_file_hash_payload, decode_file_hash_payload,
-    decode_hashset_request2, decode_request_filename_ext_info, decode_request_sources_payload,
-    encode_aich_file_hash_answer, encode_answer_sources2, encode_file_desc,
-    encode_file_req_ans_nofil, encode_file_status, encode_hashset_answer, encode_hashset_answer2,
-    encode_multipacket_answer, encode_multipacket_ext2_answer, encode_request_filename_answer,
-    source_exchange_entry_count,
+    decode_hashset_request2, decode_multipacket_filename_ext_info,
+    decode_request_filename_ext_info, decode_request_sources_payload, encode_aich_file_hash_answer,
+    encode_answer_sources2, encode_file_desc, encode_file_req_ans_nofil, encode_file_status,
+    encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
+    encode_multipacket_ext2_answer, encode_request_filename_answer, source_exchange_entry_count,
 };
 
 const SOURCE_EXCHANGE_RARE_FILE_MAX_SOURCES: usize = 50;
@@ -136,7 +136,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                let (ext_info, rest) = decode_request_filename_ext_info(
+                let (ext_info, rest) = decode_multipacket_filename_ext_info(
                     remaining,
                     shared.file_size,
                     peer.extended_requests_version,
@@ -274,7 +274,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         remaining = rest;
         match sub_opcode {
             OP_REQUESTFILENAME => {
-                let (ext_info, rest) = decode_request_filename_ext_info(
+                let (ext_info, rest) = decode_multipacket_filename_ext_info(
                     remaining,
                     shared.file_size,
                     peer.extended_requests_version,

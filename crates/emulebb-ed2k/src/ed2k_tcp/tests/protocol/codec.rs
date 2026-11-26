@@ -52,8 +52,12 @@ fn filename_request_versions_divide_each_envelope_at_the_stock_boundary() {
         let subrequests = [&[OP_REQUESTFILENAME][..], tail, &[OP_SETREQFILEID]].concat();
         for packet in [legacy, extended, ext2] {
             assert!(packet.ends_with(&subrequests));
-            let (decoded, rest) =
-                decode_request_filename_ext_info(&subrequests[1..], file_size, version).unwrap();
+            let (decoded, rest) = crate::ed2k_tcp::codec::decode_multipacket_filename_ext_info(
+                &subrequests[1..],
+                file_size,
+                version,
+            )
+            .unwrap();
             assert_eq!(rest, [OP_SETREQFILEID]);
             assert_eq!(
                 decoded.part_status,
@@ -74,7 +78,7 @@ fn compact_request_status_preserves_verified_bits_and_exact_multiple_eof() {
         FILENAME_EXTENSION_V2,
         [true, false, false, true, false, false, false, true].into_iter(),
     );
-    assert_eq!(status, [9, 0, 0b1000_1001, 1, 0, 0]);
+    assert_eq!(status, [9, 0, 0b1000_1001, 0, 0]);
     let (decoded, rest) = decode_request_filename_ext_info(&status, ED2K_PART_SIZE * 8, 2).unwrap();
     assert!(rest.is_empty());
     assert_eq!(decoded.complete_source_count, 0);
@@ -82,6 +86,70 @@ fn compact_request_status_preserves_verified_bits_and_exact_multiple_eof() {
         decoded.part_status.unwrap(),
         [true, false, false, true, false, false, false, true, true]
     );
+}
+
+#[test]
+fn exact_eight_part_filename_parses_native_and_wide_bitmap_forms() {
+    use crate::ed2k_tcp::codec::decode_multipacket_filename_ext_info;
+
+    let file_size = ED2K_PART_SIZE * 8;
+    let bits = 0b1000_1001;
+    for (version, compact, wide) in [
+        (1, &[9, 0, bits][..], &[9, 0, bits, 1][..]),
+        (
+            2,
+            &[9, 0, bits, 0x34, 0x12][..],
+            &[9, 0, bits, 1, 0x34, 0x12][..],
+        ),
+    ] {
+        for payload in [compact, wide] {
+            let (info, rest) =
+                decode_request_filename_ext_info(payload, file_size, version).unwrap();
+            assert_eq!(
+                info.part_status.unwrap(),
+                [true, false, false, true, false, false, false, true, true]
+            );
+            assert_eq!(
+                info.complete_source_count,
+                if version == 2 { 0x1234 } else { 0 }
+            );
+            assert!(rest.is_empty());
+
+            let tail = [OP_SETREQFILEID, OP_REQUESTSOURCES2, 4, 0, 0];
+            let packet = [payload, &tail].concat();
+            let (info, rest) =
+                decode_multipacket_filename_ext_info(&packet, file_size, version).unwrap();
+            assert_eq!(
+                info.complete_source_count,
+                if version == 2 { 0x1234 } else { 0 }
+            );
+            assert_eq!(rest, tail);
+        }
+    }
+
+    // Either suffix is framed when the first status sub-op can be consumed
+    // as the high byte of a guessed wide count. Keep the compact layout.
+    let compact = [
+        9,
+        0,
+        bits,
+        0,
+        0,
+        OP_SETREQFILEID,
+        OP_REQUESTSOURCES2,
+        4,
+        0,
+        0,
+    ];
+    let (info, rest) = decode_multipacket_filename_ext_info(&compact, file_size, 2).unwrap();
+    assert_eq!(info.complete_source_count, 0);
+    assert_eq!(rest, &compact[5..]);
+    // A valid-looking SX2 opcode in the wide count cannot be a subrequest:
+    // the complete compact tail lacks the three SX2 option bytes.
+    let wide = [9, 0, bits, 1, 0x34, OP_REQUESTSOURCES2, OP_SETREQFILEID];
+    let (info, rest) = decode_multipacket_filename_ext_info(&wide, file_size, 2).unwrap();
+    assert_eq!(info.complete_source_count, 0x8334);
+    assert_eq!(rest, &[OP_SETREQFILEID]);
 }
 
 #[test]

@@ -10,9 +10,49 @@ use super::super::{
     OP_REQUESTSOURCES2, OP_SETREQFILEID,
 };
 use super::{
-    FilenameRequestExtension, encode_packet, encode_request_filename_answer_body,
-    encode_request_filename_ext_info, encode_request_sources2_subpayload,
+    FilenameRequestExtension, RequestFilenameExtInfo, encode_packet,
+    encode_request_filename_answer_body, encode_request_filename_ext_info,
+    encode_request_sources2_subpayload, filename_request_ext_layout,
 };
+
+pub(in crate::ed2k_tcp) fn decode_multipacket_filename_ext_info(
+    payload: &[u8],
+    file_size: u64,
+    version: u8,
+) -> Result<(RequestFilenameExtInfo, &[u8])> {
+    let layout = filename_request_ext_layout(payload, file_size, version)?;
+    let wide = layout.wide_end(payload).is_some_and(|wide_end| {
+        // Some byte sequences admit both interpretations. Prefer the width
+        // used by the stock reader when the full compact suffix is valid.
+        let suffix = &payload[layout.compact_end()..];
+        let framed = framed_multipacket_suffixes(suffix, file_size, version);
+        !framed[0] && framed[wide_end - layout.compact_end()]
+    });
+    Ok(layout.decode(payload, wide))
+}
+
+fn framed_multipacket_suffixes(payload: &[u8], file_size: u64, version: u8) -> Vec<bool> {
+    // Work backwards so ambiguous repeated subrequests require one bounded
+    // pass, without running handler side effects or recursive backtracking.
+    let mut framed = vec![false; payload.len() + 1];
+    framed[payload.len()] = true;
+    for offset in (0..payload.len()).rev() {
+        let start = offset + 1;
+        let tail = &payload[start..];
+        framed[offset] = match payload[offset] {
+            OP_SETREQFILEID | OP_REQUESTSOURCES | OP_AICHFILEHASHREQ => framed[start],
+            OP_REQUESTSOURCES2 => framed.get(start + 3).copied().unwrap_or(false),
+            OP_REQUESTFILENAME => {
+                filename_request_ext_layout(tail, file_size, version).is_ok_and(|layout| {
+                    framed[start + layout.compact_end()]
+                        || layout.wide_end(tail).is_some_and(|end| framed[start + end])
+                })
+            }
+            _ => false,
+        };
+    }
+    framed
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ed2k_tcp) enum PeerSourceExchangeRequest {
