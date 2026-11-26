@@ -110,11 +110,8 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
 ) -> Result<Option<Ed2kHash>> {
     let (requested_identifier, mut remaining) = Ed2kFileIdentifier::decode(payload)?;
     let requested = requested_identifier.file_hash;
-    // A partfile is a valid requested file only once it holds at least one
-    // complete part (master ListenSocket.cpp file-request fallback:
-    // downloadqueue file with GetCompletedSize() >= PARTSIZE).
     let Some(shared) = transfer_runtime
-        .local_servable_entry(&requested)
+        .local_file_request_entry(&requested)
         .await?
         .filter(|entry| peer.permits_size(entry.file_size))
     else {
@@ -252,7 +249,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         None
     };
     let Some(shared) = transfer_runtime
-        .local_servable_entry(&requested)
+        .local_file_request_entry(&requested)
         .await?
         .filter(|entry| peer.permits_size(entry.file_size))
     else {
@@ -362,7 +359,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
     let Some(shared) = transfer_runtime
-        .local_servable_entry(&requested)
+        .local_file_request_entry(&requested)
         .await?
         .filter(|entry| peer.permits_size(entry.file_size))
     else {
@@ -422,7 +419,7 @@ pub(in crate::ed2k_tcp) async fn handle_set_req_file_id(
     let requested = decode_exact_file_hash_payload(payload, "OP_SETREQFILEID")?;
     // WHY: Stock answers status for a known multipart download before it has
     // verified data. Reporting file-not-found would discard a future source.
-    // Only the status lookup uses this broader eligibility.
+    // Status admits these jobs even before the filename request threshold.
     let shared = transfer_runtime
         .local_entry(&requested)
         .await?

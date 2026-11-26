@@ -690,6 +690,15 @@ impl Ed2kTransferRuntime {
         &self,
         file_hash: &Ed2kHash,
     ) -> Result<Option<super::Ed2kFileServingView>> {
+        self.local_serving_view_with_progress(file_hash, false)
+            .await
+    }
+
+    async fn local_serving_view_with_progress(
+        &self,
+        file_hash: &Ed2kHash,
+        include_request_progress: bool,
+    ) -> Result<Option<super::Ed2kFileServingView>> {
         let hash_hex = file_hash.to_string();
         let mut retry_deadline = None;
         loop {
@@ -704,9 +713,13 @@ impl Ed2kTransferRuntime {
                     None => None,
                 };
                 capacity_revision = self.local_mutations.capacity_revision();
-                self.load_serving_view_optional_unlocked(&hash_hex, token)
-                    .await
-                    .context("failed to load local serving view")
+                self.load_serving_view_with_progress_unlocked(
+                    &hash_hex,
+                    token,
+                    include_request_progress,
+                )
+                .await
+                .context("failed to load local serving view")
             }
             .await;
             let error = match view {
@@ -739,11 +752,24 @@ impl Ed2kTransferRuntime {
         }
     }
 
-    /// Like [`Self::local_entry`] but only returns an entry that may be served
-    /// to an inbound peer right now: a fully verified file, or an in-progress
-    /// partfile holding at least one complete part ("share while downloading").
-    /// Mirrors the master file-request fallback that admits a `downloadqueue`
-    /// partfile only with at least one complete part (ListenSocket.cpp).
+    /// Stock filename and multipacket requests check the shared list first.
+    /// The download-queue fallback uses one part's worth of received bytes,
+    /// including when that progress is scattered across unverified parts.
+    pub(crate) async fn local_file_request_entry(
+        &self,
+        file_hash: &Ed2kHash,
+    ) -> Result<Option<Ed2kSharedEntry>> {
+        Ok(self
+            .local_serving_view_with_progress(file_hash, true)
+            .await?
+            .and_then(|view| {
+                let entry = Ed2kSharedEntry::from_serving_view(&view);
+                (view.may_answer_file_request || entry.is_servable()).then_some(entry)
+            }))
+    }
+
+    /// Like [`Self::local_entry`] but requires a fully verified file or a
+    /// partfile holding at least one verified data part for upload admission.
     pub async fn local_servable_entry(
         &self,
         file_hash: &Ed2kHash,

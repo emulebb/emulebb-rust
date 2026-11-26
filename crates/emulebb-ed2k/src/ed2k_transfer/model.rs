@@ -14,7 +14,10 @@ use emulebb_metadata::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::block_bitmap::PartBlockBitmap;
-use super::{Ed2kSharedRange, manifest::piece_count};
+use super::{
+    ED2K_PART_SIZE, Ed2kSharedRange,
+    manifest::{expected_piece_length, piece_count},
+};
 
 /// One persisted ED2K transfer job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +418,7 @@ pub struct Ed2kFileServingView {
     pub local_path: Option<PathBuf>,
     pub local_fingerprint: Option<NativeFileFingerprint>,
     pub(crate) has_payload_authority: bool,
+    pub(crate) may_answer_file_request: bool,
 }
 
 impl From<&Ed2kResumeManifest> for Ed2kFileServingView {
@@ -438,6 +442,7 @@ impl From<&Ed2kResumeManifest> for Ed2kFileServingView {
             rating: download.rating,
             local_path: None,
             local_fingerprint: None,
+            may_answer_file_request: download.completed,
             has_payload_authority: !download.final_rehash_pending
                 && if download.completed {
                     download.payload_fingerprint.is_some()
@@ -795,6 +800,31 @@ mod optional_native_path_serde {
 }
 
 impl Ed2kResumeManifest {
+    /// Whether received bytes meet stock's download-queue fallback for file
+    /// requests. Count sparse full blocks and exact contiguous prefixes.
+    pub(super) fn meets_file_request_progress_threshold(&self) -> bool {
+        if self.file_size < ED2K_PART_SIZE {
+            return false;
+        }
+        let mut received = 0;
+        for piece in &self.pieces {
+            let part_len = expected_piece_length(
+                self.file_size,
+                self.piece_size,
+                u64::from(piece.piece_index),
+            );
+            received += if piece.has_block_bitmap() {
+                piece.resolve_block_bitmap(part_len).present_bytes()
+            } else {
+                piece.bytes_written.min(part_len)
+            };
+            if received >= ED2K_PART_SIZE {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Exact durable payload bytes represented by the per-part block maps.
     ///
     /// Unlike summing `bytes_written`, this includes non-contiguous blocks

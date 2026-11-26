@@ -1158,10 +1158,8 @@ impl Ed2kSharedEntry {
     }
 
     /// Whether this entry may be served to an inbound peer right now: a fully
-    /// verified file, or an in-progress partfile holding at least one complete
-    /// ED2K part. Mirrors the master file-request fallback admitting a
-    /// `downloadqueue` partfile only with `GetCompletedSize() >= PARTSIZE`
-    /// (ListenSocket.cpp `OP_FILEREQUEST`), i.e. at least one complete part.
+    /// verified file, or an in-progress partfile holding at least one verified
+    /// ED2K data part.
     #[must_use]
     pub fn is_servable(&self) -> bool {
         // WHY: The trailing virtual EOF bit is true at exact part boundaries
