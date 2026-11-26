@@ -1,5 +1,234 @@
 use super::*;
 
+async fn write_sx2_fixture_frame(
+    stream: &mut tokio::net::TcpStream,
+    protocol: u8,
+    opcode: u8,
+    payload: &[u8],
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let mut frame = vec![protocol];
+    frame.extend_from_slice(&u32::try_from(payload.len() + 1).unwrap().to_le_bytes());
+    frame.push(opcode);
+    frame.extend_from_slice(payload);
+    stream.write_all(&frame).await.unwrap();
+}
+
+async fn read_sx2_fixture_frame(stream: &mut tokio::net::TcpStream) -> (u8, u8, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+
+    let protocol = stream.read_u8().await.unwrap();
+    let length = stream.read_u32_le().await.unwrap();
+    assert!((1..=4096).contains(&length));
+    let opcode = stream.read_u8().await.unwrap();
+    let mut payload = vec![0; length as usize - 1];
+    stream.read_exact(&mut payload).await.unwrap();
+    (protocol, opcode, payload)
+}
+
+#[tokio::test]
+async fn solicited_sx2_low_ids_dispatch_to_their_own_servers() {
+    use emulebb_ed2k::ed2k_tcp::{
+        Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, download_file_from_peer,
+    };
+    use emulebb_ed2k::networking::EgressRoute;
+    use tokio::{io::AsyncWriteExt, net::UdpSocket};
+
+    let bind_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let receivers = [
+        UdpSocket::bind(bind_addr).await.unwrap(),
+        UdpSocket::bind(bind_addr).await.unwrap(),
+    ];
+    let servers = receivers.each_ref().map(|socket| {
+        let udp_port = socket.local_addr().unwrap().port();
+        SocketAddr::from((Ipv4Addr::LOCALHOST, udp_port.checked_sub(4).unwrap()))
+    });
+    let listener = TcpListener::bind(bind_addr).await.unwrap();
+    let seed_addr = listener.local_addr().unwrap();
+    let root = unique_runtime_dir("ed2k-sx2-low-id-callback-provenance");
+    let mut network = test_network_config_with_store(
+        &root,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.bind_ip = Ipv4Addr::LOCALHOST;
+    network.kad_bind_addr = bind_addr;
+    network.p2p_bind_ip = None;
+    network.egress_route = EgressRoute::DirectSystemRoute;
+    network.vpn_guard.mode = "off".into();
+    network.ed2k.egress_route = EgressRoute::DirectSystemRoute;
+    network.ed2k.server_endpoints = servers.iter().map(ToString::to_string).collect();
+    network.ed2k.callback_timeout_secs = 10;
+    network.ed2k.connect_timeout_secs = 10;
+    network.ed2k.obfuscation_enabled = false;
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        &root,
+        Some(network.clone()),
+    )
+    .unwrap();
+    let reachability = core.ed2k_reachability_authority.begin_runtime();
+    reachability
+        .writer()
+        .set_fallback_public_ip(Ipv4Addr::LOCALHOST);
+
+    let hash = Ed2kHash::from_bytes([0x52; 16]);
+    let name = "Sample.bin";
+    let size = 1024;
+    let low_id = 0x1234_u32;
+    let (_, created) = core
+        .create_download(DownloadCreate {
+            source: DownloadCreateSource::Content {
+                hash: hash.to_string(),
+                name: name.into(),
+                size_bytes: Some(size),
+            },
+            category: None,
+            intent: emulebb_metadata::DownloadIntent::Started,
+            redownload: false,
+        })
+        .await
+        .unwrap();
+    let job = core
+        .ed2k_transfers
+        .download_job(created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(created);
+    let temp = core.download_temp_selection(&job).await.unwrap();
+    let resident = core
+        .ed2k_transfers
+        .begin_download_job_execution(job.token, Some(&temp))
+        .await
+        .unwrap();
+    let token = resident.as_ref().unwrap().token;
+    drop(resident);
+    drop(job);
+    let seed = Ed2kFoundSource {
+        file_hash: hash,
+        ip: Ipv4Addr::LOCALHOST,
+        tcp_port: seed_addr.port(),
+        client_id: u32::from(Ipv4Addr::LOCALHOST),
+        low_id: false,
+        obfuscated: false,
+        obfuscation_options: None,
+        user_hash: None,
+        source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
+        source_udp_port: None,
+    };
+    let seed_script = async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (protocol, opcode, _) = read_sx2_fixture_frame(&mut stream).await;
+        assert_eq!((protocol, opcode), (0xE3, 0x01)); // OP_HELLO
+
+        let mut hello = vec![0x55; 16];
+        hello.extend_from_slice(&Ipv4Addr::LOCALHOST.octets());
+        hello.extend_from_slice(&seed_addr.port().to_le_bytes());
+        hello.extend_from_slice(&1_u32.to_le_bytes());
+        // UINT32 CT_EMULE_MISCOPTIONS2 with only bit 10 (SX2) enabled.
+        hello.extend_from_slice(&[0x03, 1, 0, 0xFE, 0, 4, 0, 0]);
+        hello.extend_from_slice(&[0; 6]);
+        write_sx2_fixture_frame(&mut stream, 0xE3, 0x4C, &hello).await;
+
+        loop {
+            let (protocol, opcode, payload) = read_sx2_fixture_frame(&mut stream).await;
+            if (protocol, opcode) == (0xC5, 0x83) {
+                // OP_REQUESTSOURCES2
+                assert_eq!(&payload[..3], &[4, 0, 0]);
+                assert_eq!(&payload[3..], &hash.0);
+                break;
+            }
+        }
+
+        let mut answer = vec![4];
+        answer.extend_from_slice(&hash.0);
+        answer.extend_from_slice(&2_u16.to_le_bytes());
+        // Ordinary stock and aMule SX2 senders omit genuine LowIDs. Supply
+        // them here to exercise the receiver's server-qualified route.
+        for (server, user_hash) in servers.into_iter().zip([0x77, 0x78]) {
+            answer.extend_from_slice(&low_id.to_le_bytes());
+            answer.extend_from_slice(&4664_u16.to_le_bytes());
+            answer.extend_from_slice(&Ipv4Addr::LOCALHOST.octets());
+            answer.extend_from_slice(&server.port().to_le_bytes());
+            answer.extend_from_slice(&[user_hash; 16]);
+            answer.push(0);
+        }
+        write_sx2_fixture_frame(&mut stream, 0xC5, 0x84, &answer).await;
+        stream.shutdown().await.unwrap();
+        Ok::<_, anyhow::Error>(())
+    };
+    let download = download_file_from_peer(Ed2kPeerDownloadOptions {
+        job_token: token,
+        bind_ip: network.bind_ip,
+        egress_route: network.egress_route,
+        peer: &seed,
+        hello_identity: core.ed2k_hello_identity(&network),
+        secure_ident: &network.secure_ident,
+        transfer_runtime: &core.ed2k_transfers,
+        display_name: name.into(),
+        file_size: size,
+        current_source_count: 1,
+        timeout: Duration::from_secs(5),
+        upload_context: None,
+        established_context: None,
+        reask_register: None,
+    });
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(download, seed_script)
+    })
+    .await
+    .expect("seed and downloader must finish the SX2 exchange")
+    .unwrap();
+    assert_eq!(outcome, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+
+    let saved = core
+        .ed2k_transfers
+        .download_server_callback_endpoints_after(token, 0, 3)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 2);
+    for (entry, server_endpoint) in saved.iter().zip(servers) {
+        let source = found_source_from_endpoint(hash, entry);
+        assert_eq!(
+            source.identity_key(),
+            emulebb_ed2k::ed2k_server::Ed2kFoundSourceKey::ServerLowId {
+                server_endpoint,
+                client_id: low_id,
+            }
+        );
+    }
+    drop(saved);
+
+    let guard = core.download_attempts.try_prepare(token, hash).unwrap();
+    let shutdown = CancellationToken::new();
+    let (result, ()) = tokio::join!(core.prepare_download_sources(&guard, &shutdown), async {
+        let mut expected = vec![0xE3, 0x9C, 127, 0, 0, 1];
+        expected.extend_from_slice(&network.listen_port.to_le_bytes());
+        expected.extend_from_slice(&low_id.to_le_bytes());
+        for (index, receiver) in receivers.iter().enumerate() {
+            let mut datagram = [0; 64];
+            let (len, _) = tokio::time::timeout(
+                Duration::from_secs(if index == 0 { 5 } else { 18 }),
+                receiver.recv_from(&mut datagram),
+            )
+            .await
+            .expect("each server must receive a callback for its own LowID")
+            .unwrap();
+            assert_eq!(&datagram[..len], expected);
+        }
+        shutdown.cancel();
+    },);
+    assert!(matches!(
+        result.unwrap(),
+        crate::download_preparation::DownloadPreparation::Waiting
+    ));
+}
+
 #[tokio::test]
 async fn callback_preparation_dispatches_udp_routes_without_hydration_or_udp_reask() {
     let transfer_root = unique_runtime_dir("emulebb-core-direct-callback-without-reask");
