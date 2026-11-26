@@ -249,9 +249,10 @@ fn assert_startup_multipacket_ext2_with_source_exchange(
         remaining = rest;
         match sub_opcode {
             super::OP_REQUESTFILENAME => {
-                remaining = super::decode_request_filename_ext_info(remaining, file_size, 2)
-                    .unwrap()
-                    .1;
+                remaining =
+                    super::codec::decode_multipacket_filename_ext_info(remaining, file_size, 2)
+                        .unwrap()
+                        .1;
                 saw_request_filename = true;
             }
             super::OP_SETREQFILEID => {

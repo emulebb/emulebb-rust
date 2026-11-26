@@ -59,8 +59,9 @@ pub(super) use hashset::{
     encode_hashset_answer2, encode_hashset_request, encode_hashset_request2,
 };
 pub(super) use multipacket::{
-    PeerSourceExchangeRequest, encode_multipacket_answer, encode_multipacket_ext2_answer,
-    encode_multipacket_ext2_request, encode_multipacket_request, encode_multipacket_source_request,
+    PeerSourceExchangeRequest, decode_multipacket_filename_ext_info, encode_multipacket_answer,
+    encode_multipacket_ext2_answer, encode_multipacket_ext2_request, encode_multipacket_request,
+    encode_multipacket_source_request,
 };
 pub(super) use upload::{
     build_upload_part_packets, decode_compressed_part_fragment, decode_request_parts_payload,
@@ -391,10 +392,11 @@ pub(super) fn encode_start_upload_req(file_hash: &Ed2kHash) -> Vec<u8> {
 /// Encode the OP_REQUESTFILENAME / multipacket ext-info: the embedded
 /// `CPartFile::WritePartStatus` partstatus (u16 ED2K part count + one
 /// `IsCompleteBD(uPart)` bit per ED2K part, LSB-first) followed by the
-/// CompleteSourcesCount u16 (here always 0). The ED2K part count
+/// CompleteSourcesCount u16. The ED2K part count
 /// ([`crate::ed2k_transfer::ed2k_part_count`]) is one more than the data-part
 /// count at an exact PARTSIZE multiple; that trailing EOF slice is always
-/// complete, so it is marked `true`.
+/// complete, so it is marked `true` if it fits in the real parts' last byte.
+/// Stock and aMule read only enough bitmap bytes for the real parts.
 /// Only geometry and verified bits are needed: probes can use compact database
 /// status without constructing or pinning a resident execution manifest.
 pub(super) fn encode_request_filename_ext_info(
@@ -407,11 +409,13 @@ pub(super) fn encode_request_filename_ext_info(
     }
     let ed2k_part_count = ed2k_part_count(file_size);
     let data_part_count = file_size.div_ceil(ED2K_PART_SIZE);
-    let bitfield_len = usize::from(ed2k_part_count).div_ceil(8);
+    let bitmap_parts = data_part_count.min(u64::from(ed2k_part_count)) as usize;
+    let bitfield_len = bitmap_parts.div_ceil(8);
+    let bitmap_bits = usize::from(ed2k_part_count).min(bitfield_len * 8);
     let mut payload = Vec::with_capacity(2 + bitfield_len + 2);
     payload.extend_from_slice(&ed2k_part_count.to_le_bytes());
     let mut current_byte = 0u8;
-    for index in 0..usize::from(ed2k_part_count) {
+    for index in 0..bitmap_bits {
         // Data parts follow their verified state; the trailing exact-multiple
         // EOF slice (index >= data_part_count) is always complete.
         let complete = index as u64 >= data_part_count || verified_parts.next().unwrap_or(false);
@@ -423,7 +427,7 @@ pub(super) fn encode_request_filename_ext_info(
             current_byte = 0;
         }
     }
-    if !ed2k_part_count.is_multiple_of(8) {
+    if !bitmap_bits.is_multiple_of(8) {
         payload.push(current_byte);
     }
     if extension.version >= 2 {
@@ -444,24 +448,82 @@ pub(super) struct RequestFilenameExtInfo {
     pub(super) complete_source_count: u16,
 }
 
-/// Decode the extended request information which follows `OP_REQUESTFILENAME`
-/// (standalone or inside a multipacket). A zero part count is the stock
-/// "no part-status" sentinel; otherwise the count must match the requested
-/// file's ED2K part count. The returned slice starts at the next multipacket
-/// sub-opcode.
+/// Decode standalone filename information. The payload length distinguishes a
+/// bitmap covering only the real parts from the reference senders' wider form.
 pub(super) fn decode_request_filename_ext_info(
     payload: &[u8],
     file_size: u64,
     version: u8,
 ) -> Result<(RequestFilenameExtInfo, &[u8])> {
-    if version == 0 {
-        return Ok((
+    let layout = filename_request_ext_layout(payload, file_size, version)?;
+    let wide = layout.wide_end(payload) == Some(payload.len());
+    Ok(layout.decode(payload, wide))
+}
+
+struct FilenameRequestExtLayout {
+    part_count: usize,
+    bitmap_len: usize,
+    count_len: usize,
+    header_len: usize,
+}
+
+impl FilenameRequestExtLayout {
+    fn compact_end(&self) -> usize {
+        self.header_len + self.bitmap_len + self.count_len
+    }
+
+    fn wide_end(&self, payload: &[u8]) -> Option<usize> {
+        let end = self.compact_end() + 1;
+        let eof_index = self.header_len + self.bitmap_len;
+        // Only a separate EOF bit and its zero padding belong in this byte.
+        (self.part_count.div_ceil(8) > self.bitmap_len
+            && payload.len() >= end
+            && payload[eof_index] <= 1)
+            .then_some(end)
+    }
+
+    fn decode<'a>(&self, payload: &'a [u8], wide: bool) -> (RequestFilenameExtInfo, &'a [u8]) {
+        let bitmap_len = self.bitmap_len + usize::from(wide);
+        let count_offset = self.header_len + bitmap_len;
+        let part_status = (self.part_count != 0).then(|| {
+            let bitfield = &payload[self.header_len..count_offset];
+            (0..self.part_count)
+                .map(|index| {
+                    // The compact form omits only the virtual complete EOF bit
+                    // when it would otherwise occupy a separate byte.
+                    bitfield
+                        .get(index / 8)
+                        .is_none_or(|byte| (byte >> (index % 8)) & 1 == 1)
+                })
+                .collect()
+        });
+        let complete_source_count = if self.count_len == 0 {
+            0
+        } else {
+            u16::from_le_bytes([payload[count_offset], payload[count_offset + 1]])
+        };
+        (
             RequestFilenameExtInfo {
-                part_status: None,
-                complete_source_count: 0,
+                part_status,
+                complete_source_count,
             },
-            payload,
-        ));
+            &payload[count_offset + self.count_len..],
+        )
+    }
+}
+
+fn filename_request_ext_layout(
+    payload: &[u8],
+    file_size: u64,
+    version: u8,
+) -> Result<FilenameRequestExtLayout> {
+    if version == 0 {
+        return Ok(FilenameRequestExtLayout {
+            part_count: 0,
+            bitmap_len: 0,
+            count_len: 0,
+            header_len: 0,
+        });
     }
     if payload.len() < 2 {
         anyhow::bail!("short OP_REQUESTFILENAME ext-info payload");
@@ -477,9 +539,14 @@ pub(super) fn decode_request_filename_ext_info(
             expected_parts
         );
     }
-    let bitfield_len = part_count.div_ceil(8);
-    let count_offset = 2 + bitfield_len;
-    let expected_len = count_offset + if version >= 2 { 2 } else { 0 };
+    let data_parts = file_size.div_ceil(ED2K_PART_SIZE).min(part_count as u64) as usize;
+    let layout = FilenameRequestExtLayout {
+        part_count,
+        bitmap_len: data_parts.div_ceil(8),
+        count_len: if version >= 2 { 2 } else { 0 },
+        header_len: 2,
+    };
+    let expected_len = layout.compact_end();
     if payload.len() < expected_len {
         anyhow::bail!(
             "short OP_REQUESTFILENAME ext-info payload {} expected at least {}",
@@ -487,24 +554,7 @@ pub(super) fn decode_request_filename_ext_info(
             expected_len
         );
     }
-    let part_status = (part_count != 0).then(|| {
-        let bitfield = &payload[2..2 + bitfield_len];
-        (0..part_count)
-            .map(|index| (bitfield[index / 8] >> (index % 8)) & 1 == 1)
-            .collect()
-    });
-    let complete_source_count = if version >= 2 {
-        u16::from_le_bytes([payload[count_offset], payload[count_offset + 1]])
-    } else {
-        0
-    };
-    Ok((
-        RequestFilenameExtInfo {
-            part_status,
-            complete_source_count,
-        },
-        &payload[expected_len..],
-    ))
+    Ok(layout)
 }
 
 pub(super) fn encode_request_filename(
