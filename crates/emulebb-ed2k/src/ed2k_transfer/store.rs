@@ -175,6 +175,16 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         token: Option<JobToken>,
     ) -> Result<Option<super::Ed2kFileServingView>> {
+        self.load_serving_view_with_progress_unlocked(file_hash, token, false)
+            .await
+    }
+
+    pub(super) async fn load_serving_view_with_progress_unlocked(
+        &self,
+        file_hash: &str,
+        token: Option<JobToken>,
+        include_request_progress: bool,
+    ) -> Result<Option<super::Ed2kFileServingView>> {
         // WHY: SQLite remembers verified bytes, but an offline replacement
         // can leave the selected path stale. Resolve a live sibling path or
         // fall through to an independently verified download payload.
@@ -229,6 +239,7 @@ impl Ed2kTransferRuntime {
                 local_path: Some(content.path),
                 local_fingerprint: Some(content.fingerprint),
                 has_payload_authority: true,
+                may_answer_file_request: true,
             }
         });
         let view = if local_view.is_some() {
@@ -236,7 +247,16 @@ impl Ed2kTransferRuntime {
         } else if let Some(token) = token {
             self.load_manifest_optional_unlocked(token)
                 .await?
-                .map(|manifest| super::Ed2kFileServingView::from(&*manifest))
+                .map(|manifest| {
+                    let mut view = super::Ed2kFileServingView::from(&*manifest);
+                    // Only filename and multipacket requests need the sparse
+                    // progress scan. Upload admission uses verified ranges.
+                    if include_request_progress && !view.completed {
+                        view.may_answer_file_request =
+                            manifest.meets_file_request_progress_threshold();
+                    }
+                    view
+                })
         } else {
             None
         };

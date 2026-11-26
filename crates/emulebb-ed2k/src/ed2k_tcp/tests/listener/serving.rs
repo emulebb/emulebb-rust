@@ -187,6 +187,145 @@ async fn listener_distinguishes_unknown_filename_and_empty_partial_status() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+async fn listener_admits_scattered_part_progress_for_metadata_only() {
+    let root = unique_test_dir("ed2k-scattered-file-metadata");
+    let runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let hash = Ed2kHash::from_bytes([0x57; 16]);
+    let last_full_block_end = ED2K_PART_SIZE - ED2K_PART_SIZE % ED2K_EMBLOCK_SIZE;
+    let first_part_present = last_full_block_end - ED2K_EMBLOCK_SIZE;
+    let second_part_prefix = ED2K_PART_SIZE - first_part_present;
+    let size = ED2K_PART_SIZE + second_part_prefix + 1;
+    let name = "scattered.bin";
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &runtime,
+        hash,
+        name.to_string(),
+        size,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    let bytes = vec![0x21; second_part_prefix as usize];
+    let mut start = ED2K_EMBLOCK_SIZE;
+    while start < last_full_block_end {
+        let end = start + ED2K_EMBLOCK_SIZE;
+        runtime
+            .append_piece_block(
+                job.token,
+                0,
+                start,
+                end,
+                &bytes[..ED2K_EMBLOCK_SIZE as usize],
+            )
+            .await
+            .unwrap();
+        start = end;
+    }
+    let threshold_byte = ED2K_PART_SIZE + second_part_prefix - 1;
+    runtime
+        .append_piece_block(
+            job.token,
+            1,
+            ED2K_PART_SIZE,
+            threshold_byte,
+            &bytes[..(second_part_prefix - 1) as usize],
+        )
+        .await
+        .unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
+    assert_eq!(manifest.pieces[1].bytes_written, second_part_prefix - 1);
+    let identifier = Ed2kFileIdentifier::from_manifest(&manifest).unwrap();
+    drop(manifest);
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let server = spawn_single_listener_connection(
+        listener,
+        test_dht().await,
+        Arc::new(RwLock::new(Ed2kServerState::default())),
+        Arc::new(Mutex::new(KadFirewallState::default())),
+        listener_secure_ident(),
+        Arc::clone(&runtime),
+        listener_hello_identity(),
+    );
+    let mut stream = connect_peer_and_exchange_hello(peer_addr, peer_hello_identity()).await;
+    let filename =
+        encode_request_filename(&hash, size, FILENAME_EXTENSION_V2, [false; 2].into_iter());
+    let status = encode_packet(OP_EDONKEYPROT, OP_SETREQFILEID, &hash.0);
+
+    for at_threshold in [false, true] {
+        if at_threshold {
+            runtime
+                .append_piece_block(
+                    job.token,
+                    1,
+                    threshold_byte,
+                    threshold_byte + 1,
+                    &bytes[..1],
+                )
+                .await
+                .unwrap();
+            let manifest = runtime.manifest(job.token).await.unwrap();
+            assert_eq!(manifest.pieces[1].bytes_written, second_part_prefix);
+            assert!(manifest.durable_present_bytes() < ED2K_PART_SIZE);
+            assert!(manifest.verified_ranges.is_empty());
+        }
+        assert!(runtime.local_servable_entry(&hash).await.unwrap().is_none());
+        stream.write_all(&filename).await.unwrap();
+        if at_threshold {
+            let reply = read_next_edonkey_packet(&mut stream).await;
+            assert_eq!(reply[5], OP_REQFILENAMEANSWER);
+            assert_eq!(&reply[6..22], &hash.0);
+            assert_eq!(&reply[24..], name.as_bytes());
+            stream
+                .write_all(&encode_start_upload_req(&hash))
+                .await
+                .unwrap();
+        }
+        // Use the following status as a marker for filename silence below
+        // threshold and upload-request silence at the threshold.
+        stream.write_all(&status).await.unwrap();
+        let reply = read_next_edonkey_packet(&mut stream).await;
+        assert_eq!(reply[5], OP_FILESTATUS);
+        assert_eq!(&reply[6..22], &hash.0);
+        assert_eq!(&reply[22..], &[2, 0, 0]);
+
+        for opcode in [OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2] {
+            let mut request = Vec::new();
+            if opcode == OP_MULTIPACKET_EXT2 {
+                identifier.encode_into(&mut request);
+            } else {
+                request.extend_from_slice(&hash.0);
+                if opcode == OP_MULTIPACKET_EXT {
+                    request.extend_from_slice(&size.to_le_bytes());
+                }
+            }
+            request.push(OP_SETREQFILEID);
+            stream
+                .write_all(&encode_packet(OP_EMULEPROT, opcode, &request))
+                .await
+                .unwrap();
+            if !at_threshold {
+                let reply = read_next_edonkey_packet(&mut stream).await;
+                assert_eq!(reply[5], OP_FILEREQANSNOFIL);
+                assert_eq!(&reply[6..], &hash.0);
+            } else if opcode == OP_MULTIPACKET_EXT2 {
+                let reply =
+                    read_until_opcode(&mut stream, OP_EMULEPROT, OP_MULTIPACKETANSWER_EXT2).await;
+                let (returned, remaining) = Ed2kFileIdentifier::decode(&reply[6..]).unwrap();
+                assert_eq!(returned.file_hash, hash);
+                assert_eq!(remaining, &[OP_FILESTATUS, 2, 0, 0]);
+            } else {
+                let reply =
+                    read_until_opcode(&mut stream, OP_EMULEPROT, OP_MULTIPACKETANSWER).await;
+                assert_eq!(&reply[6..22], &hash.0);
+                assert_eq!(&reply[22..], &[OP_FILESTATUS, 2, 0, 0]);
+            }
+        }
+    }
+    drop(stream);
+    server.await.unwrap();
+}
+
 #[test]
 fn upload_part_packets_split_large_uncompressed_ranges() {
     let file_hash = Ed2kHash::from_bytes([0x5A; 16]);
