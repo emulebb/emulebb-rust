@@ -1,6 +1,229 @@
 use super::*;
 use crate::ed2k_transfer::Ed2kTransferState;
 
+const LARGE_BROWSE_FILES: usize = 100_000;
+const BROWSE_FIXTURE_FILE_SIZE: u64 = 32;
+
+async fn large_browse_publisher(root: &std::path::Path) -> Arc<Ed2kTransferRuntime> {
+    use emulebb_metadata::{MetadataSharedDirectoryRoot, MetadataStore, NativePath};
+    use rusqlite::params;
+
+    let database = root.join("large-browse.sqlite");
+    let metadata = MetadataStore::open(&database).unwrap();
+    let runtime =
+        Ed2kTransferRuntime::load_or_create_with_metadata(root, metadata.clone()).unwrap();
+    let library = root.join("private-browse-root");
+    std::fs::create_dir(&library).unwrap();
+    let template = root.join("unshared-evidence.bin");
+    std::fs::write(&template, [0x62; BROWSE_FIXTURE_FILE_SIZE as usize]).unwrap();
+    runtime
+        .ingest_local_file(&template, "unshared-evidence.bin")
+        .await
+        .unwrap();
+    let fingerprint = metadata
+        .local_file_instance(&crate::long_path::long_path(&template))
+        .unwrap()
+        .unwrap()
+        .verified_fingerprint;
+    metadata
+        .clone()
+        .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
+            path: library.to_string_lossy().into_owned(),
+            watch_enabled: false,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }])
+        .unwrap();
+
+    // Seed persisted rows in one transaction. Session visibility is still
+    // granted by the production membership admission on the runtime's own
+    // connection. Only the browse projection is under test, so the 100,000
+    // synthetic paths need no payload files.
+    let mut writer = rusqlite::Connection::open(&database).unwrap();
+    writer.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let tx = writer.transaction().unwrap();
+    let (native_identity, secondary_identity, stored_fingerprint): (Vec<u8>, Option<Vec<u8>>, Vec<u8>) = tx
+        .query_row(
+            "SELECT native_identity,secondary_identity,verified_fingerprint FROM local_file_instances",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    {
+        let mut known = tx.prepare(
+            "INSERT INTO known_files(ed2k_hash,size_bytes,display_name,first_seen_at_s,last_seen_at_s,updated_at_s)
+             VALUES(?1,?2,?3,0,0,0) RETURNING id",
+        ).unwrap();
+        let mut path = tx.prepare(
+            "INSERT INTO local_paths(display_path,native_path,search_key,platform,sort_key,file_name_search_key)
+             VALUES(?1,?2,?3,?4,?3,?5) RETURNING id",
+        ).unwrap();
+        let mut instance = tx.prepare(
+            "INSERT INTO local_file_instances(path_id,known_file_id,size_bytes,native_identity,secondary_identity,verified_fingerprint,verified_at_s)
+             VALUES(?1,?2,?3,?4,?5,?6,0)",
+        ).unwrap();
+        let mut verified = tx.prepare(
+            "INSERT INTO verified_local_content(known_file_id,display_name,part_size_bytes,part_count)
+             VALUES(?1,?2,?3,0)",
+        ).unwrap();
+        for index in 1..=LARGE_BROWSE_FILES {
+            let name = format!("browse-{index:06}.bin");
+            let hash = format!("{index:016}");
+            let id: i64 = known
+                .query_row(
+                    params![hash.as_bytes(), BROWSE_FIXTURE_FILE_SIZE as i64, name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let native = NativePath::from(library.join(&name));
+            let display = native.display_path();
+            let path_id: i64 = path
+                .query_row(
+                    params![
+                        display,
+                        native.storage_bytes(),
+                        display.to_lowercase(),
+                        NativePath::platform(),
+                        name
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            instance
+                .execute(params![
+                    path_id,
+                    id,
+                    BROWSE_FIXTURE_FILE_SIZE as i64,
+                    native_identity,
+                    secondary_identity,
+                    stored_fingerprint
+                ])
+                .unwrap();
+            verified
+                .execute(params![id, name, ED2K_PART_SIZE as i64])
+                .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+
+    let watermark = metadata.shared_root_scan_watermark(&library).unwrap();
+    metadata
+        .replace_root_memberships(
+            &library,
+            &watermark,
+            (1..=LARGE_BROWSE_FILES).map(|index| {
+                let relative = std::path::PathBuf::from(format!("browse-{index:06}.bin"));
+                (library.join(&relative), relative, fingerprint.clone())
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        metadata.verified_local_share_count().unwrap(),
+        LARGE_BROWSE_FILES
+    );
+    Arc::new(runtime)
+}
+
+#[tokio::test]
+async fn listener_and_requester_browse_one_hundred_thousand_files_over_tcp() {
+    use crate::ed2k_tcp::{
+        OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILESDIRANS,
+        browse::{BrowsePeer, requests::PeerBrowseStatus},
+        codec::shared_browse::BROWSE_MAX_PAYLOAD,
+    };
+
+    let root = tempfile::tempdir_in(unique_test_dir("ed2k-large-browse-tcp")).unwrap();
+    let publisher = large_browse_publisher(root.path()).await;
+    let requester = Ed2kTransferRuntime::load_or_create(&root.path().join("requester")).unwrap();
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let identity = listener_hello_identity();
+    let task = spawn_single_listener_connection(
+        listener,
+        test_dht().await,
+        Arc::new(RwLock::new(Ed2kServerState::default())),
+        Arc::new(Mutex::new(KadFirewallState::default())),
+        listener_secure_ident(),
+        publisher,
+        identity,
+    );
+    let mut socket = TcpStream::connect(endpoint).await.unwrap();
+    socket
+        .write_all(&encode_hello_request(peer_hello_identity()))
+        .await
+        .unwrap();
+    let hello = read_until_opcode(&mut socket, OP_EDONKEYPROT, OP_HELLOANSWER).await;
+    let hello = decode_hello_answer_profile(&hello[6..]).unwrap();
+    let mut session = None;
+    BrowsePeer::from_hello(&hello).bind(
+        &requester,
+        hello.identity.user_hash,
+        endpoint,
+        &mut session,
+    );
+    let mut session = session.unwrap();
+
+    socket
+        .write_all(&encode_packet(OP_EDONKEYPROT, OP_ASKSHAREDFILES, &[]))
+        .await
+        .unwrap();
+    let flat = tokio::time::timeout(
+        Duration::from_secs(30),
+        read_until_opcode(&mut socket, OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS),
+    )
+    .await
+    .unwrap();
+    assert!(flat[6..].is_empty());
+
+    let registry = requester.peer_browse_registry();
+    let peer_endpoint = SocketAddr::new(endpoint.ip(), identity.tcp_port);
+    let browse = registry
+        .start(Some(identity.user_hash), peer_endpoint)
+        .unwrap();
+    let mut directory_replies = 0;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let mut request = session.recv().await;
+        while let Some(frame) = request {
+            let expected = match frame[5] {
+                OP_ASKSHAREDDIRS => OP_ASKSHAREDDIRSANS,
+                OP_ASKSHAREDFILESDIR => OP_ASKSHAREDFILESDIRANS,
+                opcode => panic!("unexpected browse request {opcode:#x}"),
+            };
+            socket.write_all(&frame).await.unwrap();
+            let reply = read_next_edonkey_packet(&mut socket).await;
+            assert_eq!(reply[5], expected);
+            assert!(reply.len() - 6 <= BROWSE_MAX_PAYLOAD);
+            request = session
+                .handle_reply_async(expected, reply[6..].to_vec())
+                .await;
+            directory_replies += usize::from(expected == OP_ASKSHAREDFILESDIRANS);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(directory_replies, LARGE_BROWSE_FILES.div_ceil(512));
+
+    for offset in (0..LARGE_BROWSE_FILES).step_by(512) {
+        let page = registry.page(browse.search_id, offset, 512).unwrap();
+        assert_eq!(page.status, PeerBrowseStatus::Complete);
+        assert_eq!(page.total, LARGE_BROWSE_FILES);
+        assert_eq!(page.files.len(), (LARGE_BROWSE_FILES - offset).min(512));
+        let directory = format!("Shared {:04}", offset / 512 + 1);
+        for (index, entry) in (offset + 1..).zip(page.files) {
+            assert_eq!(entry.directory.as_deref(), Some(directory.as_str()));
+            assert_eq!(
+                entry.file.file_hash.0.as_slice(),
+                format!("{index:016}").as_bytes()
+            );
+            assert_eq!(entry.file.display_name, format!("browse-{index:06}.bin"));
+            assert_eq!(entry.file.file_size, BROWSE_FIXTURE_FILE_SIZE);
+        }
+    }
+    drop(socket);
+    task.await.unwrap();
+}
+
 async fn read_next_edonkey_packet(stream: &mut TcpStream) -> Vec<u8> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
