@@ -1,4 +1,7 @@
 use super::*;
+use emulebb_kad_dht::SourceResult;
+use emulebb_kad_proto::{PublishSourceReq, TagName};
+use tokio::net::UdpSocket;
 
 #[test]
 fn source_publish_relay_addresses_use_stock_ipv4_byte_order() {
@@ -11,6 +14,161 @@ fn source_publish_relay_addresses_use_stock_ipv4_byte_order() {
         kad_buddy::source_publish_buddy_ips(&tags).collect::<Vec<_>>(),
         [Ipv4Addr::new(198, 51, 100, 136)]
     );
+}
+
+async fn receive_kad_response(peer: &UdpSocket, from: SocketAddr) -> KadPacket {
+    let mut buffer = [0; 2048];
+    let (length, sender) =
+        tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut buffer))
+            .await
+            .expect("expected a Kad response")
+            .unwrap();
+    assert_eq!(sender, from);
+    KadPacket::decode(&buffer[..length]).unwrap()
+}
+
+#[tokio::test]
+async fn source_publish_relay_admission_controls_ack_search_and_persistence() {
+    let allowed_relay = Ipv4Addr::new(198, 51, 100, 136);
+    let filtered_relay = Ipv4Addr::new(198, 51, 100, 137);
+    let banned_relay = Ipv4Addr::new(198, 51, 100, 138);
+    let root = unique_runtime_dir("kad-source-relay-admission");
+    let config = KadLocalStoreConfig {
+        enabled: true,
+        ..KadLocalStoreConfig::default()
+    };
+    let mut network = test_network_config_with_store(&root, config, SnoopQueueConfig::default());
+    network.ip_filter = emulebb_ed2k::ipfilter::IpFilter::parse(
+        &format!("{filtered_relay} - {filtered_relay}, 0, test relay"),
+        emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL,
+    );
+    assert!(network.ip_filter.is_filtered(filtered_relay));
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.ed2k_transfers
+        .ban_store()
+        .ban(Some(banned_relay), None);
+    let bind_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some(bind_addr),
+        obfuscation_enabled: false,
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let dht_addr = dht.bind_addr().unwrap();
+    let target = dht.own_id();
+    let mut inbound = dht.subscribe_packets();
+    let dht_task = dht.start();
+    let reachability = core.ed2k_reachability_authority.begin_runtime();
+    let runtime = KadLocalStoreRuntime {
+        dht,
+        local_store: Arc::new(Mutex::new(KadLocalStore::new(config))),
+        metadata_store: core.metadata_store.clone(),
+        snoop_queue: None,
+        ed2k_listener: Arc::new(TcpListener::bind(bind_addr).await.unwrap()),
+        server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        reachability: core.ed2k_reachability.clone(),
+        reachability_writer: reachability.writer(),
+        kad_buddy: Arc::new(Mutex::new(KadBuddyState::new())),
+        buddy_registry: BuddySocketRegistry::new(),
+        buddy_link_cancel: Arc::new(std::sync::Mutex::new(None)),
+        buddy_manager_wake: Arc::new(tokio::sync::Notify::new()),
+        transfer_runtime: Arc::clone(&core.ed2k_transfers),
+        callback_sessions: ed2k_callback_session_channel().0,
+        reask_handle: Arc::clone(&core.ed2k_reask_handle),
+        network,
+    };
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let peer = UdpSocket::bind(bind_addr).await.unwrap();
+    let observed_addr = peer.local_addr().unwrap();
+    let advertised_port = if observed_addr.port() == 41000 {
+        41001
+    } else {
+        41000
+    };
+    let file_size = 2_097_152;
+    let file_hash = Ed2kHash::from_bytes(target.to_be_bytes());
+    // Poll the production store loop first so it has subscribed before the
+    // socket sends the first publication.
+    tokio::join!(
+        biased;
+        run_kad_local_store_loop(runtime, Arc::clone(&shutdown)),
+        async {
+            for (id, relay, udp_port, allowed) in [
+                (1, allowed_relay, Some(advertised_port), true),
+                (2, allowed_relay, None, true),
+                (3, filtered_relay, Some(41002), false),
+                (4, banned_relay, Some(41003), false),
+            ] {
+                let publisher_id = NodeId::from_bytes([id; 16]);
+                let mut tags = build_source_publish_tags(
+                    udp_port.unwrap_or(0),
+                    SourcePublishSettings {
+                        tcp_port: 42000 + u16::from(id),
+                        obfuscation_enabled: false,
+                    },
+                    file_size,
+                    SourcePublishReachability::BuddyRelay {
+                        buddy_ip: relay,
+                        buddy_kad_port: 4672,
+                    },
+                    publisher_id,
+                );
+                if udp_port.is_none() {
+                    tags.retain(|tag| tag.name != TagName::Short(tag_name::SOURCEUPORT));
+                }
+                let publish = KadPacket::PublishSourceReq(PublishSourceReq { target, publisher_id, tags });
+                peer.send_to(&publish.encode().unwrap(), dht_addr).await.unwrap();
+                let received = tokio::time::timeout(Duration::from_secs(3), inbound.recv())
+                    .await
+                    .expect("expected the publication to reach Kad dispatch")
+                    .unwrap();
+                assert_eq!(received.from, observed_addr);
+                assert!(matches!(
+                    received.packet,
+                    KadPacket::PublishSourceReq(request) if request.publisher_id == publisher_id
+                ));
+                if allowed {
+                    let response = receive_kad_response(&peer, dht_addr).await;
+                    assert!(matches!(response, KadPacket::PublishRes(reply) if reply.target == target));
+                }
+            }
+
+            let search = KadPacket::SearchSourceReq(SearchSourceReq {
+                target,
+                start_position: 0,
+                size: file_size,
+            });
+            peer.send_to(&search.encode().unwrap(), dht_addr).await.unwrap();
+            // The store loop processes these packets in order. Any acknowledgment
+            // for either refused publication would precede the search response.
+            let KadPacket::SearchRes(reply) = receive_kad_response(&peer, dht_addr).await else {
+                panic!("refused relay publications must be silent before the search response");
+            };
+            assert_eq!(reply.target, target);
+            assert_eq!(reply.results.len(), 2);
+            let cache = core.metadata_store.load_kad_publish_cache().unwrap();
+            assert_eq!(cache.source_publishes.len(), 2);
+            for (id, expected_port) in [(1, advertised_port), (2, observed_addr.port())] {
+                let publisher_id = NodeId::from_bytes([id; 16]);
+                let source_id = Ed2kHash::from_bytes(publisher_id.to_be_bytes());
+                let entry = reply.results.iter().find(|entry| entry.entry_id == source_id).unwrap();
+                let source = SourceResult::from_tags(file_hash, source_id, entry.tags.clone()).unwrap();
+                assert_eq!(source.buddy_ip, Some(allowed_relay));
+                assert_eq!(source.udp_port, expected_port);
+
+                let record = cache.source_publishes.iter()
+                    .find(|row| row.publisher_id == publisher_id.to_string()).unwrap();
+                assert_eq!(record.target_node_id, target.to_string());
+                assert_eq!(record.source_ip, Ipv4Addr::LOCALHOST.to_string());
+                assert_eq!(record.source_tcp_port, 42000 + u16::from(id));
+                assert_eq!(record.source_udp_port, expected_port);
+            }
+            shutdown.store(true, Ordering::SeqCst);
+        },
+    );
+    dht_task.abort();
 }
 
 #[test]
