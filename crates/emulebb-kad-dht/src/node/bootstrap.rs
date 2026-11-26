@@ -258,10 +258,17 @@ fn bootstrap_contact_entry(entry: emulebb_kad_proto::packet::ContactEntry) -> Op
 
 #[cfg(test)]
 mod tests {
-    use crate::{DhtConfig, DhtNode};
-    use emulebb_kad_proto::NodeId;
+    use crate::{DhtConfig, DhtError, DhtNode};
+    use emulebb_kad_proto::{
+        KadPacket, NodeId,
+        constants::KADEMLIA_FIND_NODE,
+        packet::{BootstrapRes, Res as KadRes},
+    };
     use emulebb_kad_routing::Contact;
+    use std::net::SocketAddr;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+    use tokio::net::UdpSocket;
 
     #[test]
     fn bootstrap_rounds_reach_later_candidates_and_wrap() {
@@ -272,6 +279,93 @@ mod tests {
         assert_eq!(super::next_bootstrap_round(&cursor, 21), 0..10);
         assert_eq!(super::next_bootstrap_round(&cursor, 3), 1..3);
         assert_eq!(super::next_bootstrap_round(&cursor, 3), 0..3);
+    }
+
+    async fn receive_kad_packet(socket: &UdpSocket) -> (KadPacket, SocketAddr) {
+        let mut buffer = [0; 512];
+        let (length, sender) =
+            tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+                .await
+                .expect("expected a Kad packet")
+                .unwrap();
+        (KadPacket::decode(&buffer[..length]).unwrap(), sender)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_reaches_eleventh_candidate_and_looks_up_own_id() {
+        let bind_addr = (crate::test_bind_ip(), 0);
+        let mut silent = Vec::new();
+        for _ in 0..10 {
+            silent.push(UdpSocket::bind(bind_addr).await.unwrap());
+        }
+        let responder = UdpSocket::bind(bind_addr).await.unwrap();
+        let nodes_text = silent
+            .iter()
+            .chain(std::iter::once(&responder))
+            .map(|peer| peer.local_addr().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(bind_addr.into()),
+            nodes_text: Some(nodes_text),
+            obfuscation_enabled: false,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let receive_loop = dht.start();
+
+        // Silent peers require only outbound datagrams and timeouts. Use real
+        // time again before the round that depends on inbound socket readiness.
+        tokio::time::pause();
+        let first_round = dht.bootstrap().await;
+        tokio::time::resume();
+        assert!(matches!(first_round, Err(DhtError::BootstrapFailed)));
+        for peer in &silent {
+            let (packet, _) = receive_kad_packet(peer).await;
+            assert!(matches!(packet, KadPacket::BootstrapReq));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), responder.readable())
+                .await
+                .is_err(),
+            "the eleventh candidate must be reserved for the next round"
+        );
+
+        let responder_id = NodeId::from_bytes([0x42; 16]);
+        let (second_round, ()) = tokio::join!(dht.bootstrap(), async {
+            let (packet, dht_addr) = receive_kad_packet(&responder).await;
+            assert!(matches!(packet, KadPacket::BootstrapReq));
+            let response = KadPacket::BootstrapRes(BootstrapRes {
+                sender_id: responder_id,
+                sender_tcp_port: 4662,
+                sender_version: 9,
+                contacts: Vec::new(),
+            });
+            responder
+                .send_to(&response.encode().unwrap(), dht_addr)
+                .await
+                .unwrap();
+
+            let (packet, sender) = receive_kad_packet(&responder).await;
+            assert_eq!(sender, dht_addr);
+            let KadPacket::Req(request) = packet else {
+                panic!("bootstrap response must be followed by a node lookup");
+            };
+            assert_eq!(request.count, KADEMLIA_FIND_NODE);
+            assert_eq!(request.target, dht.own_id());
+            assert_eq!(request.recipient_id, responder_id);
+            let response = KadPacket::Res(KadRes {
+                target: request.target,
+                contacts: Vec::new(),
+            });
+            responder
+                .send_to(&response.encode().unwrap(), dht_addr)
+                .await
+                .unwrap();
+        });
+        second_round.unwrap();
+        receive_loop.abort();
     }
 
     async fn empty_node() -> DhtNode {
