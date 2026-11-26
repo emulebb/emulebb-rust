@@ -7,9 +7,8 @@ use crate::error::DhtError;
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::{KadPacket, KadUdpKey, NodeId, opcode};
 use emulebb_kad_routing::Contact;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
-use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -53,6 +52,7 @@ impl DhtNode {
 
     /// Bootstrap from configured sources. Populates the routing table.
     pub async fn bootstrap_with_class(&self, work_class: RpcWorkClass) -> Result<(), DhtError> {
+        let mut pending = self.inner.bootstrap_pending.lock().await;
         let mut contacts = self.load_bootstrap_contacts();
 
         // eMule `CRoutingZone::Bootstrap` seeds the bootstrap self-lookup from the
@@ -60,10 +60,11 @@ impl DhtNode {
         // node restored from `nodes.dat` (contacts already in the table, no
         // configured `nodes_text`) must therefore still bootstrap: fold the live
         // routing-table contacts in as seeds so the self-lookup has live peers to
-        // probe. Configured/hardcoded seeds are tried first, table contacts after.
+        // probe. Configured seeds are tried first, table contacts after.
         contacts.extend(self.routing_table_bootstrap_contacts().await);
 
         if contacts.is_empty() {
+            pending.clear();
             return Err(DhtError::NoBootstrapNodes);
         }
 
@@ -71,11 +72,11 @@ impl DhtNode {
 
         let mut responded = 0usize;
 
-        // WHY: Replaying the first batch can strand a reachable configured or
-        // restored contact behind silent seeds indefinitely. Stock and aMule
-        // advance their seed lists between attempts.
-        let round = next_bootstrap_round(&self.inner.bootstrap_cursor, contacts.len());
-        for bc in &contacts[round] {
+        // Keep the current sweep's endpoint order even if the routing table
+        // changes. Stock and aMule advance through retained seed queues.
+        let round = next_bootstrap_round(&mut pending, contacts);
+        drop(pending);
+        for bc in &round {
             if self.bootstrap_contact(bc, work_class).await {
                 responded += 1;
             }
@@ -231,16 +232,32 @@ impl DhtNode {
     }
 }
 
-fn next_bootstrap_round(cursor: &AtomicUsize, contact_count: usize) -> Range<usize> {
-    let round_end = |start: usize| (start + BOOTSTRAP_ATTEMPTS_PER_ROUND).min(contact_count);
-    let round_start = cursor
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
-            let end = round_end(previous % contact_count);
-            Some(end % contact_count)
+fn next_bootstrap_round(
+    pending: &mut VecDeque<SocketAddrV4>,
+    contacts: Vec<BootstrapContact>,
+) -> Vec<BootstrapContact> {
+    let mut current = HashMap::with_capacity(contacts.len());
+    let mut ordered = VecDeque::with_capacity(contacts.len());
+    for contact in contacts {
+        let endpoint = SocketAddrV4::new(contact.ip, contact.udp_port);
+        if let std::collections::hash_map::Entry::Vacant(entry) = current.entry(endpoint) {
+            entry.insert(contact);
+            ordered.push_back(endpoint);
+        }
+    }
+    pending.retain(|endpoint| current.contains_key(endpoint));
+    if pending.is_empty() {
+        *pending = ordered;
+    }
+    let count = pending.len().min(BOOTSTRAP_ATTEMPTS_PER_ROUND);
+    pending
+        .drain(..count)
+        .map(|endpoint| {
+            current
+                .remove(&endpoint)
+                .expect("retained current endpoint")
         })
-        .expect("bootstrap round reservation always advances")
-        % contact_count;
-    round_start..round_end(round_start)
+        .collect()
 }
 
 fn bootstrap_contact_entry(entry: emulebb_kad_proto::packet::ContactEntry) -> Option<Contact> {
@@ -265,20 +282,36 @@ mod tests {
         packet::{BootstrapRes, Res as KadRes},
     };
     use emulebb_kad_routing::Contact;
+    use std::collections::VecDeque;
     use std::net::SocketAddr;
-    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
     use tokio::net::UdpSocket;
 
     #[test]
-    fn bootstrap_rounds_reach_later_candidates_and_wrap() {
-        let cursor = AtomicUsize::new(0);
-        assert_eq!(super::next_bootstrap_round(&cursor, 21), 0..10);
-        assert_eq!(super::next_bootstrap_round(&cursor, 21), 10..20);
-        assert_eq!(super::next_bootstrap_round(&cursor, 21), 20..21);
-        assert_eq!(super::next_bootstrap_round(&cursor, 21), 0..10);
-        assert_eq!(super::next_bootstrap_round(&cursor, 3), 1..3);
-        assert_eq!(super::next_bootstrap_round(&cursor, 3), 0..3);
+    fn bootstrap_sweep_keeps_pending_endpoints_across_reorder_and_replacement() {
+        let mut pending = VecDeque::new();
+        let mut round_ports = |ports: Vec<u16>| {
+            let endpoints = ports
+                .iter()
+                .map(|port| format!("192.0.2.20:{port}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            super::next_bootstrap_round(&mut pending, super::parse_nodes_text(&endpoints))
+                .iter()
+                .map(|contact| contact.udp_port)
+                .collect::<Vec<_>>()
+        };
+        let original: Vec<_> = (4600..4621).collect();
+        assert_eq!(round_ports(original), (4600..4610).collect::<Vec<_>>());
+        // Move 4610 before the old cursor and replace 4611 at the same count.
+        let mut changed: Vec<_> = (4600..4621).filter(|port| *port != 4611).collect();
+        changed.swap(0, 10);
+        changed.insert(1, 4621);
+        let expected: Vec<_> = (4610..4621).filter(|port| *port != 4611).collect();
+        assert_eq!(round_ports(changed.clone()), expected);
+        assert_eq!(round_ports(changed.clone()), changed[..10]);
+        assert!(round_ports(Vec::new()).is_empty());
+        assert_eq!(round_ports(vec![4621]), vec![4621]);
     }
 
     async fn receive_kad_packet(socket: &UdpSocket) -> (KadPacket, SocketAddr) {
