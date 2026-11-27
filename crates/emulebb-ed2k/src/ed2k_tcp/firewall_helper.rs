@@ -42,8 +42,8 @@ async fn drive_firewall_helper_hello_exchange(
     context: FirewallHelperContext<'_>,
     peer_secure_ident: &mut Ed2kPeerSecureIdentState,
     timeout: Duration,
-) -> Result<bool> {
-    let mut hello_completed = false;
+) -> Result<Option<bool>> {
+    let mut kad_capable = None;
     let hello_packet = encode_hello_request(context.hello_identity);
     tokio::time::timeout(
         timeout,
@@ -97,35 +97,37 @@ async fn drive_firewall_helper_hello_exchange(
             }
             Err(_) => break,
         };
-        let packet_completed_hello = helper_packet_completes_hello(&packet);
-        if !handle_firewall_helper_packet(transport, context, peer_secure_ident, packet).await? {
+        if !handle_firewall_helper_packet(
+            transport,
+            context,
+            peer_secure_ident,
+            &mut kad_capable,
+            packet,
+        )
+        .await?
+        {
             break;
         }
-        hello_completed |= packet_completed_hello;
-        if hello_completed {
+        if kad_capable.is_some() {
             break;
         }
     }
 
-    Ok(hello_completed)
-}
-
-fn helper_packet_completes_hello(packet: &EmuleTcpPacket) -> bool {
-    matches!(
-        (packet.protocol, packet.opcode),
-        (OP_EDONKEYPROT, OP_HELLO) | (OP_EDONKEYPROT, OP_HELLOANSWER)
-    )
+    Ok(kad_capable)
 }
 
 async fn handle_firewall_helper_packet(
     transport: &mut Ed2kTransport,
     context: FirewallHelperContext<'_>,
     peer_secure_ident: &mut Ed2kPeerSecureIdentState,
+    kad_capable: &mut Option<bool>,
     packet: EmuleTcpPacket,
 ) -> Result<bool> {
     match (packet.protocol, packet.opcode) {
         (OP_EDONKEYPROT, OP_HELLO) => {
             let hello_profile = decode_hello_profile(&packet.payload)?;
+            *kad_capable =
+                Some(hello_profile.kad_version >= 6 && hello_profile.identity.kad_port != 0);
             let reply = encode_hello_answer(context.hello_identity);
             transport
                 .write_all_diagnostic(
@@ -158,6 +160,8 @@ async fn handle_firewall_helper_packet(
             // "both info packets received" gate, so the helper immediately
             // starts secure-ident before it sends OP_FWCHECKUDPREQ.
             let hello_profile = decode_hello_answer_profile(&packet.payload)?;
+            *kad_capable =
+                Some(hello_profile.kad_version >= 6 && hello_profile.identity.kad_port != 0);
             if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
                 let request = begin_secure_ident_probe(peer_secure_ident);
                 transport
@@ -292,6 +296,13 @@ async fn handle_firewall_helper_packet(
     Ok(true)
 }
 
+/// TCP disposition after a successful `OP_FWCHECKUDPREQ` write.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UdpFirewallHelperOutcome {
+    AwaitingProbe,
+    PeerDisconnected,
+}
+
 /// Send one `OP_FWCHECKUDPREQ` to a helper peer over eD2k TCP.
 pub async fn request_udp_firewall_check(
     dht: Option<DhtNode>,
@@ -301,7 +312,7 @@ pub async fn request_udp_firewall_check(
     secure_ident: Arc<Ed2kSecureIdent>,
     request: FirewallCheckUdpRequest,
     timeout: Duration,
-) -> Result<()> {
+) -> Result<UdpFirewallHelperOutcome> {
     let mut transport = match Ed2kTransport::connect_outgoing(
         "udp_firewall_check",
         binding,
@@ -336,14 +347,14 @@ pub async fn request_udp_firewall_check(
         dht: dht.as_ref(),
     };
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
-    let hello_completed = drive_firewall_helper_hello_exchange(
+    let kad_capable = drive_firewall_helper_hello_exchange(
         &mut transport,
         helper_context,
         &mut peer_secure_ident,
         timeout,
     )
     .await?;
-    if !hello_completed {
+    let Some(kad_capable) = kad_capable else {
         dump_ed2k_tcp_helper_meta(
             helper_addr,
             Some(transport.mode),
@@ -351,7 +362,13 @@ pub async fn request_udp_firewall_check(
             || ("helper never completed HELLO before firewall request").into(),
         );
         anyhow::bail!("helper {helper_addr} did not complete HELLO before OP_FWCHECKUDPREQ");
-    }
+    };
+    // WHY: a referral can outlive the peer it named. Stock checks the
+    // connected peer can do UDP firewall tests before counting its failures.
+    anyhow::ensure!(
+        kad_capable,
+        "helper {helper_addr} does not advertise Kad UDP firewall checks"
+    );
     let payload = request.encode();
     let packet = encode_packet(OP_EMULEPROT, OP_FWCHECKUDPREQ, &payload);
     tokio::time::timeout(
@@ -373,6 +390,7 @@ pub async fn request_udp_firewall_check(
         + timeout.min(Duration::from_secs(
             FIREWALL_HELPER_POST_REQUEST_KEEPALIVE_SECS,
         ));
+    let mut subsequent_hello = None;
     while tokio::time::Instant::now() < post_fwcheck_deadline {
         let remaining =
             post_fwcheck_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -390,9 +408,11 @@ pub async fn request_udp_firewall_check(
                     "post_fwcheck_closed",
                     || ("connection closed after firewall request").into(),
                 );
-                break;
+                return Ok(UdpFirewallHelperOutcome::PeerDisconnected);
             }
-            Ok(Err(error)) if is_connection_shutdown_error(&error) => break,
+            Ok(Err(error)) if is_connection_shutdown_error(&error) => {
+                return Ok(UdpFirewallHelperOutcome::PeerDisconnected);
+            }
             Ok(Err(error)) => {
                 dump_ed2k_tcp_helper_meta(
                     helper_addr,
@@ -408,12 +428,16 @@ pub async fn request_udp_firewall_check(
             &mut transport,
             helper_context,
             &mut peer_secure_ident,
+            &mut subsequent_hello,
             packet,
         )
         .await
         {
             Ok(true) => {}
             Ok(false) => break,
+            Err(error) if is_connection_shutdown_error(&error) => {
+                return Ok(UdpFirewallHelperOutcome::PeerDisconnected);
+            }
             Err(error) => {
                 tracing::debug!(
                     "helper {helper_addr} closed after the UDP check request: {error:#}"
@@ -422,7 +446,7 @@ pub async fn request_udp_firewall_check(
             }
         }
     }
-    Ok(())
+    Ok(UdpFirewallHelperOutcome::AwaitingProbe)
 }
 
 /// Validate a received Kad `OP_CALLBACK` `uCheck` against our own Kad id.
@@ -692,6 +716,7 @@ mod tests {
             &mut transport,
             context,
             &mut state,
+            &mut None,
             super::EmuleTcpPacket {
                 protocol: super::OP_EMULEPROT,
                 opcode: super::OP_PUBLICKEY,

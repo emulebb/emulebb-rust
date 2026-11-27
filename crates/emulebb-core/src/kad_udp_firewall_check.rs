@@ -29,8 +29,9 @@ use tokio::{
 use emulebb_ed2k::ed2k_server::Ed2kServerState;
 use emulebb_ed2k::{
     ed2k_tcp::{
-        Ed2kHelloIdentity, FirewallCheckUdpRequest, KadHelloIdentityState, emule_connect_options,
-        enrich_hello_identity, request_udp_firewall_check,
+        Ed2kHelloIdentity, FirewallCheckUdpRequest, KadHelloIdentityState,
+        UdpFirewallHelperOutcome, emule_connect_options, enrich_hello_identity,
+        request_udp_firewall_check,
     },
     kad_firewall::{KadFirewallState, UdpFirewallCheckSummary},
     reachability::RuntimeReachabilityWriter,
@@ -250,11 +251,18 @@ async fn run_kad_udp_firewall_check_round(
             () = tokio::time::sleep_until(deadline) => break,
         };
         match result {
-            Ok(()) => {
-                kad_firewall
-                    .lock()
-                    .await
-                    .record_udp_check_request_sent(helper_ip);
+            Ok(outcome) => {
+                let mut firewall = kad_firewall.lock().await;
+                if !binding_is_current() {
+                    break;
+                }
+                firewall.record_udp_check_request_sent(helper_ip);
+                if outcome == UdpFirewallHelperOutcome::PeerDisconnected {
+                    firewall.record_helper_test_failed(
+                        helper_ip,
+                        "helper disconnected after UDP firewall-check request",
+                    );
+                }
                 tracing::debug!(
                     "sent OP_FWCHECKUDPREQ to firewall-check helper {helper_addr} (kad v{})",
                     helper.kad_version

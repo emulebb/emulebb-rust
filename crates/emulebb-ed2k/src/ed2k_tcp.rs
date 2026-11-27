@@ -116,8 +116,8 @@ pub(crate) use dump::dump_ed2k_tcp_download_meta;
 pub use established_peer::Ed2kEstablishedPeerContext;
 pub use firewall_helper::emule_connect_options;
 pub(crate) use firewall_helper::is_connection_shutdown_error;
-pub use firewall_helper::request_udp_firewall_check;
 pub use firewall_helper::send_kad_firewall_tcp_ack;
+pub use firewall_helper::{UdpFirewallHelperOutcome, request_udp_firewall_check};
 pub use hello::set_publish_rust_identity;
 pub(in crate::ed2k_tcp) use hello::{
     DecodedEmuleInfoProfile, build_hello_responses_with_share_policy, decode_emule_info_profile,
