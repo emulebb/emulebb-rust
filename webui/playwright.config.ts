@@ -20,8 +20,8 @@ export default defineConfig({
     {
       name: "webkit-mobile",
       use: { ...devices["iPhone 13"] },
-      testMatch: "mobile-appearance.spec.ts",
-      grep: /mobile Safari smoke/
+      testMatch: ["mobile-appearance.spec.ts", "mobile.spec.ts"],
+      grep: /mobile Safari smoke|phone workflow/
     }
   ],
   webServer: {

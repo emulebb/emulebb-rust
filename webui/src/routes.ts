@@ -17,6 +17,7 @@ export type Tab =
 export type AppRoute = {
   tab: Tab;
   searchId?: string;
+  mobile?: true;
 };
 
 const TAB_PATHS: Record<Tab, string> = {
@@ -40,6 +41,13 @@ const PATH_TABS = new Map(Object.entries(TAB_PATHS).map(([tab, path]) => [path, 
 
 export function routeFromPathname(pathname: string): AppRoute | null {
   const normalized = normalizePathname(pathname);
+  if (normalized === "/mobile") return { tab: "downloads", mobile: true };
+  if (normalized === "/mobile/more") return { tab: "overview", mobile: true };
+  if (normalized === "/mobile/searches") return { tab: "search", mobile: true };
+  const mobileSearch = /^\/mobile\/searches\/([1-9]\d*)$/.exec(normalized);
+  if (mobileSearch && isSearchId(mobileSearch[1])) {
+    return { tab: "search", searchId: mobileSearch[1], mobile: true };
+  }
   const tab = PATH_TABS.get(normalized);
   if (tab) {
     return { tab };
@@ -64,9 +72,22 @@ export function pathForSearch(searchId: string): string {
 }
 
 export function pathForRoute(route: AppRoute): string {
+  if (route.mobile) {
+    if (route.tab === "downloads") return "/mobile";
+    if (route.tab === "overview") return "/mobile/more";
+    if (route.tab === "search") return `/mobile${route.searchId ? pathForSearch(route.searchId) : pathForTab("search")}`;
+  }
   return route.tab === "search" && route.searchId
     ? pathForSearch(route.searchId)
     : pathForTab(route.tab);
+}
+
+/** Choose a phone view only for destinations the phone interface implements. */
+export function defaultMobileRoute(route: AppRoute): AppRoute {
+  if (route.mobile) return route;
+  if (route.tab === "overview") return { tab: "downloads", mobile: true };
+  if (route.tab === "downloads" || route.tab === "search") return { ...route, mobile: true };
+  return route;
 }
 
 function normalizePathname(pathname: string): string {

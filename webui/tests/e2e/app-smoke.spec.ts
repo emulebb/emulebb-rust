@@ -366,6 +366,7 @@ test("shows connecting and connected-with-unknown-ID server states explicitly", 
 
 test("keeps the unified toolbar usable at a narrow viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => sessionStorage.setItem("emulebb.webui.desktopView", "true"));
   await page.route("**/api/v1/**", installMockApi([]));
 
   await page.goto("/");
