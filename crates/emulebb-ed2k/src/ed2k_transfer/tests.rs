@@ -1147,7 +1147,12 @@ async fn completion_with_conflicting_master_preserves_payload_without_sharing() 
             .unwrap()
     );
     assert!(!restarted.recheck_transfer(job.token).await.unwrap());
-    assert!(restarted.local_entry(&file_hash).await.unwrap().is_none());
+    let serving = restarted
+        .serving_view(&file_hash.to_string())
+        .await
+        .unwrap();
+    assert!(!serving.has_payload_authority);
+    assert!(!serving.may_answer_file_request);
 }
 
 #[test]
