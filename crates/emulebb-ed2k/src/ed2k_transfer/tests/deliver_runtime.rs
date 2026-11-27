@@ -1414,6 +1414,15 @@ async fn saturated_delivery_defers_retirement_and_the_next_sweep_recovers_it_onc
 
     // Each retained delivery reserves a physical slot and 512 KiB. The
     // journal read can still run, but three deliveries leave no cleanup slot.
+    // WHY: A receipt can arrive before the blocking task is joinable. Reap
+    // setup work so the test saturates only the intended physical capacity.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.local_mutations.wait_until_idle(),
+    )
+    .await
+    .expect("setup tasks did not retire")
+    .unwrap();
     let mut held = Vec::new();
     for offset in 1..=3 {
         let other_id = emulebb_metadata::JobId::new(job.token.job_id.get() + offset).unwrap();
@@ -1450,6 +1459,13 @@ async fn saturated_delivery_defers_retirement_and_the_next_sweep_recovers_it_onc
         release.send(()).unwrap();
         receipt.await.unwrap().unwrap();
     }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.local_mutations.wait_until_idle(),
+    )
+    .await
+    .expect("held deliveries did not retire")
+    .unwrap();
     let (cursor, wrapped) = runtime
         .recover_download_retirements_page(cursor, 4)
         .await

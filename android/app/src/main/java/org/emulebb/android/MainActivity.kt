@@ -212,7 +212,7 @@ class MainActivity : Activity() {
                 try {
                     val uri = Uri.parse(ShellFiles.browserUrl(endpoint)).buildUpon().apply {
                         pendingLink?.let { link ->
-                            path("/transfers")
+                            path("/downloads")
                             encodedFragment("ed2k=" + Uri.encode(link))
                         }
                     }.build()
