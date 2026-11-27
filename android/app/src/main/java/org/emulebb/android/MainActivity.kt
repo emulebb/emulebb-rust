@@ -51,6 +51,7 @@ class MainActivity : Activity() {
     private var pendingLink: String? = null
     private var pendingLinkError = ""
     private var sharingDiagnostics = false
+    private var serviceStatusKnown = false
     private var confirmedStopped = false
     private var pendingStop: String? = null
     private var exitAfterStop = false
@@ -75,7 +76,8 @@ class MainActivity : Activity() {
 
     private val replies = Messenger(object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(message: Message) {
-            if (message.what != DaemonService.STATUS) return
+            if (message.what != DaemonService.STATUS || remote == null) return
+            serviceStatusKnown = true
             phase = message.data.getString("phase") ?: "Starting"
             confirmedStopped = message.data.getBoolean("confirmedStopped")
             val stopError = message.data.getString("error")
@@ -115,6 +117,7 @@ class MainActivity : Activity() {
         }
         override fun onServiceDisconnected(name: ComponentName) {
             remote = null
+            serviceStatusKnown = false
             confirmedStopped = false
             wanAddress.show("WAN IPv4  Unknown")
             phase = "Starting"
@@ -347,7 +350,7 @@ class MainActivity : Activity() {
     }
 
     private fun saveSettings(andStart: Boolean) {
-        if (busy || phase !in listOf("Stopped", "Failed")) return
+        if (busy || !serviceStatusKnown || !confirmedStopped || pendingStop != null) return
         if (andStart && !Environment.isExternalStorageManager()) {
             error.text = "Grant all-files access before starting"
             return
@@ -385,7 +388,7 @@ class MainActivity : Activity() {
     }
 
     private fun requestStop(exit: Boolean) {
-        if (busy || pendingStop != null) return
+        if (!serviceStatusKnown || pendingStop != null || (busy && confirmedStopped)) return
         val request = UUID.randomUUID().toString()
         pendingStop = request
         exitAfterStop = exit
@@ -408,14 +411,14 @@ class MainActivity : Activity() {
     }
 
     private fun updateControls() {
-        val stopped = pendingStop == null && (phase == "Stopped" || phase == "Failed")
+        val stopped = serviceStatusKnown && confirmedStopped && pendingStop == null
         bind.isEnabled = !busy && stopped
         key.isEnabled = !busy && stopped
         regenerate.isEnabled = !busy && stopped
         save.isEnabled = !busy && stopped
         start.isEnabled = !busy && stopped
-        stop.isEnabled = remote != null && !busy && pendingStop == null && !confirmedStopped
-        stopAndExit.isEnabled = remote != null && !busy && pendingStop == null
+        stop.isEnabled = serviceStatusKnown && pendingStop == null && !confirmedStopped
+        stopAndExit.isEnabled = serviceStatusKnown && pendingStop == null && (!busy || !confirmedStopped)
         open.isEnabled = pendingStop == null && phase == "Running" && address != null
     }
 
@@ -454,6 +457,9 @@ class MainActivity : Activity() {
     }
     override fun onStop() {
         if (bound) { unbindService(connection); bound = false; remote = null }
+        serviceStatusKnown = false
+        confirmedStopped = false
+        updateControls()
         super.onStop()
     }
     override fun onDestroy() { handler.removeCallbacksAndMessages(null); setup.shutdown(); super.onDestroy() }

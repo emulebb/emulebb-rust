@@ -14,6 +14,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.LinkProperties
 import java.net.Inet4Address
+import java.net.InetAddress
 import android.os.Bundle
 import android.os.Build
 import android.os.Environment
@@ -33,6 +34,9 @@ class DaemonService : Service() {
     companion object {
         const val START = "org.emulebb.android.START"
         const val STOP = "org.emulebb.android.STOP"
+        // JNI daemon ownership is process-wide. A replacement service's first
+        // command must run after any teardown queued by the old instance.
+        private val commands = Executors.newSingleThreadExecutor()
         const val STOP_REQUEST = "stopRequest"
         const val STATUS = 1
         const val PREFERENCES = "service-lifecycle"
@@ -45,8 +49,13 @@ class DaemonService : Service() {
     private fun hasLocalNetworkPermission() = Build.VERSION.SDK_INT < 37 ||
         checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
 
+    private data class Ipv4Route(
+        val addresses: Set<Inet4Address>,
+        val interfaceName: String?,
+        val defaultGateways: Set<InetAddress?>,
+    )
+
     private val handler = Handler(Looper.getMainLooper())
-    private val commands = Executors.newSingleThreadExecutor()
     private val desired = AtomicBoolean(false)
     private val networkNotificationPending = AtomicBoolean(false)
     private val prefs by lazy { getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE) }
@@ -56,7 +65,7 @@ class DaemonService : Service() {
     private var starting = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var network: Network? = null
-    private var routeIpv4: Set<Inet4Address>? = null
+    private var routeIpv4: Ipv4Route? = null
     private var publicIpv4: String? = null
     private var confirmedStopped = false
     private var stopRequest: String? = null
@@ -80,12 +89,17 @@ class DaemonService : Service() {
         }
 
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
-            val addresses = properties.linkAddresses.mapNotNull { it.address as? Inet4Address }.toSet()
+            val route = Ipv4Route(
+                properties.linkAddresses.mapNotNull { it.address as? Inet4Address }.toSet(),
+                properties.interfaceName,
+                properties.routes.filter { it.isDefaultRoute && it.destination.address is Inet4Address }
+                    .map { it.gateway }.toSet(),
+            )
             handler.post {
                 if (destroyed || this@DaemonService.network != network) return@post
                 val previous = routeIpv4
-                routeIpv4 = addresses
-                if (previous != null && previous != addresses) defaultRouteChanged()
+                routeIpv4 = route
+                if (previous != null && previous != route) defaultRouteChanged()
                 else notifyNetworkChanged()
             }
         }
@@ -112,8 +126,7 @@ class DaemonService : Service() {
     }
 
     private fun recordEvent(event: AndroidSupportLog.Event) {
-        val timestamp = System.currentTimeMillis()
-        commands.execute { AndroidSupportLog.record(this, timestamp, event) }
+        AndroidSupportLog.enqueue(this, System.currentTimeMillis(), event)
     }
 
     private fun notifyNetworkChanged() {
@@ -133,7 +146,7 @@ class DaemonService : Service() {
     private val messenger = Messenger(object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(message: Message) {
             // The service is non-exported; Binder calls remain within this application's UID.
-            if (message.what == STATUS) {
+            if (!destroyed && message.what == STATUS) {
                 val response = Message.obtain(null, STATUS).apply {
                     data = Bundle().apply {
                         putString("phase", phase)
@@ -232,7 +245,7 @@ class DaemonService : Service() {
         if (!starting && phase != "Running" && phase != "Stopping") {
             phase = "Starting"
             val delay = if (intent?.action == START) 0L else (1L shl prefs.getInt("restarts", 1)) * 1_000
-            handler.postDelayed({ if (desired.get() && !starting) startNative() }, delay)
+            handler.postDelayed({ if (!destroyed && desired.get() && !starting) startNative() }, delay)
         }
         return START_STICKY
     }
@@ -251,13 +264,33 @@ class DaemonService : Service() {
         phase = "Starting"
         commands.execute {
             try {
-                ShellFiles.prepareStart(this)
-                // Commands are serialized: Stop queued during preparation runs after
-                // any Start already entering JNI, and cancellation before it skips Start.
-                if (desired.get()) ShellFiles.start(this)
-                handler.post { starting = false; handler.removeCallbacks(poll); handler.post(poll) }
+                var nativeDraining = false
+                if (desired.get()) {
+                    val nativePhase = (NativeBridge.call("status") as JSONObject).getString("phase")
+                    nativeDraining = nativePhase == "Stopping"
+                    if (!nativeDraining) {
+                        ShellFiles.prepareStart(this)
+                        // Stop can cancel preparation before it enters JNI.
+                        if (desired.get()) ShellFiles.start(this)
+                    }
+                }
+                handler.post {
+                    if (destroyed) return@post
+                    starting = false
+                    if (nativeDraining && desired.get()) {
+                        handler.postDelayed({
+                            if (!destroyed && desired.get() && !starting && !stopCommandPending) {
+                                startNative()
+                            }
+                        }, 1_000)
+                    } else {
+                        handler.removeCallbacks(poll)
+                        handler.post(poll)
+                    }
+                }
             } catch (failure: Exception) {
                 handler.post {
+                    if (destroyed) return@post
                     starting = false
                     recordEvent(AndroidSupportLog.Event.START_FAILED)
                     fail(failure.message ?: "Service startup failed")
@@ -268,6 +301,7 @@ class DaemonService : Service() {
 
     private val poll = object : Runnable {
         override fun run() {
+            if (destroyed) return
             try {
                 if (!Environment.isExternalStorageManager() && desired.get()) {
                     restartForNetwork = false
@@ -382,9 +416,14 @@ class DaemonService : Service() {
         commands.execute {
             try { NativeBridge.call("stop") }
             catch (failure: Exception) {
-                handler.post { stopFailures++; error = failure.message ?: "Native Stop failed" }
+                handler.post {
+                    if (destroyed) return@post
+                    stopFailures++
+                    error = failure.message ?: "Native Stop failed"
+                }
             }
             handler.post {
+                if (destroyed) return@post
                 stopCommandPending = false
                 handler.removeCallbacks(poll)
                 handler.post(poll)
@@ -423,12 +462,12 @@ class DaemonService : Service() {
 
     override fun onDestroy() {
         destroyed = true
+        desired.set(false)
         handler.removeCallbacksAndMessages(null)
         connectivity.unregisterNetworkCallback(networkCallback)
         // Deliberately retain desired-running on OS teardown. Explicit Stop and
         // graceful REST shutdown clear it before entering this path.
         commands.execute { try { NativeBridge.call("stop") } catch (_: Exception) { } }
-        commands.shutdown()
         releaseWakeLock()
         super.onDestroy()
     }
