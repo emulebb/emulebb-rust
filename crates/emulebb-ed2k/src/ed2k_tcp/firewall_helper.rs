@@ -404,15 +404,22 @@ pub async fn request_udp_firewall_check(
             }
             Err(_) => break,
         };
-        if !handle_firewall_helper_packet(
+        match handle_firewall_helper_packet(
             &mut transport,
             helper_context,
             &mut peer_secure_ident,
             packet,
         )
-        .await?
+        .await
         {
-            break;
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                tracing::debug!(
+                    "helper {helper_addr} closed after the UDP check request: {error:#}"
+                );
+                break;
+            }
         }
     }
     Ok(())

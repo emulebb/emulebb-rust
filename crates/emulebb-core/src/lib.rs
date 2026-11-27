@@ -5870,12 +5870,19 @@ async fn handle_kad_local_store_packet(
             tracing::debug!("Kad legacy FIREWALLED_ACK_RES from {from} accepted={accepted}");
         }
         KadPacket::FirewallUdp(packet) => {
-            let outcome = kad_firewall.lock().await.record_firewall_udp_packet(
-                from.ip(),
-                packet.error_code,
-                packet.udp_port,
-                Utc::now(),
-            );
+            let outcome = {
+                let mut state = kad_firewall.lock().await;
+                if !dht.is_running() || !state.accepts_udp_check_binding(dht.udp_probe_binding()) {
+                    state.cancel_udp_check();
+                    return Ok(());
+                }
+                state.record_firewall_udp_packet(
+                    from.ip(),
+                    packet.error_code,
+                    packet.udp_port,
+                    Utc::now(),
+                )
+            };
             match outcome {
                 FirewallUdpPacketOutcome::Open(summary) => {
                     crate::diag_kad_event::firewall(false);
@@ -5884,10 +5891,10 @@ async fn handle_kad_local_store_packet(
                     // UPnP mapping. (The driver loop also applies this on finish;
                     // doing it here too means a fast inbound completion is reflected
                     // immediately.)
-                    if let Some(external_udp_port) = summary.external_udp_port {
+                    if let Some(verified_udp_port) = summary.verified_udp_port {
                         runtime
                             .reachability_writer
-                            .set_peer_confirmed_udp_port(external_udp_port);
+                            .set_peer_confirmed_udp_port(verified_udp_port);
                     } else {
                         runtime.reachability_writer.clear_peer_confirmed_udp_port();
                     }

@@ -6,6 +6,7 @@
 //! accepted or dropped.
 
 mod config;
+mod fresh_probe;
 mod observability;
 mod outbound;
 mod packet_info;
@@ -14,6 +15,7 @@ mod receive_loop;
 mod search_response_registry;
 
 pub use config::{MassiveFloodHandler, RpcClassBudgetConfig, RpcConfig, RpcWorkClass};
+pub use fresh_probe::KadUdpProbeReservation;
 use observability::RpcObservabilityState;
 pub use observability::{
     RpcObservabilitySnapshot, RpcResponseOpcodeSnapshot, RpcTrackerBucketSnapshot,
@@ -107,7 +109,9 @@ struct RpcInner {
     class_budgets: RpcClassBudgetConfig,
     tracker: Mutex<PacketTracker>,
     outbound_tracker: Mutex<OutboundRequestTracker>,
+    recent_udp: Mutex<fresh_probe::RecentUdp>,
     pending: Mutex<HashMap<u64, PendingEntry>>,
+    udp_probe_epoch: AtomicU64,
     search_response_registry: search_response_registry::SearchResponseRegistry,
     next_id: AtomicU64,
     unsolicited_tx: broadcast::Sender<ReceivedKadPacket>,
@@ -171,7 +175,9 @@ impl RpcManager {
                 config.request_tracking_window,
             )),
             outbound_tracker: Mutex::new(OutboundRequestTracker::new(Duration::from_secs(180))),
+            recent_udp: Mutex::new(fresh_probe::RecentUdp::default()),
             pending: Mutex::new(HashMap::new()),
+            udp_probe_epoch: AtomicU64::new(0),
             search_response_registry: search_response_registry::SearchResponseRegistry::default(),
             next_id: AtomicU64::new(0),
             unsolicited_tx,
@@ -191,7 +197,10 @@ impl RpcManager {
 
     /// Pause or resume Kad traffic without closing the shared UDP transport.
     pub fn set_kad_enabled(&self, enabled: bool) {
-        self.inner.kad_enabled.store(enabled, Ordering::SeqCst);
+        let previous = self.inner.kad_enabled.swap(enabled, Ordering::SeqCst);
+        if previous != enabled {
+            self.inner.udp_probe_epoch.fetch_add(1, Ordering::SeqCst);
+        }
         if !enabled {
             // Wake in-flight request futures immediately instead of leaving
             // them blocked until their network timeout expires.
@@ -204,6 +213,12 @@ impl RpcManager {
     #[must_use]
     pub fn kad_enabled(&self) -> bool {
         self.inner.kad_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Identity of the current Kad lifecycle and UDP key binding.
+    #[must_use]
+    pub fn udp_probe_epoch(&self) -> u64 {
+        self.inner.udp_probe_epoch.load(Ordering::SeqCst)
     }
 
     /// Whether the enabled Kad runtime has observed a decoded packet within the
@@ -228,6 +243,7 @@ impl RpcManager {
         addr: SocketAddr,
         data: &[u8],
     ) -> Result<(), crate::error::NetError> {
+        self.inner.recent_udp.lock().record_send(addr.ip())?;
         self.inner.transport.send_raw(addr, data).await
     }
 
@@ -238,6 +254,7 @@ impl RpcManager {
     pub fn prune_packet_tracker(&self) {
         self.inner.tracker.lock().prune();
         self.inner.pending.lock().retain(|_, entry| entry.is_live());
+        self.inner.recent_udp.lock().prune();
     }
 
     /// Number of in-flight pending request entries. Test-only window onto the

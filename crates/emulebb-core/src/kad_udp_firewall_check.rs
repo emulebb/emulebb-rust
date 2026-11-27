@@ -10,7 +10,8 @@
 //! (taking precedence over the UPnP mapping).
 
 use std::{
-    net::{IpAddr, SocketAddr},
+    collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -32,18 +33,19 @@ use emulebb_ed2k::{
         enrich_hello_identity, request_udp_firewall_check,
     },
     kad_firewall::{KadFirewallState, UdpFirewallCheckSummary},
-    reachability::{ExternalReachability, RuntimeReachabilityWriter},
+    reachability::RuntimeReachabilityWriter,
 };
-use emulebb_kad_dht::DhtNode;
+use emulebb_kad_dht::{DhtNode, RpcWorkClass};
+use emulebb_kad_proto::{KadPacket, constants::K, opcode};
 
 use crate::Ed2kNetworkConfig;
 
-/// Helpers asked per Kad UDP firewall-check round (oracle
-/// `UDP_FIREWALLTEST_CLIENTSTOASK`): two corroborate without inviting false
-/// positives.
-const KAD_UDP_FIREWALL_CHECK_HELPERS: usize = 2;
 /// Per-helper eD2k TCP timeout for sending `OP_FWCHECKUDPREQ`.
 const KAD_UDP_FIREWALL_CHECK_TCP_TIMEOUT_SECS: u64 = 20;
+const EXTERNAL_PORT_REPORTER_LIMIT: usize = 3;
+const EXTERNAL_PORT_REPORT_TIMEOUT: Duration = Duration::from_secs(3);
+const USED_TESTER_RETENTION: Duration = Duration::from_secs(180);
+const MAX_RECENT_TESTERS: usize = 1024;
 /// How long one round waits for the helpers' `KADEMLIA2_FIREWALLUDP` replies to
 /// converge before finalizing the verdict.
 const KAD_UDP_FIREWALL_CHECK_RESULT_WAIT_SECS: u64 = 30;
@@ -56,7 +58,6 @@ pub(crate) struct KadUdpFirewallCheckOptions {
     pub(crate) ed2k_listener: Arc<TcpListener>,
     pub(crate) server_state: Arc<RwLock<Ed2kServerState>>,
     pub(crate) kad_firewall: Arc<Mutex<KadFirewallState>>,
-    pub(crate) reachability: ExternalReachability,
     pub(crate) reachability_writer: RuntimeReachabilityWriter,
     pub(crate) network: Ed2kNetworkConfig,
     /// Fired by `recheck_kad_firewall` to run a round immediately.
@@ -78,17 +79,16 @@ pub(crate) struct KadUdpFirewallCheckOptions {
 pub(crate) async fn run_kad_udp_firewall_check_loop(options: KadUdpFirewallCheckOptions) {
     let KadUdpFirewallCheckOptions {
         dht,
-        ed2k_listener,
-        server_state,
         kad_firewall,
-        reachability,
         reachability_writer,
         network,
         recheck_signal,
         shutdown,
-    } = options;
+        ..
+    } = &options;
     let interval = Duration::from_secs(network.kad_udp_firewall_check_interval_secs.max(60));
     let mut warmed_up = false;
+    let mut used_testers = HashMap::new();
 
     while !shutdown.load(Ordering::SeqCst) {
         // First round waits a short warmup; later rounds wait the full interval
@@ -106,22 +106,12 @@ pub(crate) async fn run_kad_udp_firewall_check_loop(options: KadUdpFirewallCheck
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        expire_stale_kad_udp_verification(&kad_firewall, &reachability_writer, Utc::now()).await;
-        if !dht.is_bootstrapped() {
+        expire_stale_kad_udp_verification(kad_firewall, reachability_writer, Utc::now()).await;
+        if !dht.is_running() || !dht.is_bootstrapped() {
             continue;
         }
 
-        if let Err(error) = run_kad_udp_firewall_check_round(
-            &dht,
-            &ed2k_listener,
-            &server_state,
-            &kad_firewall,
-            &reachability,
-            &reachability_writer,
-            &network,
-        )
-        .await
-        {
+        if let Err(error) = run_kad_udp_firewall_check_round(&options, &mut used_testers).await {
             tracing::debug!("Kad UDP firewall check round failed: {error:#}");
             kad_firewall
                 .lock()
@@ -130,20 +120,25 @@ pub(crate) async fn run_kad_udp_firewall_check_loop(options: KadUdpFirewallCheck
                     "Kad UDP firewall-check driver failed: {error:#}"
                 ));
         }
-        expire_stale_kad_udp_verification(&kad_firewall, &reachability_writer, Utc::now()).await;
+        expire_stale_kad_udp_verification(kad_firewall, reachability_writer, Utc::now()).await;
     }
 }
 
 /// Run one requester UDP firewall-check round end to end.
 async fn run_kad_udp_firewall_check_round(
-    dht: &DhtNode,
-    ed2k_listener: &Arc<TcpListener>,
-    server_state: &Arc<RwLock<Ed2kServerState>>,
-    kad_firewall: &Arc<Mutex<KadFirewallState>>,
-    reachability: &ExternalReachability,
-    reachability_writer: &RuntimeReachabilityWriter,
-    network: &Ed2kNetworkConfig,
+    options: &KadUdpFirewallCheckOptions,
+    used_testers: &mut HashMap<Ipv4Addr, tokio::time::Instant>,
 ) -> Result<()> {
+    let KadUdpFirewallCheckOptions {
+        dht,
+        ed2k_listener,
+        server_state,
+        kad_firewall,
+        reachability_writer,
+        network,
+        shutdown,
+        ..
+    } = options;
     let bind_addr = dht
         .bind_addr()
         .context("failed to resolve Kad bind address for UDP firewall check")?;
@@ -151,43 +146,25 @@ async fn run_kad_udp_firewall_check_round(
     if internal_udp_port == 0 {
         anyhow::bail!("Kad UDP bind port is unknown; cannot run firewall check");
     }
-    // The external port we currently believe peers see (UPnP / prior discovery).
-    // 0 / equal-to-internal means "test the internal port only".
-    let advertised_udp_port = reachability.advertised_udp_port(internal_udp_port);
-    let external_udp_port = if advertised_udp_port != internal_udp_port {
-        advertised_udp_port
-    } else {
-        0
+    let binding = dht.udp_probe_binding();
+    let binding_is_current = || {
+        !shutdown.load(Ordering::SeqCst) && dht.is_running() && dht.udp_probe_binding() == binding
     };
-
-    let helpers = dht
-        .firewall_check_helpers(KAD_UDP_FIREWALL_CHECK_HELPERS)
-        .await;
-    if helpers.is_empty() {
-        tracing::debug!("Kad UDP firewall check skipped: no eligible helper contacts yet");
-        kad_firewall
-            .lock()
-            .await
-            .record_udp_check_inconclusive("no eligible UDP firewall-check helpers available");
+    let external_udp_port = discover_external_udp_port(dht, kad_firewall, bind_addr.ip()).await;
+    if !binding_is_current() {
         return Ok(());
     }
+    let external_udp_port = if external_udp_port == internal_udp_port {
+        0
+    } else {
+        external_udp_port
+    };
 
-    let helper_ips = helpers
-        .iter()
-        .map(|helper| IpAddr::V4(helper.ip))
-        .collect::<Vec<_>>();
+    let mut helpers = tokio::select! {
+        helpers = dht.discover_udp_firewall_helpers() => helpers.into_iter().peekable(),
+        () = wait_for_udp_check_binding_change(&binding_is_current) => return Ok(()),
+    };
     let expected_ports = [internal_udp_port, external_udp_port];
-    {
-        let mut firewall = kad_firewall.lock().await;
-        if !firewall.begin_udp_check(
-            helper_ips.iter().copied(),
-            expected_ports.iter().copied(),
-            Utc::now(),
-        ) {
-            let error = firewall.last_error.clone().unwrap_or_default();
-            anyhow::bail!("could not begin Kad UDP firewall-check round: {error}");
-        }
-    }
 
     let listener_addr = ed2k_listener
         .local_addr()
@@ -205,14 +182,60 @@ async fn run_kad_udp_firewall_check_round(
 
     // Ask each helper over eD2k TCP. eMule keys the helper's UDP reply with the
     // per-helper Kad verify key we announce for that IP.
-    for helper in &helpers {
+    used_testers.retain(|_, used_at| used_at.elapsed() < USED_TESTER_RETENTION);
+    let mut round_started = false;
+    let mut tester_reservations = Vec::new();
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(KAD_UDP_FIREWALL_CHECK_RESULT_WAIT_SECS);
+    while binding_is_current() && tokio::time::Instant::now() < deadline {
+        if round_started {
+            let firewall = kad_firewall.lock().await;
+            if !firewall.waiting_for_udp_probes(Utc::now()) {
+                break;
+            }
+            if !firewall.udp_check_needs_helper() || helpers.peek().is_none() {
+                drop(firewall);
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        }
+        let Some(helper) = helpers.next() else { break };
+        if used_testers.len() >= MAX_RECENT_TESTERS {
+            break;
+        }
+        if used_testers.contains_key(&helper.ip) || dht.is_known_kad_ip(helper.ip).await {
+            continue;
+        }
+        let helper_ip = IpAddr::V4(helper.ip);
+        let Some(reservation) = dht.reserve_fresh_udp_probe(helper_ip) else {
+            continue;
+        };
+        {
+            let mut firewall = kad_firewall.lock().await;
+            let armed = if round_started {
+                firewall.add_udp_check_helper(helper_ip)
+            } else {
+                firewall.begin_udp_check_for_binding(
+                    [helper_ip],
+                    expected_ports,
+                    Utc::now(),
+                    binding,
+                )
+            };
+            if !armed {
+                break;
+            }
+            round_started = true;
+        }
+        tester_reservations.push(reservation);
+        used_testers.insert(helper.ip, tokio::time::Instant::now());
         let request = FirewallCheckUdpRequest {
             internal_udp_port,
             external_udp_port,
             sender_udp_key: dht.verify_key_for_ip(helper.ip),
         };
-        let helper_addr = SocketAddr::new(IpAddr::V4(helper.ip), helper.tcp_port);
-        match request_udp_firewall_check(
+        let helper_addr = SocketAddr::new(helper_ip, helper.tcp_port);
+        let request_send = request_udp_firewall_check(
             Some(dht.clone()),
             emulebb_ed2k::networking::EgressBinding::new(network.bind_ip, network.egress_route),
             helper_addr,
@@ -220,13 +243,23 @@ async fn run_kad_udp_firewall_check_round(
             Arc::clone(&network.secure_ident),
             request,
             tcp_timeout,
-        )
-        .await
-        {
-            Ok(()) => tracing::debug!(
-                "sent OP_FWCHECKUDPREQ to firewall-check helper {helper_addr} (kad v{})",
-                helper.kad_version
-            ),
+        );
+        let result = tokio::select! {
+            result = request_send => result,
+            () = wait_for_udp_check_binding_change(&binding_is_current) => break,
+            () = tokio::time::sleep_until(deadline) => break,
+        };
+        match result {
+            Ok(()) => {
+                kad_firewall
+                    .lock()
+                    .await
+                    .record_udp_check_request_sent(helper_ip);
+                tracing::debug!(
+                    "sent OP_FWCHECKUDPREQ to firewall-check helper {helper_addr} (kad v{})",
+                    helper.kad_version
+                );
+            }
             Err(error) => {
                 tracing::debug!(
                     "Kad UDP firewall-check request to {helper_addr} failed: {error:#}"
@@ -234,27 +267,94 @@ async fn run_kad_udp_firewall_check_round(
                 kad_firewall
                     .lock()
                     .await
-                    .record_helper_request_failed(IpAddr::V4(helper.ip), &error.to_string());
+                    .record_helper_request_failed(helper_ip, &error.to_string());
             }
         }
     }
 
-    // Wait for the inbound KADEMLIA2_FIREWALLUDP replies to converge. The inbound
-    // handler records them against the active round; poll the active round itself
-    // rather than the sticky public verdict, which remains visible during normal
-    // rechecks for MFC parity.
-    let deadline =
-        tokio::time::Instant::now() + Duration::from_secs(KAD_UDP_FIREWALL_CHECK_RESULT_WAIT_SECS);
-    while tokio::time::Instant::now() < deadline {
-        if !kad_firewall.lock().await.udp_check_in_progress() {
-            break;
+    let summary = {
+        let mut firewall = kad_firewall.lock().await;
+        if !binding_is_current() {
+            firewall.cancel_udp_check();
+            return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        if !round_started {
+            firewall.record_udp_check_inconclusive("no fresh UDP firewall-check helpers available");
+            return Ok(());
+        }
+        firewall.finish_udp_check(Utc::now())
+    };
+    // A success on the external port near the round deadline still gets the
+    // full stock grace for a delayed internal-port reply.
+    while binding_is_current() && kad_firewall.lock().await.waiting_for_udp_probes(Utc::now()) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
-
-    let summary = kad_firewall.lock().await.finish_udp_check(Utc::now());
-    apply_kad_udp_firewall_check_result(kad_firewall, reachability_writer, summary).await;
+    drop(tester_reservations);
+    if binding_is_current() {
+        apply_kad_udp_firewall_check_result(kad_firewall, reachability_writer, summary).await;
+    }
     Ok(())
+}
+
+async fn wait_for_udp_check_binding_change(is_current: &impl Fn() -> bool) {
+    while is_current() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Sample only distinct known reporters. The later unsolicited probe tests
+/// reachability, whereas a PONG reports the source port of our outbound PING.
+async fn discover_external_udp_port(
+    dht: &DhtNode,
+    firewall: &Mutex<KadFirewallState>,
+    bind_ip: IpAddr,
+) -> u16 {
+    let binding = dht.udp_probe_binding();
+    let public_ip = binding.0;
+    let contacts = dht.closest_contacts(&dht.own_id(), K).await;
+    let mut reporter_ips = HashSet::new();
+    let reporters = contacts
+        .into_iter()
+        .filter_map(|contact| {
+            let ip = IpAddr::V4(contact.ip);
+            (contact.kad_version >= 6
+                && !contact.udp_firewalled
+                && contact.udp_port != 0
+                && ip != bind_ip
+                && public_ip != Some(contact.ip)
+                && reporter_ips.insert(ip))
+            .then(|| SocketAddr::new(ip, contact.udp_port))
+        })
+        .take(EXTERNAL_PORT_REPORTER_LIMIT);
+    firewall
+        .lock()
+        .await
+        .begin_external_port_discovery(Utc::now());
+    for reporter in reporters {
+        let response = dht
+            .request_packet_with_class(
+                reporter,
+                &KadPacket::Ping,
+                opcode::PONG,
+                EXTERNAL_PORT_REPORT_TIMEOUT,
+                RpcWorkClass::Maintenance,
+            )
+            .await;
+        let mut state = firewall.lock().await;
+        if !dht.is_running() || dht.udp_probe_binding() != binding {
+            state.finish_external_port_discovery(Utc::now());
+            return 0;
+        }
+        if let Ok(KadPacket::Pong(pong)) = response {
+            state.record_external_port_candidate(reporter.ip(), pong.udp_port, Utc::now());
+        }
+        if !state.needs_external_port_discovery() {
+            return state.external_udp_port_for_request();
+        }
+    }
+    let mut state = firewall.lock().await;
+    state.finish_external_port_discovery(Utc::now());
+    state.external_udp_port_for_request()
 }
 
 /// Build the eD2k hello identity announced to firewall-check helpers, reusing the
@@ -300,12 +400,12 @@ async fn apply_kad_udp_firewall_check_result(
         Some(summary) if summary.open => {
             // kad_event firewall milestone `open` (uniform-diagnostics-v2 §3.3).
             crate::diag_kad_event::firewall(false);
-            if let Some(external_udp_port) = summary.external_udp_port {
-                reachability_writer.set_peer_confirmed_udp_port(external_udp_port);
+            if let Some(verified_udp_port) = summary.verified_udp_port {
+                reachability_writer.set_peer_confirmed_udp_port(verified_udp_port);
                 tracing::info!(
                     helpers_succeeded = summary.helpers_succeeded,
-                    external_udp_port,
-                    "Kad UDP firewall check: open (external UDP port confirmed by peers)"
+                    verified_udp_port,
+                    "Kad UDP firewall check: open (UDP port confirmed by a fresh tester)"
                 );
             } else {
                 reachability_writer.clear_peer_confirmed_udp_port();
@@ -370,6 +470,7 @@ mod tests {
             started_at: now,
             completed_at: now,
             external_udp_port,
+            verified_udp_port: open.then(|| external_udp_port.unwrap_or(4672)),
         }
     }
 
@@ -398,7 +499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_on_internal_port_does_not_pin_a_port() {
+    async fn open_on_internal_port_takes_precedence_over_the_nat_mapping() {
         let firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let reachability_authority = emulebb_ed2k::ReachabilityRuntimeAuthority::new();
         let reachability = reachability_authority.reader();
@@ -414,8 +515,8 @@ mod tests {
         )
         .await;
 
-        assert!(!reachability.udp_port_is_peer_confirmed());
-        assert_eq!(reachability.advertised_udp_port(4672), 45000);
+        assert!(reachability.udp_port_is_peer_confirmed());
+        assert_eq!(reachability.advertised_udp_port(4672), 4672);
     }
 
     #[tokio::test]

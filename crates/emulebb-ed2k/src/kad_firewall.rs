@@ -13,7 +13,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
 };
 
 use chrono::{DateTime, Utc};
@@ -39,11 +39,14 @@ pub struct UdpFirewallCheckSummary {
     /// internal port. `None` when the open result came in on the internal port
     /// (or the round did not open). Mirrors the oracle's `SetUseExternKadPort`.
     pub external_udp_port: Option<u16>,
+    /// Positively verified destination port, including an internal port.
+    pub verified_udp_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HelperOutcome {
     Pending,
+    AwaitingResult,
     /// The TCP request could not be sent, so the helper did not actually run the test.
     RequestFailed,
     /// The helper ran the test and explicitly completed it with a negative result.
@@ -65,22 +68,22 @@ const UDP_VERIFICATION_INCONCLUSIVE_ROUND_LIMIT: u8 = 2;
 /// six-minute in-flight round deadline.
 const UDP_VERIFICATION_MAX_AGE_SECS: i64 = 2 * 60 * 60 + 6 * 60;
 const EXTERNAL_PORT_DISCOVERY_REPORTERS: usize = 3;
-/// Unique helpers that must report the same off-list incoming UDP port before we
-/// trust it as our real external port (one report could be a NAT fluke).
-const FIREWALL_UDP_PORT_DISCOVERY_REPORTERS: usize = 2;
+const INTERNAL_PORT_PREFERENCE_SECS: i64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UdpFirewallCheckRound {
     started_at: DateTime<Utc>,
     expected_ports: HashSet<u16>,
+    internal_udp_port: u16,
     helper_outcomes: HashMap<IpAddr, HelperOutcome>,
-    /// Off-list incoming ports reported with a positive result, keyed by port to
-    /// the unique helper IPs that reported them. A NAT remaps our source UDP port
-    /// so the helper observes (and echoes) a port we did not predict; once enough
-    /// distinct helpers agree, that port is our real external UDP port.
-    discovered_port_reporters: HashMap<u16, HashSet<IpAddr>>,
-    /// The off-list port that reached the corroboration threshold, if any.
     discovered_external_udp_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentExternalOpen {
+    internal_udp_port: u16,
+    testers: HashSet<IpAddr>,
+    summary: UdpFirewallCheckSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +140,8 @@ pub struct KadFirewallState {
     /// Consecutive completed UDP checks which could not establish a verdict.
     udp_inconclusive_rounds: u8,
     active_round: Option<UdpFirewallCheckRound>,
+    udp_check_binding: Option<(Option<Ipv4Addr>, u64)>,
+    recent_external_open: Option<RecentExternalOpen>,
     active_tcp_round: Option<TcpFirewallCheckRound>,
     active_external_port_discovery: Option<ExternalPortDiscoveryRound>,
     discovered_external_udp_port: Option<u16>,
@@ -373,14 +378,11 @@ impl KadFirewallState {
             return false;
         }
 
-        let expected_ports = expected_ports
-            .into_iter()
-            .filter(|port| *port != 0)
-            .collect::<HashSet<_>>();
-        if expected_ports.is_empty() {
+        let mut expected_ports = expected_ports.into_iter().filter(|port| *port != 0);
+        let Some(internal_udp_port) = expected_ports.next() else {
             self.last_error = Some("UDP firewall-check has no expected ports".to_string());
             return false;
-        }
+        };
 
         self.last_udp_check_started_at = Some(started_at);
         self.last_error = None;
@@ -391,12 +393,45 @@ impl KadFirewallState {
         // open result.
         self.active_round = Some(UdpFirewallCheckRound {
             started_at,
-            expected_ports,
+            expected_ports: std::iter::once(internal_udp_port)
+                .chain(expected_ports)
+                .collect(),
+            internal_udp_port,
             helper_outcomes,
-            discovered_port_reporters: HashMap::new(),
             discovered_external_udp_port: None,
         });
+        self.recent_external_open = None;
+        self.udp_check_binding = None;
         true
+    }
+
+    /// Start a round whose replies must match the current public IP binding.
+    pub fn begin_udp_check_for_binding(
+        &mut self,
+        helper_ips: impl IntoIterator<Item = IpAddr>,
+        expected_ports: impl IntoIterator<Item = u16>,
+        started_at: DateTime<Utc>,
+        binding: (Option<Ipv4Addr>, u64),
+    ) -> bool {
+        if !self.begin_udp_check(helper_ips, expected_ports, started_at) {
+            return false;
+        }
+        self.udp_check_binding = Some(binding);
+        true
+    }
+
+    /// Check the active round's binding before accepting an inbound probe.
+    #[must_use]
+    pub fn accepts_udp_check_binding(&self, current: (Option<Ipv4Addr>, u64)) -> bool {
+        self.udp_check_binding
+            .is_none_or(|binding| binding == current)
+    }
+
+    /// Retire a check whose runtime or address binding changed.
+    pub fn cancel_udp_check(&mut self) {
+        self.active_round = None;
+        self.recent_external_open = None;
+        self.udp_check_binding = None;
     }
 
     /// Whether a UDP firewall-check round is currently waiting for helper
@@ -404,6 +439,60 @@ impl KadFirewallState {
     #[must_use]
     pub fn udp_check_in_progress(&self) -> bool {
         self.active_round.is_some()
+    }
+
+    /// Keep testers isolated from ordinary UDP through the internal-port grace.
+    #[must_use]
+    pub fn waiting_for_udp_probes(&self, now: DateTime<Utc>) -> bool {
+        self.udp_check_in_progress()
+            || self.recent_external_open.as_ref().is_some_and(|open| {
+                now - open.summary.completed_at
+                    < chrono::Duration::seconds(INTERNAL_PORT_PREFERENCE_SECS)
+            })
+    }
+
+    /// Arm an expected reply immediately before requesting a reserve tester.
+    /// A reply from a candidate we have not asked yet remains unsolicited.
+    pub fn add_udp_check_helper(&mut self, helper_ip: IpAddr) -> bool {
+        self.active_round.as_mut().is_some_and(|round| {
+            match round.helper_outcomes.entry(helper_ip) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(HelperOutcome::Pending);
+                    true
+                }
+                std::collections::hash_map::Entry::Occupied(_) => false,
+            }
+        })
+    }
+
+    /// Cancelled tests and TCP failures leave room for reserve helpers.
+    #[must_use]
+    pub fn udp_check_needs_helper(&self) -> bool {
+        self.active_round.as_ref().is_some_and(|round| {
+            round
+                .helper_outcomes
+                .values()
+                .filter(|outcome| {
+                    matches!(
+                        outcome,
+                        HelperOutcome::Pending
+                            | HelperOutcome::AwaitingResult
+                            | HelperOutcome::TestFailed
+                    )
+                })
+                .count()
+                < UDP_FIREWALL_CHECK_CLIENTS_TO_ASK
+        })
+    }
+
+    /// Note that the TCP request was sent while waiting for its UDP reply.
+    pub fn record_udp_check_request_sent(&mut self, helper_ip: IpAddr) {
+        if let Some(round) = &mut self.active_round
+            && let Some(outcome @ HelperOutcome::Pending) =
+                round.helper_outcomes.get_mut(&helper_ip)
+        {
+            *outcome = HelperOutcome::AwaitingResult;
+        }
     }
 
     /// Mark one helper request as failed before any UDP probe arrives.
@@ -437,47 +526,68 @@ impl KadFirewallState {
         observed_at: DateTime<Utc>,
     ) -> FirewallUdpPacketOutcome {
         let Some(round) = &mut self.active_round else {
+            if let Some(open) = &self.recent_external_open
+                && error_code == 0
+                && incoming_port == open.internal_udp_port
+                && open.testers.contains(&helper_ip)
+                && observed_at >= open.summary.completed_at
+                && observed_at - open.summary.completed_at
+                    < chrono::Duration::seconds(INTERNAL_PORT_PREFERENCE_SECS)
+            {
+                let mut open = self.recent_external_open.take().unwrap();
+                open.summary.external_udp_port = None;
+                open.summary.verified_udp_port = Some(incoming_port);
+                return FirewallUdpPacketOutcome::Open(open.summary);
+            }
             return FirewallUdpPacketOutcome::Ignored;
         };
         let Some(outcome) = round.helper_outcomes.get_mut(&helper_ip) else {
             return FirewallUdpPacketOutcome::Ignored;
         };
+        if !matches!(
+            outcome,
+            HelperOutcome::Pending | HelperOutcome::AwaitingResult
+        ) {
+            return FirewallUdpPacketOutcome::Ignored;
+        }
 
         self.last_helper_ip = Some(helper_ip.to_string());
         self.last_reported_port = Some(incoming_port);
 
         if error_code == 0 && round.expected_ports.contains(&incoming_port) {
             *outcome = HelperOutcome::Succeeded;
+            let external = incoming_port != round.internal_udp_port;
+            let internal_udp_port = round.internal_udp_port;
+            let testers = if external {
+                round.discovered_external_udp_port = Some(incoming_port);
+                round
+                    .helper_outcomes
+                    .iter()
+                    .filter(|(_, status)| {
+                        matches!(
+                            status,
+                            HelperOutcome::Pending
+                                | HelperOutcome::AwaitingResult
+                                | HelperOutcome::Succeeded
+                        )
+                    })
+                    .map(|(ip, _)| *ip)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
             let summary = self
                 .finalize_udp_round(true, observed_at)
                 .expect("active round disappeared while marking success");
             self.last_error = None;
-            return FirewallUdpPacketOutcome::Open(summary);
-        }
-
-        if error_code == 0 && incoming_port != 0 {
-            // A positive result on a port we did not predict means a NAT remapped
-            // our source UDP port: the helper observed (and echoed) our real
-            // external port. Treat it as a discovery candidate and only trust it
-            // once enough distinct helpers corroborate the same port, matching the
-            // oracle preferring a corroborated open external port over a guess.
-            let reporters = round
-                .discovered_port_reporters
-                .entry(incoming_port)
-                .or_default();
-            reporters.insert(helper_ip);
-            if reporters.len() >= FIREWALL_UDP_PORT_DISCOVERY_REPORTERS {
-                *outcome = HelperOutcome::Succeeded;
-                round.discovered_external_udp_port = Some(incoming_port);
-                self.discovered_external_udp_port = Some(incoming_port);
-                let summary = self
-                    .finalize_udp_round(true, observed_at)
-                    .expect("active round disappeared while marking discovery success");
-                self.last_error = None;
-                return FirewallUdpPacketOutcome::Open(summary);
+            if external {
+                self.recent_external_open = Some(RecentExternalOpen {
+                    internal_udp_port,
+                    testers,
+                    summary: summary.clone(),
+                });
             }
-            *outcome = HelperOutcome::WrongPort;
-            return FirewallUdpPacketOutcome::Recorded;
+            return FirewallUdpPacketOutcome::Open(summary);
         }
 
         // MFC treats wrong-port and remote-error FIREWALLUDP replies as cancelled
@@ -651,6 +761,7 @@ impl KadFirewallState {
             started_at: round.started_at,
             completed_at,
             external_udp_port,
+            verified_udp_port: open.then(|| external_udp_port.unwrap_or(round.internal_udp_port)),
         })
     }
 
