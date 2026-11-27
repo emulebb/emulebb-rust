@@ -70,7 +70,7 @@ pub(super) struct ListenerTestRuntime {
     server_state: Arc<RwLock<Ed2kServerState>>,
     server_search: crate::ed2k_server::Ed2kServerSearchHandle,
     _server_search_inbox: crate::ed2k_server::Ed2kServerSearchInbox,
-    kad_firewall: Arc<Mutex<KadFirewallState>>,
+    pub(super) kad_firewall: Arc<Mutex<KadFirewallState>>,
     secure_ident: Arc<Ed2kSecureIdent>,
     hello_identity: Ed2kHelloIdentity,
     pub(super) peer_addr: SocketAddr,

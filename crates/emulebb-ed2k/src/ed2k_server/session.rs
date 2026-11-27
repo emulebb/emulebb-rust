@@ -23,6 +23,7 @@ use tracing::{debug, warn};
 use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
 
 use super::Ed2kServerFailure;
+use super::background::BackgroundCallbackRequests;
 #[cfg(feature = "packet-diagnostics")]
 use super::diagnostics::{Ed2kServerPacketCapture, Ed2kServerSendAttempt};
 use super::offer_policy::{
@@ -161,6 +162,7 @@ pub(super) struct ServerSession {
     pub(super) pending_login_deadline: Option<Instant>,
     pub(super) login_accepted: bool,
     pub(super) probe_search_state: ProbeSearchState,
+    pub(super) callback_requests: BackgroundCallbackRequests,
     pub(super) offer_files_sent: bool,
     pub(super) offer_files_sent_at: Option<Instant>,
     pub(super) offer_files_catalog_fingerprint: Option<u64>,
@@ -413,6 +415,7 @@ impl ServerSession {
             pending_login_deadline: Some(pending_login_deadline),
             login_accepted: false,
             probe_search_state: ProbeSearchState::NotStarted,
+            callback_requests: BackgroundCallbackRequests::default(),
             offer_files_sent: false,
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,
@@ -456,6 +459,7 @@ impl ServerSession {
             pending_login_deadline: None,
             login_accepted: false,
             probe_search_state: ProbeSearchState::NotStarted,
+            callback_requests: BackgroundCallbackRequests::default(),
             offer_files_sent: false,
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,

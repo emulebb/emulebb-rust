@@ -1705,21 +1705,15 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             answer.recovery_payload_len
                         ),
                     );
-                    // Clear the in-flight marker so this part can be re-requested
-                    // later if the salvage still leaves it corrupt.
-                    if let Some(answered_part) = answer.part {
-                        session_state
-                            .aich_requests_inflight
-                            .retain(|part| *part != answered_part);
-                    }
+                    let transport_mode = transport.mode;
                     handle_aich_recovery_answer(
                         transfer_runtime,
-                        job_token,
-                        file_hash_hex,
+                        &mut session_state.aich_request,
+                        &mut transport.aich_request_history,
                         &answer,
                         &packet.payload,
                         peer_addr,
-                        transport.mode,
+                        transport_mode,
                     )
                     .await?;
                 }
@@ -1794,7 +1788,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 &manifest,
                 AichRecoveryRequestState {
                     pending: &mut session_state.pending_aich_recovery_parts,
-                    inflight: &mut session_state.aich_requests_inflight,
+                    inflight: &mut session_state.aich_request,
+                    runtime: transfer_runtime,
+                    peer_hash: session_state.peer_user_hash,
                     peer_part_bitmap: session_state.peer_part_bitmap.as_deref(),
                     remote_supports_aich: session_state.remote_supports_aich,
                 },

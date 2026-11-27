@@ -75,6 +75,16 @@ impl CallbackPreparations {
         let index = state.pending.iter().position(|entry| entry.id == id)?;
         Some(state.pending.swap_remove(index))
     }
+
+    pub(super) fn defer(&self, id: Ed2kCallbackPreparationId) {
+        if let Some(mut pending) = self.remove(id) {
+            let available = pending.available.take();
+            drop(pending);
+            if let Some(available) = available {
+                let _ = available.send(Ed2kCallbackPreparationOutcome::Deferred);
+            }
+        }
+    }
 }
 
 /// One pending/ready callback. Its borrowed availability cannot outlive this

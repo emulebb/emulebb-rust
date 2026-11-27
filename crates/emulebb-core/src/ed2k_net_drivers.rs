@@ -21,7 +21,7 @@ use std::{
 
 use anyhow::Result;
 use emulebb_ed2k::ed2k_server::{
-    Ed2kServerControlHandle, Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerState,
+    Ed2kServerControlHandle, Ed2kServerListEvent, Ed2kServerListEventReceiver,
 };
 use emulebb_ed2k::ed2k_tcp::{
     Ed2kCallbackSessionHandle, Ed2kCallbackSessionOrigin, Ed2kCallbackSessionRequest,
@@ -37,10 +37,9 @@ use emulebb_ed2k::{
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
 use emulebb_kad_dht::DhtNode;
 use futures_util::FutureExt;
-use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
-use crate::{Ed2kNetworkConfig, EmulebbCore, current_ed2k_tcp_firewalled};
+use crate::{Ed2kNetworkConfig, EmulebbCore};
 
 /// Shared runtime state the reask re-engage consumer needs to act on an inbound
 /// `OP_DIRECTCALLBACKREQ` (FIX 1): the firewalled-verdict inputs (oracle
@@ -52,11 +51,7 @@ pub(crate) struct ReaskReengageContext {
     pub dht: DhtNode,
     /// Listener-owned dispatcher for the callback's long-lived peer session.
     pub callback_sessions: Ed2kCallbackSessionHandle,
-    /// The eD2k TCP listener, for the last-resort firewalled fallback verdict.
-    pub ed2k_listener: Arc<TcpListener>,
-    /// The eD2k server state (authoritative LowID flag).
-    pub server_state: Arc<RwLock<Ed2kServerState>>,
-    /// The Kad TCP firewall verdict (pure-Kad LowID detection).
+    /// The Kad TCP firewall verdict for direct callback eligibility.
     pub kad_firewall: Arc<Mutex<KadFirewallState>>,
     /// Per-IP direct-callback rate limiter (oracle `AllowCalbackRequest` /
     /// `AddTrackCallbackRequests`): at most one request per IP per 180s.
@@ -389,12 +384,6 @@ async fn handle_direct_callback_req(
     user_hash: [u8; 16],
     connect_options: u8,
 ) {
-    if !ctx.dht.is_running() {
-        tracing::debug!(
-            "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: Kad is not running"
-        );
-        return;
-    }
     if !direct_callback_target_is_valid(requester_ip, tcp_port) {
         tracing::debug!(
             "ignoring OP_DIRECTCALLBACKREQ: invalid connect-back endpoint {requester_ip}:{tcp_port}"
@@ -412,15 +401,18 @@ async fn handle_direct_callback_req(
         );
         return;
     }
-    // Only act when we are still the firewalled (LowID) side we advertised: a
-    // non-firewalled node never advertised direct UDP callback, so a request to
-    // it is stale/spurious (oracle gates on IsFirewalled()).
-    let firewalled =
-        current_ed2k_tcp_firewalled(&ctx.ed2k_listener, &ctx.server_state, &ctx.kad_firewall).await;
-    if !firewalled {
+    // WHY: stock uses Kad's own reachability here. An eD2K ID describes a
+    // separate server session, and a new Kad session starts firewalled.
+    let firewalled = ctx
+        .kad_firewall
+        .lock()
+        .await
+        .tcp_firewalled()
+        .unwrap_or(true);
+    if !ctx.dht.is_running() || !firewalled {
         tracing::debug!(
-            "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: not firewalled (we do \
-             not accept direct callbacks)"
+            "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: Kad must be running \
+             and TCP firewalled"
         );
         return;
     }
@@ -654,19 +646,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_callback_requires_live_kad_at_dispatch_time() {
+    async fn direct_callback_ingress_requires_running_and_tcp_firewalled_kad() {
         let dht = DhtNode::new(emulebb_kad_dht::DhtConfig {
             bind_addr: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
             ..emulebb_kad_dht::DhtConfig::default()
         })
         .await
         .unwrap();
-        dht.set_running(false);
-        let listener = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
-        let server_state = Arc::new(RwLock::new(Ed2kServerState {
-            client_id: Some(1),
-            ..Ed2kServerState::default()
-        }));
         let (callback_sessions, _callback_inbox) =
             emulebb_ed2k::ed2k_tcp::ed2k_callback_session_channel();
         let limiter = Arc::new(crate::callback_tracker::DirectCallbackRateLimiter::new());
@@ -674,17 +660,32 @@ mod tests {
         let context = ReaskReengageContext {
             dht,
             callback_sessions,
-            ed2k_listener: listener,
-            server_state,
             kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
             direct_callback_limiter: Arc::clone(&limiter),
         };
 
+        context.dht.set_running(false);
+        context.kad_firewall.lock().await.tcp_firewalled_verdict = Some(true);
         handle_direct_callback_req(&context, requester_ip, 4662, [0x5A; 16], 0x01).await;
 
         assert!(
             limiter.allow(requester_ip),
             "a callback rejected because Kad stopped must not consume its rate-limit slot"
+        );
+
+        context.dht.set_running(true);
+        context.kad_firewall.lock().await.tcp_firewalled_verdict = Some(false);
+        handle_direct_callback_req(&context, requester_ip, 4662, [0x5A; 16], 0x01).await;
+        assert!(
+            limiter.allow(requester_ip),
+            "open Kad must reject callbacks"
+        );
+
+        context.kad_firewall.lock().await.tcp_firewalled_verdict = None;
+        handle_direct_callback_req(&context, requester_ip, 4662, [0x5A; 16], 0x01).await;
+        assert!(
+            !limiter.allow(requester_ip),
+            "Kad accepts callbacks before its first TCP verdict"
         );
     }
 }

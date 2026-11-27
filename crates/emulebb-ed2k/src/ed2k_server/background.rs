@@ -33,7 +33,8 @@ type BackgroundSourceSearchResponse =
     std::result::Result<Vec<Ed2kFoundSource>, BackgroundSearchFailure>;
 type BackgroundSourceBatchSearchResponse =
     std::result::Result<HashMap<Ed2kHash, Ed2kServerSourceSearchResult>, BackgroundSearchFailure>;
-type BackgroundCallbackRequestResponse = std::result::Result<(), BackgroundSearchFailure>;
+type BackgroundCallbackRequestResponse =
+    std::result::Result<oneshot::Receiver<()>, BackgroundSearchFailure>;
 type BackgroundPublishResponse =
     std::result::Result<OfferFilesPublishStats, BackgroundSearchFailure>;
 
@@ -137,7 +138,9 @@ impl Ed2kServerSearchInbox {
         else {
             panic!("expected background callback command")
         };
-        response.send(Ok(())).expect("callback acknowledgement");
+        response
+            .send(Ok(oneshot::channel().1))
+            .expect("callback acknowledgement");
         (
             expected_server_endpoint,
             expected_session_generation,
@@ -147,12 +150,66 @@ impl Ed2kServerSearchInbox {
 }
 
 /// Whether a background-session callback command reached the server socket.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Ed2kBackgroundCallbackDispatchOutcome {
-    /// The complete `OP_CALLBACKREQUEST` frame was written to the live session.
-    Sent,
+    /// The complete `OP_CALLBACKREQUEST` frame was written. The receipt
+    /// resolves successfully only for an attributable server refusal.
+    Sent { refusal: oneshot::Receiver<()> },
     /// The command was proven not to have reached a server session.
     NotSent { reason: String },
+}
+
+/// Correlates stock's untagged `OP_CALLBACK_FAIL` on one physical session.
+#[derive(Debug, Default)]
+pub(super) enum BackgroundCallbackRequests {
+    #[default]
+    Idle,
+    One {
+        deadline: TokioInstant,
+        refusal: oneshot::Sender<()>,
+    },
+    Ambiguous {
+        deadline: TokioInstant,
+    },
+}
+
+impl BackgroundCallbackRequests {
+    fn expire(&mut self, now: TokioInstant) {
+        match self {
+            Self::One { deadline, .. } | Self::Ambiguous { deadline } if *deadline <= now => {
+                *self = Self::Idle;
+            }
+            _ => {}
+        }
+    }
+
+    fn record(&mut self, deadline: TokioInstant, refusal: oneshot::Sender<()>, now: TokioInstant) {
+        self.expire(now);
+        *self = match self {
+            Self::Idle => Self::One { deadline, refusal },
+            Self::One {
+                deadline: existing, ..
+            }
+            | Self::Ambiguous { deadline: existing } => {
+                // WHY: an untagged response could still belong to either
+                // request, even after one caller cancels or its deadline passes.
+                Self::Ambiguous {
+                    deadline: (*existing).max(deadline),
+                }
+            }
+        };
+    }
+
+    pub(super) fn refuse(&mut self, now: TokioInstant) -> bool {
+        self.expire(now);
+        match std::mem::take(self) {
+            Self::One { refusal, .. } => refusal.send(()).is_ok(),
+            other => {
+                *self = other;
+                false
+            }
+        }
+    }
 }
 
 /// One file included in a connected-server TCP source-search frame.
@@ -456,7 +513,7 @@ pub async fn request_callback_via_background_session(
                 "ED2K background callback responder dropped; delivery status is unknown"
             )?;
             match response {
-                Ok(()) => Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent),
+                Ok(refusal) => Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent { refusal }),
                 Err(failure) if failure.interrupted => {
                     Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent {
                         reason: failure.message,
@@ -995,7 +1052,11 @@ pub(super) async fn start_background_server_search(
                 "sent ED2K background callback request client_id={} endpoint={} trace_id={} role={}",
                 client_id, session.endpoint, session.trace_id, session.trace_role
             );
-            let _ = response.send(Ok(()));
+            let (refuse, refusal) = oneshot::channel();
+            session
+                .callback_requests
+                .record(deadline, refuse, TokioInstant::now());
+            let _ = response.send(Ok(refusal));
             Ok(None)
         }
         BackgroundServerSearchRequest::Publish { response } => {
@@ -1198,12 +1259,34 @@ mod callback_dispatch_tests {
         let BackgroundServerSearchRequest::Callback { response, .. } = request else {
             panic!("expected callback command")
         };
-        response.send(Ok(())).unwrap();
+        response.send(Ok(oneshot::channel().1)).unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             task.await.unwrap().unwrap(),
-            Ed2kBackgroundCallbackDispatchOutcome::Sent
-        );
+            Ed2kBackgroundCallbackDispatchOutcome::Sent { .. }
+        ));
+    }
+
+    #[test]
+    fn background_callback_refusal_preserves_ambiguous_deadlines() {
+        let now = TokioInstant::now();
+        let early = now + Duration::from_secs(1);
+        let late = now + Duration::from_secs(2);
+        let mut requests = BackgroundCallbackRequests::default();
+        let (refuse_first, mut first) = oneshot::channel();
+        let (refuse_second, mut second) = oneshot::channel();
+        requests.record(early, refuse_first, now);
+        requests.record(late, refuse_second, now);
+
+        assert!(!requests.refuse(now));
+        assert!(!requests.refuse(early));
+        assert_eq!(first.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+        assert_eq!(second.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+
+        let (refuse_third, mut third) = oneshot::channel();
+        requests.record(late + Duration::from_secs(1), refuse_third, late);
+        assert!(requests.refuse(late));
+        assert_eq!(third.try_recv(), Ok(()));
     }
 
     #[tokio::test]
@@ -1230,12 +1313,11 @@ mod callback_dispatch_tests {
             )))
             .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             task.await.unwrap().unwrap(),
-            Ed2kBackgroundCallbackDispatchOutcome::NotSent {
-                reason: "connection closed before dispatch".to_string(),
-            }
-        );
+            Ed2kBackgroundCallbackDispatchOutcome::NotSent { reason }
+                if reason == "connection closed before dispatch"
+        ));
     }
 
     #[tokio::test]

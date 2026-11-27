@@ -235,7 +235,9 @@ impl EmulebbCore {
 }
 
 enum Ed2kServerCallbackDispatch {
-    Sent,
+    Sent {
+        refusal: Option<tokio::sync::oneshot::Receiver<()>>,
+    },
     KnownNotSent(String),
     DeliveryUnknown(anyhow::Error),
 }
@@ -404,8 +406,10 @@ impl EmulebbCore {
                         )
                         .await
                         {
-                            Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent) => {
-                                Ed2kServerCallbackDispatch::Sent
+                            Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent { refusal }) => {
+                                Ed2kServerCallbackDispatch::Sent {
+                                    refusal: Some(refusal),
+                                }
                             }
                             Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent { reason }) => {
                                 Ed2kServerCallbackDispatch::KnownNotSent(reason)
@@ -433,7 +437,7 @@ impl EmulebbCore {
                             })
                             .await
                             {
-                                Ok(()) => Ed2kServerCallbackDispatch::Sent,
+                                Ok(()) => Ed2kServerCallbackDispatch::Sent { refusal: None },
                                 Err(error) => {
                                     Ed2kServerCallbackDispatch::KnownNotSent(error.to_string())
                                 }
@@ -450,7 +454,8 @@ impl EmulebbCore {
             }
         };
         match callback_dispatch {
-            Ed2kServerCallbackDispatch::Sent => {
+            Ed2kServerCallbackDispatch::Sent { refusal } => {
+                let ticket_id = callback_dispatch_guard.ticket_id();
                 let ticket_outcome = callback_dispatch_guard.mark_dispatched();
                 let cooldown_committed = {
                     let mut state = self.state.lock().await;
@@ -467,6 +472,17 @@ impl EmulebbCore {
                     source.tcp_port,
                     source_server,
                 );
+                if let Some(refusal) = refusal {
+                    let transfers = self.ed2k_transfers.clone();
+                    tokio::spawn(async move {
+                        if matches!(
+                            tokio::time::timeout_at(callback_deadline.into(), refusal).await,
+                            Ok(Ok(()))
+                        ) {
+                            transfers.refuse_server_callback(ticket_id);
+                        }
+                    });
+                }
                 true
             }
             Ed2kServerCallbackDispatch::KnownNotSent(reason) => {

@@ -1069,7 +1069,7 @@ async fn completed_manifest_persists_and_reloads_truthful_aich_hashset() {
 }
 
 #[tokio::test]
-async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() {
+async fn completion_with_conflicting_master_preserves_payload_without_sharing() {
     let root = unique_test_dir("ed2k-transfer-runtime-remote-aich");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let first_piece = vec![0x31; ED2K_PART_SIZE as usize];
@@ -1094,28 +1094,9 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
         .await
         .unwrap();
 
-    let remote_aich = super::Ed2kAichHashset {
-        master_hash: hex::decode("050066b767710d1bd84377e71b1b23e522cce4af")
-            .unwrap()
-            .try_into()
-            .unwrap(),
-        part_hashes: vec![
-            hex::decode("80ebdc35e9618aa7617fa988f756a33b79aa0d6c")
-                .unwrap()
-                .try_into()
-                .unwrap(),
-            hex::decode("b05ae2f6c5a179ec4b7ecffdcc18045151be0437")
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        ],
-    };
+    let remote_root = [1; 20];
     runtime
-        .reconcile_aich_root(job.token, Some(remote_aich.master_hash))
-        .await
-        .unwrap();
-    runtime
-        .store_aich_hashset(job.token, remote_aich.clone())
+        .reconcile_aich_root(job.token, Some(remote_root))
         .await
         .unwrap();
 
@@ -1129,19 +1110,13 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
         .unwrap();
 
     let manifest = runtime.manifest(job.token).await.unwrap();
-    assert!(manifest.completed);
-    assert!(manifest.aich_hashset_acquired);
-    assert_eq!(
-        manifest.aich_root.as_deref(),
-        Some("050066b767710d1bd84377e71b1b23e522cce4af")
-    );
-    assert_eq!(
-        manifest.aich_hashset,
-        vec![
-            "80ebdc35e9618aa7617fa988f756a33b79aa0d6c".to_string(),
-            "b05ae2f6c5a179ec4b7ecffdcc18045151be0437".to_string(),
-        ]
-    );
+    assert!(!manifest.completed);
+    assert!(!manifest.final_rehash_pending);
+    assert!(!manifest.aich_hashset_acquired);
+    assert_eq!(manifest.aich_root, Some(hex::encode(remote_root)));
+    assert_eq!(manifest.durable_present_bytes(), job.file_size);
+    assert!(!manifest.is_fully_verified());
+    assert!(manifest.verified_ranges.is_empty());
 
     let transfer_dir = runtime.transfer_dir_path(job.token.job_id).unwrap();
     let rebuilt = super::build_aich_hashset_from_payload(
@@ -1154,15 +1129,25 @@ async fn completed_manifest_preserves_remote_aich_identity_over_local_rebuild() 
         manifest.aich_root.clone().unwrap()
     );
 
-    let local_entry = runtime
-        .local_entry(&Ed2kHash::from_str(&job.file_hash).unwrap())
+    drop(manifest);
+    drop(runtime);
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    restarted
+        .reconcile_download_storage(job.token)
         .await
-        .unwrap()
-        .expect("missing local entry");
-    assert_eq!(
-        local_entry.aich_root.as_deref(),
-        Some("050066b767710d1bd84377e71b1b23e522cce4af")
+        .unwrap();
+    let manifest = restarted.manifest(job.token).await.unwrap();
+    assert_eq!(manifest.durable_present_bytes(), job.file_size);
+    assert!(!manifest.is_fully_verified());
+    assert!(manifest.verified_ranges.is_empty());
+    assert!(
+        !restarted
+            .finalize_pending_transfer(job.token)
+            .await
+            .unwrap()
     );
+    assert!(!restarted.recheck_transfer(job.token).await.unwrap());
+    assert!(restarted.local_entry(&file_hash).await.unwrap().is_none());
 }
 
 #[test]

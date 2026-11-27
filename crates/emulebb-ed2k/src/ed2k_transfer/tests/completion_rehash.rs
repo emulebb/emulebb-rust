@@ -13,6 +13,90 @@ fn md4(bytes: &[u8]) -> [u8; 16] {
 }
 
 #[tokio::test]
+async fn small_part_requires_agreement_with_the_accepted_aich_master() {
+    let root = unique_test_dir("ed2k-part-aich-disagreement");
+    let payload = b"MD4-identical to the requested download";
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes(md4(payload)),
+        "conflict.bin".to_string(),
+        payload.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(job.token, Vec::new())
+        .await
+        .unwrap();
+    runtime
+        .reconcile_aich_root(job.token, Some([1; 20]))
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(job.token, 0, payload)
+        .await
+        .unwrap();
+    let manifest = runtime.manifest(job.token).await.unwrap();
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
+    assert!(!manifest.completed);
+    assert!(manifest.verified_ranges.is_empty());
+}
+
+#[tokio::test]
+async fn partial_recheck_uses_trusted_part_roots_when_the_payload_is_incomplete() {
+    let root = unique_test_dir("ed2k-partial-recheck-aich");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let mut payload = vec![0x31; ED2K_PART_SIZE as usize + 257];
+    let first_hash = md4(&payload[..ED2K_PART_SIZE as usize]);
+    let second_hash = md4(&payload[ED2K_PART_SIZE as usize..]);
+    let mut composite = Md4::new();
+    composite.update(first_hash);
+    composite.update(second_hash);
+    let job = super::super::test_support::admit_download_job(
+        &runtime,
+        Ed2kHash::from_bytes(composite.finalize().into()),
+        "incomplete.bin".to_string(),
+        payload.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(job.token, vec![first_hash, second_hash])
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(job.token, 0, &payload[..ED2K_PART_SIZE as usize])
+        .await
+        .unwrap();
+    let path = runtime.payload_path(job.token.job_id).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(ED2K_PART_SIZE)
+        .unwrap();
+
+    payload[0] ^= 0xff;
+    let aich = super::super::hashset::build_md4_and_aich_hashsets_from_reader_with_progress(
+        &mut payload.as_slice(),
+        payload.len() as u64,
+        None,
+    )
+    .unwrap()
+    .aich_hashset;
+    runtime
+        .reconcile_aich_root(job.token, Some(aich.master_hash))
+        .await
+        .unwrap();
+    runtime.store_aich_hashset(job.token, aich).await.unwrap();
+    assert!(!runtime.recheck_transfer(job.token).await.unwrap());
+    let manifest = runtime.manifest(job.token).await.unwrap();
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Missing);
+    assert!(manifest.pieces[0].ich_corrupted);
+    assert!(manifest.verified_ranges.is_empty());
+    assert_eq!(std::fs::metadata(path).unwrap().len(), ED2K_PART_SIZE);
+}
+
+#[tokio::test]
 async fn clean_completion_persists_pending_before_restart_finalizer_accepts() {
     let root = unique_test_dir("ed2k-final-rehash-clean-restart");
     let payload = b"completion barrier payload";

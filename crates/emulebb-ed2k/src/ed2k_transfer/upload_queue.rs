@@ -1676,8 +1676,8 @@ impl Ed2kUploadQueueState {
         true
     }
 
-    /// Settle a callback which was proven not to have reached the wire. Only
-    /// the matching live epoch can be changed; a late sender result cannot
+    /// Settle a callback that was proven unsent or refused by the server.
+    /// Only the matching live epoch can be changed; a late result cannot
     /// disturb a successful HELLO claim or a newer callback generation.
     pub(super) fn cancel_callback_known_not_sent(
         &mut self,

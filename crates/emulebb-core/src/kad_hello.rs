@@ -422,6 +422,7 @@ async fn kad_firewall_ack_hello_identity(
         server_state,
         kad_firewall,
         KadHelloIdentityState {
+            running: dht.is_running(),
             connected: dht.has_had_contact(),
             public_ip: dht.public_ip_for_udp_keys(),
         },

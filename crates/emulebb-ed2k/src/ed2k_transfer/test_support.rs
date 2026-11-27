@@ -4,6 +4,61 @@ use emulebb_metadata::MetadataSharedDirectoryRoot;
 
 use super::Ed2kTransferRuntime;
 
+impl Ed2kTransferRuntime {
+    pub(crate) fn recovery_payload_reads(&self) -> usize {
+        self.raw_part_read_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Mark manually staged corrupt bytes as recovery-eligible, as a failed
+    /// piece flush does in a live session.
+    pub(super) async fn mark_fixture_part_corrupt(
+        &self,
+        token: emulebb_metadata::JobToken,
+        part: u16,
+    ) {
+        let guard = self.lock_manifest(token).await;
+        let mut manifest = self
+            .load_manifest_unlocked(token)
+            .await
+            .unwrap()
+            .edit()
+            .unwrap();
+        manifest.pieces[usize::from(part)].ich_corrupted = true;
+        self.store_manifest_unlocked(&manifest, guard)
+            .await
+            .unwrap();
+    }
+
+    /// Run the ordinary reservation-to-commit path in a storage fixture.
+    pub(super) async fn begin_part_salvage(
+        &self,
+        token: emulebb_metadata::JobToken,
+        part: u16,
+        master: [u8; 20],
+        body: &[u8],
+    ) -> anyhow::Result<Option<super::salvage::PartSalvageOutcome>> {
+        let peer = std::net::SocketAddr::from(([192, 0, 2, 1], 4662));
+        let Some(request) = self.reserve_aich_recovery(token, part, peer, None).await? else {
+            return Ok(None);
+        };
+        if request.master() != master {
+            return Ok(None);
+        }
+        self.salvage_requested_part(request, body).await
+    }
+}
+
+/// Construct a stock recovery response from synthetic sharer-side bytes.
+pub(crate) fn recovery_answer_for_part(data: &[u8], part: u64) -> ([u8; 20], Vec<u8>) {
+    let mut tree = super::aich_recovery::AichRecoveryHashSet::new(data.len() as u64);
+    tree.build_from_data(data).unwrap();
+    (
+        tree.master_hash(),
+        tree.create_part_recovery_data(part).unwrap(),
+    )
+}
+
 /// Admit a fully hashed fixture through a real root and refresh its live offer.
 pub(crate) async fn admit_local_share(runtime: &Ed2kTransferRuntime, root: &Path, path: &Path) {
     let mut metadata = runtime.metadata.clone();

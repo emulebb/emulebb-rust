@@ -338,8 +338,17 @@ async fn dispatch_server_upload_callback(
     )
     .await;
     match outcome {
-        Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent) => {
-            debug!("sent OP_CALLBACKREQUEST via shared server {endpoint} for LowID {client_id}")
+        Ok(Ed2kBackgroundCallbackDispatchOutcome::Sent { refusal }) => {
+            debug!("sent OP_CALLBACKREQUEST via shared server {endpoint} for LowID {client_id}");
+            if matches!(
+                tokio::time::timeout_at(permit.expires_at.into(), refusal).await,
+                Ok(Ok(()))
+            ) {
+                debug!("server {endpoint} refused callback for LowID {client_id}");
+                transfer_runtime
+                    .cancel_upload_callback_known_not_sent(&permit)
+                    .await;
+            }
         }
         Ok(Ed2kBackgroundCallbackDispatchOutcome::NotSent { reason }) => {
             debug!(

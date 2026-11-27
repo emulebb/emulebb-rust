@@ -7,7 +7,9 @@ pub(in crate::ed2k_tcp) mod stale_guard;
 pub(in crate::ed2k_tcp) mod startup;
 pub(in crate::ed2k_tcp) mod window;
 
-pub(in crate::ed2k_tcp) use aich_request::{AichRecoveryRequestState, pump_aich_recovery_requests};
+pub(in crate::ed2k_tcp) use aich_request::{
+    AichRecoveryRequestState, AichRequestHistory, pump_aich_recovery_requests,
+};
 pub(in crate::ed2k_tcp) use blocks::{
     PendingCompressedPart, ReadyDownloadBlocks, flush_buffered_download_prefixes,
     flush_ready_download_blocks, reconcile_download_manifest_metadata,
