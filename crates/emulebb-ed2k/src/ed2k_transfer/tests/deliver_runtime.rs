@@ -394,6 +394,52 @@ async fn recovery_releases_an_unused_direct_copy_reservation() {
 }
 
 #[tokio::test]
+async fn direct_delivery_retries_after_reclaiming_its_disk_full_partial() {
+    let root = unique_test_dir("ed2k-direct-storage-full");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = ingest_completed(&runtime, &root, "Sample.bin").await;
+    let source = runtime.payload_path(job.token.job_id).unwrap();
+    let payload = fs::read(&source).unwrap();
+    let incoming = root.join("incoming");
+    let target = incoming.join("Sample.bin");
+    force_unsupported_move(&target);
+    super::super::deliver::force_delivery_storage_full(&target);
+
+    let error = runtime
+        .materialize_completed_payload(job.token, &incoming)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::StorageFull
+    );
+    assert!(!target.exists());
+    assert_eq!(fs::read(&source).unwrap(), payload);
+    let journal = runtime
+        .metadata
+        .download_job_delivery_attempt(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !runtime
+            .metadata
+            .has_delivery_reservation(job.token.job_id, journal.attempt_id)
+            .unwrap()
+    );
+
+    force_unsupported_move(&target);
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(job.token, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target.clone()),
+    );
+    assert_eq!(fs::read(&target).unwrap(), payload);
+    assert!(!incoming.join("Sample_01.bin").exists());
+}
+
+#[tokio::test]
 async fn interrupted_direct_copy_preserves_and_excludes_partial() {
     let root = unique_test_dir("ed2k-direct-interrupted");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -450,6 +496,35 @@ async fn interrupted_direct_copy_preserves_and_excludes_partial() {
             .delete_transfer_manifest(hash.token.job_id)
             .unwrap()
     );
+    assert!(
+        runtime
+            .metadata
+            .delivery_output_is_excluded(&target)
+            .unwrap()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"partial");
+
+    // Removing a job while the destination is unavailable must keep the
+    // sharing barrier. Restoring the directory must not expose its partial.
+    runtime
+        .remove_download_job(hash.token.job_id, false)
+        .await
+        .unwrap();
+    let moved_incoming = root.join("moved-incoming");
+    fs::rename(&incoming, &moved_incoming).unwrap();
+    let (_, cleanup) = runtime
+        .recover_removed_download_jobs_page(None, 4)
+        .await
+        .unwrap();
+    assert_eq!(cleanup.recovered, 0);
+    assert_eq!(cleanup.failures.len(), 1);
+    assert!(
+        runtime
+            .metadata
+            .has_delivery_reservation(hash.token.job_id, attempt)
+            .unwrap()
+    );
+    fs::rename(&moved_incoming, &incoming).unwrap();
     assert!(
         runtime
             .metadata
@@ -1311,6 +1386,96 @@ async fn retired_download_recovery_reclaims_only_owned_piece_storage() {
         .unwrap();
     assert!(retained.completed_at_s.is_some() && retained.internal_storage_retired);
     assert_eq!(retained.file_hash, job.file_hash);
+}
+
+#[tokio::test]
+async fn saturated_delivery_defers_retirement_and_the_next_sweep_recovers_it_once() {
+    let root = unique_test_dir("ed2k-retirement-delivery-pressure");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = ingest_completed(&runtime, &root, "Retired.bin").await;
+    let incoming = root.join("incoming");
+    let delivered = incoming.join("Retired.bin");
+    runtime
+        .materialize_completed_payload(job.token, &incoming)
+        .await
+        .unwrap();
+    runtime
+        .register_delivered_local_content(job.token)
+        .await
+        .unwrap();
+    let transfer_dir = runtime.transfer_dir_path(job.token.job_id).unwrap();
+    assert!(runtime.complete_download_job(job.token).await.unwrap());
+    let before = fs::read(&delivered).unwrap();
+    let journal = runtime
+        .metadata
+        .download_job_retirement(job.token.job_id)
+        .unwrap()
+        .unwrap();
+
+    // Each retained delivery reserves a physical slot and 512 KiB. The
+    // journal read can still run, but three deliveries leave no cleanup slot.
+    let mut held = Vec::new();
+    for offset in 1..=3 {
+        let other_id = emulebb_metadata::JobId::new(job.token.job_id.get() + offset).unwrap();
+        let guard = runtime.lock_lifecycle(other_id).await;
+        let (release, wait) = std::sync::mpsc::channel();
+        let receipt = runtime
+            .local_mutations
+            .submit_delivery_io(guard, move || {
+                wait.recv()?;
+                Ok(())
+            })
+            .unwrap();
+        held.push((release, receipt));
+    }
+    let (cursor, deferred) = runtime
+        .recover_download_retirements_page(None, 4)
+        .await
+        .unwrap();
+    assert_eq!(cursor, Some(job.token.job_id));
+    assert_eq!(deferred.deferred_due_to_capacity, 1);
+    assert_eq!(deferred.recovered, 0);
+    assert!(deferred.failures.is_empty(), "{:?}", deferred.failures);
+    assert_eq!(
+        runtime
+            .metadata
+            .download_job_retirement(job.token.job_id)
+            .unwrap(),
+        Some(journal)
+    );
+    assert!(transfer_dir.exists());
+    assert_eq!(fs::read(&delivered).unwrap(), before);
+
+    for (release, receipt) in held {
+        release.send(()).unwrap();
+        receipt.await.unwrap().unwrap();
+    }
+    let (cursor, wrapped) = runtime
+        .recover_download_retirements_page(cursor, 4)
+        .await
+        .unwrap();
+    assert_eq!(cursor, None);
+    assert_eq!(wrapped.recovered, 0);
+    let (_, recovered) = runtime
+        .recover_download_retirements_page(cursor, 4)
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered, 1);
+    assert_eq!(recovered.deferred_due_to_capacity, 0);
+    assert!(recovered.failures.is_empty(), "{:?}", recovered.failures);
+    let (_, settled) = runtime
+        .recover_download_retirements_page(None, 4)
+        .await
+        .unwrap();
+    assert_eq!(settled.recovered, 0);
+    assert!(!transfer_dir.exists());
+    assert_eq!(fs::read(&delivered).unwrap(), before);
+    let completed = runtime
+        .metadata
+        .download_job(job.token.job_id)
+        .unwrap()
+        .unwrap();
+    assert!(completed.completed_at_s.is_some() && completed.internal_storage_retired);
 }
 
 #[tokio::test]

@@ -457,16 +457,23 @@ impl Ed2kTransferRuntime {
             let source = source.to_owned();
             let staging = staging_path.clone();
             tracing::debug!("copying delivery payload");
-            let verified_staging = self
+            let metadata = self.metadata.clone();
+            let (verified_staging, attempt) = self
                 .run_delivery_io(guard, move || {
                     stage_delivery_payload_blocking(&source, &staging, expected.size)?;
-                    open_verified_staging_file(&staging, expected)
+                    let verified = open_verified_staging_file(&staging, expected)?;
+                    // WHY: A cancelled waiter must not leave a complete staging
+                    // copy behind a Prepared record with no file authority.
+                    let attempt = metadata
+                        .mark_transfer_delivery_attempt_staged(
+                            token,
+                            attempt_id,
+                            &verified.fingerprint,
+                        )?
+                        .context("delivery attempt disappeared before staging committed")?;
+                    Ok((verified, attempt))
                 })
                 .await?;
-            let attempt = self
-                .mark_delivery_attempt_staged(token, attempt_id, &verified_staging.fingerprint)
-                .await?
-                .context("delivery attempt disappeared before staging committed")?;
 
             let installation = match self
                 .install_delivery_payload(&staging_path, &target_path, guard)
@@ -559,7 +566,10 @@ impl Ed2kTransferRuntime {
             .delivery_output_reservation(token.job_id, attempt_id)?
             .context("delivery output reservation disappeared before creation")?;
         self.refresh_complete_shared_catalog().await?;
-        let target = long_path(target_path);
+        let target = long_path(&reservation.path);
+        let requested_target = long_path(target_path);
+        let retained_reservation = reservation.clone();
+        let retained_attempt = attempt.clone();
         let metadata = self.metadata.clone();
         let staging = long_path(staging_path);
         let staging_fingerprint = verified.fingerprint;
@@ -582,13 +592,40 @@ impl Ed2kTransferRuntime {
                 run_after_direct_create_hook(&target)?;
                 tracing::debug!("copying delivery payload to a reserved output");
                 let mut input = verified.file;
-                input.seek(SeekFrom::Start(0))?;
-                std::io::copy(&mut input, &mut output)?;
-                output.sync_all()?;
-                sync_delivery_parent_retained(&target)?;
+                let copy = (|| -> Result<()> {
+                    input.seek(SeekFrom::Start(0))?;
+                    copy_delivery_bytes(&mut input, &mut output, &target)?;
+                    output.sync_all()?;
+                    sync_delivery_parent_retained(&target)
+                })();
+                if let Err(error) = copy {
+                    let cleanup = (|| -> Result<()> {
+                        if remove_live_incomplete_delivery(&target, &output)? {
+                            drop(output);
+                            sync_delivery_parent_retained(&target)?;
+                            anyhow::ensure!(
+                                metadata.release_delivery_output(
+                                    token,
+                                    &retained_reservation,
+                                    &retained_attempt
+                                )?,
+                                "direct delivery reservation changed during failed-copy cleanup"
+                            );
+                        }
+                        Ok(())
+                    })();
+                    if let Err(cleanup_error) = cleanup {
+                        tracing::warn!(%cleanup_error, "reserved delivery cleanup remains pending");
+                    }
+                    return Err(error);
+                }
                 let fingerprint =
                     verify_delivery_handle(&mut output, &target, expected.size, expected.hash)?
                         .context("reserved delivery failed verification")?;
+                anyhow::ensure!(
+                    delivery_path_fingerprint(&requested_target)? == fingerprint,
+                    "delivery destination alias changed during publication"
+                );
                 // Retain the exclusion until the verified publication receipt commits,
                 // including when the caller has stopped waiting for this unit.
                 let published = metadata
@@ -711,21 +748,6 @@ impl Ed2kTransferRuntime {
         })
         .await
         .context("ED2K delivery-attempt prepare task panicked")?
-    }
-
-    async fn mark_delivery_attempt_staged(
-        &self,
-        token: JobToken,
-        attempt_id: Uuid,
-        staging_fingerprint: &NativeFileFingerprint,
-    ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
-        let metadata = self.metadata.clone();
-        let staging_fingerprint = staging_fingerprint.clone();
-        tokio::task::spawn_blocking(move || {
-            metadata.mark_transfer_delivery_attempt_staged(token, attempt_id, &staging_fingerprint)
-        })
-        .await
-        .context("ED2K delivery-attempt stage task panicked")?
     }
 
     async fn mark_delivery_attempt_published(
@@ -1463,15 +1485,60 @@ fn stage_delivery_payload_blocking(source: &Path, staging_path: &Path, size: u64
         .create_new(true)
         .write(true)
         .open(&staging_path)?;
-    match File::open(source) {
-        Ok(mut input) => {
-            std::io::copy(&mut input, &mut output)?;
+    let copied = (|| -> Result<()> {
+        match File::open(source) {
+            Ok(mut input) => {
+                copy_delivery_bytes(&mut input, &mut output, &staging_path)?;
+            }
+            Err(error) if size == 0 && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-        Err(error) if size == 0 && error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        output.sync_all()?;
+        sync_delivery_parent_retained(&staging_path)
+    })();
+    if copied.is_err()
+        && let Err(error) = remove_live_incomplete_delivery(&staging_path, &output)
+    {
+        tracing::warn!(%error, "staging delivery cleanup remains pending");
     }
-    output.sync_all()?;
-    sync_delivery_parent_retained(&staging_path)
+    copied
+}
+
+fn copy_delivery_bytes(input: &mut File, output: &mut File, destination: &Path) -> Result<()> {
+    #[cfg(test)]
+    if delivery_storage_full_paths()
+        .lock()
+        .unwrap()
+        .remove(destination)
+    {
+        use std::io::Write;
+        output.write_all(&[0x5a])?;
+        return Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
+    }
+    std::io::copy(input, output)
+        .with_context(|| format!("failed to copy delivery bytes to {}", destination.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn delivery_storage_full_paths() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static PATHS: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    PATHS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(super) fn force_delivery_storage_full(path: &Path) {
+    delivery_storage_full_paths()
+        .lock()
+        .unwrap()
+        .insert(long_path(path));
+}
+
+fn remove_live_incomplete_delivery(path: &Path, created: &File) -> Result<bool> {
+    // Only the still-open exclusive-create object confers removal authority.
+    // Recovered pathname reservations never enter this path.
+    let fingerprint = delivery_handle_fingerprint(created, path)?;
+    remove_file_if_fingerprint_matches_retained(path, &fingerprint)
 }
 
 #[cfg(test)]
@@ -1755,6 +1822,23 @@ fn split_stem_extension(file_name: &str) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn storage_full_reclaims_owned_partial_staging_and_keeps_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("payload");
+        let staging = directory.path().join(".emulebb-stage.tmp");
+        std::fs::write(&source, b"complete payload").unwrap();
+        force_delivery_storage_full(&staging);
+
+        let error = stage_delivery_payload_blocking(&source, &staging, 16).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::StorageFull
+        );
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read(&source).unwrap(), b"complete payload");
+    }
+
     #[test]
     fn delivery_rehashes_once_after_timestamp_drift() {
         for (second_drift, change_bytes) in [(false, false), (true, false), (false, true)] {

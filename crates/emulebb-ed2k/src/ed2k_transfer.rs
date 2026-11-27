@@ -293,6 +293,8 @@ pub struct Ed2kDownloadStorageReconciliation {
 pub struct Ed2kTransferDeletionRecoveryReport {
     /// Durable deletion intents fully finalized by this sweep.
     pub recovered: usize,
+    /// Journal entries deferred by temporary local admission pressure.
+    pub deferred_due_to_capacity: usize,
     /// Per-transfer cleanup failures retained for a later retry.
     pub failures: Vec<String>,
 }
@@ -302,6 +304,8 @@ pub struct Ed2kTransferDeletionRecoveryReport {
 pub struct Ed2kTransferRetirementRecoveryReport {
     /// Internal download directories reclaimed and transfer rows finalized.
     pub recovered: usize,
+    /// Journal entries deferred by temporary local admission pressure.
+    pub deferred_due_to_capacity: usize,
     /// Per-download cleanup failures retained for a later retry.
     pub failures: Vec<String>,
 }

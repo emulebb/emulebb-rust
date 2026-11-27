@@ -17,10 +17,24 @@ impl LocalMutationRegistry {
         // Copy and hashing are sequential and use bounded buffers.
         const DELIVERY_IO_WORKSPACE: usize = 512 * 1024;
         let lease = Self::reserve_long_fs(&mut state, DELIVERY_IO_WORKSPACE)?;
+        let enqueued = std::time::Instant::now();
         let (sender, receipt) = oneshot::channel();
         Self::spawn_unit_reply(&mut state, lease, sender, move |_| {
             let _guard = guard;
-            (operation(), 0)
+            let started = std::time::Instant::now();
+            let result = operation();
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let dispatch_ms =
+                u64::try_from(started.duration_since(enqueued).as_millis()).unwrap_or(u64::MAX);
+            // Observation only. Slow storage must keep its owner and admission.
+            if dispatch_ms >= 250 || elapsed_ms >= 250 {
+                tracing::info!(
+                    dispatch_ms,
+                    elapsed_ms,
+                    "delivery filesystem operation was slow"
+                );
+            }
+            (result, 0)
         });
         Ok(receipt)
     }
