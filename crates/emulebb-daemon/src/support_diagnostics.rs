@@ -140,6 +140,14 @@ fn project_record(record: &Value) -> Option<Value> {
         Some("persistent logging is unavailable; continuing with console and REST logging") => {
             "persistent_logging_unavailable"
         }
+        Some("copying delivery payload" | "copying delivery payload to a reserved output") => {
+            "delivery_copy"
+        }
+        Some("publishing delivery payload") => "delivery_publish",
+        Some("verifying published delivery") => "delivery_verify",
+        Some("download delivery deferred" | "download delivery remains pending") => {
+            "delivery_deferred"
+        }
         Some("automatic Kad startup failed; REST start remains available") => "kad_start_failed",
         Some("automatic ED2K/Kad startup failed; REST connect remains available") => {
             "peer_connect_failed"

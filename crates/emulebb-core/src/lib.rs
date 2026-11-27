@@ -877,6 +877,11 @@ impl EmulebbCore {
         Ok(self.ip_filter_status())
     }
 
+    /// Current externally observed IPv4 for the running peer network.
+    pub fn observed_public_ipv4(&self) -> Option<std::net::Ipv4Addr> {
+        self.ed2k_reachability.get()
+    }
+
     pub async fn nat_status(&self) -> NatStatusSnapshot {
         if let Some(runtime) = self.ed2k_runtime.lock().await.as_ref() {
             return runtime.nat.status().await.snapshot();

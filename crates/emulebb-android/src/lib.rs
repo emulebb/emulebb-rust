@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use emulebb_daemon::{
-    DaemonProfile, InitialProfileStorage, RestBootstrapSettings, ShutdownRequest, host_bootstrap,
+    DaemonProfile, HostedReady, InitialProfileStorage, RestBootstrapSettings, ShutdownRequest,
+    host_bootstrap,
 };
 use jni::{
     Env, native_method,
@@ -67,7 +68,7 @@ enum Phase {
 struct Host {
     phase: Phase,
     error: Option<String>,
-    address: Option<String>,
+    ready: Option<HostedReady>,
     shutdown: Option<ShutdownRequest>,
     worker: Option<JoinHandle<()>>,
     startup_network: Option<Arc<StartupNetwork>>,
@@ -179,7 +180,7 @@ fn handle(request: Request) -> Result<Value> {
             let shutdown = ShutdownRequest::default();
             state.phase = Phase::Starting;
             state.error = None;
-            state.address = None;
+            state.ready = None;
             state.shutdown = Some(shutdown.clone());
             let startup_network = Arc::new(StartupNetwork::default());
             state.startup_network = Some(Arc::clone(&startup_network));
@@ -215,7 +216,7 @@ fn handle(request: Request) -> Result<Value> {
                         state.shutdown = None;
                         state.startup_network = None;
                         state.waiting_for_network = false;
-                        state.address = None;
+                        state.ready = None;
                     }
                 });
             match worker {
@@ -255,10 +256,17 @@ fn handle(request: Request) -> Result<Value> {
             let state = host()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("host state unavailable"))?;
-            Ok(
-                json!({"phase":state.phase,"error":state.error,"address":state.address,
-                "waitingForNetwork":state.waiting_for_network}),
-            )
+            let ready = state.ready.as_ref();
+            let public_ipv4 = ready
+                .filter(|_| state.phase == Phase::Running)
+                .and_then(HostedReady::observed_public_ipv4);
+            Ok(json!({
+                "phase": state.phase,
+                "error": state.error,
+                "address": ready.map(|ready| ready.address),
+                "publicIpv4": public_ipv4,
+                "waitingForNetwork": state.waiting_for_network
+            }))
         }
     }
 }
@@ -326,7 +334,7 @@ fn run_attempt(
             let mut state = host()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("host state unavailable"))?;
-            state.address = Some(address.to_string());
+            state.ready = Some(address);
             if state.phase == Phase::Starting {
                 state.phase = Phase::Running;
             }
@@ -339,11 +347,11 @@ fn run_attempt(
     outcome
 }
 
-async fn await_readiness(
+async fn await_readiness<T>(
     run: impl std::future::Future<Output = Result<()>>,
-    mut readiness: tokio::sync::oneshot::Receiver<std::net::SocketAddr>,
+    mut readiness: tokio::sync::oneshot::Receiver<T>,
     reported: &mut bool,
-    ready: impl FnOnce(std::net::SocketAddr) -> Result<()>,
+    ready: impl FnOnce(T) -> Result<()>,
 ) -> Result<()> {
     tokio::pin!(run);
     tokio::select! {
@@ -450,7 +458,7 @@ mod tests {
         let mut reported = false;
         let outcome = runtime.block_on(await_readiness(
             async {
-                ready.send("127.0.0.1:20017".parse().unwrap()).unwrap();
+                ready.send(()).unwrap();
                 Err(emulebb_daemon::NetworkStartupError::DefaultRouteUnavailable.into())
             },
             readiness,

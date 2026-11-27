@@ -10,6 +10,9 @@
     <item name="api_key" type="id" />
     <item name="start_service" type="id" />
     <item name="stop_service" type="id" />
+    <item name="stop_service_and_exit" type="id" />
+    <item name="local_addresses" type="id" />
+    <item name="wan_address" type="id" />
     <item name="copy_api_key" type="id" />
     <item name="open_webui" type="id" />
     <item name="pending_link" type="id" />

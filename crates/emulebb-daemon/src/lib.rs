@@ -604,14 +604,26 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
 pub async fn run_hosted(
     profile: DaemonProfile,
     shutdown: ShutdownSignal,
-    ready: oneshot::Sender<SocketAddr>,
+    ready: oneshot::Sender<HostedReady>,
 ) -> Result<()> {
     run_inner(profile, Some(HostedLifecycle { shutdown, ready })).await
 }
 
+/// Read-only status for one hosted daemon lifetime.
+pub struct HostedReady {
+    pub address: SocketAddr,
+    core: std::sync::Weak<EmulebbCore>,
+}
+
+impl HostedReady {
+    pub fn observed_public_ipv4(&self) -> Option<std::net::Ipv4Addr> {
+        self.core.upgrade()?.observed_public_ipv4()
+    }
+}
+
 struct HostedLifecycle {
     shutdown: ShutdownSignal,
-    ready: oneshot::Sender<SocketAddr>,
+    ready: oneshot::Sender<HostedReady>,
 }
 
 async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) -> Result<()> {
@@ -691,7 +703,7 @@ async fn run_inner(mut profile: DaemonProfile, host: Option<HostedLifecycle>) ->
         if host.shutdown.is_requested() {
             return Ok(());
         }
-        if host.ready.send(bound_addr).is_err() {
+        if host.ready.send(HostedReady { address: bound_addr, core: Arc::downgrade(&core) }).is_err() {
             bail!("embedded host readiness receiver closed during startup");
         }
         Some(host.shutdown)
