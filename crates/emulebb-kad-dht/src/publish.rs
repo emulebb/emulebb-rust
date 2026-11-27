@@ -124,7 +124,7 @@ async fn execute_publish_fanout_for_contacts(
         join_set.spawn(async move {
             let expected_opcode = publish_response_opcode(&packet);
             let result = rpc
-                .request_with_class(
+                .request_with_class_and_metadata(
                     attempt.contact.addr,
                     &packet,
                     expected_opcode,
@@ -132,14 +132,10 @@ async fn execute_publish_fanout_for_contacts(
                     work_class,
                 )
                 .await;
-            acknowledge_publish_response_if_requested(
-                &rpc,
-                attempt.contact.addr,
-                work_class,
-                &result,
+            (
+                attempt,
+                acknowledge_publish_response(&rpc, work_class, result).await,
             )
-            .await;
-            (attempt, result)
         });
     }
 
@@ -184,7 +180,7 @@ async fn execute_keyword_publish_fanout(
             join_set.spawn(async move {
                 let expected_opcode = publish_response_opcode(&packet);
                 let result = rpc
-                    .request_with_class(
+                    .request_with_class_and_metadata(
                         addr,
                         &packet,
                         expected_opcode,
@@ -192,8 +188,11 @@ async fn execute_keyword_publish_fanout(
                         work_class,
                     )
                     .await;
-                acknowledge_publish_response_if_requested(&rpc, addr, work_class, &result).await;
-                (contact_index, chunk_index, result)
+                (
+                    contact_index,
+                    chunk_index,
+                    acknowledge_publish_response(&rpc, work_class, result).await,
+                )
             });
         }
     }
@@ -240,32 +239,29 @@ fn publish_response_opcode(packet: &KadPacket) -> u8 {
     }
 }
 
-fn publish_response_requests_ack(result: &Result<KadPacket, emulebb_kad_net::NetError>) -> bool {
+fn publish_response_requests_ack(packet: &KadPacket) -> bool {
     matches!(
-        result,
-        Ok(KadPacket::PublishRes(response))
+        packet,
+        KadPacket::PublishRes(response)
             if response.options.is_some_and(|options| options & 0x01 != 0)
     )
 }
 
-async fn acknowledge_publish_response_if_requested(
+async fn acknowledge_publish_response(
     rpc: &RpcManager,
-    addr: SocketAddr,
     work_class: RpcWorkClass,
-    result: &Result<KadPacket, emulebb_kad_net::NetError>,
-) {
-    // The option is meaningful only for keyed responses. The receive loop
-    // learns the sender verify key before completing the pending request, so
-    // this mirrors the stock `sender key available` gate.
-    if !publish_response_requests_ack(result) || rpc.known_peer_key(addr).is_none() {
-        return;
-    }
-    if let Err(error) = rpc
-        .send_with_class(addr, &KadPacket::PublishResAck, work_class)
-        .await
+    result: Result<emulebb_kad_net::ReceivedKadPacket, emulebb_kad_net::NetError>,
+) -> Result<KadPacket, emulebb_kad_net::NetError> {
+    let response = result?;
+    let addr = response.from;
+    // WHY: a cached key for the requested endpoint does not make a plaintext
+    // reply keyed, and the response may have arrived from a different port.
+    if publish_response_requests_ack(&response.packet)
+        && let Err(error) = rpc.send_publish_response_ack(&response, work_class).await
     {
         tracing::debug!("failed to send Kad publish response ACK to {addr}: {error}");
     }
+    Ok(response.packet)
 }
 
 #[expect(

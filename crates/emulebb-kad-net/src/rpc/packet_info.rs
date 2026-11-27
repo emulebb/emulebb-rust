@@ -292,6 +292,28 @@ pub(super) fn inbound_transport_mode(
     }
 }
 
+pub(super) fn targeted_request_reply(packet: &KadPacket) -> Option<(u8, NodeId)> {
+    match packet {
+        KadPacket::Req(request) => Some((opcode::RES, request.target)),
+        KadPacket::PublishKeyReq(request) => Some((opcode::PUBLISH_RES, request.target)),
+        KadPacket::PublishSourceReq(request) => Some((opcode::PUBLISH_RES, request.target)),
+        KadPacket::PublishNotesReq(request) => Some((opcode::PUBLISH_RES, request.target)),
+        KadPacket::LegacyPublishSourceReq(request) => {
+            Some((opcode::PUBLISH_RES_LEGACY, request.target))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn correlated_response_target(packet: &KadPacket) -> Option<NodeId> {
+    match packet {
+        KadPacket::Res(response) => Some(response.target),
+        KadPacket::PublishRes(response) => Some(response.target),
+        KadPacket::LegacyPublishRes(response) => Some(response.target),
+        _ => None,
+    }
+}
+
 pub(super) fn tracked_request_opcode_for_response(
     outbound_tracker: &Mutex<OutboundRequestTracker>,
     ip: IpAddr,
@@ -303,29 +325,6 @@ pub(super) fn tracked_request_opcode_for_response(
         opcode::BOOTSTRAP_RES => tracker.find_any(ip, &[opcode::BOOTSTRAP_REQ], remove),
         opcode::HELLO_RES => tracker.find_any(ip, &[opcode::HELLO_REQ], remove),
         opcode::HELLO_RES_ACK => tracker.find_any(ip, &[opcode::HELLO_RES], remove),
-        opcode::RES => tracker.find_any(ip, &[opcode::REQ], remove),
-        opcode::PUBLISH_RES => {
-            let matched = tracker.find_any(
-                ip,
-                &[
-                    opcode::PUBLISH_KEY_REQ,
-                    opcode::PUBLISH_SOURCE_REQ,
-                    opcode::PUBLISH_NOTES_REQ,
-                ],
-                false,
-            )?;
-            if remove {
-                let _ = tracker.contains(ip, matched, true);
-            }
-            Some(matched)
-        }
-        opcode::PUBLISH_RES_LEGACY => {
-            let matched = tracker.find_any(ip, &[opcode::PUBLISH_REQ_LEGACY], false)?;
-            if remove {
-                let _ = tracker.contains(ip, matched, true);
-            }
-            Some(matched)
-        }
         opcode::SEARCH_NOTES_RES_LEGACY => {
             tracker.find_any(ip, &[opcode::SEARCH_NOTES_REQ_LEGACY], false)
         }

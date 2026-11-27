@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use emulebb_kad_proto::KadPacket;
+use emulebb_kad_proto::{KadPacket, NodeId};
 use tracing::{debug, error, trace, warn};
 
 use super::packet_info::{
-    inbound_transport_mode, inspect_inbound_packet, is_publish_opcode, is_tracked_response_opcode,
-    opcode_name, search_response_target, should_learn_sender_verify_key,
-    should_log_unsolicited_opcode, tracked_request_opcode_for_response,
+    correlated_response_target, inbound_transport_mode, inspect_inbound_packet, is_publish_opcode,
+    is_tracked_response_opcode, opcode_name, search_response_target,
+    should_learn_sender_verify_key, should_log_unsolicited_opcode,
+    tracked_request_opcode_for_response,
 };
 use super::{PendingEntry, ReceivedKadPacket, RpcManager};
 use crate::error::NetError;
@@ -162,16 +163,26 @@ impl RpcManager {
                         // Validate response correlation without consuming either
                         // request tracker. Rejected/spoofed replies must not spend
                         // the legitimate sender's flood budget or pending request.
+                        let response_target = correlated_response_target(&packet);
                         let pending_correlation = {
                             let pending = inner.pending.lock();
-                            find_pending_correlation(&pending, from, response_opcode)
+                            find_pending_correlation(
+                                &pending,
+                                from,
+                                response_opcode,
+                                response_target,
+                            )
                         };
-                        let tracked_correlation = tracked_request_opcode_for_response(
-                            &inner.outbound_tracker,
-                            from.ip(),
-                            response_opcode,
-                            false,
-                        );
+                        let tracked_correlation = if response_target.is_none() {
+                            tracked_request_opcode_for_response(
+                                &inner.outbound_tracker,
+                                from.ip(),
+                                response_opcode,
+                                false,
+                            )
+                        } else {
+                            None
+                        };
                         if is_tracked_response_opcode(response_opcode)
                             && pending_correlation.is_none()
                             && tracked_correlation.is_none()
@@ -340,6 +351,18 @@ impl RpcManager {
 
                         // Admission succeeded. Only now may the packet teach peer
                         // metadata or consume correlation state.
+                        let pending_reply = pending_correlation.and_then(|correlation| {
+                            inner
+                                .pending
+                                .lock()
+                                .remove(&correlation.id)
+                                .map(|entry| (correlation.id, entry))
+                        });
+                        // WHY: a cancellation during admission invalidates a
+                        // targeted reply before it can teach peer metadata.
+                        if response_target.is_some() && pending_reply.is_none() {
+                            continue;
+                        }
                         if let Some(peer_id) = inbound.peer_id {
                             inner.obfuscation.register_peer_identity(from, peer_id);
                         }
@@ -376,9 +399,12 @@ impl RpcManager {
                                 .map_or_else(|| "-".to_string(), |version| version.to_string()),
                         );
 
-                        let matched = pending_correlation.and_then(|correlation| {
-                            let mut pending = inner.pending.lock();
-                            if let Some(entry) = pending.remove(&correlation.id) {
+                        let mut detached_request_opcode = None;
+                        let matched = pending_reply.and_then(|(id, mut entry)| {
+                                let Some(tx) = entry.tx.take() else {
+                                    detached_request_opcode = Some(entry.request_opcode);
+                                    return None;
+                                };
                                 let age_ms = entry.created_at.elapsed().as_millis();
                                 let matched_by_ip_only = entry.remote_addr != from;
                                 debug!(
@@ -390,7 +416,7 @@ impl RpcManager {
                                 {
                                     debug!(
                                         "kad publish pending match pending_id={} request_opcode={} response_opcode={} from={} age_ms={}",
-                                        correlation.id,
+                                        id,
                                         opcode_name(entry.request_opcode),
                                         opcode_name(response_opcode),
                                         from,
@@ -398,31 +424,39 @@ impl RpcManager {
                                     );
                                 }
                                 super::outbound::emit_rpc_terminal(
-                                    correlation.id,
+                                    id,
                                     &entry,
                                     Some(response_opcode),
                                     "response",
                                     None,
                                 );
-                                let _ = entry.tx.send(packet.clone());
+                                let _ = tx.send(ReceivedKadPacket {
+                                    packet: packet.clone(),
+                                    from,
+                                    was_obfuscated,
+                                    sender_verify_key,
+                                    receiver_verify_key_valid,
+                                    key_epoch: peer_key_epoch,
+                                });
                                 Some((
-                                    correlation.id,
+                                    id,
                                     age_ms,
                                     entry.request_opcode,
                                     matched_by_ip_only,
                                 ))
-                            } else {
-                                None
-                            }
                         });
 
-                        let tracked_request_opcode = tracked_request_opcode_for_response(
-                            &inner.outbound_tracker,
-                            from.ip(),
-                            response_opcode,
-                            true,
-                        )
-                        .or(tracked_correlation);
+                        let tracked_request_opcode = if response_target.is_some() {
+                            detached_request_opcode
+                        } else {
+                            tracked_request_opcode_for_response(
+                                &inner.outbound_tracker,
+                                from.ip(),
+                                response_opcode,
+                                true,
+                            )
+                            .or(tracked_correlation)
+                        };
                         let dump_request_opcode = matched
                             .map(|(_, _, request_opcode, _)| request_opcode)
                             .or(tracked_request_opcode)
@@ -506,6 +540,7 @@ impl RpcManager {
                                 was_obfuscated,
                                 sender_verify_key,
                                 receiver_verify_key_valid,
+                                key_epoch: peer_key_epoch,
                             });
                         } else {
                             inner
@@ -545,18 +580,31 @@ fn find_pending_correlation(
     pending: &HashMap<u64, PendingEntry>,
     from: SocketAddr,
     response_opcode: u8,
+    response_target: Option<NodeId>,
 ) -> Option<PendingCorrelation> {
-    let exact = pending
-        .iter()
-        .filter(|(_, entry)| entry.remote_addr == from && entry.expected_opcode == response_opcode)
-        .min_by_key(|(_, entry)| entry.created_at);
+    let candidates = pending.iter().filter(|(_, entry)| {
+        entry.dispatched_at.is_some()
+            && entry.expected_opcode == response_opcode
+            && entry.response_target == response_target
+            && entry.remote_addr.ip() == from.ip()
+            && entry.is_live()
+    });
+    let exact = candidates
+        .clone()
+        .filter(|(_, entry)| entry.remote_addr == from)
+        .min_by_key(|(id, entry)| (entry.dispatched_at, **id));
     let matched = exact.or_else(|| {
-        pending
-            .iter()
-            .filter(|(_, entry)| {
-                entry.remote_addr.ip() == from.ip() && entry.expected_opcode == response_opcode
-            })
-            .min_by_key(|(_, entry)| entry.created_at)
+        let oldest = candidates
+            .clone()
+            .min_by_key(|(id, entry)| (entry.dispatched_at, **id))?;
+        if response_target.is_some()
+            && candidates
+                .clone()
+                .any(|(_, entry)| entry.remote_addr != oldest.1.remote_addr)
+        {
+            return None;
+        }
+        Some(oldest)
     });
     matched.map(|(id, entry)| PendingCorrelation {
         id: *id,

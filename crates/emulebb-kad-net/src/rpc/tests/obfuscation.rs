@@ -1,4 +1,46 @@
 use super::*;
+
+#[tokio::test]
+async fn publish_ack_uses_the_observed_port_and_key_even_without_learning() {
+    let transport = Arc::new(MockTransport::new(make_local_addr()));
+    let local = ObfuscationLayer::new(NodeId::ZERO, 0x1234_5678, true);
+    let peer = ObfuscationLayer::new(NodeId::from_bytes([0x44; 16]), 0x5566_7788, true);
+    let rpc = make_rpc_with_shared_transport(Arc::clone(&transport), local);
+    rpc.reset_peer_keys(false);
+
+    let observed = SocketAddr::from(([127, 0, 0, 1], 4672));
+    let key = peer.verify_key_for_ip(std::net::Ipv4Addr::LOCALHOST);
+    let response = ReceivedKadPacket {
+        packet: KadPacket::PublishRes(emulebb_kad_proto::PublishRes {
+            target: NodeId::ZERO,
+            load: 1,
+            options: Some(1),
+        }),
+        from: observed,
+        was_obfuscated: true,
+        sender_verify_key: Some(key),
+        receiver_verify_key_valid: true,
+        key_epoch: rpc.inner.obfuscation.peer_key_epoch(),
+    };
+    rpc.send_publish_response_ack(&response, RpcWorkClass::Publish)
+        .await
+        .unwrap();
+    let [(destination, payload)] = transport.drain_outgoing().try_into().unwrap();
+    assert_eq!(destination, observed);
+    let decoded = peer.decrypt(make_local_addr(), &payload);
+    assert!(decoded.was_obfuscated);
+    assert!(decoded.receiver_verify_key_valid);
+    assert!(matches!(
+        KadPacket::decode(&decoded.data).unwrap(),
+        KadPacket::PublishResAck
+    ));
+
+    rpc.reset_peer_keys(false);
+    rpc.send_publish_response_ack(&response, RpcWorkClass::Publish)
+        .await
+        .unwrap();
+    assert!(transport.drain_outgoing().is_empty());
+}
 use emulebb_kad_proto::constants::opcode;
 use emulebb_kad_proto::{KadPacket, NodeId};
 
