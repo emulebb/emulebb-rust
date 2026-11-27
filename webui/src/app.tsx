@@ -55,9 +55,11 @@ import { errorMessage, formatRate, numberField } from "./format";
 import {
   type AppRoute,
   type Tab,
+  defaultMobileRoute,
   pathForRoute,
   routeFromPathname
 } from "./routes";
+import { MobileDownloads, MobileMore, MobileSearch, MobileShell } from "./mobile";
 import {
   CategoriesView,
   DiagnosticsView,
@@ -72,7 +74,8 @@ import {
   SharingView,
   DownloadsView,
   UploadsView,
-  type EventStreamStatus
+  type EventStreamStatus,
+  type SearchViewProps
 } from "./views";
 import { UpdateWarning } from "./components";
 import "@tabler/core/dist/css/tabler.min.css";
@@ -81,6 +84,7 @@ import { SettingsView } from "./settings";
 import { useRefreshRead } from "./useRefreshRead";
 
 const API_KEY_STORAGE = "emulebb.webui.apiKey";
+const DESKTOP_VIEW_STORAGE = "emulebb.webui.desktopView";
 const SNAPSHOT_LIMIT = 500;
 const LOG_LIMIT = 300;
 const SEARCH_RESULT_PAGE_SIZE = 100;
@@ -118,18 +122,32 @@ const pollingEventStreamStatus: EventStreamStatus = {
   retryIntervalMs: EVENT_STREAM_RETRY_MS
 };
 
-function currentRoute(): AppRoute {
-  const route = routeFromPathname(window.location.pathname);
-  if (route) {
-    const canonicalPath = pathForRoute(route);
-    if (window.location.pathname !== canonicalPath) {
-      window.history.replaceState(null, "", canonicalPath + window.location.search + window.location.hash);
-    }
-    return route;
+function currentRoute(initial = false): AppRoute {
+  const parsed = routeFromPathname(window.location.pathname);
+  let route: AppRoute = parsed ?? { tab: "overview" };
+  if (initial) {
+    if (route.mobile) storeDesktopView(false);
+    else if (window.matchMedia("(max-width: 639px)").matches && !prefersDesktopView()) route = defaultMobileRoute(route);
   }
-  const fallback: AppRoute = { tab: "overview" };
-  window.history.replaceState(null, "", pathForRoute(fallback));
-  return fallback;
+  const path = pathForRoute(route);
+  if (window.location.pathname !== path) {
+    window.history.replaceState(null, "", path + (parsed ? window.location.search + window.location.hash : ""));
+  }
+  return route;
+}
+
+function prefersDesktopView(): boolean {
+  try { return window.sessionStorage.getItem(DESKTOP_VIEW_STORAGE) === "true"; }
+  catch { return false; }
+}
+
+function storeDesktopView(preferred: boolean) {
+  try {
+    if (preferred) window.sessionStorage.setItem(DESKTOP_VIEW_STORAGE, "true");
+    else window.sessionStorage.removeItem(DESKTOP_VIEW_STORAGE);
+  } catch {
+    // Opening either view still works while browser storage is unavailable.
+  }
 }
 
 export function App({ appearance }: { appearance: Appearance }) {
@@ -187,7 +205,11 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [authError, setAuthError] = useState("");
   const [authAttempt, setAuthAttempt] = useState(0);
   const [storageWarning, setStorageWarning] = useState("");
-  const [route, setRoute] = useState<AppRoute>(currentRoute);
+  const [route, setRoute] = useState<AppRoute>(() => currentRoute(true));
+  const lastMobilePage = useRef<AppRoute>({ tab: "overview" });
+  useLayoutEffect(() => {
+    if (route.mobile && route.tab !== "overview") lastMobilePage.current = { tab: route.tab, searchId: route.searchId };
+  }, [route]);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [downloadPreview, setDownloadPreview] = useState<DownloadSummary[]>([]);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
@@ -289,24 +311,26 @@ export function App({ appearance }: { appearance: Appearance }) {
     setSearchOrder("desc");
   }, []);
 
-  const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
+  const navigate = useCallback((nextRoute: AppRoute, replace = false, suffix?: string) => {
     setMobileMenuExpanded(false);
     setAppearanceOpen(false);
     setSupportingReadError("");
     const path = pathForRoute(nextRoute);
-    if (window.location.pathname !== path) {
-      window.history[replace ? "replaceState" : "pushState"](null, "", path);
+    const currentSuffix = window.location.search + window.location.hash;
+    if (window.location.pathname !== path || (suffix !== undefined && suffix !== currentSuffix)) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", path + (suffix ?? ""));
     }
     setRoute(nextRoute);
   }, []);
 
   const navigateToTab = useCallback((nextTab: Tab) => {
-    navigate({ tab: nextTab });
-  }, [navigate]);
+    navigate({ tab: nextTab, mobile: route.mobile });
+  }, [navigate, route.mobile]);
 
   const navigateToSearch = useCallback((searchId: string, replace = false) => {
-    navigate({ tab: "search", searchId }, replace);
-  }, [navigate]);
+    const suffix = route.mobile && replace ? window.location.search + window.location.hash : undefined;
+    navigate({ tab: "search", searchId, mobile: route.mobile }, replace, suffix);
+  }, [navigate, route.mobile]);
 
   useEffect(() => {
     const syncRoute = () => {
@@ -384,7 +408,7 @@ export function App({ appearance }: { appearance: Appearance }) {
     const failure = [snapshotResult, previewResult].find((result) => result.status === "rejected");
     setRefreshError(failure ? errorMessage(failure.reason) : "");
   }, []);
-  useRefreshRead(authState === "authenticated" ? readSnapshot : null, refreshGeneration);
+  useRefreshRead(authState === "authenticated" && !route.mobile ? readSnapshot : null, refreshGeneration);
 
   useEffect(() => {
     if (authState !== "authenticated") return;
@@ -598,7 +622,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   const downloadSseEnabled = supportsDownloadSse(appInfo) || supportsDownloadSse(capabilities);
 
   useEffect(() => {
-    if (authState !== "authenticated" || !downloadSseEnabled) {
+    if (authState !== "authenticated" || !downloadSseEnabled || route.mobile) {
       setEventStreamStatus(pollingEventStreamStatus);
       return;
     }
@@ -677,7 +701,7 @@ export function App({ appearance }: { appearance: Appearance }) {
       closed = true;
       controller.abort();
     };
-  }, [apiKey, authState, downloadSseEnabled]);
+  }, [apiKey, authState, downloadSseEnabled, route.mobile]);
 
   const resetSession = () => {
     session.current.abort();
@@ -783,6 +807,126 @@ export function App({ appearance }: { appearance: Appearance }) {
     { tab: "diagnostics", label: "Diagnostics", icon: <Gauge size={16} /> }
   ];
 
+  const searchProps: SearchViewProps = {
+    searches,
+    selectedSearch,
+    resultPage: searchResults?.key === searchResultKey ? searchResults.page : null,
+    readError: (searchError?.key === searchResultKey ? searchError.message : "") || searchSessionsError,
+    downloadStatus,
+    queueDownload: queueSearchDownload,
+    resultCursor: selectedSearchCursor,
+    sessionCursor: searchSessionCursor,
+    sessionNextCursor: searchSessionNextCursor,
+    selectSearchSessionsPage: setSearchSessionCursor,
+    selectedSearchId: route.searchId,
+    categories,
+    client,
+    run,
+    selectSearch: navigateToSearch,
+    searchSort,
+    searchOrder,
+    selectSearchSort: (sort, order) => {
+      setSearchSort(sort);
+      setSearchOrder(order);
+      setSearchPage({ searchId: route.searchId ?? "", cursor: null });
+    },
+    selectSearchPage: (cursor) => {
+      if (route.searchId) setSearchPage({ searchId: route.searchId, cursor });
+    },
+    onSearchCreated: (search) => {
+      if (sessionSignal.aborted) return;
+      setSearchSessionCursor(null);
+      setSelectedSearch(search);
+      setSearchPage({ searchId: search.id, cursor: null });
+      navigateToSearch(search.id);
+    },
+    onSearchDeleted: () => {
+      setSelectedSearch(null);
+      setSearchResults(null);
+      setSearchPage({ searchId: "", cursor: null });
+      navigateToTab("search");
+    },
+    onSearchesCleared: () => {
+      setSearches([]);
+      setSearchSessionCursor(null);
+      setSearchSessionNextCursor(null);
+      setSearchResults(null);
+      setSelectedSearch(null);
+      setSearchPage({ searchId: "", cursor: null });
+      navigateToTab("search");
+    }
+  };
+  const downloadsProps = {
+    categories, client, run, refreshGeneration,
+    onDownloadRemoved: (job: DownloadSummary) => { if (!sessionSignal.aborted) forgetDownload(job); }
+  };
+  const authForm = (
+    <section class="auth-card card" aria-labelledby="auth-title">
+      <div class="card-body">
+        <div class="auth-heading">
+          <span class="brand-mark"><Lock size={18} /></span>
+          <div>
+            <h2 id="auth-title">Connect to the local daemon</h2>
+            <p>The WebUI stays locked until the API key is verified.</p>
+          </div>
+        </div>
+        {authError && <div class="notice alert alert-danger">{authError}</div>}
+        {storageWarning && <div class="notice alert alert-warning">{storageWarning}</div>}
+        <form
+          class="auth-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveApiKey();
+          }}
+        >
+          <label for="webui-api-key">API key</label>
+          <div class="auth-controls">
+            <div class="api-key input-icon">
+              <span class="input-icon-addon"><KeyRound size={16} /></span>
+              <input
+                id="webui-api-key"
+                class="form-control"
+                type="password"
+                value={apiKeyInput}
+                placeholder="X-API-Key"
+                autoComplete="off"
+                autofocus
+                onInput={(event) => setApiKeyInput(event.currentTarget.value)}
+              />
+            </div>
+            <button type="submit" class="btn btn-primary" disabled={authState === "checking" || !apiKeyInput.trim()}>
+              {authState === "checking" ? <RefreshCw size={16} class="spin" /> : <Unlock size={16} />}
+              {authState === "checking" ? "Checking…" : "Connect"}
+            </button>
+          </div>
+        </form>
+        <p class="auth-help">Use the API key printed beside the WebUI address when emulebb-rust starts.</p>
+      </div>
+    </section>
+  );
+  if (route.mobile) {
+    const desktopRoute: AppRoute = route.tab === "overview" ? lastMobilePage.current : { tab: route.tab, searchId: route.searchId };
+    const switchToDesktop = () => {
+      storeDesktopView(true);
+      navigate(desktopRoute, false, window.location.search + window.location.hash);
+    };
+    const navigatePhone = (nextRoute: AppRoute) => {
+      navigate(nextRoute);
+      window.scrollTo(0, 0);
+    };
+    return <MobileShell route={route} authenticated={authState === "authenticated"} navigate={navigatePhone}
+      desktopRoute={desktopRoute} switchToDesktop={switchToDesktop} refreshError={supportingReadError}
+      message={message} error={error}>
+      {authState === "authenticated" ? <>
+        {tab === "downloads" && <MobileDownloads {...downloadsProps} />}
+        {tab === "search" && <MobileSearch {...searchProps} />}
+        {tab === "overview" && <MobileMore appearance={appearance} preference={appearancePreference} logOut={logOut}
+          desktopRoute={desktopRoute} switchToDesktop={switchToDesktop}
+          tools={tabs.filter((item) => !["overview", "downloads", "search"].includes(item.tab))} navigate={navigatePhone} />}
+      </> : authForm}
+    </MobileShell>;
+  }
+
   return (
     <div class="page">
       <header class="navbar d-print-none">
@@ -834,50 +978,7 @@ export function App({ appearance }: { appearance: Appearance }) {
       <div class="page-wrapper">
         <div class="page-body">
           <div class="container-xl shell">
-            {authState !== "authenticated" && (
-              <section class="auth-card card" aria-labelledby="auth-title">
-                <div class="card-body">
-                  <div class="auth-heading">
-                    <span class="brand-mark"><Lock size={18} /></span>
-                    <div>
-                      <h2 id="auth-title">Connect to the local daemon</h2>
-                      <p>The WebUI stays locked until the API key is verified.</p>
-                    </div>
-                  </div>
-                  {authError && <div class="notice alert alert-danger">{authError}</div>}
-                  {storageWarning && <div class="notice alert alert-warning">{storageWarning}</div>}
-                  <form
-                    class="auth-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      saveApiKey();
-                    }}
-                  >
-                    <label for="webui-api-key">API key</label>
-                    <div class="auth-controls">
-                      <div class="api-key input-icon">
-                        <span class="input-icon-addon"><KeyRound size={16} /></span>
-                        <input
-                          id="webui-api-key"
-                          class="form-control"
-                          type="password"
-                          value={apiKeyInput}
-                          placeholder="X-API-Key"
-                          autoComplete="off"
-                          autofocus
-                          onInput={(event) => setApiKeyInput(event.currentTarget.value)}
-                        />
-                      </div>
-                      <button type="submit" class="btn btn-primary" disabled={authState === "checking" || !apiKeyInput.trim()}>
-                        {authState === "checking" ? <RefreshCw size={16} class="spin" /> : <Unlock size={16} />}
-                        {authState === "checking" ? "Checking…" : "Connect"}
-                      </button>
-                    </div>
-                  </form>
-                  <p class="auth-help">Use the API key printed beside the WebUI address when emulebb-rust starts.</p>
-                </div>
-              </section>
-            )}
+            {authState !== "authenticated" && authForm}
 
             {authState === "authenticated" && (
               <>
@@ -895,58 +996,8 @@ export function App({ appearance }: { appearance: Appearance }) {
                 kad={kad}
               />
             )}
-            {tab === "downloads" && <DownloadsView categories={categories} client={client} run={run} refreshGeneration={refreshGeneration}
-              onDownloadRemoved={(job) => { if (!sessionSignal.aborted) forgetDownload(job); }} />}
-            {tab === "search" && (
-              <SearchView
-                searches={searches}
-                selectedSearch={selectedSearch}
-                resultPage={searchResults?.key === searchResultKey ? searchResults.page : null}
-                readError={(searchError?.key === searchResultKey ? searchError.message : "") || searchSessionsError}
-                downloadStatus={downloadStatus}
-                queueDownload={queueSearchDownload}
-                resultCursor={selectedSearchCursor}
-                sessionCursor={searchSessionCursor}
-                sessionNextCursor={searchSessionNextCursor}
-                selectSearchSessionsPage={setSearchSessionCursor}
-                selectedSearchId={route.searchId}
-                categories={categories}
-                client={client}
-                run={run}
-                selectSearch={navigateToSearch}
-                searchSort={searchSort}
-                searchOrder={searchOrder}
-                selectSearchSort={(sort, order) => {
-                  setSearchSort(sort);
-                  setSearchOrder(order);
-                  setSearchPage({ searchId: route.searchId ?? "", cursor: null });
-                }}
-                selectSearchPage={(cursor) => {
-                  if (route.searchId) setSearchPage({ searchId: route.searchId, cursor });
-                }}
-                onSearchCreated={(search) => {
-                  setSearchSessionCursor(null);
-                  setSelectedSearch(search);
-                  setSearchPage({ searchId: search.id, cursor: null });
-                  navigateToSearch(search.id);
-                }}
-                onSearchDeleted={() => {
-                  setSelectedSearch(null);
-                  setSearchResults(null);
-                  setSearchPage({ searchId: "", cursor: null });
-                  navigateToTab("search");
-                }}
-                onSearchesCleared={() => {
-                  setSearches([]);
-                  setSearchSessionCursor(null);
-                  setSearchSessionNextCursor(null);
-                  setSearchResults(null);
-                  setSelectedSearch(null);
-                  setSearchPage({ searchId: "", cursor: null });
-                  navigateToTab("search");
-                }}
-              />
-            )}
+            {tab === "downloads" && <DownloadsView {...downloadsProps} />}
+            {tab === "search" && <SearchView {...searchProps} />}
             {tab === "sharing" && (
               <SharingView
                 refreshGeneration={refreshGeneration}

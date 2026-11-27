@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { pathForRoute, pathForSearch, pathForTab, routeFromPathname } from "../../src/routes";
+import { defaultMobileRoute, pathForRoute, pathForSearch, pathForTab, routeFromPathname } from "../../src/routes";
 
 describe("WebUI routes", () => {
   it("maps primary views to stable paths", () => {
@@ -23,5 +23,16 @@ describe("WebUI routes", () => {
     expect(routeFromPathname("/searches/01")).toBeNull();
     expect(routeFromPathname("/searches/4294967296")).toBeNull();
     expect(() => pathForSearch("not-a-number")).toThrow("Invalid search session id");
+  });
+
+  it("chooses phone routes only for supported views and round-trips mobile search links", () => {
+    expect(pathForRoute(defaultMobileRoute({ tab: "overview" }))).toBe("/mobile");
+    expect(pathForRoute(defaultMobileRoute({ tab: "downloads" }))).toBe("/mobile");
+    expect(pathForRoute(defaultMobileRoute({ tab: "settings" }))).toBe("/settings");
+    expect(defaultMobileRoute({ tab: "overview", mobile: true })).toEqual({ tab: "overview", mobile: true });
+    expect(pathForRoute(routeFromPathname("/mobile/more")!)).toBe("/mobile/more");
+    expect(pathForRoute(defaultMobileRoute({ tab: "search", searchId: "17" }))).toBe("/mobile/searches/17");
+    expect(routeFromPathname("/mobile/searches/17")).toEqual({ tab: "search", searchId: "17", mobile: true });
+    expect(routeFromPathname("/mobile/searches/01")).toBeNull();
   });
 });

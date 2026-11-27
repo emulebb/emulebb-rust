@@ -1,0 +1,276 @@
+.mobile-ui {
+  --phone-bg: var(--tblr-bg-surface-secondary);
+  --phone-card: var(--tblr-bg-surface);
+  --phone-ink: var(--tblr-body-color);
+  --phone-muted: var(--tblr-secondary);
+  --phone-line: var(--tblr-border-color);
+  --phone-accent: var(--tblr-primary);
+  --phone-bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
+  min-height: 100dvh;
+  background: var(--phone-bg);
+  color: var(--phone-ink);
+}
+
+.mobile-ui .phone-header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 3.25rem;
+  padding: env(safe-area-inset-top, 0px) max(1rem, env(safe-area-inset-right)) 0 max(1rem, env(safe-area-inset-left));
+  background: var(--phone-card);
+  border-bottom: 1px solid var(--phone-line);
+}
+
+.mobile-ui .phone-content {
+  max-width: 44rem;
+  margin-inline: auto;
+  padding: 1rem max(0.875rem, env(safe-area-inset-right)) calc(var(--phone-bottom) + 3rem) max(0.875rem, env(safe-area-inset-left));
+}
+
+.mobile-ui .phone-navigation {
+  position: fixed;
+  z-index: 3;
+  inset: auto 0 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-height: var(--phone-bottom);
+  padding-block-end: env(safe-area-inset-bottom, 0px);
+  background: var(--phone-card);
+  border-top: 1px solid var(--phone-line);
+}
+
+.mobile-ui .phone-navigation a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 0.2rem;
+  color: var(--phone-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.mobile-ui .phone-navigation [aria-current="page"] {
+  background: var(--tblr-primary-bg-subtle);
+  color: var(--phone-accent);
+}
+
+.mobile-ui .phone-feedback {
+  position: fixed;
+  z-index: 3;
+  inset: auto 0.75rem calc(var(--phone-bottom) + 0.5rem);
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.mobile-ui .phone-feedback span {
+  max-width: 100%;
+  padding: 0.4rem 0.65rem;
+  background: var(--phone-card);
+  border: 1px solid var(--phone-line);
+  border-radius: 0.75rem;
+  box-shadow: var(--tblr-box-shadow);
+  overflow-wrap: anywhere;
+}
+
+.mobile-ui .phone-error {
+  color: var(--tblr-danger);
+}
+
+.mobile-ui h1,
+.mobile-ui h2,
+.mobile-ui p {
+  margin: 0;
+}
+
+.mobile-ui h1 {
+  font-size: 1.45rem;
+}
+
+.mobile-ui h2 {
+  font-size: 1rem;
+}
+
+.mobile-ui .phone-list {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.mobile-ui .phone-heading,
+.mobile-ui .phone-card-heading,
+.mobile-ui .phone-card-meta,
+.mobile-ui .phone-actions,
+.mobile-ui .phone-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mobile-ui .phone-heading button,
+.mobile-ui .phone-card-heading button + button,
+.mobile-ui .phone-card-meta > :last-child {
+  margin-inline-start: auto;
+}
+
+.mobile-ui .phone-actions {
+  flex-wrap: wrap;
+}
+
+.mobile-ui .phone-card,
+.mobile-ui .phone-dialog {
+  background: var(--phone-card);
+  color: var(--phone-ink);
+  border: 1px solid var(--phone-line);
+  border-radius: 0.875rem;
+  padding: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.mobile-ui .phone-card-meta,
+.mobile-ui .phone-muted {
+  color: var(--phone-muted);
+  font-size: 0.875rem;
+}
+
+.mobile-ui .phone-card-meta > :first-child {
+  min-width: 0;
+}
+
+.mobile-ui .phone-queued {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--tblr-success);
+  font-weight: 700;
+}
+
+.mobile-ui :where(button, .phone-button, input:not([type="checkbox"]), select, textarea) {
+  min-height: 44px;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--phone-line);
+  border-radius: 0.625rem;
+  background: var(--phone-card);
+  color: inherit;
+  padding: 0.45rem 0.65rem;
+}
+
+.mobile-ui :is(input:not([type="checkbox"]), select, textarea) {
+  width: 100%;
+  font-size: 16px;
+}
+
+.mobile-ui :is(button, .phone-button) {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.mobile-ui .phone-primary,
+.mobile-ui .auth-form button {
+  background: var(--phone-accent);
+  border-color: var(--phone-accent);
+  color: var(--tblr-primary-fg);
+}
+
+.mobile-ui button:disabled {
+  opacity: 0.6;
+}
+
+.mobile-ui .phone-button,
+.mobile-ui .phone-tools a {
+  display: flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.mobile-ui .phone-tools {
+  display: grid;
+  gap: 0.25rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mobile-ui .phone-tools a {
+  min-height: 44px;
+  padding: 0.4rem 0.65rem;
+}
+
+.mobile-ui .phone-field {
+  display: grid;
+  min-width: 0;
+  gap: 0.25rem;
+}
+
+.mobile-ui .phone-filters,
+.mobile-ui .phone-query {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.mobile-ui .phone-query {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.mobile-ui .phone-file {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: start;
+  overflow-wrap: anywhere;
+  background: transparent;
+  border: 0;
+  padding-inline-start: 0;
+  color: var(--tblr-link-color);
+}
+
+.mobile-ui .phone-file span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.mobile-ui progress {
+  width: 100%;
+  height: 0.55rem;
+  accent-color: var(--phone-accent);
+}
+
+.mobile-ui .phone-dialog:not([open]) {
+  display: none;
+}
+
+.mobile-ui .phone-dialog[open] {
+  display: grid;
+  gap: 0.75rem;
+  margin: auto;
+  width: min(28rem, calc(100% - 1.5rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+}
+
+.mobile-ui .phone-dialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+.mobile-ui summary {
+  min-height: 44px;
+  padding-block: 0.65rem;
+  cursor: pointer;
+}
+
+.mobile-ui .auth-card {
+  margin-top: 0;
+}
+
+.mobile-ui .auth-heading p,
+.mobile-ui .auth-help {
+  margin-block-start: 0.5rem;
+}

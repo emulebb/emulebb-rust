@@ -263,13 +263,16 @@ function DownloadEvidence<T>(props: { path: string; label: string; client: RestC
   </section>;
 }
 
-export function DownloadsView(props: {
+export type DownloadsViewProps = {
   categories: Category[];
   client: RestClient;
   run: RunFunction;
   refreshGeneration: number;
   onDownloadRemoved?: (job: DownloadSummary) => void;
-}) {
+};
+
+/** Share download navigation, reads and mutations between the two layouts. */
+export function useDownloads(props: DownloadsViewProps, onSelectionChange?: () => void) {
   const [view, setView] = useState("unfinished");
   const [category, setCategory] = useState("");
   const [cursor, setCursor] = useState<string | null>(null);
@@ -282,13 +285,12 @@ export function DownloadsView(props: {
   const [selectedId, setSelectedId] = useState("");
   const [details, setDetails] = useState<DownloadDetail | null>(null);
   const [detailError, setDetailError] = useState("");
-  const [browse, setBrowse] = useState<{ path: string; peer: string; request: number } | null>(null);
   const selectDownload = (id: string) => {
     if (id !== selectedId) {
       setSelectedId(id);
       setDetails(null);
       setDetailError("");
-      setBrowse(null);
+      onSelectionChange?.();
     }
   };
   const linksError = transferLinksValidationError(ed2kLinks);
@@ -353,6 +355,20 @@ export function DownloadsView(props: {
       if (selectedId === job.id) selectDownload("");
     }, "Download removed");
   };
+  return {
+    view, setView, category, setCategory, cursor, page, loading, listError,
+    handoff, ed2kLinks, setEd2kLinks, stoppedCreate, setStoppedCreate, selectedId,
+    details, detailError, selectDownload, linksError, consumeHandoff, changePage, createDownloads, remove
+  };
+}
+
+export function DownloadsView(props: DownloadsViewProps) {
+  const [browse, setBrowse] = useState<{ path: string; peer: string; request: number } | null>(null);
+  const {
+    view, setView, category, setCategory, cursor, page, loading, listError,
+    handoff, ed2kLinks, setEd2kLinks, stoppedCreate, setStoppedCreate, selectedId,
+    details, detailError, selectDownload, linksError, consumeHandoff, changePage, createDownloads, remove
+  } = useDownloads(props, () => setBrowse(null));
   return <section class="view-stack">
     <section class="panel card">
       <div class="section-title"><div class="section-heading"><h2>Downloads</h2><UpdateWarning message={page ? listError : ""} /></div><div class="row-actions">
@@ -500,7 +516,7 @@ function SourceBrowsePanel(props: { path: string; peer: string; client: RestClie
   </section>;
 }
 
-export function SearchView(props: {
+export type SearchViewProps = {
   searches: SearchItem[];
   selectedSearch: SearchItem | null;
   resultPage: CursorPage<SearchResult> | null;
@@ -523,7 +539,25 @@ export function SearchView(props: {
   onSearchCreated: (search: SearchItem) => void;
   onSearchDeleted: (searchId: string) => void;
   onSearchesCleared: () => void;
-}) {
+};
+
+export function queueSearchResult(
+  props: Pick<SearchViewProps, "client" | "queueDownload" | "selectedSearchId" | "run">,
+  result: SearchResult, category = "", paused = false
+) {
+  const searchId = props.selectedSearchId;
+  if (!searchId) return;
+  return props.run(
+    () => props.queueDownload(result.hash, (signal) => createDownloadWithChoice((redownload) =>
+      props.client.post<DownloadSummary>(`searches/${searchId}/results/${result.id}/download`, {
+        intent: paused ? "stopped" : "started", category: category || null, redownload
+      }, signal)
+    )),
+    "Download queued"
+  );
+}
+
+export function SearchView(props: SearchViewProps) {
   const [query, setQuery] = useState("");
   const [parentSearchId, setParentSearchId] = useState<string | null>(null);
   const [method, setMethod] = useState("automatic");
@@ -858,18 +892,7 @@ export function SearchView(props: {
                     type="button"
                     title="Download this result"
                     disabled={typeof downloadStatus === "symbol" || !props.selectedSearchId}
-                    onClick={() => void props.run(
-                      () => props.queueDownload(result.hash, (signal) =>
-                        createDownloadWithChoice((redownload) =>
-                          props.client.post<DownloadSummary>(`searches/${props.selectedSearchId}/results/${result.id}/download`, {
-                            intent: paused ? "stopped" : "started",
-                            category: category || null,
-                            redownload
-                          }, signal)
-                        )
-                      ),
-                      "Download queued"
-                    )}
+                    onClick={() => void queueSearchResult(props, result, category, paused)}
                   >
                     <Download size={15} />
                     {typeof downloadStatus === "symbol" ? "Queuing…" : "Download"}
@@ -2595,11 +2618,11 @@ function friendNameError(value: string): string | undefined {
 
 
 
-function normalizeSearchQuery(value: string): string {
+export function normalizeSearchQuery(value: string): string {
   return value.trim().split(/[ \t\n\r\f\v]+/).filter(Boolean).join(" ");
 }
 
-function searchQueryValidationError(value: string): string | undefined {
+export function searchQueryValidationError(value: string): string | undefined {
   const normalized = normalizeSearchQuery(value);
   if (!normalized) {
     return undefined;
@@ -2801,7 +2824,7 @@ export function LogsView(props: { logs: LogRecord[]; client: RestClient; run: Ru
   );
 }
 
-function DownloadStateLabel({ download }: { download: DownloadSummary }) {
+export function DownloadStateLabel({ download }: { download: DownloadSummary }) {
   const labels = { network: "Waiting for network", sources: "Waiting for useful sources", resources: "Waiting for resources" };
   return <span><StatusPill value={download.state} />{download.state === "queued" && <small class="text-muted"> {labels[download.waitingReason]}</small>}</span>;
 }

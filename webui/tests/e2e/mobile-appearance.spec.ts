@@ -20,7 +20,10 @@ async function noPageOverflow(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => sessionStorage.setItem("emulebb.webui.apiKey", "sample-key"));
+  await page.addInitScript(() => {
+    sessionStorage.setItem("emulebb.webui.apiKey", "sample-key");
+    sessionStorage.setItem("emulebb.webui.desktopView", "true");
+  });
 });
 
 for (const width of [320, 390, 768, 1280]) {
@@ -111,7 +114,7 @@ test("mobile menu closes for every link, current view, Escape, history, shortcut
 test("appearance works while locked, follows System and persists explicit overrides", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ colorScheme: "dark" });
-  await page.addInitScript(() => sessionStorage.clear());
+  await page.addInitScript(() => sessionStorage.removeItem("emulebb.webui.apiKey"));
   await page.route("**/api/v1/**", installMockApi([]));
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
