@@ -17,6 +17,20 @@ FIELDS = ("diagnostic_run_id", "diagnostic_source_sha", "diagnostic_manifest_sha
 VALID = dict(zip(FIELDS, ("43524927475", "a" * 40, "b" * 64, "apk34")))
 
 
+class TestRetainedArm64SourceTrust(unittest.TestCase):
+    def test_dispatch_inputs_never_select_the_initial_checkout(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/arm64-package-replay.yml").read_text(encoding="utf-8"))
+        self.assertEqual(workflow["permissions"], {"actions": "read", "contents": "read"})
+        replay = workflow["jobs"]["replay"]
+        self.assertEqual(replay["if"], "github.ref == 'refs/heads/main'")
+        checkouts = [step["with"]["ref"] for step in replay["steps"]
+                     if step.get("uses", "").startswith("actions/checkout@")]
+        self.assertEqual(checkouts.count("refs/heads/main"), 3)
+        self.assertTrue(all(ref == "refs/heads/main" or re.fullmatch(r"[0-9a-f]{40}", ref) for ref in checkouts))
+        self.assertEqual(sum('"merge-base", "--is-ancestor"' in step.get("run", "")
+                             for step in replay["steps"]), 2)
+
+
 def evaluate(expression, values, event="workflow_dispatch"):
     """Evaluate only the boolean/string subset used by the actual routing guards."""
     source = expression.removeprefix("${{").removesuffix("}}").strip()
