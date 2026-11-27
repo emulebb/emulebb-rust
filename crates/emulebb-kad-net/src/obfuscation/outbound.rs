@@ -95,39 +95,40 @@ impl ObfuscationLayer {
     /// NodeID context is missing.
     pub fn encrypt(&self, addr: SocketAddr, opcode_value: u8, plaintext: &[u8]) -> Vec<u8> {
         let outbound = self.inspect_outbound(addr, opcode_value);
-        if matches!(outbound.mode, OutboundKadEncryptionMode::Plaintext) {
-            return plaintext.to_vec();
-        }
+        Self::encrypt_outbound(outbound, plaintext)
+    }
 
-        let peer = self.peer_state_for_addr(addr);
-        let preferred_mode = match outbound.mode {
-            OutboundKadEncryptionMode::Plaintext => None,
-            OutboundKadEncryptionMode::NodeId => Some(KadKeyMode::NodeId),
-            OutboundKadEncryptionMode::ReceiverVerifyKey => Some(KadKeyMode::ReceiverVerifyKey),
-        };
-
-        let Some(mode) = preferred_mode else {
+    /// Encode with one immutable snapshot so a peer-key reset cannot change
+    /// the envelope between selection and encryption.
+    pub(crate) fn encrypt_outbound(
+        outbound: OutboundKadEncryptionInfo,
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        let Some(sender_verify_key) = outbound.sender_verify_key else {
             return plaintext.to_vec();
         };
-
         let random_key_part: u16 = rand::rng().random();
-        let rc4_key = match mode {
-            KadKeyMode::NodeId => derive_kad_request_key(peer.node_id.unwrap(), random_key_part),
-            KadKeyMode::ReceiverVerifyKey => {
-                derive_kad_receiver_key(peer.receiver_verify_key.unwrap(), random_key_part)
-            }
-        };
-
-        let sender_verify_key = match addr.ip() {
-            IpAddr::V4(ip) => self.verify_key_for_ip(ip),
-            IpAddr::V6(_) => return plaintext.to_vec(),
+        let (mode, rc4_key) = match outbound.mode {
+            OutboundKadEncryptionMode::NodeId => (
+                KadKeyMode::NodeId,
+                derive_kad_request_key(outbound.peer_node_id.unwrap(), random_key_part),
+            ),
+            OutboundKadEncryptionMode::ReceiverVerifyKey => (
+                KadKeyMode::ReceiverVerifyKey,
+                derive_kad_receiver_key(outbound.receiver_verify_key.unwrap(), random_key_part),
+            ),
+            OutboundKadEncryptionMode::Plaintext => return plaintext.to_vec(),
         };
 
         let mut encrypted_tail = Vec::with_capacity(13 + plaintext.len());
         encrypted_tail.extend_from_slice(&MAGICVALUE_UDP_SYNC_CLIENT.to_le_bytes());
         encrypted_tail.push(UDP_PADDING_LEN);
-        encrypted_tail
-            .extend_from_slice(&peer.receiver_verify_key.unwrap_or_default().to_le_bytes());
+        encrypted_tail.extend_from_slice(
+            &outbound
+                .receiver_verify_key
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
         encrypted_tail.extend_from_slice(&sender_verify_key.to_le_bytes());
         encrypted_tail.extend_from_slice(plaintext);
         rc4(&rc4_key, &mut encrypted_tail);

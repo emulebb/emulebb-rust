@@ -493,12 +493,12 @@ fn publish_res(load: u8) -> KadPacket {
 
 #[test]
 fn publish_response_ack_bit_is_detected_without_treating_other_options_as_requests() {
-    let response = |options| -> Result<KadPacket, emulebb_kad_net::NetError> {
-        Ok(KadPacket::PublishRes(PublishRes {
+    let response = |options| {
+        KadPacket::PublishRes(PublishRes {
             target: NodeId::from_bytes([9; 16]),
             load: 1,
             options,
-        }))
+        })
     };
     assert!(!publish_response_requests_ack(&response(None)));
     assert!(!publish_response_requests_ack(&response(Some(0))));

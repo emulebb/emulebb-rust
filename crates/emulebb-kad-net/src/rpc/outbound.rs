@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -8,12 +8,16 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::debug;
 
-use super::packet_info::{is_publish_opcode, opcode_name, outbound_transport_reason};
-use super::{PendingEntry, RpcInner, RpcManager, RpcWorkClass};
+use super::packet_info::{
+    is_publish_opcode, opcode_name, outbound_transport_reason, targeted_request_reply,
+};
+use super::{PendingEntry, ReceivedKadPacket, RpcInner, RpcManager, RpcWorkClass};
 use crate::error::NetError;
-use crate::obfuscation::OutboundKadEncryptionMode;
+use crate::obfuscation::{ObfuscationLayer, OutboundKadEncryptionMode};
 use crate::rate_limit::RateLimiter;
 use crate::wire_dump::{KadUdpDumpSummary, KadUdpOutcome, dump_kad_udp_packet};
+
+const DETACHED_REQUEST_LIFETIME: Duration = Duration::from_secs(180);
 
 /// RAII guard that guarantees a pending-request entry is removed from the
 /// `RpcManager` map exactly once, even if the awaiting request future is
@@ -113,6 +117,26 @@ impl RpcManager {
         timeout_duration: Duration,
         work_class: RpcWorkClass,
     ) -> Result<KadPacket, NetError> {
+        self.request_with_class_and_metadata(
+            addr,
+            packet,
+            expected_opcode,
+            timeout_duration,
+            work_class,
+        )
+        .await
+        .map(|response| response.packet)
+    }
+
+    /// Wait for a correlated response and retain its actual envelope metadata.
+    pub async fn request_with_class_and_metadata(
+        &self,
+        addr: SocketAddr,
+        packet: &KadPacket,
+        expected_opcode: u8,
+        timeout_duration: Duration,
+        work_class: RpcWorkClass,
+    ) -> Result<ReceivedKadPacket, NetError> {
         if !self.kad_enabled() {
             return Err(NetError::KadStopped);
         }
@@ -129,7 +153,9 @@ impl RpcManager {
                     expected_opcode,
                     work_class,
                     timeout_duration,
-                    tx,
+                    response_target: targeted_request_reply(packet).map(|(_, target)| target),
+                    dispatched_at: None,
+                    tx: Some(tx),
                     created_at: std::time::Instant::now(),
                 },
             );
@@ -165,7 +191,7 @@ impl RpcManager {
         }
 
         if let Err(e) = self
-            .send_with_class_for_request(addr, packet, work_class, Some(id))
+            .send_with_class_for_request(addr, packet, work_class, Some(id), None)
             .await
         {
             if let Some(entry) = guard.take() {
@@ -227,8 +253,28 @@ impl RpcManager {
         packet: &KadPacket,
         work_class: RpcWorkClass,
     ) -> Result<(), NetError> {
-        self.send_with_class_for_request(addr, packet, work_class, None)
+        self.send_with_class_for_request(addr, packet, work_class, None, None)
             .await
+    }
+
+    /// Acknowledge a keyed publish reply at its observed endpoint, using the
+    /// reply's own sender key even when peer-key learning is disabled.
+    pub async fn send_publish_response_ack(
+        &self,
+        response: &ReceivedKadPacket,
+        work_class: RpcWorkClass,
+    ) -> Result<(), NetError> {
+        let Some(key) = response.sender_verify_key.filter(|&key| key != 0) else {
+            return Ok(());
+        };
+        self.send_with_class_for_request(
+            response.from,
+            &KadPacket::PublishResAck,
+            work_class,
+            None,
+            Some((key, response.key_epoch)),
+        )
+        .await
     }
 
     async fn send_with_class_for_request(
@@ -237,6 +283,7 @@ impl RpcManager {
         packet: &KadPacket,
         work_class: RpcWorkClass,
         request_id: Option<u64>,
+        reply_key: Option<(u32, u64)>,
     ) -> Result<(), NetError> {
         if !self.kad_enabled() {
             dump_kad_udp_packet(
@@ -289,10 +336,21 @@ impl RpcManager {
                 return Err(error.into());
             }
         };
-        let outbound = self
+        let mut outbound = self
             .inner
             .obfuscation
             .inspect_outbound(addr, packet.opcode());
+        if let Some((key, epoch)) = reply_key {
+            let IpAddr::V4(ip) = addr.ip() else {
+                return Ok(());
+            };
+            if self.inner.obfuscation.peer_key_epoch() != epoch {
+                return Ok(());
+            }
+            outbound.mode = OutboundKadEncryptionMode::ReceiverVerifyKey;
+            outbound.receiver_verify_key = Some(key);
+            outbound.sender_verify_key = Some(self.inner.obfuscation.verify_key_for_ip(ip));
+        }
         debug!(
             "kad send opcode={} to={} mode={} reason={} peer_version={} receiver_verify_key={} sender_verify_key={} peer_node_id={}",
             opcode_name(packet.opcode()),
@@ -309,14 +367,48 @@ impl RpcManager {
                 .map(|node_id| node_id.to_string())
                 .unwrap_or_else(|| "-".to_string()),
         );
-        let wire = self
-            .inner
-            .obfuscation
-            .encrypt(addr, packet.opcode(), &encoded);
-        self.inner
-            .outbound_tracker
-            .lock()
-            .record(addr.ip(), packet.opcode());
+        let wire = ObfuscationLayer::encrypt_outbound(outbound, &encoded);
+        let targeted_reply = targeted_request_reply(packet);
+        let mut detached_guard = None;
+        {
+            let mut pending = self.inner.pending.lock();
+            if !self.kad_enabled() {
+                return Err(NetError::KadStopped);
+            }
+            if let Some(id) = request_id {
+                let Some(entry) = pending.get_mut(&id) else {
+                    return Err(NetError::KadStopped);
+                };
+                entry.dispatched_at = Some(std::time::Instant::now());
+            } else if let Some((expected_opcode, target)) = targeted_reply {
+                let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+                pending.retain(|_, entry| entry.is_live());
+                let now = std::time::Instant::now();
+                pending.insert(
+                    id,
+                    PendingEntry {
+                        remote_addr: addr,
+                        request_opcode: packet.opcode(),
+                        expected_opcode,
+                        response_target: Some(target),
+                        work_class,
+                        timeout_duration: DETACHED_REQUEST_LIFETIME,
+                        dispatched_at: Some(now),
+                        tx: None,
+                        created_at: now,
+                    },
+                );
+                detached_guard = Some(PendingGuard::new(Arc::clone(&self.inner), id));
+            }
+        }
+        // WHY: opcode-only tracking cannot distinguish outstanding targets.
+        // Both awaited and detached targeted requests use the pending map.
+        if targeted_reply.is_none() {
+            self.inner
+                .outbound_tracker
+                .lock()
+                .record(addr.ip(), packet.opcode());
+        }
         if is_publish_opcode(packet.opcode()) {
             let crypt_target = outbound
                 .peer_node_id
@@ -343,7 +435,11 @@ impl RpcManager {
                 Some(error.to_string()),
             ),
         };
-        if send_result.is_err() {
+        if send_result.is_ok() {
+            if let Some(guard) = &mut detached_guard {
+                guard.removed = true;
+            }
+        } else if targeted_reply.is_none() {
             self.inner
                 .outbound_tracker
                 .lock()

@@ -25,7 +25,7 @@ use crate::obfuscation::ObfuscationLayer;
 use crate::rate_limit::RateLimiter;
 use crate::tracker::{OutboundRequestTracker, PacketTracker};
 use crate::transport::Transport;
-use emulebb_kad_proto::KadPacket;
+use emulebb_kad_proto::{KadPacket, NodeId};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -40,8 +40,17 @@ struct PendingEntry {
     expected_opcode: u8,
     work_class: RpcWorkClass,
     timeout_duration: Duration,
-    tx: oneshot::Sender<KadPacket>,
+    response_target: Option<NodeId>,
+    dispatched_at: Option<Instant>,
+    /// A detached send such as a legacy challenge uses the unsolicited receiver.
+    tx: Option<oneshot::Sender<ReceivedKadPacket>>,
     created_at: std::time::Instant,
+}
+
+impl PendingEntry {
+    fn is_live(&self) -> bool {
+        self.tx.is_some() || self.created_at.elapsed() < self.timeout_duration
+    }
 }
 
 /// Stock Kad considers itself connected for twenty minutes after any decoded
@@ -63,6 +72,7 @@ pub struct ReceivedKadPacket {
     /// Whether the sender proved our receiver verify key instead of using
     /// NodeID-mode request obfuscation.
     pub receiver_verify_key_valid: bool,
+    pub(crate) key_epoch: u64,
 }
 
 /// Handler for inbound datagrams that fail Kad decode — e.g. eD2k client UDP
@@ -227,6 +237,7 @@ impl RpcManager {
     /// sweep. Call periodically from the Kad maintenance loop.
     pub fn prune_packet_tracker(&self) {
         self.inner.tracker.lock().prune();
+        self.inner.pending.lock().retain(|_, entry| entry.is_live());
     }
 
     /// Number of in-flight pending request entries. Test-only window onto the
