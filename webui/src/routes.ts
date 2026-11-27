@@ -1,6 +1,6 @@
 export type Tab =
   | "overview"
-  | "transfers"
+  | "downloads"
   | "search"
   | "sharing"
   | "library"
@@ -21,7 +21,7 @@ export type AppRoute = {
 
 const TAB_PATHS: Record<Tab, string> = {
   overview: "/",
-  transfers: "/transfers",
+  downloads: "/downloads",
   search: "/searches",
   sharing: "/sharing",
   "library": "/library",

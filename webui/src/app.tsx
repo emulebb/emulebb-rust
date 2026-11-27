@@ -2,7 +2,7 @@ import { LibraryView } from "./libraryFiles";
 import type { ComponentChildren } from "preact";
 import { AppIdentity } from "./AppIdentity";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { type Appearance, type AppearancePreference } from "./appearance";
+import { type Appearance } from "./appearance";
 import {
   Activity,
   FolderTree,
@@ -10,6 +10,7 @@ import {
   KeyRound,
   ListChecks,
   Lock,
+  LogOut,
   Network,
   RefreshCw,
   Search,
@@ -17,6 +18,7 @@ import {
   Settings,
   Share2,
   Shield,
+  SunMoon,
   Unlock,
   UploadCloud,
   Users,
@@ -68,10 +70,11 @@ import {
   SearchView,
   ServersView,
   SharingView,
-  TransfersView,
+  DownloadsView,
   UploadsView,
   type EventStreamStatus
 } from "./views";
+import { UpdateWarning } from "./components";
 import "@tabler/core/dist/css/tabler.min.css";
 import "./styles.css";
 import { SettingsView } from "./settings";
@@ -83,6 +86,11 @@ const LOG_LIMIT = 300;
 const SEARCH_RESULT_PAGE_SIZE = 100;
 const REFRESH_INTERVAL_MS = 10_000;
 const EVENT_STREAM_RETRY_MS = 3000;
+const appearanceChoices = [
+  { preference: "system", label: "System" },
+  { preference: "light", label: "Light" },
+  { preference: "dark", label: "Dark" }
+] as const;
 
 type AuthenticationState = "checking" | "authenticated" | "unauthenticated";
 
@@ -126,9 +134,32 @@ function currentRoute(): AppRoute {
 
 export function App({ appearance }: { appearance: Appearance }) {
   const [appearancePreference, setAppearancePreference] = useState(appearance.getPreference);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const appearanceControl = useRef<HTMLDivElement>(null);
+  const appearanceButton = useRef<HTMLButtonElement>(null);
   const [mobileMenuExpanded, setMobileMenuExpanded] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   useEffect(() => appearance.subscribe(setAppearancePreference), [appearance]);
+  useLayoutEffect(() => {
+    const control = appearanceControl.current;
+    if (!appearanceOpen || !control) return;
+    const ownerDocument = control.ownerDocument;
+    const dismissOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !control.contains(event.target)) setAppearanceOpen(false);
+    };
+    const dismissEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setAppearanceOpen(false);
+      appearanceButton.current?.focus();
+    };
+    ownerDocument.addEventListener("pointerdown", dismissOutside, true);
+    ownerDocument.addEventListener("keydown", dismissEscape, true);
+    return () => {
+      ownerDocument.removeEventListener("pointerdown", dismissOutside, true);
+      ownerDocument.removeEventListener("keydown", dismissEscape, true);
+    };
+  }, [appearanceOpen]);
   useLayoutEffect(() => {
     if (!mobileMenuExpanded) return;
     const ownerDocument = menuButton.current?.ownerDocument;
@@ -188,11 +219,9 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [searchOrder, setSearchOrder] = useState("desc");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState("");
   const [supportingReadError, setSupportingReadError] = useState("");
   const [refreshGeneration, setRefreshGeneration] = useState(0);
-  const [manualRefreshGeneration, setManualRefreshGeneration] = useState(0);
   const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>(pollingEventStreamStatus);
   const session = useRef(new AbortController());
   const downloadRequests = useRef(new Map<string, string | symbol>());
@@ -252,7 +281,6 @@ export function App({ appearance }: { appearance: Appearance }) {
     setSearchSessionsError("");
     setRefreshError("");
     setSupportingReadError("");
-    setRefreshing(false);
     setSearchSessionCursor(null);
     setSearchSessionNextCursor(null);
     setSelectedSearch(null);
@@ -263,6 +291,8 @@ export function App({ appearance }: { appearance: Appearance }) {
 
   const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
     setMobileMenuExpanded(false);
+    setAppearanceOpen(false);
+    setSupportingReadError("");
     const path = pathForRoute(nextRoute);
     if (window.location.pathname !== path) {
       window.history[replace ? "replaceState" : "pushState"](null, "", path);
@@ -281,6 +311,8 @@ export function App({ appearance }: { appearance: Appearance }) {
   useEffect(() => {
     const syncRoute = () => {
       setMobileMenuExpanded(false);
+      setAppearanceOpen(false);
+      setSupportingReadError("");
       setRoute(currentRoute());
     };
     window.addEventListener("popstate", syncRoute);
@@ -331,14 +363,11 @@ export function App({ appearance }: { appearance: Appearance }) {
     };
   }, [apiKey, authAttempt, resetProtectedState]);
 
-  const refresh = useCallback((manual = false) => {
-    setSupportingReadError("");
+  const refresh = useCallback(() => {
     setRefreshGeneration((value) => value + 1);
-    if (manual) setManualRefreshGeneration((value) => value + 1);
   }, []);
 
   const readSnapshot = useCallback(async (signal: AbortSignal) => {
-    setRefreshing(true);
     const [snapshotResult, previewResult] = await Promise.allSettled([
       client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`, signal),
       client.getPage<DownloadSummary>("downloads?view=all&limit=12", signal)
@@ -354,7 +383,6 @@ export function App({ appearance }: { appearance: Appearance }) {
     if (previewResult.status === "fulfilled") setDownloadPreview(previewResult.value.data);
     const failure = [snapshotResult, previewResult].find((result) => result.status === "rejected");
     setRefreshError(failure ? errorMessage(failure.reason) : "");
-    setRefreshing(false);
   }, []);
   useRefreshRead(authState === "authenticated" ? readSnapshot : null, refreshGeneration);
 
@@ -367,7 +395,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   }, [authState, refresh]);
 
   useEffect(() => {
-    if (authState !== "authenticated" || !["transfers", "search", "categories"].includes(tab)) {
+    if (authState !== "authenticated" || !["downloads", "search", "categories"].includes(tab)) {
       return;
     }
     let cancelled = false;
@@ -375,6 +403,7 @@ export function App({ appearance }: { appearance: Appearance }) {
       try {
         const nextCategories = await client.get<Page<Category>>("categories");
         if (!cancelled) {
+          setSupportingReadError("");
           setCategories(nextCategories.items ?? []);
         }
       } catch (caught) {
@@ -398,6 +427,7 @@ export function App({ appearance }: { appearance: Appearance }) {
       try {
         const nextFriends = await client.get<Page<Friend>>("friends");
         if (!cancelled) {
+          setSupportingReadError("");
           setFriends(nextFriends.items ?? []);
         }
       } catch (caught) {
@@ -424,6 +454,7 @@ export function App({ appearance }: { appearance: Appearance }) {
           client.get<SharedFileIgnores>("library/ignores")
         ]);
         if (!cancelled) {
+          setSupportingReadError("");
           setLibraryScan(nextLibraryScan);
           setSharedFileIgnores(nextSharedFileIgnores);
         }
@@ -455,6 +486,7 @@ export function App({ appearance }: { appearance: Appearance }) {
           client.get<SettingsSurface>("settings/surface")
         ]);
         if (!cancelled) {
+          setSupportingReadError("");
           setSettings(nextSettings);
           setNetworkStatus(nextNetworkStatus);
           setNatStatus(nextNatStatus);
@@ -486,6 +518,7 @@ export function App({ appearance }: { appearance: Appearance }) {
           client.get<DownloadEventRuntimeDiagnostics>("events/status")
         ]);
         if (!cancelled) {
+          setSupportingReadError("");
           setRuntimeDiagnostics({
             ...nextRuntimeDiagnostics,
             downloadEvents: nextDownloadEventDiagnostics
@@ -512,6 +545,7 @@ export function App({ appearance }: { appearance: Appearance }) {
       try {
         const nextLogs = await client.get<Page<LogRecord> | LogRecord[]>(`logs?limit=${LOG_LIMIT}`);
         if (!cancelled) {
+          setSupportingReadError("");
           setLogs(Array.isArray(nextLogs) ? nextLogs : nextLogs.items ?? []);
         }
       } catch (caught) {
@@ -664,8 +698,10 @@ export function App({ appearance }: { appearance: Appearance }) {
     setAuthAttempt((value) => value + 1);
   };
 
-  const clearApiKey = () => {
+  const logOut = () => {
     resetSession();
+    setAppearanceOpen(false);
+    setMobileMenuExpanded(false);
     removeStoredApiKey();
     setApiKey("");
     setApiKeyInput("");
@@ -720,7 +756,7 @@ export function App({ appearance }: { appearance: Appearance }) {
       : serverConnected
         ? undefined
         : "disconnected";
-  const activeTransfers = snapshot?.downloads?.unfinished ?? 0;
+  const unfinishedDownloads = snapshot?.downloads?.unfinished ?? 0;
   const downloadRate = formatRate(
     numberField(stats, "downloadRateBytesPerSec") ?? (numberField(stats, "downloadSpeedKiBps") ?? 0) * 1024
   );
@@ -730,100 +766,68 @@ export function App({ appearance }: { appearance: Appearance }) {
   const kadStatus = kad.connected ? "Connected" : kad.running ? "Starting" : "Stopped";
   const sessionSignal = session.current.signal;
 
+  const tabs: { tab: Tab; label: string; icon: ComponentChildren; value?: string; state?: TabStatus }[] = [
+    { tab: "overview", label: "Dashboard", icon: <Activity size={16} /> },
+    { tab: "search", label: "Search", icon: <Search size={16} /> },
+    { tab: "downloads", label: "Downloads", icon: <Download size={16} />, value: `${downloadRate} · ${unfinishedDownloads} unfinished` },
+    { tab: "uploads", label: "Uploads", icon: <UploadCloud size={16} />, value: uploadRate },
+    { tab: "library", label: "Library", icon: <Share2 size={16} /> },
+    { tab: "sharing", label: "Sharing", icon: <FolderTree size={16} /> },
+    { tab: "categories", label: "Categories", icon: <ListChecks size={16} /> },
+    { tab: "friends", label: "Friends", icon: <Users size={16} /> },
+    { tab: "servers", label: "Servers", icon: <Server size={16} />, value: serverConnectionLabel, state: serverConnectionStyle },
+    { tab: "kad", label: "KAD", icon: <Shield size={16} />, value: kadStatus, state: kad.connected ? "connected" : "disconnected" },
+    { tab: "network", label: "Network", icon: <Network size={16} /> },
+    { tab: "settings", label: "Settings", icon: <Settings size={16} /> },
+    { tab: "logs", label: "Logs", icon: <FileText size={16} /> },
+    { tab: "diagnostics", label: "Diagnostics", icon: <Gauge size={16} /> }
+  ];
+
   return (
     <div class="page">
-      <header class="navbar navbar-expand-md d-print-none">
-        <div class="container-fluid topbar">
-          <div class="topbar-main">
-            <div class="navbar-brand app-brand">
-              <img class="brand-mark" src="/favicon.ico" width="32" height="32" alt="" />
-              <AppIdentity app={appInfo ?? snapshot?.app ?? null} />
-            </div>
-            <label class="appearance-control">
-              <span>Appearance</span>
-              <select class="form-select" value={appearancePreference}
-                onChange={(event) => appearance.setPreference(event.currentTarget.value as AppearancePreference)}>
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
-            </label>
-            {authState === "authenticated" && (
-              <>
-                <div class="status-toolbar" role="toolbar" aria-label="Connection and transfer status">
-                  <ToolbarButton
-                    label="Server"
-                    value={serverConnectionLabel}
-                    icon={<Server size={17} />}
-                    state={serverConnectionStyle}
-                    onClick={() => navigateToTab("servers")}
-                  />
-                  <ToolbarButton
-                    label="Kad"
-                    value={kadStatus}
-                    icon={<Shield size={17} />}
-                    state={kad.connected ? "connected" : "disconnected"}
-                    onClick={() => navigateToTab("kad")}
-                  />
-                  <ToolbarButton
-                    label="Download"
-                    value={downloadRate}
-                    icon={<Download size={17} />}
-                    onClick={() => navigateToTab("transfers")}
-                  />
-                  <ToolbarButton
-                    label="Upload"
-                    value={uploadRate}
-                    icon={<UploadCloud size={17} />}
-                    onClick={() => navigateToTab("uploads")}
-                  />
-                  <ToolbarButton
-                    label="Transfers"
-                    value={`${activeTransfers} unfinished`}
-                    icon={<Activity size={17} />}
-                    onClick={() => navigateToTab("transfers")}
-                  />
-                </div>
-                <div class="top-actions navbar-nav flex-row">
-                  <span class="badge bg-success-lt api-status"><Unlock size={14} /> API connected</span>
-                  <button type="button" class="btn btn-outline-secondary" title="Change API key" onClick={clearApiKey}>
-                    <KeyRound size={16} />
-                    Change key
-                  </button>
-                  <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => refresh(true)}>
-                    <RefreshCw size={16} class={refreshing ? "spin" : ""} />
-                    Refresh
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+      <header class="navbar d-print-none">
+        <div class="topbar">
+          <AppIdentity app={appInfo ?? snapshot?.app ?? null} />
           {authState === "authenticated" && (
-            <div class="primary-navigation">
-            <div class="mobile-menu-bar">
-              <button class="btn btn-outline-secondary" type="button" ref={menuButton}
-                aria-expanded={mobileMenuExpanded} aria-controls="primary-views"
-                onClick={() => setMobileMenuExpanded((expanded) => !expanded)}>Menu</button>
-              <strong>{tab === "library" ? "Library" : tab === "network" ? "Network" : tab[0].toUpperCase() + tab.slice(1)}</strong>
-            </div>
-            <nav id="primary-views" class={`tabs topbar-tabs nav nav-pills${mobileMenuExpanded ? " mobile-expanded" : ""}`} aria-label="Primary views">
-              <TabButton tab="overview" active={tab} navigate={navigateToTab} icon={<Activity size={16} />} label="Overview" />
-              <TabButton tab="transfers" active={tab} navigate={navigateToTab} icon={<Download size={16} />} label="Transfers" />
-              <TabButton tab="search" active={tab} navigate={navigateToTab} icon={<Search size={16} />} label="Search" />
-              <TabButton tab="sharing" active={tab} navigate={navigateToTab} icon={<FolderTree size={16} />} label="Sharing" />
-              <TabButton tab="library" active={tab} navigate={navigateToTab} icon={<Share2 size={16} />} label="Library" />
-              <TabButton tab="uploads" active={tab} navigate={navigateToTab} icon={<UploadCloud size={16} />} label="Uploads" />
-              <TabButton tab="network" active={tab} navigate={navigateToTab} icon={<Network size={16} />} label="Network" />
-              <TabButton tab="servers" active={tab} navigate={navigateToTab} icon={<Server size={16} />} label="Servers" />
-              <TabButton tab="kad" active={tab} navigate={navigateToTab} icon={<Shield size={16} />} label="Kad" />
-              <TabButton tab="categories" active={tab} navigate={navigateToTab} icon={<ListChecks size={16} />} label="Categories" />
-              <TabButton tab="friends" active={tab} navigate={navigateToTab} icon={<Users size={16} />} label="Friends" />
-              <TabButton tab="settings" active={tab} navigate={navigateToTab} icon={<Settings size={16} />} label="Settings" />
-              <TabButton tab="diagnostics" active={tab} navigate={navigateToTab} icon={<Gauge size={16} />} label="Diagnostics" />
-              <TabButton tab="logs" active={tab} navigate={navigateToTab} icon={<FileText size={16} />} label="Logs" />
-            </nav>
-            </div>
+            <>
+              <div class="mobile-menu-bar">
+                <button class="btn btn-outline-secondary" type="button" ref={menuButton}
+                  aria-expanded={mobileMenuExpanded} aria-controls="primary-views"
+                  onClick={() => {
+                    setAppearanceOpen(false);
+                    setMobileMenuExpanded((expanded) => !expanded);
+                  }}>Menu</button>
+                <strong>{tabs.find((item) => item.tab === tab)?.label}</strong>
+              </div>
+              <nav id="primary-views" class={`topbar-tabs${mobileMenuExpanded ? " mobile-expanded" : ""}`} aria-label="Primary views">
+                {tabs.map((item) => <TabButton key={item.tab} {...item} active={tab} navigate={navigateToTab} />)}
+              </nav>
+            </>
           )}
+          <div class="header-tools">
+            {authState === "authenticated" && <UpdateWarning message={refreshError || supportingReadError} />}
+            <div class="appearance-control" ref={appearanceControl}>
+              <button type="button" class="header-icon" ref={appearanceButton} aria-label="Appearance" title="Appearance"
+                aria-expanded={appearanceOpen} aria-controls="appearance-options"
+                onClick={() => {
+                  setMobileMenuExpanded(false);
+                  setAppearanceOpen((open) => !open);
+                }}>
+                <SunMoon size={17} aria-hidden="true" />
+              </button>
+              <div id="appearance-options" class="appearance-options" role="group" aria-label="Appearance choices" hidden={!appearanceOpen}>
+                {appearanceChoices.map(({ preference, label }) => <button type="button" key={preference}
+                  aria-pressed={appearancePreference === preference} onClick={() => {
+                    appearance.setPreference(preference);
+                    setAppearanceOpen(false);
+                    appearanceButton.current?.focus();
+                  }}>{label}</button>)}
+              </div>
+            </div>
+            {authState === "authenticated" && <button type="button" class="header-icon" aria-label="Log out" title="Log out" onClick={logOut}>
+              <LogOut size={17} aria-hidden="true" />
+            </button>}
+          </div>
         </div>
       </header>
 
@@ -879,7 +883,6 @@ export function App({ appearance }: { appearance: Appearance }) {
               <>
                 {message && <div class="notice alert alert-success" role="status">{message}</div>}
                 {error && <div class="notice alert alert-danger">{error}</div>}
-                {(refreshError || supportingReadError) && <div class="notice alert alert-danger">{refreshError || supportingReadError}</div>}
 
                 {tab === "overview" && (
               <Overview
@@ -892,7 +895,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 kad={kad}
               />
             )}
-            {tab === "transfers" && <TransfersView categories={categories} client={client} run={run} refreshGeneration={refreshGeneration}
+            {tab === "downloads" && <DownloadsView categories={categories} client={client} run={run} refreshGeneration={refreshGeneration}
               onDownloadRemoved={(job) => { if (!sessionSignal.aborted) forgetDownload(job); }} />}
             {tab === "search" && (
               <SearchView
@@ -961,7 +964,6 @@ export function App({ appearance }: { appearance: Appearance }) {
               <LibraryView
                 client={client}
                 run={run}
-                refreshGeneration={manualRefreshGeneration}
               />
             )}
             {tab === "uploads" && <UploadsView refreshGeneration={refreshGeneration} client={client} run={run} />}
@@ -1078,17 +1080,25 @@ function delayWithAbort(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+type TabStatus = "connected" | "disconnected" | "warning";
+
 function TabButton(props: {
   tab: Tab;
   active: Tab;
   navigate: (tab: Tab) => void;
   icon: ComponentChildren;
   label: string;
+  value?: string;
+  state?: TabStatus;
 }) {
+  const statusId = props.value ? `nav-status-${props.tab}` : undefined;
+  const style = props.value ? `toolbar-item toolbar-${props.tab}` : "tab";
   return (
     <a
       href={pathForRoute({ tab: props.tab })}
-      class={props.active === props.tab ? "tab nav-link active" : "tab nav-link"}
+      class={`${style}${props.active === props.tab ? " active" : ""}${props.state ? ` is-${props.state}` : ""}`}
+      aria-label={props.label}
+      aria-describedby={statusId}
       aria-current={props.active === props.tab ? "page" : undefined}
       onClick={(event) => {
         if (
@@ -1103,31 +1113,11 @@ function TabButton(props: {
         }
       }}
     >
-      {props.icon}
-      {props.label}
-    </a>
-  );
-}
-
-function ToolbarButton(props: {
-  label: string;
-  value: string;
-  icon: ComponentChildren;
-  state?: "connected" | "disconnected" | "warning";
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      class={`toolbar-item${props.state ? ` is-${props.state}` : ""}`}
-      aria-label={`${props.label}: ${props.value}`}
-      onClick={props.onClick}
-    >
-      <span class="toolbar-icon">{props.icon}</span>
+      <span class="toolbar-icon" aria-hidden="true">{props.icon}</span>
       <span class="toolbar-copy">
-        <span class="toolbar-label">{props.label}</span>
-        <strong>{props.value}</strong>
+        <span class={props.value ? "toolbar-label" : undefined}>{props.label}</span>
+        {props.value && <strong id={statusId} title={props.value}>{props.value}</strong>}
       </span>
-    </button>
+    </a>
   );
 }

@@ -18,7 +18,7 @@ function parseRating(value: string): number | null {
   return parsed <= 5 ? parsed : null;
 }
 
-export function LibraryView(props: { client: RestClient; run: RunFunction; refreshGeneration: number }) {
+export function LibraryView(props: { client: RestClient; run: RunFunction }) {
   const [page, setPage] = useState<CursorPage<LibraryFile> | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
   const [history, setHistory] = useState<Array<string | null>>([]);
@@ -63,7 +63,7 @@ export function LibraryView(props: { client: RestClient; run: RunFunction; refre
       if (current) setRoots(value);
     }).catch((caught) => { if (current) { setRoots(null); setRootsError(errorMessage(caught)); } });
     return () => { current = false; };
-  }, [props.client, props.refreshGeneration, rootCursor]);
+  }, [props.client, rootCursor]);
 
   useEffect(() => {
     let current = true;
@@ -82,7 +82,7 @@ export function LibraryView(props: { client: RestClient; run: RunFunction; refre
       else { setPage(null); setError(errorMessage(caught)); }
     }).finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
-  }, [props.client, props.refreshGeneration, generation, cursor, search, view, sort, order, tag, rootId, sharing, pageSize]);
+  }, [props.client, generation, cursor, search, view, sort, order, tag, rootId, sharing, pageSize]);
 
   useEffect(() => {
     let current = true;
@@ -95,7 +95,7 @@ export function LibraryView(props: { client: RestClient; run: RunFunction; refre
       if (!dirty.current) { setPriority(value.uploadPriority); setComment(value.comment); setRating(String(value.rating)); }
     }).catch((caught) => { if (current) { setDetail(null); setDetailError(errorMessage(caught)); } });
     return () => { current = false; };
-  }, [props.client, props.refreshGeneration, generation, hash]);
+  }, [props.client, generation, hash]);
 
   const save = async () => {
     const parsed = parseRating(rating);
@@ -162,6 +162,6 @@ export function LibraryView(props: { client: RestClient; run: RunFunction; refre
       </>}
       {selected && <FileTags key={hash} client={props.client} hash={hash} />}
     </section>
-    {selected && <LibraryLocations key={hash} client={props.client} hash={hash} refreshGeneration={props.refreshGeneration + generation} />}
+    {selected && <LibraryLocations key={hash} client={props.client} hash={hash} refreshGeneration={generation} />}
   </section>;
 }

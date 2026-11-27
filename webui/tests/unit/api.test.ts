@@ -90,15 +90,16 @@ describe("RestClient", () => {
     const client = new RestClient({ basePath: "/api/v1/", fetch: fetchMock });
     client.setApiKey("  secret-key  ");
 
-    await client.post("transfers", { links: ["ed2k://|file|Sample.bin|1|ABCDEF|/"], paused: true });
+    const body = { source: { type: "ed2k-link", link: "ed2k://|file|Sample.bin|1|00112233445566778899aabbccddeeff|/" }, intent: "stopped" };
+    await client.post("downloads", body);
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/transfers", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/downloads", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": "secret-key"
       },
-      body: JSON.stringify({ links: ["ed2k://|file|Sample.bin|1|ABCDEF|/"], paused: true })
+      body: JSON.stringify(body)
     });
   });
 
