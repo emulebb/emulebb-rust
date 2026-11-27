@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockApi, mockSnapshotFixture, type RecordedApiRequest } from "../fixtures/mockApi";
+import { installMockApi, mockDownloadFixture, mockSnapshotFixture, type RecordedApiRequest } from "../fixtures/mockApi";
 
 const longSharedRoot =
   "F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
@@ -11,6 +11,168 @@ test.beforeEach(async ({ page }) => {
     window.sessionStorage.clear();
     window.sessionStorage.setItem("emulebb.webui.apiKey", "sample-key");
   });
+});
+
+for (const [width, theme] of [[1280, "light"], [1280, "dark"], [1440, "light"], [1440, "dark"]] as const) {
+  test(`desktop workflow tables fit at ${width}px in ${theme} appearance`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript((appearance) => localStorage.setItem("emulebb.webui.theme", appearance), theme);
+    const mock = installMockApi([]);
+    const longName = `Sample-${"long-filename-segment-".repeat(18)}.bin`;
+    const jobs = mockDownloadFixture();
+    const search = { id: "1", query: "Sample", status: "completed", resultCount: 1 };
+    await page.route("**/api/v1/**", (route) => {
+      const url = new URL(route.request().url());
+      const meta = { apiVersion: "2.0.0", nextCursor: null, hasMore: false };
+      switch (url.pathname) {
+        case "/api/v1/downloads":
+          return route.fulfill({ json: { data: [...jobs, { ...jobs[0], id: "2", name: longName, progress: null }], meta } });
+        case "/api/v1/searches":
+          return route.fulfill({ json: { data: [search], meta } });
+        case "/api/v1/searches/1":
+          return route.fulfill({ json: { data: search } });
+        case "/api/v1/searches/1/results":
+          return route.fulfill({ json: { data: [{ id: "11", hash: jobs[0].hash, displayName: longName, sizeBytes: null }], meta } });
+        default:
+          return mock(route);
+      }
+    });
+    await page.goto("/transfers");
+    await expect(page.locator("html")).toHaveAttribute("data-bs-theme", theme);
+    const transfers = page.getByRole("table", { name: "Transfers", exact: true });
+    await expect(transfers.getByRole("progressbar")).toBeVisible();
+    await expect(transfers.getByText("25.0%")).toBeVisible();
+    await expect(transfers.getByRole("row").filter({ hasText: longName }).getByText("Unknown progress", { exact: true })).toBeAttached();
+    await expect.poll(() => transfers.locator("tbody tr").first().locator(".row-actions button").evaluateAll((buttons) =>
+      new Set(buttons.map((button) => button.getBoundingClientRect().top)).size)).toBe(1);
+    await expect.poll(() => transfers.locator("..").evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("desktop-transfers.png") });
+    await page.getByRole("link", { name: "Search", exact: true }).click();
+    const results = page.getByRole("table", { name: "Search results", exact: true });
+    await expect(results.getByText(longName)).toBeVisible();
+    await expect(results.getByRole("button", { name: "Download", exact: true })).toBeVisible();
+    await expect.poll(() => results.locator("..").evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("desktop-search.png") });
+  });
+}
+
+test("Search marks acknowledged downloads across results and clears the label after removal", async ({ page }) => {
+  const job = mockDownloadFixture()[0];
+  const search = { id: "1", query: "Sample", status: "completed", resultCount: 2 };
+  const mock = installMockApi([]);
+  let posts = 0;
+  let finishDownload = () => {};
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.slice("/api/v1/".length);
+    const method = route.request().method();
+    const pageMeta = { apiVersion: "2.0.0", nextCursor: null, hasMore: false };
+    if (path === "searches") return route.fulfill({ json: { data: [search], meta: pageMeta } });
+    if (path === "searches/1") return route.fulfill({ json: { data: search } });
+    if (path === "searches/1/results") return route.fulfill({ json: {
+      data: [
+        { id: "11", hash: job.hash, displayName: "Sample result", sizeBytes: job.sizeBytes },
+        { id: "12", hash: job.hash.toUpperCase(), displayName: "Other sample result", sizeBytes: job.sizeBytes }
+      ],
+      meta: pageMeta
+    } });
+    if (method === "POST" && path === "searches/1/results/11/download") {
+      posts++;
+      if (posts === 1) return route.fulfill({ status: 503, json: { error: { message: "Temporary download failure" } } });
+      if (posts === 2) return route.fulfill({ status: 409, json: {
+        error: { code: "LOCAL_CONTENT_CHOICE_REQUIRED", message: "Choose whether to download again" }
+      } });
+      await new Promise<void>((resolve) => { finishDownload = resolve; });
+      return route.fulfill({ status: 201, json: { data: job } });
+    }
+    if (path === "downloads/remove") return route.fulfill({ json: { data: [{ id: job.id, status: "accepted" }] } });
+    return mock(route);
+  });
+  await page.goto("/searches/1");
+  const results = page.getByRole("table", { name: "Search results", exact: true });
+  const row = results.getByRole("row").filter({ has: page.getByText("Sample result", { exact: true }) });
+  const download = row.getByRole("button", { name: "Download", exact: true });
+  await download.click();
+  await expect(page.getByText("Temporary download failure")).toBeVisible();
+  await expect(download).toBeEnabled();
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await download.click();
+  await expect.poll(() => posts).toBe(2);
+  await expect(download).toBeEnabled();
+  await download.click();
+  await expect.poll(() => posts).toBe(3);
+  const pending = results.getByRole("button", { name: "Queuing…" });
+  await expect(pending).toHaveCount(2);
+  for (const button of await pending.all()) {
+    await expect(button).toBeDisabled();
+    await button.dispatchEvent("click");
+  }
+  await expect(results.getByText("Queued", { exact: true })).toHaveCount(0);
+  expect(posts).toBe(3);
+  finishDownload();
+  await expect(results.getByText("Queued", { exact: true })).toHaveCount(2);
+
+  await page.getByRole("link", { name: "Transfers", exact: true }).click();
+  await page.getByRole("link", { name: "Search", exact: true }).click();
+  await expect(results.getByText("Queued", { exact: true })).toHaveCount(2);
+  await page.getByRole("link", { name: "Transfers", exact: true }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Remove from list", exact: true }).click();
+  await expect(page.getByText("Download removed", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Search", exact: true }).click();
+  await expect(results.getByRole("button", { name: "Download", exact: true })).toHaveCount(2);
+});
+
+test("Search refresh keeps results visible and reads once per cadence despite event bursts", async ({ page }) => {
+  const search = { id: "1", query: "Sample", status: "running", resultCount: 2 };
+  const results = [
+    { id: "11", hash: "11".repeat(16), displayName: "First sample", sizeBytes: 1 },
+    { id: "12", hash: "22".repeat(16), displayName: "Second sample", sizeBytes: 2 }
+  ];
+  const mock = installMockApi([]);
+  let resultReads = 0;
+  let failRead = () => {};
+  let finishRead = () => {};
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.slice("/api/v1/".length);
+    if (path === "capabilities") return route.fulfill({ json: { data: { capabilities: ["downloads.sse"] } } });
+    if (path === "events") {
+      return route.fulfill({ contentType: "text/event-stream", body: [1, 2, 3].map((id) =>
+        `id: ${id}\ndata: {"type":"updated"}\n\n`).join("") });
+    }
+    if (path === "searches") return route.fulfill({ json: { data: [search], meta: { nextCursor: null } } });
+    if (path === "searches/1") return route.fulfill({ json: { data: search } });
+    if (path === "searches/1/results") {
+      resultReads++;
+      if (resultReads === 2) {
+        await new Promise<void>((resolve) => { failRead = resolve; });
+        return route.fulfill({ status: 503, json: { error: { message: "Temporary results failure" } } });
+      }
+      if (resultReads === 3) await new Promise<void>((resolve) => { finishRead = resolve; });
+      return route.fulfill({ json: { data: resultReads === 1 ? results : [...results].reverse(), meta: { nextCursor: null } } });
+    }
+    return mock(route);
+  });
+  await page.clock.install();
+  const eventResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/events");
+  await page.goto("/searches/1");
+  const rows = page.getByRole("table", { name: "Search results", exact: true }).locator("tbody tr");
+  await expect(rows.first()).toContainText("First sample");
+  await (await eventResponse).finished();
+  await page.clock.fastForward(6_000);
+  expect(resultReads).toBe(1);
+  await page.clock.fastForward(4_000);
+  await expect.poll(() => resultReads).toBe(2);
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first()).toContainText("First sample");
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  expect(resultReads).toBe(2);
+  failRead();
+  await expect.poll(() => resultReads).toBe(3);
+  await expect(page.getByRole("alert")).toContainText("Temporary results failure");
+  await expect(rows.first()).toContainText("First sample");
+  finishRead();
+  await expect(rows.first()).toContainText("Second sample");
+  await expect(page.getByText("Temporary results failure")).toHaveCount(0);
 });
 
 test("preserves an eD2K handoff through sign-in and requires explicit confirmation", async ({ page }) => {

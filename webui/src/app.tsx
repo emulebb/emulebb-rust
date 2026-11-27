@@ -75,14 +75,14 @@ import {
 import "@tabler/core/dist/css/tabler.min.css";
 import "./styles.css";
 import { SettingsView } from "./settings";
+import { useRefreshRead } from "./useRefreshRead";
 
 const API_KEY_STORAGE = "emulebb.webui.apiKey";
 const SNAPSHOT_LIMIT = 500;
 const LOG_LIMIT = 300;
 const SEARCH_RESULT_PAGE_SIZE = 100;
-const REFRESH_INTERVAL_MS = 3000;
+const REFRESH_INTERVAL_MS = 10_000;
 const EVENT_STREAM_RETRY_MS = 3000;
-const EVENT_STREAM_REFRESH_THROTTLE_MS = 1000;
 
 type AuthenticationState = "checking" | "authenticated" | "unauthenticated";
 
@@ -179,7 +179,9 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [searches, setSearches] = useState<SearchItem[]>([]);
   const [selectedSearch, setSelectedSearch] = useState<SearchItem | null>(null);
   const [searchPage, setSearchPage] = useState<{ searchId: string; cursor: string | null }>({ searchId: "", cursor: null });
-  const [searchResultPage, setSearchResultPage] = useState<CursorPage<SearchResult> | null>(null);
+  const [searchResults, setSearchResults] = useState<{ key: string; page: CursorPage<SearchResult> } | null>(null);
+  const [searchError, setSearchError] = useState<{ key: string; message: string } | null>(null);
+  const [searchSessionsError, setSearchSessionsError] = useState("");
   const [searchSessionCursor, setSearchSessionCursor] = useState<string | null>(null);
   const [searchSessionNextCursor, setSearchSessionNextCursor] = useState<string | null>(null);
   const [searchSort, setSearchSort] = useState("sources");
@@ -187,9 +189,43 @@ export function App({ appearance }: { appearance: Appearance }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState("");
+  const [supportingReadError, setSupportingReadError] = useState("");
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [manualRefreshGeneration, setManualRefreshGeneration] = useState(0);
   const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>(pollingEventStreamStatus);
+  const session = useRef(new AbortController());
+  const downloadRequests = useRef(new Map<string, string | symbol>());
+  const [downloadStatus, setDownloadStatus] = useState<ReadonlyMap<string, string | symbol>>(downloadRequests.current);
+
+  const updateDownloadStatus = useCallback((hash: string, status?: string | symbol) => {
+    const next = new Map(downloadRequests.current);
+    if (status === undefined) next.delete(hash);
+    else next.set(hash, status);
+    downloadRequests.current = next;
+    setDownloadStatus(next);
+  }, []);
+
+  const queueSearchDownload = useCallback(async (
+    hash: string, create: (signal: AbortSignal) => Promise<DownloadSummary>
+  ) => {
+    const key = hash.toLowerCase();
+    if (downloadRequests.current.has(key)) throw new OperationCancelledError();
+    const pending = Symbol();
+    const signal = session.current.signal;
+    updateDownloadStatus(key, pending);
+    try {
+      const job = await create(signal);
+      if (!signal.aborted) updateDownloadStatus(key, job.id);
+    } finally {
+      if (downloadRequests.current.get(key) === pending) updateDownloadStatus(key);
+    }
+  }, [updateDownloadStatus]);
+
+  const forgetDownload = useCallback((job: DownloadSummary) => {
+    const key = job.hash.toLowerCase();
+    if (downloadRequests.current.get(key) === job.id) updateDownloadStatus(key);
+  }, [updateDownloadStatus]);
 
   const resetProtectedState = useCallback(() => {
     setSnapshot(null);
@@ -211,7 +247,12 @@ export function App({ appearance }: { appearance: Appearance }) {
     setUploadQueue([]);
     setLogs([]);
     setSearches([]);
-    setSearchResultPage(null);
+    setSearchResults(null);
+    setSearchError(null);
+    setSearchSessionsError("");
+    setRefreshError("");
+    setSupportingReadError("");
+    setRefreshing(false);
     setSearchSessionCursor(null);
     setSearchSessionNextCursor(null);
     setSelectedSearch(null);
@@ -247,7 +288,9 @@ export function App({ appearance }: { appearance: Appearance }) {
   }, []);
 
   const tab = route.tab;
+  const needsRecentSearch = !route.searchId;
   const selectedSearchCursor = route.searchId === searchPage.searchId ? searchPage.cursor : null;
+  const searchResultKey = JSON.stringify([route.searchId, selectedSearchCursor, searchSort, searchOrder]);
 
   useEffect(() => {
     let cancelled = false;
@@ -288,40 +331,38 @@ export function App({ appearance }: { appearance: Appearance }) {
     };
   }, [apiKey, authAttempt, resetProtectedState]);
 
-  const refresh = useCallback(async (manual = false) => {
-    if (authState !== "authenticated") {
-      return;
-    }
+  const refresh = useCallback((manual = false) => {
+    setSupportingReadError("");
+    setRefreshGeneration((value) => value + 1);
+    if (manual) setManualRefreshGeneration((value) => value + 1);
+  }, []);
+
+  const readSnapshot = useCallback(async (signal: AbortSignal) => {
     setRefreshing(true);
-    setError("");
-    try {
-      const [nextSnapshot, recentDownloads] = await Promise.all([
-        client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`),
-        client.getPage<DownloadSummary>("downloads?view=all&limit=12"),
-      ]);
-      setDownloadPreview(recentDownloads.data);
-      setSnapshot(nextSnapshot);
-      setAppInfo((current) => current ?? nextSnapshot.app ?? null);
-      setLogs(nextSnapshot.logs ?? []);
-      setUploads(nextSnapshot.uploads ?? []);
-      setUploadQueue(nextSnapshot.uploadQueue ?? []);
-      setRefreshGeneration((value) => value + 1);
-      if (manual) {
-        setManualRefreshGeneration((value) => value + 1);
-      }
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setRefreshing(false);
+    const [snapshotResult, previewResult] = await Promise.allSettled([
+      client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`, signal),
+      client.getPage<DownloadSummary>("downloads?view=all&limit=12", signal)
+    ]);
+    if (signal.aborted) return;
+    if (snapshotResult.status === "fulfilled") {
+      const next = snapshotResult.value;
+      setSnapshot(next);
+      setAppInfo((current) => current ?? next.app ?? null);
+      setUploads(next.uploads ?? []);
+      setUploadQueue(next.uploadQueue ?? []);
     }
-  }, [authState]);
+    if (previewResult.status === "fulfilled") setDownloadPreview(previewResult.value.data);
+    const failure = [snapshotResult, previewResult].find((result) => result.status === "rejected");
+    setRefreshError(failure ? errorMessage(failure.reason) : "");
+    setRefreshing(false);
+  }, []);
+  useRefreshRead(authState === "authenticated" ? readSnapshot : null, refreshGeneration);
 
   useEffect(() => {
-    if (authState !== "authenticated") {
-      return;
-    }
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
+    if (authState !== "authenticated") return;
+    // WHY: The periodic read picks up download events too, so event bursts cannot
+    // start extra reads or reorder rows between scheduled updates.
+    const timer = window.setInterval(refresh, REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [authState, refresh]);
 
@@ -338,7 +379,7 @@ export function App({ appearance }: { appearance: Appearance }) {
         }
       } catch (caught) {
         if (!cancelled) {
-          setError(errorMessage(caught));
+          setSupportingReadError(errorMessage(caught));
         }
       }
     };
@@ -361,7 +402,7 @@ export function App({ appearance }: { appearance: Appearance }) {
         }
       } catch (caught) {
         if (!cancelled) {
-          setError(errorMessage(caught));
+          setSupportingReadError(errorMessage(caught));
         }
       }
     };
@@ -388,7 +429,7 @@ export function App({ appearance }: { appearance: Appearance }) {
         }
       } catch (caught) {
         if (!cancelled) {
-          setError(errorMessage(caught));
+          setSupportingReadError(errorMessage(caught));
         }
       }
     };
@@ -423,7 +464,7 @@ export function App({ appearance }: { appearance: Appearance }) {
         }
       } catch (caught) {
         if (!cancelled) {
-          setError(errorMessage(caught));
+          setSupportingReadError(errorMessage(caught));
         }
       }
     };
@@ -452,7 +493,7 @@ export function App({ appearance }: { appearance: Appearance }) {
         }
       } catch (caught) {
         if (!cancelled) {
-          setError(errorMessage(caught));
+          setSupportingReadError(errorMessage(caught));
         }
       }
     };
@@ -475,7 +516,7 @@ export function App({ appearance }: { appearance: Appearance }) {
         }
       } catch (caught) {
         if (!cancelled) {
-          setError(errorMessage(caught));
+          setSupportingReadError(errorMessage(caught));
         }
       }
     };
@@ -485,42 +526,40 @@ export function App({ appearance }: { appearance: Appearance }) {
     };
   }, [tab, refreshGeneration, authState]);
 
-  useEffect(() => {
-    if (authState !== "authenticated" || tab !== "search") {
-      return;
+  const readSearchSessions = useCallback(async (signal: AbortSignal) => {
+    const query = new URLSearchParams({ limit: "100" });
+    if (searchSessionCursor) query.set("cursor", searchSessionCursor);
+    try {
+      const collection = await client.getPage<SearchItem>(`searches?${query}`, signal);
+      if (signal.aborted) return;
+      setSearches(collection.data);
+      setSearchSessionNextCursor(collection.meta.nextCursor);
+      setSearchSessionsError("");
+      if (needsRecentSearch && collection.data[0]) navigateToSearch(collection.data[0].id, true);
+    } catch (caught) {
+      if (!signal.aborted) setSearchSessionsError(errorMessage(caught));
     }
-    const selectedSearchId = route.searchId;
-    setSelectedSearch((current) => current?.id === selectedSearchId ? current : null);
-    let cancelled = false;
-    setSearchResultPage(null);
-    const loadSearchSessions = async () => {
-      try {
-        const sessionQuery = new URLSearchParams({ limit: "100" });
-        if (searchSessionCursor) sessionQuery.set("cursor", searchSessionCursor);
-        const collection = await client.getPage<SearchItem>(`searches?${sessionQuery}`);
-        if (cancelled) return;
-        setSearches(collection.data);
-        setSearchSessionNextCursor(collection.meta.nextCursor);
-        if (!selectedSearchId) {
-          const recent = collection.data[0];
-          if (recent) navigateToSearch(recent.id, true);
-          else setSelectedSearch(null);
-          return;
-        }
-        const resultQuery = new URLSearchParams({ limit: String(SEARCH_RESULT_PAGE_SIZE), sort: searchSort, order: searchOrder });
-        if (selectedSearchCursor) resultQuery.set("cursor", selectedSearchCursor);
-        const [search, resultPage] = await Promise.all([
-          client.get<SearchItem>(`searches/${selectedSearchId}`),
-          client.getPage<SearchResult>(`searches/${selectedSearchId}/results?${resultQuery}`)
-        ]);
-        if (!cancelled) { setSelectedSearch(search); setSearchResultPage(resultPage); }
-      } catch (caught) { if (!cancelled) setError(errorMessage(caught)); }
-    };
-    void loadSearchSessions();
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, route.searchId, selectedSearchCursor, searchSessionCursor, searchSort, searchOrder, refreshGeneration, authState, navigateToSearch]);
+  }, [needsRecentSearch, searchSessionCursor, navigateToSearch]);
+
+  const readSearchResults = useCallback(async (signal: AbortSignal) => {
+    if (!route.searchId) return;
+    const path = `searches/${route.searchId}`;
+    const query = new URLSearchParams({ limit: String(SEARCH_RESULT_PAGE_SIZE), sort: searchSort, order: searchOrder });
+    if (selectedSearchCursor) query.set("cursor", selectedSearchCursor);
+    const [search, results] = await Promise.allSettled([
+      client.get<SearchItem>(path, signal),
+      client.getPage<SearchResult>(`${path}/results?${query}`, signal)
+    ]);
+    if (signal.aborted) return;
+    if (search.status === "fulfilled") setSelectedSearch(search.value);
+    if (results.status === "fulfilled") setSearchResults({ key: searchResultKey, page: results.value });
+    const failure = [search, results].find((result) => result.status === "rejected");
+    setSearchError(failure ? { key: searchResultKey, message: errorMessage(failure.reason) } : null);
+  }, [route.searchId, searchSort, searchOrder, selectedSearchCursor, searchResultKey]);
+
+  const searchActive = authState === "authenticated" && tab === "search";
+  useRefreshRead(searchActive ? readSearchSessions : null, refreshGeneration);
+  useRefreshRead(searchActive ? readSearchResults : null, refreshGeneration);
 
   const downloadSseEnabled = supportsDownloadSse(appInfo) || supportsDownloadSse(capabilities);
 
@@ -533,9 +572,6 @@ export function App({ appearance }: { appearance: Appearance }) {
     let closed = false;
     let lastEventId: string | undefined;
     let reconnectAttempts = 0;
-    let refreshTimer: number | undefined;
-    let refreshInFlight = false;
-    let refreshPending = false;
     setEventStreamStatus({
       mode: "connecting",
       enabled: true,
@@ -544,33 +580,6 @@ export function App({ appearance }: { appearance: Appearance }) {
       pollIntervalMs: REFRESH_INTERVAL_MS,
       retryIntervalMs: EVENT_STREAM_RETRY_MS
     });
-
-    const runScheduledRefresh = async () => {
-      if (refreshInFlight) {
-        refreshPending = true;
-        return;
-      }
-      refreshInFlight = true;
-      try {
-        await refresh();
-      } finally {
-        refreshInFlight = false;
-        if (refreshPending && !closed) {
-          refreshPending = false;
-          scheduleRefresh();
-        }
-      }
-    };
-
-    const scheduleRefresh = () => {
-      if (refreshTimer !== undefined) {
-        return;
-      }
-      refreshTimer = window.setTimeout(() => {
-        refreshTimer = undefined;
-        void runScheduledRefresh();
-      }, EVENT_STREAM_REFRESH_THROTTLE_MS);
-    };
 
     const runStream = async () => {
       while (!closed) {
@@ -597,7 +606,6 @@ export function App({ appearance }: { appearance: Appearance }) {
               pollIntervalMs: REFRESH_INTERVAL_MS,
               retryIntervalMs: EVENT_STREAM_RETRY_MS
             });
-            scheduleRefresh();
           }, { signal: controller.signal, lastEventId });
           if (!closed && !controller.signal.aborted) {
             setEventStreamStatus((status) => ({
@@ -634,14 +642,21 @@ export function App({ appearance }: { appearance: Appearance }) {
     return () => {
       closed = true;
       controller.abort();
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-      }
     };
-  }, [apiKey, authState, refresh, downloadSseEnabled]);
+  }, [apiKey, authState, downloadSseEnabled]);
+
+  const resetSession = () => {
+    session.current.abort();
+    session.current = new AbortController();
+    downloadRequests.current = new Map();
+    setDownloadStatus(downloadRequests.current);
+    setAuthState("checking");
+    resetProtectedState();
+  };
 
   const saveApiKey = () => {
     const next = apiKeyInput.trim();
+    resetSession();
     setMessage("");
     setError("");
     setStorageWarning(storeApiKey(next) ? "" : "Browser storage is unavailable; this key will only last for the current page.");
@@ -650,6 +665,7 @@ export function App({ appearance }: { appearance: Appearance }) {
   };
 
   const clearApiKey = () => {
+    resetSession();
     removeStoredApiKey();
     setApiKey("");
     setApiKeyInput("");
@@ -663,16 +679,18 @@ export function App({ appearance }: { appearance: Appearance }) {
     success: string,
     options: { refresh?: boolean } = {}
   ) => {
+    const signal = session.current.signal;
     setError("");
     setMessage("");
     try {
       await operation();
+      if (signal.aborted) return;
       setMessage(success);
       if (options.refresh !== false) {
-        await refresh();
+        refresh();
       }
     } catch (caught) {
-      if (caught instanceof OperationCancelledError) {
+      if (signal.aborted || caught instanceof OperationCancelledError) {
         return;
       }
       setError(errorMessage(caught));
@@ -710,6 +728,7 @@ export function App({ appearance }: { appearance: Appearance }) {
     numberField(stats, "uploadRateBytesPerSec") ?? (numberField(stats, "uploadSpeedKiBps") ?? 0) * 1024
   );
   const kadStatus = kad.connected ? "Connected" : kad.running ? "Starting" : "Stopped";
+  const sessionSignal = session.current.signal;
 
   return (
     <div class="page">
@@ -771,7 +790,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                     <KeyRound size={16} />
                     Change key
                   </button>
-                  <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => void refresh(true)}>
+                  <button type="button" class="btn btn-outline-secondary" title="Refresh" onClick={() => refresh(true)}>
                     <RefreshCw size={16} class={refreshing ? "spin" : ""} />
                     Refresh
                   </button>
@@ -858,8 +877,9 @@ export function App({ appearance }: { appearance: Appearance }) {
 
             {authState === "authenticated" && (
               <>
-                {message && <div class="notice alert alert-success">{message}</div>}
+                {message && <div class="notice alert alert-success" role="status">{message}</div>}
                 {error && <div class="notice alert alert-danger">{error}</div>}
+                {(refreshError || supportingReadError) && <div class="notice alert alert-danger">{refreshError || supportingReadError}</div>}
 
                 {tab === "overview" && (
               <Overview
@@ -872,12 +892,16 @@ export function App({ appearance }: { appearance: Appearance }) {
                 kad={kad}
               />
             )}
-            {tab === "transfers" && <TransfersView categories={categories} client={client} run={run} refreshGeneration={refreshGeneration} />}
+            {tab === "transfers" && <TransfersView categories={categories} client={client} run={run} refreshGeneration={refreshGeneration}
+              onDownloadRemoved={(job) => { if (!sessionSignal.aborted) forgetDownload(job); }} />}
             {tab === "search" && (
               <SearchView
                 searches={searches}
                 selectedSearch={selectedSearch}
-                resultPage={searchResultPage}
+                resultPage={searchResults?.key === searchResultKey ? searchResults.page : null}
+                readError={(searchError?.key === searchResultKey ? searchError.message : "") || searchSessionsError}
+                downloadStatus={downloadStatus}
+                queueDownload={queueSearchDownload}
                 resultCursor={selectedSearchCursor}
                 sessionCursor={searchSessionCursor}
                 sessionNextCursor={searchSessionNextCursor}
@@ -905,7 +929,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                 }}
                 onSearchDeleted={() => {
                   setSelectedSearch(null);
-                  setSearchResultPage(null);
+                  setSearchResults(null);
                   setSearchPage({ searchId: "", cursor: null });
                   navigateToTab("search");
                 }}
@@ -913,7 +937,7 @@ export function App({ appearance }: { appearance: Appearance }) {
                   setSearches([]);
                   setSearchSessionCursor(null);
                   setSearchSessionNextCursor(null);
-                  setSearchResultPage(null);
+                  setSearchResults(null);
                   setSelectedSearch(null);
                   setSearchPage({ searchId: "", cursor: null });
                   navigateToTab("search");

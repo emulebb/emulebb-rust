@@ -1,8 +1,9 @@
 import type { ComponentChildren } from "preact";
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { SearchObservations } from "./searchObservations";
 import { LibraryTags } from "./libraryTags";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
+import { useRefreshRead } from "./useRefreshRead";
 import {
   Ban,
   Clipboard,
@@ -238,19 +239,23 @@ function DownloadEvidence<T>(props: { path: string; label: string; client: RestC
   const [page, setPage] = useState<CursorPage<T> | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => {
-    let cancelled = false;
+  const readEvidence = useCallback(async (signal: AbortSignal) => {
     setLoading(true);
-    setError("");
     const query = new URLSearchParams({ limit: "100" });
     if (cursor) query.set("cursor", cursor);
-    void props.client.getPage<T>(`${props.path}?${query}`).then((value) => {
-      if (!cancelled) setPage(value);
-    }).catch((caught) => { if (!cancelled) setError(errorMessage(caught)); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [props.client, props.path, cursor, props.refreshGeneration]);
-  const change = (value: string | null) => { setPage(null); setCursor(value); };
+    try {
+      const value = await props.client.getPage<T>(`${props.path}?${query}`, signal);
+      if (signal.aborted) return;
+      setPage(value);
+      setError("");
+    } catch (caught) {
+      if (!signal.aborted) setError(errorMessage(caught));
+    } finally {
+      if (!signal.aborted) setLoading(false);
+    }
+  }, [props.client, props.path, cursor]);
+  useRefreshRead(readEvidence, props.refreshGeneration);
+  const change = (value: string | null) => { setPage(null); setError(""); setCursor(value); };
   return <section class="panel card">
     <div class="section-title"><h2>{props.label}</h2><CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading} change={change} /></div>
     {error && <div class="notice alert alert-danger">{error}</div>}
@@ -258,7 +263,13 @@ function DownloadEvidence<T>(props: { path: string; label: string; client: RestC
   </section>;
 }
 
-export function TransfersView(props: { categories: Category[]; client: RestClient; run: RunFunction; refreshGeneration: number }) {
+export function TransfersView(props: {
+  categories: Category[];
+  client: RestClient;
+  run: RunFunction;
+  refreshGeneration: number;
+  onDownloadRemoved?: (job: DownloadSummary) => void;
+}) {
   const [view, setView] = useState("unfinished");
   const [category, setCategory] = useState("");
   const [cursor, setCursor] = useState<string | null>(null);
@@ -275,23 +286,29 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
   const selectDownload = (id: string) => {
     if (id !== selectedId) {
       setSelectedId(id);
+      setDetails(null);
+      setDetailError("");
       setBrowse(null);
     }
   };
   const linksError = transferLinksValidationError(ed2kLinks);
-  useEffect(() => {
-    let cancelled = false;
+  const readDownloads = useCallback(async (signal: AbortSignal) => {
     setLoading(true);
-    setListError("");
     const query = new URLSearchParams({ view, limit: "100" });
     if (category) query.set("category", category);
     if (cursor) query.set("cursor", cursor);
-    void props.client.getPage<DownloadSummary>(`downloads?${query}`).then((value) => {
-      if (!cancelled) setPage(value);
-    }).catch((caught) => { if (!cancelled) setListError(errorMessage(caught)); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [props.client, view, category, cursor, props.refreshGeneration]);
+    try {
+      const value = await props.client.getPage<DownloadSummary>(`downloads?${query}`, signal);
+      if (signal.aborted) return;
+      setPage(value);
+      setListError("");
+    } catch (caught) {
+      if (!signal.aborted) setListError(errorMessage(caught));
+    } finally {
+      if (!signal.aborted) setLoading(false);
+    }
+  }, [props.client, view, category, cursor]);
+  useRefreshRead(readDownloads, props.refreshGeneration);
   useEffect(() => {
     const receive = () => {
       const next = readEd2kHandoff(window.location.hash);
@@ -302,16 +319,18 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
     return () => window.removeEventListener("hashchange", receive);
   }, []);
   const consumeHandoff = () => { if (handoff) clearEd2kHandoff(); setHandoff(null); };
-  useEffect(() => {
-    let cancelled = false;
-    setDetails(null);
-    setDetailError("");
-    if (selectedId) void props.client.get<DownloadDetail>(`downloads/${selectedId}`).then((value) => {
-      if (!cancelled) setDetails(value);
-    }).catch((caught) => { if (!cancelled) setDetailError(errorMessage(caught)); });
-    return () => { cancelled = true; };
-  }, [props.client, selectedId, props.refreshGeneration]);
-  const changePage = (value: string | null) => { setPage(null); setCursor(value); selectDownload(""); };
+  const readDownloadDetails = useCallback(async (signal: AbortSignal) => {
+    try {
+      const value = await props.client.get<DownloadDetail>(`downloads/${selectedId}`, signal);
+      if (signal.aborted) return;
+      setDetails(value);
+      setDetailError("");
+    } catch (caught) {
+      if (!signal.aborted) setDetailError(errorMessage(caught));
+    }
+  }, [props.client, selectedId]);
+  useRefreshRead(selectedId ? readDownloadDetails : null, props.refreshGeneration);
+  const changePage = (value: string | null) => { setPage(null); setListError(""); setCursor(value); selectDownload(""); };
   const createDownloads = async () => {
     const links = transferLinksFromText(ed2kLinks);
     if (!links.length) throw new Error("At least one eD2K link is required");
@@ -330,6 +349,7 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
       : `Remove "${job.name}"? Completed outputs are preserved; internal temporary pieces are retired.`)) return;
     void props.run(async () => {
       await props.client.controlDownloads("remove", [job.id], deleteData);
+      props.onDownloadRemoved?.(job);
       if (selectedId === job.id) selectDownload("");
     }, "Download removed");
   };
@@ -342,7 +362,7 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
         <select class="form-select" aria-label="Download category" value={category} onInput={(event) => { setCategory(event.currentTarget.value); changePage(null); }}>
           <option value="">All categories</option>{props.categories.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
         </select>
-        <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading} change={changePage} />
+        <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading && !page} change={changePage} />
       </div></div>
       {listError && <div class="notice alert alert-danger">{listError}</div>}
       {handoff && <p class={handoff.error ? "field-error" : "text-secondary"}>{handoff.error ?? "Review the linked file and press Add links to queue it."}</p>}
@@ -353,10 +373,14 @@ export function TransfersView(props: { categories: Category[]; client: RestClien
         {handoff && <button class="btn" type="button" onClick={() => { consumeHandoff(); setEd2kLinks(""); }}>Cancel links</button>}
       </form>
       {linksError && <p class="field-error">{linksError}</p>}
-      <TableScroll label="Transfers"><table class="table table-vcenter card-table"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
+      <TableScroll label="Transfers"><table class="table table-vcenter card-table workflow-table transfers-table" aria-label="Transfers"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
         {(page?.data ?? []).map((job) => <tr key={job.id} class={selectedId === job.id ? "selected-row" : ""}>
           <td><button type="button" class="link-button" onClick={() => selectDownload(job.id)}>{job.name}</button></td>
-          <td><DownloadStateLabel download={job} /></td><td>{formatProgress(job)}</td>
+          <td><DownloadStateLabel download={job} /></td>
+          <td>{job.progress === null ? <><span aria-hidden="true">—</span><span class="visually-hidden">Unknown progress</span></> : <div class="transfer-progress">
+            <progress aria-label={`Progress for ${job.name}`} value={job.progress} max={1} />
+            <span>{formatProgress(job)}</span>
+          </div>}</td>
           <td><select class="form-select" aria-label={`Category for ${job.name}`} value={job.category ?? ""} onInput={(event) => void props.run(() => props.client.patch(`downloads/${job.id}`, { category: event.currentTarget.value || null }), "Category updated")}>
             <option value="">Uncategorized</option>{props.categories.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
           </select></td>
@@ -479,6 +503,9 @@ export function SearchView(props: {
   searches: SearchItem[];
   selectedSearch: SearchItem | null;
   resultPage: CursorPage<SearchResult> | null;
+  readError?: string;
+  downloadStatus: ReadonlyMap<string, string | symbol>;
+  queueDownload: (hash: string, create: (signal: AbortSignal) => Promise<DownloadSummary>) => Promise<void>;
   resultCursor: string | null;
   sessionCursor: string | null;
   sessionNextCursor: string | null;
@@ -519,6 +546,7 @@ export function SearchView(props: {
   const selectedSummary = props.searches.find((search) => search.id === props.selectedSearchId);
   const displayedSearch = selectedSearch ?? selectedSummary;
   const results = props.resultPage?.data ?? [];
+  const resultLoading = Boolean(props.selectedSearchId) && !props.resultPage && !props.readError;
   const searchQueryError = searchQueryValidationError(query);
   const displayedStatus = displayedSearch?.status ?? "unknown";
   const searchProgress = displayedSearch?.progress;
@@ -785,8 +813,9 @@ export function SearchView(props: {
         <span>Session pages</span><CursorControls cursor={props.sessionCursor} nextCursor={props.sessionNextCursor}
           loading={false} change={props.selectSearchSessionsPage} />
       </div>
+      {props.readError && <div class="notice alert alert-danger" role="alert">{props.readError}</div>}
       <TableScroll label="Search results">
-        <table class="table table-vcenter card-table">
+        <table class="table table-vcenter card-table workflow-table search-results-table" aria-label="Search results">
           <thead>
             <tr>
               <th>Name</th>
@@ -802,6 +831,7 @@ export function SearchView(props: {
           <tbody>
             {results.map((result) => {
               const mediaSummary = searchResultMediaSummary(result.media);
+              const downloadStatus = props.downloadStatus.get(result.hash.toLowerCase());
               return (
               <tr key={result.id}>
                 <td class="search-result-name-cell">
@@ -818,35 +848,42 @@ export function SearchView(props: {
                 </td>
                 <td>{(result.rating ?? 0) > 0 ? `${result.rating}/5` : "—"}</td>
                 <td>{result.fileType ?? ""}</td>
-                <td><button class="btn" type="button" onClick={() => setObservationSelection({ session: selectedSearch!.id, claim: result.id })}>Observations</button></td>
+                <td><button class="btn" type="button" onClick={() => {
+                  if (props.selectedSearchId) setObservationSelection({ session: props.selectedSearchId, claim: result.id });
+                }}>Observations</button></td>
                 <td><code class="search-result-hash">{result.hash}</code></td>
                 <td>
-                  <button class="btn"
+                  {typeof downloadStatus === "string" ? <span class="badge bg-success-lt">Queued</span> : <button class="btn"
                     type="button"
                     title="Download this result"
+                    disabled={typeof downloadStatus === "symbol" || !props.selectedSearchId}
                     onClick={() => void props.run(
-                      () => createDownloadWithChoice((redownload) =>
-                        props.client.post(`searches/${selectedSearch?.id}/results/${result.id}/download`, {
-                          intent: paused ? "stopped" : "started",
-                          category: category || null,
-                          redownload
-                        })
+                      () => props.queueDownload(result.hash, (signal) =>
+                        createDownloadWithChoice((redownload) =>
+                          props.client.post<DownloadSummary>(`searches/${props.selectedSearchId}/results/${result.id}/download`, {
+                            intent: paused ? "stopped" : "started",
+                            category: category || null,
+                            redownload
+                          }, signal)
+                        )
                       ),
                       "Download queued"
                     )}
                   >
                     <Download size={15} />
-                    Download
-                  </button>
+                    {typeof downloadStatus === "symbol" ? "Queuing…" : "Download"}
+                  </button>}
                 </td>
               </tr>
               );
             })}
-            {results.length === 0 && <EmptyRow colSpan={8} text="No results." />}
+            {results.length === 0 && !props.readError && (
+              <EmptyRow colSpan={8} text={resultLoading ? "Loading results…" : "No results."} />
+            )}
           </tbody>
         </table>
       </TableScroll>
-      {observationSelection && observationSelection.session === selectedSearch?.id && (
+      {observationSelection && observationSelection.session === props.selectedSearchId && (
         <SearchObservations key={`${observationSelection.session}:${observationSelection.claim}`}
           client={props.client} session={observationSelection.session} claim={observationSelection.claim}
           close={() => setObservationSelection(null)} />
