@@ -316,6 +316,22 @@ impl LocalMutationRegistry {
         self.state.lock().unwrap().wait_pending = Some(sender);
         receiver
     }
+    #[cfg(test)]
+    pub(super) async fn wait_until_idle(&self) -> Result<()> {
+        loop {
+            let observed = {
+                let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
+                Self::reap(&mut state);
+                ensure!(!state.faulted, LocalMutationError::Unknown);
+                if state.tasks.is_empty() {
+                    return Ok(());
+                }
+                state.capacity.revision()
+            };
+            self.wait_for_completion(observed).await?;
+        }
+    }
+
     fn reap(state: &mut State) {
         // The capacity lease releases actual backing independently of joining.
         // Reaping only records the completed unit's durable outcome.
