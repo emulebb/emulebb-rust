@@ -318,6 +318,82 @@ async fn unsupported_atomic_move_uses_verified_exclusive_copy() {
 }
 
 #[tokio::test]
+async fn recovery_after_directory_sync_failure_keeps_the_original_name() {
+    let root = unique_test_dir("ed2k-publish-parent-sync-failure");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = ingest_completed(&runtime, &root, "Sample.bin").await;
+    let payload = runtime.payload_path(job.token.job_id).unwrap();
+    let incoming = root.join("incoming");
+    let target = incoming.join("Sample.bin");
+    super::super::fs_durability::force_parent_sync_failure(&target);
+
+    let error = runtime
+        .materialize_completed_payload(job.token, &incoming)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("forced parent sync failure after rename"));
+    assert_eq!(fs::read(&target).unwrap(), fs::read(&payload).unwrap());
+
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(job.token, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target.clone()),
+    );
+    assert_eq!(fs::read(&target).unwrap(), fs::read(&payload).unwrap());
+    assert!(!incoming.join("Sample_01.bin").exists());
+}
+
+#[tokio::test]
+async fn recovery_releases_an_unused_direct_copy_reservation() {
+    let root = unique_test_dir("ed2k-direct-before-create");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let job = ingest_completed(&runtime, &root, "Sample.bin").await;
+    let payload = fs::read(runtime.payload_path(job.token.job_id).unwrap()).unwrap();
+    let incoming = root.join("incoming");
+    fs::create_dir_all(&incoming).unwrap();
+    let target = incoming.join("Sample.bin");
+    let attempt = Uuid::new_v4();
+    let staging = incoming.join(format!(".emulebb-delivery-{attempt}.tmp"));
+    runtime
+        .metadata
+        .begin_transfer_delivery_attempt(job.token, attempt, &target, &staging)
+        .unwrap();
+    fs::write(&staging, &payload).unwrap();
+    runtime
+        .metadata
+        .mark_transfer_delivery_attempt_staged(
+            job.token,
+            attempt,
+            &native_file_fingerprint(&staging).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(
+        runtime
+            .metadata
+            .reserve_delivery_output(job.token, &target, attempt)
+            .unwrap()
+    );
+    assert_eq!(
+        runtime
+            .materialize_completed_payload(job.token, &incoming)
+            .await
+            .unwrap(),
+        Ed2kDeliveryOutcome::AlreadyDelivered(target.clone()),
+    );
+    assert_eq!(fs::read(&target).unwrap(), payload);
+    assert!(
+        !runtime
+            .metadata
+            .delivery_output_is_excluded(&target)
+            .unwrap()
+    );
+    assert!(!incoming.join("Sample_01.bin").exists());
+}
+
+#[tokio::test]
 async fn interrupted_direct_copy_preserves_and_excludes_partial() {
     let root = unique_test_dir("ed2k-direct-interrupted");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -392,7 +468,7 @@ async fn cancelled_direct_copy_keeps_partial_excluded_and_retry_pending() {
     let incoming = root.join("incoming");
     let target = incoming.join("Sample.bin");
     force_unsupported_move(&target);
-    let created = pause_after_direct_create(&target);
+    let (created, release) = pause_after_direct_create(&target);
     let task_runtime = Arc::clone(&runtime);
     let task_hash = hash.clone();
     let task_incoming = incoming.clone();
@@ -414,6 +490,15 @@ async fn cancelled_direct_copy_keeps_partial_excluded_and_retry_pending() {
             .unwrap()
     );
     assert_eq!(fs::read(&target).unwrap(), b"");
+    {
+        let mut wait_for_owner = std::pin::pin!(runtime.lock_lifecycle(hash.token.job_id));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(wait_for_owner.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+    release.send(()).unwrap();
     let retry = incoming.join("Sample_01.bin");
     let error = runtime
         .materialize_completed_payload(hash.token, &incoming)
