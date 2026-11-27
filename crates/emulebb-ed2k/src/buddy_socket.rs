@@ -193,11 +193,7 @@ impl BuddySocketRegistry {
 
     /// Register the outbound buddy we acquired while firewalled (oracle
     /// `m_pBuddy` set on `KS_CONNECTED_BUDDY`). Replaces any prior outbound buddy.
-    pub(crate) fn register_outbound(
-        &self,
-        ip: Ipv4Addr,
-        user_hash: [u8; 16],
-    ) -> OutboundBuddyToken {
+    pub fn register_outbound(&self, ip: Ipv4Addr, user_hash: [u8; 16]) -> OutboundBuddyToken {
         let mut inner = self.lock();
         inner.next_outbound_generation = inner.next_outbound_generation.wrapping_add(1);
         if inner.next_outbound_generation == 0 {

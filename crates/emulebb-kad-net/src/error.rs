@@ -25,6 +25,9 @@ pub enum NetError {
     /// The local outbound rate limiter rejected the send attempt.
     #[error("rate limited")]
     RateLimited,
+    /// The owner withdrew the operation before UDP dispatch.
+    #[error("request cancelled before UDP dispatch")]
+    RequestCancelled,
     /// UDP to this destination would invalidate an unsolicited firewall test.
     #[error("peer {0} is reserved for an unsolicited firewall test")]
     FirewallTesterReserved(std::net::IpAddr),

@@ -22,6 +22,7 @@
 //!   (`MIN2MS(10)` cadence).
 //! - `srchybrid/ListenSocket.cpp` `OP_CALLBACK` relayed to the firewalled client.
 
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,11 +99,13 @@ pub struct OutboundBuddyLinkOptions {
     pub cancel: CancellationToken,
 }
 
-/// Hold a persistent TCP connection to our buddy: connect + hello, register in
-/// the outbound slot, ping at the oracle cadence, and complete firewalled
-/// callbacks the buddy relays to us. Returns when the socket drops; on return
-/// the outbound slot is evicted and the termination reason is returned.
-pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Result<BuddyLinkEnd> {
+/// Hold a persistent TCP link after an identity-bearing HELLO. The caller's
+/// authorization future registers the live relay and may reject a stale offer.
+/// Once authorized, this task pings and handles callbacks while the slot is current.
+pub async fn run_outbound_buddy_link(
+    options: OutboundBuddyLinkOptions,
+    authorize_ready: impl Future<Output = Option<OutboundBuddyToken>>,
+) -> Result<BuddyLinkEnd> {
     let OutboundBuddyLinkOptions {
         binding,
         buddy_addr,
@@ -118,29 +121,33 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         cancel,
     } = options;
 
-    let buddy_ip = match buddy_addr.ip() {
-        IpAddr::V4(ip) => ip,
-        IpAddr::V6(_) => anyhow::bail!("IPv6 buddy connections are not supported: {buddy_addr}"),
-    };
-
     // If the relationship was already cancelled while the connect was queued,
     // don't even open the socket.
     if cancel.is_cancelled() {
         return Ok(BuddyLinkEnd::Cancelled);
     }
 
-    let mut transport = connect_and_hello_buddy(
+    let connect = connect_and_hello_buddy(
         binding,
         buddy_addr,
         buddy_user_hash,
         buddy_connect_options,
         hello_identity,
         timeout,
-    )
-    .await
-    .with_context(|| format!("failed to establish buddy link to {buddy_addr}"))?;
-
-    let registry_token = registry.register_outbound(buddy_ip, buddy_user_hash);
+    );
+    let mut transport = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Ok(BuddyLinkEnd::Cancelled),
+        result = connect => result.with_context(|| format!("failed to establish buddy link to {buddy_addr}"))?,
+    };
+    let Some(registry_token) = authorize_ready.await else {
+        return Ok(BuddyLinkEnd::Cancelled);
+    };
+    let _retire_relay = RetireOutboundRelay {
+        registry: &registry,
+        token: registry_token,
+        cancel: &cancel,
+    };
     info!(
         "established outbound Kad buddy link to {buddy_addr} transport={}",
         transport.mode.as_str()
@@ -160,11 +167,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     )
     .await;
 
-    if !registry.evict_outbound_if(registry_token) {
-        debug!(
-            "outbound Kad buddy link to {buddy_addr} ended after its registry slot was replaced"
-        );
-    }
+    drop(_retire_relay);
     match &result {
         Ok(BuddyLinkEnd::Cancelled) => {
             info!("outbound Kad buddy link to {buddy_addr} cancelled")
@@ -181,6 +184,19 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         Err(error) => debug!("outbound Kad buddy link to {buddy_addr} ended: {error:#}"),
     }
     result
+}
+
+struct RetireOutboundRelay<'a> {
+    registry: &'a BuddySocketRegistry,
+    token: OutboundBuddyToken,
+    cancel: &'a CancellationToken,
+}
+
+impl Drop for RetireOutboundRelay<'_> {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.registry.evict_outbound_if(self.token);
+    }
 }
 
 #[expect(
