@@ -210,8 +210,8 @@ pub enum Ed2kPeerDownloadOutcome {
     /// socket onto the UDP reask loop (eMuleBB `QueuedDetached`); the driver must not
     /// reconnect (the reask loop keeps the slot warm + re-engages on UDP failure).
     QueuedDetachedForUdpReask,
-    /// The peer reported No Needed Parts for this file (eMuleBB `OP_OUTOFPARTREQS`
-    /// / `DS_NONEEDEDPARTS`): we already hold every part it offers, or it lacks the
+    /// This source has No Needed Parts for this file (`DS_NONEEDEDPARTS`):
+    /// we already hold every part it offers, or it lacks the
     /// parts we still need. Full A4AF immediately switches this live connection
     /// to the next wanted file, then the driver records the NNP hold on this
     /// relation (`CUpDownClient::SwapToAnotherFile`).
@@ -381,10 +381,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         active_piece_request: &mut session_state.active_piece_request,
                         pending_part_requests: &mut pending_part_requests,
                         peer_part_bitmap: session_state.peer_part_bitmap.as_deref(),
-                        upload_accepted_at: session_state.upload_accepted_at
+                        upload_accepted_at: session_state.last_upload_grant_at
                             .unwrap_or_else(tokio::time::Instant::now),
                         completed_block_count: session_state.completed_block_count,
-                        session_payload_down: session_state.session_payload_down,
+                        session_payload_down: session_state.session_payload_down
+                            .saturating_sub(session_state.grant_payload_baseline),
                         part_response_grace: PART_RESPONSE_GRACE,
                     },
                 )
@@ -561,24 +562,22 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             "peer_timeout_incomplete",
                             || format!("file_hash={file_hash_hex}"),
                         );
-                        // Parity with MFC CUpDownClient::CheckDownloadTimeout: a
-                        // requested source that stalled past the part-response
-                        // deadline is surfaced as a bad_peer event — split on
-                        // session_payload_down (= GetSessionPayloadDown()): 0 => it
-                        // sent no payload at all (download_first_payload_timeout),
-                        // >0 => it stalled mid-transfer (download_idle_timeout).
-                        if session_state.session_payload_down == 0 {
-                            diag_bad_peer::download_first_payload_timeout(
-                                &peer_addr.to_string(),
-                                session_state.peer_user_hash,
-                                file_hash_hex,
-                            );
-                        } else {
-                            diag_bad_peer::download_idle_timeout(
-                                &peer_addr.to_string(),
-                                session_state.peer_user_hash,
-                                file_hash_hex,
-                            );
+                        // WHY: the interval between grants is queue time,
+                        // so it cannot be charged as a payload stall.
+                        if session_state.upload_accepted || session_state.last_upload_grant_at.is_none() {
+                            if session_state.session_payload_down == session_state.grant_payload_baseline {
+                                diag_bad_peer::download_first_payload_timeout(
+                                    &peer_addr.to_string(),
+                                    session_state.peer_user_hash,
+                                    file_hash_hex,
+                                );
+                            } else {
+                                diag_bad_peer::download_idle_timeout(
+                                    &peer_addr.to_string(),
+                                    session_state.peer_user_hash,
+                                    file_hash_hex,
+                                );
+                            }
                         }
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
@@ -854,8 +853,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
                         continue;
                     }
-                    session_state.upload_accepted = true;
-                    session_state.upload_accepted_at.get_or_insert_with(tokio::time::Instant::now);
+                    if !session_state.upload_accepted {
+                        session_state.upload_accepted = true;
+                        session_state.last_upload_grant_at = Some(tokio::time::Instant::now());
+                        session_state.grant_payload_baseline = session_state.session_payload_down;
+                        session_state.completed_block_count = 0;
+                    }
                     session_state.queued_until = None;
                 }
                 (OP_EMULEPROT, OP_EMULEINFO) => {
@@ -1399,7 +1402,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EDONKEYPROT, OP_QUEUERANK) => {
                     let rank = decode_edonkey_queue_rank_payload(&packet.payload)?;
-                    session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
+                    if !session_state.upload_accepted {
+                        session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
+                    }
                     transfer_runtime.note_download_source_queue_rank(job_token, peer_addr, rank);
                     check_queue_rank_flood(
                         transfer_runtime,
@@ -1416,7 +1421,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EMULEPROT, OP_QUEUERANKING) => {
                     let rank = decode_emule_queue_ranking_payload(&packet.payload)?;
-                    session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
+                    if !session_state.upload_accepted {
+                        session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
+                    }
                     transfer_runtime.note_download_source_queue_rank(
                         job_token,
                         peer_addr,
@@ -1510,10 +1517,31 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             );
                         }
                     }
-                    // No Needed Parts (eMuleBB DS_NONEEDEDPARTS): the driver may swap
-                    // this source to another wanted file it serves (full A4AF
-                    // SwapToAnotherFile) rather than drop it.
-                    return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
+                    // WHY: stock recycles the upload grant while the peer can
+                    // still serve useful parts after a new grant on this socket.
+                    // Save eligible received bytes before releasing the old leases.
+                    let credit_user_hash = session_state.verified_credit_user_hash();
+                    flush_buffered_download_prefixes(
+                        transfer_runtime,
+                        file_hash_hex,
+                        &mut pending_part_requests,
+                        &mut session_state.active_piece_request,
+                        &mut manifest,
+                        peer_addr,
+                        transport.mode,
+                        session_state.peer_user_hash,
+                        session_state.peer_connect_options,
+                        credit_user_hash,
+                        &mut session_state.pending_aich_recovery_parts,
+                    )
+                    .await?;
+                    pending_part_requests.clear();
+                    pending_compressed_parts.clear();
+                    session_state.active_piece_request = None;
+                    session_state.part_response_deadline = None;
+                    session_state.upload_accepted = false;
+                    session_state.stale_block_guard.reset();
+                    session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
                 }
                 (OP_EDONKEYPROT, OP_CHANGE_CLIENT_ID) => {
                     let known_server = if let Some(context) = established_context {
@@ -1718,6 +1746,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 | (OP_EMULEPROT, OP_SENDINGPART_I64)
                 | (OP_EMULEPROT, OP_COMPRESSEDPART)
                 | (OP_EMULEPROT, OP_COMPRESSEDPART_I64) => {
+                    if !session_state.upload_accepted && session_state.last_upload_grant_at.is_some() {
+                        continue;
+                    }
                     if let Some(outcome) = handle_download_part_packet(DownloadPartPacket {
                             transport: &mut *transport,
                             transfer_runtime,
