@@ -1044,9 +1044,12 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
             "ready connections must not hydrate while the payload slot is occupied"
         );
     }
-    download
-        .download_hydration_busy
-        .store(true, Ordering::Release);
+    // Freeze the winning worker after it downloads the payload and before
+    // it publishes the share. The other owner still holds the ordinary slot.
+    // The separate hydration-Busy test drives that retry with its own clock.
+    let (reached, downloaded) = tokio::sync::oneshot::channel();
+    let (publish, resume) = tokio::sync::oneshot::channel();
+    *download.download_delivery_gate.lock().await = Some((reached, resume));
     let victim = victim.unwrap();
     assert!(
         download.ed2k_transfers.download_yield_requested(victim),
@@ -1068,13 +1071,10 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
         "Native retirement precedes guard release"
     );
     drop(active.remove(0));
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while download.download_hydration_busy.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), downloaded)
+        .await
+        .expect("the selected transfer did not reach delivery")
+        .expect("the selected delivery gate closed");
     let expected_first = usize::from(!prefer_rare);
     let waiting = download
         .ed2k_transfers
@@ -1103,20 +1103,19 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
         2,
         "the ready rare file starts in the burst slot while the ordinary owner remains"
     );
+    assert!(started.payload_verified);
     drop((waiting, started));
+    publish
+        .send(())
+        .expect("the selected worker owns publication");
+    assert_ready_job_published(&download, ids[expected_first].0, &files[expected_first].0).await;
     drop(active);
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if download.share(&files[0].0).await.is_some()
-                && download.share(&files[1].0).await.is_some()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    assert_ready_job_published(
+        &download,
+        ids[1 - expected_first].0,
+        &files[1 - expected_first].0,
+    )
+    .await;
     download.disconnect_ed2k().await.unwrap();
     assert_eq!(
         download
@@ -1127,5 +1126,38 @@ async fn assert_ready_admission_order(prefer_rare: bool) {
     );
     for seed in seeds {
         seed.disconnect_ed2k().await.unwrap();
+    }
+}
+
+async fn assert_ready_job_published(core: &EmulebbCore, id: emulebb_metadata::JobId, hash: &str) {
+    let published = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let job = core.ed2k_transfers.download_job(id).await.unwrap().unwrap();
+            assert!(
+                job.storage_failure.is_none(),
+                "ready job {id} failed: {:?}",
+                job.storage_failure
+            );
+            let completed = job.completed_at_s.is_some();
+            drop(job);
+            if completed && core.share(hash).await.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if published.is_err() {
+        let job = core.ed2k_transfers.download_job(id).await.unwrap();
+        panic!(
+            "ready job {id} did not publish: {:?}",
+            job.as_ref().map(|job| (
+                job.token,
+                job.checkpointed_bytes,
+                job.payload_verified,
+                job.completed_at_s,
+                &job.storage_failure,
+            ))
+        );
     }
 }
