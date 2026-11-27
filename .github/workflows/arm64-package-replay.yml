@@ -92,13 +92,42 @@ jobs:
           ref: ${{ inputs.harness_sha }}
           path: .ci/emulebb-build-tests
           persist-credentials: false
+      - name: Resolve the original package's OpenAPI contract
+        id: original-contract
+        shell: python
+        run: |
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          manifest = json.loads(Path(".ci/candidate/tools/ci-toolchain.json").read_text(encoding="utf-8"))
+          tooling = manifest["inputs"]["emulebb-tooling"]
+          digest = manifest["openapi_sha256"]
+          if not re.fullmatch("[0-9a-f]{40}", tooling) or not re.fullmatch("[0-9a-f]{64}", digest):
+              raise SystemExit("Original source does not identify an immutable OpenAPI contract")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              print(f"tooling_sha={tooling}", file=stream)
+              print(f"openapi_sha256={digest}", file=stream)
       - name: Checkout the pinned OpenAPI contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: emulebb/emulebb-tooling
-          ref: 0163a64c2139a32e60c427c7559501ab887b536e
+          ref: ${{ steps.original-contract.outputs.tooling_sha }}
           path: .ci/emulebb-tooling
           persist-credentials: false
+      - name: Verify original OpenAPI contract digest
+        shell: python
+        env:
+          OPENAPI_SHA256: ${{ steps.original-contract.outputs.openapi_sha256 }}
+        run: |
+          import hashlib
+          import os
+          from pathlib import Path
+
+          with Path(os.environ["EMULEBB_REST_OPENAPI_CONTRACT_PATH"]).open("rb") as contract:
+              if hashlib.file_digest(contract, "sha256").hexdigest() != os.environ["OPENAPI_SHA256"]:
+                  raise SystemExit("OpenAPI contract differs from the original producer pin")
       - name: Download and verify retained Windows ARM64 package
         id: original
         working-directory: .ci/emulebb-build
