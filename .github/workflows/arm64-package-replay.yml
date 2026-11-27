@@ -144,6 +144,10 @@ jobs:
           with Path(os.environ["EMULEBB_REST_OPENAPI_CONTRACT_PATH"]).open("rb") as contract:
               if hashlib.file_digest(contract, "sha256").hexdigest() != os.environ["OPENAPI_SHA256"]:
                   raise SystemExit("OpenAPI contract differs from the original producer pin")
+      - name: Install pinned replay and package smoke dependencies
+        run: >-
+          python -m pip install -r .ci/candidate/tools/requirements-ci.txt
+          click==8.4.1 pydantic==2.14.3 psutil==7.2.2
       - name: Download and verify retained Windows ARM64 package
         id: original
         working-directory: .ci/emulebb-build
@@ -159,8 +163,6 @@ jobs:
           --run-id "$env:PRODUCER_RUN" --attempt "$env:PRODUCER_ATTEMPT"
           --source-sha "$env:SOURCE_SHA" --artifact-name "$env:ARTIFACT_NAME"
           --artifact-sha256 "$env:ARTIFACT_SHA256"
-      - name: Install pinned package smoke dependencies
-        run: python -m pip install psutil==7.2.2
       - name: Prove retained package lifecycle
         env:
           PACKAGE_VERSION: ${{ steps.original.outputs.version }}
