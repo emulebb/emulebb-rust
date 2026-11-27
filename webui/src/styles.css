@@ -788,6 +788,69 @@ td {
   overflow-wrap: anywhere;
 }
 
+.transfer-progress progress {
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .workflow-table {
+    line-height: 1.35;
+  }
+
+  .workflow-table > :is(thead, tbody) > tr > :is(th, td) {
+    padding-block: 0.4rem;
+  }
+
+  .workflow-table tbody tr:hover:not(.selected-row) > td {
+    background-color: var(--tblr-bg-surface-secondary);
+  }
+
+  .transfers-table .link-button {
+    font-weight: 600;
+    text-align: start;
+    overflow-wrap: anywhere;
+  }
+
+  .transfers-table .status-pill {
+    white-space: nowrap;
+  }
+
+  .transfers-table .form-select {
+    min-inline-size: 10rem;
+  }
+
+  .transfers-table .row-actions {
+    flex-wrap: nowrap;
+    gap: 0.25rem;
+  }
+
+  .transfer-progress {
+    display: grid;
+    grid-template-columns: minmax(3rem, 1fr) 6ch;
+    align-items: center;
+    gap: 0.5rem;
+    text-align: end;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .transfer-progress progress {
+    display: block;
+    width: 100%;
+    height: 0.45rem;
+    accent-color: var(--tblr-primary);
+  }
+
+  .search-results-table td:nth-child(n+2):nth-child(-n+4) {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .search-results-table .search-result-hash {
+    display: inline-block;
+    min-inline-size: 9rem;
+  }
+}
+
 .path-cell {
   max-width: 760px;
   overflow-wrap: anywhere;

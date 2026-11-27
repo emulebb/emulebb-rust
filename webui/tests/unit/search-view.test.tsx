@@ -1,8 +1,14 @@
+import type { ComponentProps } from "preact";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 
 import { RestClient, RestError, type SearchItem, type CursorPage, type SearchResult } from "../../src/api";
 import { SearchView } from "../../src/views";
+
+function TestSearchView(props: Omit<ComponentProps<typeof SearchView>, "downloadStatus" | "queueDownload">) {
+  return <SearchView {...props} downloadStatus={new Map()}
+    queueDownload={async (_hash, create) => { await create(new AbortController().signal); }} />;
+}
 
 describe("SearchView", () => {
   it("confirms and retries an overrideable download conflict", async () => {
@@ -22,7 +28,7 @@ describe("SearchView", () => {
     const resultPage: CursorPage<SearchResult> = { data: [{ id: "11", hash, displayName: "Sample.bin", sizeBytes: 1 }], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
-      <SearchView
+      <TestSearchView
         searches={[search]}
         selectedSearch={search}
         resultPage={resultPage}
@@ -52,12 +58,12 @@ describe("SearchView", () => {
       intent: "started",
       category: null,
       redownload: false
-    });
+    }, expect.any(AbortSignal));
     expect(post).toHaveBeenNthCalledWith(2, `searches/7/results/11/download`, {
       intent: "started",
       category: null,
       redownload: true
-    });
+    }, expect.any(AbortSignal));
     expect(confirm).toHaveBeenCalledWith(
       "This content is already recorded locally. Download again? Existing library files will be preserved."
     );
@@ -79,7 +85,7 @@ describe("SearchView", () => {
       ], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
-      <SearchView
+      <TestSearchView
         searches={[search]}
         selectedSearch={search}
         resultPage={resultPage}
@@ -171,7 +177,7 @@ describe("SearchView", () => {
       }], meta: { apiVersion: "v1", nextCursor: "next", hasMore: true } };
 
     render(
-      <SearchView
+      <TestSearchView
         searches={[search]}
         selectedSearch={search}
         resultPage={resultPage}
@@ -241,13 +247,13 @@ describe("SearchView collection control", () => {
       searchSort:"sources",searchOrder:"desc",selectSearchSort:vi.fn(),selectSearchPage:vi.fn(),
       onSearchCreated:vi.fn(),onSearchDeleted:onDeleted,onSearchesCleared:vi.fn()
     };
-    const view=render(<SearchView {...props} />);
+    const view=render(<TestSearchView {...props} />);
     fireEvent.click(screen.getByRole("button",{name:"Stop search"}));
     await waitFor(()=>expect(post).toHaveBeenCalledWith(`searches/${search.id}/stop`));
     expect(onDeleted).not.toHaveBeenCalled();
     expect(screen.getByText("Sample.bin")).toBeTruthy();
     const stopped: SearchItem = {...search,status:"stopped"};
-    view.rerender(<SearchView {...props} searches={[stopped]} selectedSearch={stopped} />);
+    view.rerender(<TestSearchView {...props} searches={[stopped]} selectedSearch={stopped} />);
     expect((screen.getByRole("button",{name:"Stop search"}) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("Sample.bin")).toBeTruthy();
   });
@@ -262,7 +268,7 @@ describe("SearchView linked creation", () => {
     const created: SearchItem={id:"9007199254740994",parentSearchId:search.id,query:"Edited query",status:"queued",resultCount:0};
     const post=vi.spyOn(client,"post").mockResolvedValue(created);
     const onCreated=vi.fn();
-    render(<SearchView searches={[]} selectedSearch={search} selectedSearchId={search.id}
+    render(<TestSearchView searches={[]} selectedSearch={search} selectedSearchId={search.id}
       resultPage={null} resultCursor={null} sessionCursor={null} sessionNextCursor={null}
       selectSearchSessionsPage={()=>{}} categories={[]} client={client}
       run={async operation=>{await operation();}} selectSearch={()=>{}}

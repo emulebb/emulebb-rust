@@ -773,13 +773,13 @@ export class RestClient {
     return checkedSettingsSnapshot(await this.request<SettingsSnapshot>("PATCH", "settings", patch, "json"));
   }
 
-  async get<T>(path: string): Promise<T> {
-    return this.request<T>("GET", path);
+  async get<T>(path: string, signal?: AbortSignal): Promise<T> {
+    return this.request<T>("GET", path, undefined, "envelope", signal);
   }
 
   /** Read the current bounded data array together with its opaque continuation. */
-  async getPage<T>(path: string): Promise<CursorPage<T>> {
-    return this.request<CursorPage<T>>("GET", path, undefined, "json");
+  async getPage<T>(path: string, signal?: AbortSignal): Promise<CursorPage<T>> {
+    return this.request<CursorPage<T>>("GET", path, undefined, "json", signal);
   }
 
   async controlDownloads(action: "start" | "stop" | "verify", ids: string[]): Promise<DownloadBatchItem[]>;
@@ -808,8 +808,8 @@ export class RestClient {
     return items;
   }
 
-  async post<T>(path: string, body: unknown = {}): Promise<T> {
-    return this.request<T>("POST", path, body);
+  async post<T>(path: string, body: unknown = {}, signal?: AbortSignal): Promise<T> {
+    return this.request<T>("POST", path, body, "envelope", signal);
   }
 
   async captureDiagnosticBundle(maxBytes: number): Promise<DiagnosticBundle> {
@@ -863,12 +863,13 @@ export class RestClient {
     await readDownloadEventStream(response.body, onEvent, options.signal);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, responseKind: "envelope" | "json" = "envelope"): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, responseKind: "envelope" | "json" = "envelope", signal?: AbortSignal): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.apiKey) {
       headers["X-API-Key"] = this.apiKey;
     }
     const init: RequestInit = { method, headers };
+    if (signal) init.signal = signal;
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);

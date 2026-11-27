@@ -32,12 +32,12 @@ describe("TransfersView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     await screen.findByRole("button", { name: "Second page.bin" });
     expect(screen.queryByRole("button", { name: "First page.bin" })).not.toBeInTheDocument();
-    expect(getPage).toHaveBeenLastCalledWith("downloads?view=unfinished&limit=100&cursor=opaque-cursor");
+    expect(getPage).toHaveBeenLastCalledWith("downloads?view=unfinished&limit=100&cursor=opaque-cursor", expect.any(AbortSignal));
     rerender(<TransfersView {...props} refreshGeneration={1} />);
     await waitFor(() => expect(getPage).toHaveBeenCalledTimes(3));
-    expect(getPage).toHaveBeenLastCalledWith("downloads?view=unfinished&limit=100&cursor=opaque-cursor");
+    expect(getPage).toHaveBeenLastCalledWith("downloads?view=unfinished&limit=100&cursor=opaque-cursor", expect.any(AbortSignal));
     fireEvent.input(screen.getByRole("combobox", { name: "Download view" }), { target: { value: "completed" } });
-    await waitFor(() => expect(getPage).toHaveBeenLastCalledWith("downloads?view=completed&limit=100"));
+    await waitFor(() => expect(getPage).toHaveBeenLastCalledWith("downloads?view=completed&limit=100", expect.any(AbortSignal)));
   });
 
   it("selects distinct same-hash jobs by ID and ignores a late detail from the previous selection", async () => {
@@ -52,14 +52,44 @@ describe("TransfersView", () => {
       .mockReturnValueOnce(new Promise((resolve) => { second = resolve; }));
     render(<TransfersView categories={[]} client={client} refreshGeneration={0} run={async (operation) => { await operation(); }} />);
     fireEvent.click(await screen.findByRole("button", { name: "First copy.bin" }));
-    await waitFor(() => expect(get).toHaveBeenLastCalledWith("downloads/1"));
+    await waitFor(() => expect(get).toHaveBeenLastCalledWith("downloads/1", expect.any(AbortSignal)));
     fireEvent.click(screen.getByRole("button", { name: "Second copy.bin" }));
-    await waitFor(() => expect(get).toHaveBeenLastCalledWith("downloads/2"));
+    await waitFor(() => expect(get).toHaveBeenLastCalledWith("downloads/2", expect.any(AbortSignal)));
     second({ ...job("2", "Current detail.bin"), payloadVerified: false, delivery: { path: null, state: "pending", ownership: "none" }, failure: null });
     await screen.findByText("Current detail.bin", { selector: ".section-title span" });
     first({ ...job("1", "Stale detail.bin"), payloadVerified: false, delivery: { path: null, state: "pending", ownership: "none" }, failure: null });
     await waitFor(() => expect(screen.queryByText("Stale detail.bin")).not.toBeInTheDocument());
     expect(screen.getByText("Current detail.bin", { selector: ".section-title span" })).toBeVisible();
+  });
+
+  it("keeps selected details visible while an overlapping refresh recovers from failure", async () => {
+    const client = new RestClient();
+    const download = job("1", "Sample.bin");
+    const detail = { ...download, name: "Loaded detail.bin", payloadVerified: false, delivery: null, failure: null };
+    vi.spyOn(client, "getPage").mockImplementation(async (path) => ({
+      data: path.startsWith("downloads?") ? [download] : [],
+      meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false },
+    }));
+    let fail!: (reason: Error) => void;
+    let finish!: (value: unknown) => void;
+    const get = vi.spyOn(client, "get").mockResolvedValueOnce(detail)
+      .mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }))
+      .mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const props = { categories: [], client, run: async (operation: () => Promise<unknown>) => { await operation(); } };
+    const { rerender } = render(<TransfersView {...props} refreshGeneration={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sample.bin" }));
+    await screen.findByText("Loaded detail.bin", { selector: ".section-title span" });
+    rerender(<TransfersView {...props} refreshGeneration={1} />);
+    rerender(<TransfersView {...props} refreshGeneration={2} />);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Loaded detail.bin", { selector: ".section-title span" })).toBeVisible();
+    fail(new Error("Temporary detail failure"));
+    expect(await screen.findByText("Temporary detail failure")).toBeVisible();
+    expect(get).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("Loaded detail.bin", { selector: ".section-title span" })).toBeVisible();
+    finish({ ...detail, name: "Updated detail.bin" });
+    await screen.findByText("Updated detail.bin", { selector: ".section-title span" });
+    expect(screen.queryByText("Temporary detail failure")).not.toBeInTheDocument();
   });
 
   it("assigns a category by name and clears it with null", async () => {
