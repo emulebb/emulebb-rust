@@ -182,7 +182,8 @@ test("Search refresh keeps results visible and reads once per cadence despite ev
 });
 
 test("a background Downloads read failure preserves the selected details and viewport", async ({ page }) => {
-  const mock = installMockApi([]);
+  const requests: RecordedApiRequest[] = [];
+  const mock = installMockApi(requests);
   let detailReads = 0;
   let fail = () => {};
   await page.route("**/api/v1/**", async (route) => {
@@ -195,17 +196,29 @@ test("a background Downloads read failure preserves the selected details and vie
   await page.setViewportSize({ width: 1280, height: 560 });
   await page.clock.install();
   await page.goto("/downloads");
-  const download = page.getByRole("button", { name: "Sample Transfer.bin", exact: true });
+  const row = page.getByRole("row").filter({ hasText: "Sample Transfer.bin" });
+  const download = row.getByRole("button", { name: "Sample Transfer.bin", exact: true });
+  for (const name of ["Start", "Stop", "Verify", "Remove from list", "Delete"]) {
+    await expect(row.getByRole("button", { name, exact: true })).toBeVisible();
+  }
+  await expect(page.getByRole("heading", { name: "Download details" })).toHaveCount(0);
   await download.click();
   const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Download details" }) });
-  const detail = panel.locator("pre");
-  await expect(detail).toContainText("Sample Transfer.bin");
+  const detail = panel.locator(".workflow-facts");
+  await expect(panel.getByText("Sample Transfer.bin", { exact: true })).toBeVisible();
+  await expect(detail).toContainText("25.0%");
+  const evidence = panel.locator("summary").filter({ hasText: /^Sources$/ });
+  expect(requests.filter((request) => /^downloads\/1\/(sources|parts|comments)$/.test(request.path))).toHaveLength(0);
+  await evidence.press("Enter");
+  await expect(panel.getByText("Sample Peer")).toBeVisible();
+  expect(requests.filter((request) => /^downloads\/1\/(parts|comments)$/.test(request.path))).toHaveLength(0);
+  await expect(detail).toContainText("25.0%");
   await detail.scrollIntoViewIfNeeded();
   const scrollY = await page.evaluate(() => window.scrollY);
   const top = await detail.evaluate((element) => element.getBoundingClientRect().top);
   await page.clock.fastForward(10_000);
   await expect.poll(() => detailReads).toBe(2);
-  await expect(detail).toContainText("Sample Transfer.bin");
+  await expect(detail).toContainText("25.0%");
   fail();
   await expect(panel.locator(".update-warning").filter({ hasText: "Temporary detail failure" })).toBeVisible();
   expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
@@ -214,6 +227,13 @@ test("a background Downloads read failure preserves the selected details and vie
   await page.clock.fastForward(10_000);
   await expect.poll(() => detailReads).toBe(3);
   await expect(panel.locator(".update-warning").filter({ hasText: "Temporary detail failure" })).toHaveCount(0);
+  await expect(panel.getByText("Sample Peer")).toBeVisible();
+  await panel.locator("summary").filter({ hasText: /^Parts$/ }).click();
+  await expect.poll(() => requests.some((request) => request.path === "downloads/1/parts")).toBe(true);
+  await panel.locator("summary").filter({ hasText: /^Comments$/ }).click();
+  await expect.poll(() => requests.some((request) => request.path === "downloads/1/comments")).toBe(true);
+  await panel.locator("summary").filter({ hasText: /^Raw data$/ }).click();
+  await expect(panel.locator("pre").filter({ hasText: "Sample Transfer.bin" })).toBeVisible();
 });
 
 test("preserves an eD2K handoff through sign-in and requires explicit confirmation", async ({ page }) => {
@@ -287,6 +307,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page).toHaveURL(/\/downloads$/);
   await expect(page.locator("tr", { hasText: "Sample Transfer.bin" }).locator("select")).toHaveValue("Sample-Category");
   await page.getByRole("button", { name: "Sample Transfer.bin", exact: true }).click();
+  await page.locator("summary").filter({ hasText: /^Sources$/ }).click();
   await expect(page.getByText("Sample Peer")).toBeVisible();
 
   await page.getByRole("link", { name: "Sharing" }).click();
@@ -827,17 +848,22 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await page.goBack();
   await expect(page).toHaveURL(/\/searches\/2$/);
   await expect(resultRow).toBeVisible();
+  await expect(searchPanel.getByText("Resolved backend")).toBeHidden();
+  await searchPanel.locator("summary").filter({ hasText: /^Session details$/ }).click();
   await expect(searchPanel.getByText("Resolved backend")).toBeVisible();
   await expect(searchPanel.getByText("Extension: .pdf")).toBeVisible();
   await expect(resultRow).toContainText("2 complete");
   await expect(resultRow).toContainText("4/5");
-  await resultRow.getByRole("button", { name: "Observations", exact: true }).click();
+  const observationsButton = resultRow.getByRole("button", { name: "Observations", exact: true });
+  await observationsButton.click();
+  await expect(page.locator("#search-observations-panel")).toBeFocused();
   const observations = page.getByRole("region", { name: "Search result observations", exact: true });
   await expect(observations.getByRole("cell", { name: "Linux Manual.pdf", exact: true })).toBeVisible();
   await expect(observations.getByRole("cell", { name: "global 192.0.2.10:4661", exact: true })).toBeVisible();
   await expect(observations.getByRole("button", { name: "Next observations page" })).toBeDisabled();
   await observations.getByRole("button", { name: "Close observations" }).click();
   await expect(observations).toHaveCount(0);
+  await expect(observationsButton).toBeFocused();
   await expect(resultRow).toContainText("Title: Linux Guide");
   await expect(resultRow).toContainText("Artist: Example Author");
   await expect(resultRow).toContainText("Codec: PDF");
@@ -856,6 +882,8 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
     expect(dialog.message()).toContain("Delete this search session");
     await dialog.accept();
   });
+  await expect(searchPanel.getByRole("button", { name: "Delete session" })).toBeHidden();
+  await searchPanel.locator("summary").filter({ hasText: /^Session actions$/ }).click();
   await searchPanel.getByRole("button", { name: "Delete session" }).click();
   await expect(page.getByText("Search session deleted")).toBeVisible();
   await expect(page).toHaveURL(/\/searches\/1$/);
@@ -981,7 +1009,9 @@ test("transfer add form validates eD2K link batches", async ({ page }) => {
   await page.getByRole("link", { name: "Downloads", exact: true }).click();
   const transfersPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Downloads" }) });
   const linkInput = transfersPanel.getByPlaceholder("One eD2K link per line");
-  const addLinks = transfersPanel.getByRole("button", { name: "Add links" });
+  const addLinks = transfersPanel.getByRole("button", { name: "Add links", exact: true });
+  await expect(linkInput).toBeHidden();
+  await transfersPanel.getByRole("button", { name: "Add eD2K links" }).click();
   const initialTransferPosts = requests.filter((request) => request.method === "POST" && request.path === "downloads").length;
   const invalidLinkError = "Each transfer link must start with ed2k://, contain no whitespace or control characters, and be at most 2048 characters.";
 

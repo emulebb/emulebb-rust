@@ -961,18 +961,127 @@ td {
   padding: 8px;
 }
 
-.search-filters {
-  margin-bottom: 12px;
+.workflow-search-form,
+.workflow-sections {
+  margin-bottom: 0.75rem;
 }
 
-.search-filters summary {
-  color: var(--tblr-secondary);
-  cursor: pointer;
-  margin-bottom: 8px;
+.desktop-action-feedback {
+  display: contents;
 }
 
-.search-filters:not([open]) summary {
+.workflow-search-form > .form-row:first-child,
+.workflow-disclosure-content.form-row,
+.workflow-add-links .form-row {
   margin-bottom: 0;
+}
+
+.workflow-search-form .search-filters {
+  margin-top: 0.5rem;
+}
+
+.workflow-sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.workflow-sections:last-child {
+  margin-bottom: 0;
+}
+
+.workflow-disclosure {
+  border: 1px solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.workflow-sections > .workflow-disclosure[open] {
+  flex: 1 1 100%;
+}
+
+.workflow-disclosure > summary {
+  color: var(--tblr-body-color);
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.4rem 0.65rem;
+}
+
+.workflow-disclosure > summary .update-warning {
+  margin-inline-start: 0.35rem;
+  vertical-align: middle;
+}
+
+.workflow-disclosure-content {
+  padding: 0.65rem;
+}
+
+.workflow-disclosure-content + .workflow-disclosure-content {
+  padding-top: 0;
+}
+
+.workflow-disclosure-content > :last-child {
+  margin-bottom: 0;
+}
+
+.workflow-add-links:not([hidden]) {
+  padding-bottom: 0.75rem;
+}
+
+.workflow-download-filters .form-select,
+.workflow-results-toolbar .form-select {
+  width: auto;
+  max-width: 100%;
+}
+
+.workflow-results-toolbar {
+  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.workflow-results-toolbar h3 {
+  margin: 0.4rem 0;
+}
+
+.workflow-results-toolbar > .form-row {
+  margin-bottom: 0.5rem;
+}
+
+.workflow-results-pagination {
+  margin-top: 0.75rem;
+}
+
+.workflow-facts {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  margin-bottom: 1rem;
+}
+
+.workflow-facts dt {
+  color: var(--tblr-secondary);
+}
+
+.workflow-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.download-delivery-path {
+  display: block;
+}
+
+.download-details-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.workflow-observations {
+  scroll-margin-top: 0.75rem;
 }
 
 .search-session-row label {
