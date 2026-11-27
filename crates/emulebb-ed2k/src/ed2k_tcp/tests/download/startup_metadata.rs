@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opcodes() {
+async fn active_download_applies_callback_but_rejects_outbound_firewall_ack() {
     let root = unique_test_dir("ed2k-hash-only-small-file-download");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x41; 180 * 1024];
@@ -180,10 +180,7 @@ async fn active_download_applies_callback_firewall_ack_and_tolerates_unknown_opc
     .await
     .unwrap();
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
-    assert_eq!(
-        kad_firewall.lock().await.last_helper_ip.clone(),
-        Some(peer_addr.ip().to_string()),
-    );
+    assert!(kad_firewall.lock().await.last_helper_ip.is_none());
     let callback_request = callback_inbox
         .try_recv_for_test()
         .expect("active download should dispatch an authorized Kad callback");

@@ -74,7 +74,11 @@ fn frame_packet(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Client
     plain.push(OP_EMULEPROT);
     plain.push(opcode);
     plain.extend_from_slice(body);
-    let bytes = if target.obfuscate {
+    // Stock falls back to plaintext for optional obfuscation when the
+    // address used by the receiver to derive the key is unknown.
+    let obfuscated =
+        target.obfuscate && target.our_public_ip != [0; 4] && target.dest_user_hash != [0; 16];
+    let bytes = if obfuscated {
         obfuscate_client_udp(&target.dest_user_hash, target.our_public_ip, &plain)
     } else {
         plain
@@ -84,7 +88,7 @@ fn frame_packet(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Client
         protocol_marker: OP_EMULEPROT,
         opcode,
         payload: body.to_vec(),
-        obfuscated: target.obfuscate,
+        obfuscated,
         file_hash: None,
     }
 }
@@ -293,6 +297,34 @@ mod tests {
         match msg {
             InboundReaskMessage::Ack(ack) => assert_eq!(ack.queue_position, 13),
             other => panic!("expected Ack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_obfuscation_needs_the_sender_address_and_peer_hash() {
+        for target in [
+            OutboundReaskTarget {
+                our_public_ip: [0; 4],
+                ..obfuscated_target()
+            },
+            OutboundReaskTarget {
+                dest_user_hash: [0; 16],
+                ..obfuscated_target()
+            },
+        ] {
+            let ping = build_reask_file_ping_packet(&file_hash(), None, 0, 4, &target);
+            assert!(!ping.obfuscated);
+            assert_eq!(ping.bytes[0], OP_EMULEPROT);
+            assert!(matches!(
+                parse_inbound_reask_datagram(&ping.bytes, OUR_IP, &DEST_HASH, 4),
+                Some(InboundReaskMessage::FilePing(_))
+            ));
+            let reply = build_reask_ack_packet(None, 13, 4, &target);
+            assert!(!reply.obfuscated);
+            assert!(matches!(
+                parse_inbound_reask_datagram(&reply.bytes, OUR_IP, &DEST_HASH, 4),
+                Some(InboundReaskMessage::Ack(ack)) if ack.queue_position == 13
+            ));
         }
     }
 

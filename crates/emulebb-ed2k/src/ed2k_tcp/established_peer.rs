@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    Ed2kCallbackSessionHandle, OP_EDONKEYPROT, OP_EMULEPROT,
+    Ed2kCallbackSessionHandle, Ed2kPeerConnectionOrigin, OP_EDONKEYPROT, OP_EMULEPROT,
     codec::{ClientIdChange, KadCallbackRequest, decode_client_id_change_payload},
     firewall_helper::{complete_authorized_kad_callback, decode_kad_callback_if_running},
     hello::DecodedHelloProfile,
@@ -144,7 +144,12 @@ pub(in crate::ed2k_tcp) async fn handle_established_kad_callback(
 pub(in crate::ed2k_tcp) async fn record_established_kad_firewall_ack(
     context: &Ed2kEstablishedPeerContext,
     peer_ip: IpAddr,
+    origin: Ed2kPeerConnectionOrigin,
 ) -> bool {
+    // A daemon-dialed TCP socket proves no inbound reachability.
+    if origin != Ed2kPeerConnectionOrigin::InboundAccepted {
+        return false;
+    }
     context
         .kad_firewall
         .lock()

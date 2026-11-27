@@ -1329,6 +1329,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 let accepted = record_established_kad_firewall_ack(
                     &established_context,
                     peer_addr.ip(),
+                    transport.origin(),
                 )
                 .await;
                 dump_ed2k_tcp_listener_meta(

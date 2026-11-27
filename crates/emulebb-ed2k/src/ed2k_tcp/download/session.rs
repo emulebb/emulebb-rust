@@ -985,7 +985,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK) => {
                     let accepted = if let Some(context) = established_context {
-                        record_established_kad_firewall_ack(context, peer_addr.ip()).await
+                        record_established_kad_firewall_ack(context, peer_addr.ip(), transport.origin())
+                            .await
                     } else {
                         false
                     };
