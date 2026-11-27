@@ -57,7 +57,7 @@ import {
   RestError,
   encodeSegment
 } from "./api";
-import { Action, CursorControls, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll } from "./components";
+import { Action, CursorControls, EmptyRow, JsonPanel, Metric, StatusPill, TableScroll, UpdateWarning } from "./components";
 import {
   boolField,
   errorMessage,
@@ -123,7 +123,7 @@ export function Overview(props: {
         label="Upload"
         value={formatRate(numberField(props.stats, "uploadRateBytesPerSec") ?? kibToBytes(numberField(props.stats, "uploadSpeedKiBps")))}
       />
-      <Metric label="Transfers" value={props.snapshot?.downloads ? `${props.snapshot.downloads.unfinished} unfinished / ${props.snapshot.downloads.completed} completed` : "n/a"} />
+      <Metric label="Downloads" value={props.snapshot?.downloads ? `${props.snapshot.downloads.unfinished} unfinished / ${props.snapshot.downloads.completed} completed` : "n/a"} />
       <Metric label="Download work" value={resources ? `${resources.active} active / ${resources.preparing} preparing / ${resources.waiting} waiting` : "n/a"} />
       <Metric label="Uploads" value={`${props.stats.activeUploads ?? "unknown"}/${props.stats.waitingUploads ?? "unknown"}`} />
       <Metric label="Shared" value={String(props.snapshot?.status?.runtimeDiagnostics?.sharedFileCount ?? "n/a")} />
@@ -177,7 +177,7 @@ export function Overview(props: {
       </section>
 
       <section class="panel card wide">
-        <h2>Recent Transfers</h2>
+        <h2>Recent Downloads</h2>
         <CompactTransferList transfers={props.transfers.slice(0, 8)} />
       </section>
     </section>
@@ -263,7 +263,7 @@ function DownloadEvidence<T>(props: { path: string; label: string; client: RestC
   </section>;
 }
 
-export function TransfersView(props: {
+export function DownloadsView(props: {
   categories: Category[];
   client: RestClient;
   run: RunFunction;
@@ -355,7 +355,7 @@ export function TransfersView(props: {
   };
   return <section class="view-stack">
     <section class="panel card">
-      <div class="section-title"><h2>Transfers</h2><div class="row-actions">
+      <div class="section-title"><div class="section-heading"><h2>Downloads</h2><UpdateWarning message={page ? listError : ""} /></div><div class="row-actions">
         <select class="form-select" aria-label="Download view" value={view} onInput={(event) => { setView(event.currentTarget.value); changePage(null); }}>
           <option value="unfinished">Unfinished</option><option value="completed">Completed</option><option value="all">All downloads</option>
         </select>
@@ -364,7 +364,7 @@ export function TransfersView(props: {
         </select>
         <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading && !page} change={changePage} />
       </div></div>
-      {listError && <div class="notice alert alert-danger">{listError}</div>}
+      {!page && listError && <div class="notice alert alert-danger" role="alert">{listError}</div>}
       {handoff && <p class={handoff.error ? "field-error" : "text-secondary"}>{handoff.error ?? "Review the linked file and press Add links to queue it."}</p>}
       <form class="form-row" onSubmit={(event) => { event.preventDefault(); void props.run(createDownloads, "Downloads queued"); }}>
         <textarea class="form-control" aria-label="eD2K links" value={ed2kLinks} placeholder="One eD2K link per line" aria-invalid={linksError ? "true" : "false"} onInput={(event) => setEd2kLinks(event.currentTarget.value)} />
@@ -373,7 +373,7 @@ export function TransfersView(props: {
         {handoff && <button class="btn" type="button" onClick={() => { consumeHandoff(); setEd2kLinks(""); }}>Cancel links</button>}
       </form>
       {linksError && <p class="field-error">{linksError}</p>}
-      <TableScroll label="Transfers"><table class="table table-vcenter card-table workflow-table transfers-table" aria-label="Transfers"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
+      <TableScroll label="Downloads"><table class="table table-vcenter card-table workflow-table transfers-table" aria-label="Downloads"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
         {(page?.data ?? []).map((job) => <tr key={job.id} class={selectedId === job.id ? "selected-row" : ""}>
           <td><button type="button" class="link-button" onClick={() => selectDownload(job.id)}>{job.name}</button></td>
           <td><DownloadStateLabel download={job} /></td>
@@ -392,11 +392,12 @@ export function TransfersView(props: {
             <Action title="Delete" icon={<Trash2 size={15} />} onClick={() => remove(job, true)} />
           </div></td>
         </tr>)}
-        {page?.data.length === 0 && <EmptyRow colSpan={5} text="No transfers." />}
+        {page?.data.length === 0 && <EmptyRow colSpan={5} text="No downloads." />}
       </tbody></table></TableScroll>
     </section>
-    <section class="panel card"><div class="section-title"><h2>Transfer Details</h2><span>{details?.name ?? (selectedId || "No selection")}</span></div>
-      {detailError && <div class="notice alert alert-danger">{detailError}</div>}<JsonPanel value={details} />
+    <section class="panel card"><div class="section-title"><div class="section-heading"><h2>Download details</h2>
+      <UpdateWarning message={details ? detailError : ""} /></div><span>{details?.name ?? (selectedId || "No selection")}</span></div>
+      {!details && detailError && <div class="notice alert alert-danger" role="alert">{detailError}</div>}<JsonPanel value={details} />
     </section>
     {selectedId && <>
       <DownloadEvidence<DownloadSource> key={`${selectedId}:sources`} path={`downloads/${selectedId}/sources`} label="Download sources" client={props.client} refreshGeneration={props.refreshGeneration} render={(sources) => <TableScroll label="Transfer sources"><table class="table table-vcenter card-table"><thead><tr><th>Source</th><th>State</th><th>Rate</th><th>Reported names</th><th>Actions</th></tr></thead><tbody>
@@ -642,7 +643,7 @@ export function SearchView(props: {
   return (
     <section class="panel card">
       <div class="section-title">
-        <h2>Search</h2>
+        <div class="section-heading"><h2>Search</h2><UpdateWarning message={props.resultPage ? props.readError : ""} /></div>
         <span>{props.searches.length} sessions on this page</span>
       </div>
       {parentSearchId && <div class="form-row"><span>New search linked to #{parentSearchId}</span>
@@ -813,7 +814,7 @@ export function SearchView(props: {
         <span>Session pages</span><CursorControls cursor={props.sessionCursor} nextCursor={props.sessionNextCursor}
           loading={false} change={props.selectSearchSessionsPage} />
       </div>
-      {props.readError && <div class="notice alert alert-danger" role="alert">{props.readError}</div>}
+      {!props.resultPage && props.readError && <div class="notice alert alert-danger" role="alert">{props.readError}</div>}
       <TableScroll label="Search results">
         <table class="table table-vcenter card-table workflow-table search-results-table" aria-label="Search results">
           <thead>
@@ -2807,7 +2808,7 @@ function DownloadStateLabel({ download }: { download: DownloadSummary }) {
 
 function CompactTransferList(props: { transfers: DownloadSummary[] }) {
   if (props.transfers.length === 0) {
-    return <p class="empty">No transfers.</p>;
+    return <p class="empty">No downloads.</p>;
   }
   return (
     <div class="compact-list">

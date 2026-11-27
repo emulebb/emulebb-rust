@@ -5,7 +5,7 @@ import { pathForRoute, pathForSearch, pathForTab, routeFromPathname } from "../.
 describe("WebUI routes", () => {
   it("maps primary views to stable paths", () => {
     expect(routeFromPathname("/")).toEqual({ tab: "overview" });
-    expect(routeFromPathname("/transfers")).toEqual({ tab: "transfers" });
+    expect(routeFromPathname("/downloads")).toEqual({ tab: "downloads" });
     expect(routeFromPathname("/library/")).toEqual({ tab: "library" });
     expect(pathForTab("settings")).toBe("/settings");
   });

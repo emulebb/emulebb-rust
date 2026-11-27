@@ -4,10 +4,10 @@ import type { AppInfo } from "./api";
 export function AppIdentity({ app }: { app: AppInfo | null }) {
   const version = app?.version ?? app?.apiVersion ?? "REST dashboard";
   return (
-    <div>
-      <h1>eMuleBB WebUI</h1>
+    <div class="app-brand">
+      <h1 class="visually-hidden">eMuleBB WebUI</h1>
       <details class="brand-identity" aria-label="About this build">
-        <summary class="brand-version">{version}</summary>
+        <summary title="About this build">eMuleBB</summary>
         <dl class="build-details">
           <dt>Version</dt><dd>{version}</dd>
           <dt>Channel</dt><dd>{app?.channel ?? "unknown"}</dd>

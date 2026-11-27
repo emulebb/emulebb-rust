@@ -37,9 +37,9 @@ for (const [width, theme] of [[1280, "light"], [1280, "dark"], [1440, "light"], 
           return mock(route);
       }
     });
-    await page.goto("/transfers");
+    await page.goto("/downloads");
     await expect(page.locator("html")).toHaveAttribute("data-bs-theme", theme);
-    const transfers = page.getByRole("table", { name: "Transfers", exact: true });
+    const transfers = page.getByRole("table", { name: "Downloads", exact: true });
     await expect(transfers.getByRole("progressbar")).toBeVisible();
     await expect(transfers.getByText("25.0%")).toBeVisible();
     await expect(transfers.getByRole("row").filter({ hasText: longName }).getByText("Unknown progress", { exact: true })).toBeAttached();
@@ -111,10 +111,10 @@ test("Search marks acknowledged downloads across results and clears the label af
   finishDownload();
   await expect(results.getByText("Queued", { exact: true })).toHaveCount(2);
 
-  await page.getByRole("link", { name: "Transfers", exact: true }).click();
+  await page.getByRole("link", { name: "Downloads", exact: true }).click();
   await page.getByRole("link", { name: "Search", exact: true }).click();
   await expect(results.getByText("Queued", { exact: true })).toHaveCount(2);
-  await page.getByRole("link", { name: "Transfers", exact: true }).click();
+  await page.getByRole("link", { name: "Downloads", exact: true }).click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Remove from list", exact: true }).click();
   await expect(page.getByText("Download removed", { exact: true })).toBeVisible();
@@ -152,11 +152,15 @@ test("Search refresh keeps results visible and reads once per cadence despite ev
     }
     return mock(route);
   });
+  await page.setViewportSize({ width: 1280, height: 560 });
   await page.clock.install();
   const eventResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/events");
   await page.goto("/searches/1");
   const rows = page.getByRole("table", { name: "Search results", exact: true }).locator("tbody tr");
   await expect(rows.first()).toContainText("First sample");
+  await rows.first().scrollIntoViewIfNeeded();
+  const scrollY = await page.evaluate(() => window.scrollY);
+  const rowTop = await rows.first().evaluate((row) => row.getBoundingClientRect().top);
   await (await eventResponse).finished();
   await page.clock.fastForward(6_000);
   expect(resultReads).toBe(1);
@@ -164,15 +168,52 @@ test("Search refresh keeps results visible and reads once per cadence despite ev
   await expect.poll(() => resultReads).toBe(2);
   await expect(rows).toHaveCount(2);
   await expect(rows.first()).toContainText("First sample");
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.clock.fastForward(10_000);
   expect(resultReads).toBe(2);
   failRead();
   await expect.poll(() => resultReads).toBe(3);
-  await expect(page.getByRole("alert")).toContainText("Temporary results failure");
+  await expect(page.locator(".update-warning").filter({ hasText: "Temporary results failure" })).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
+  expect(await rows.first().evaluate((row) => row.getBoundingClientRect().top)).toBe(rowTop);
   await expect(rows.first()).toContainText("First sample");
   finishRead();
   await expect(rows.first()).toContainText("Second sample");
-  await expect(page.getByText("Temporary results failure")).toHaveCount(0);
+  await expect(page.locator(".update-warning").filter({ hasText: "Temporary results failure" })).toHaveCount(0);
+});
+
+test("a background Downloads read failure preserves the selected details and viewport", async ({ page }) => {
+  const mock = installMockApi([]);
+  let detailReads = 0;
+  let fail = () => {};
+  await page.route("**/api/v1/**", async (route) => {
+    if (new URL(route.request().url()).pathname === "/api/v1/downloads/1" && ++detailReads === 2) {
+      await new Promise<void>((resolve) => { fail = resolve; });
+      return route.fulfill({ status: 503, json: { error: { message: "Temporary detail failure" } } });
+    }
+    return mock(route);
+  });
+  await page.setViewportSize({ width: 1280, height: 560 });
+  await page.clock.install();
+  await page.goto("/downloads");
+  const download = page.getByRole("button", { name: "Sample Transfer.bin", exact: true });
+  await download.click();
+  const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Download details" }) });
+  const detail = panel.locator("pre");
+  await expect(detail).toContainText("Sample Transfer.bin");
+  await detail.scrollIntoViewIfNeeded();
+  const scrollY = await page.evaluate(() => window.scrollY);
+  const top = await detail.evaluate((element) => element.getBoundingClientRect().top);
+  await page.clock.fastForward(10_000);
+  await expect.poll(() => detailReads).toBe(2);
+  await expect(detail).toContainText("Sample Transfer.bin");
+  fail();
+  await expect(panel.locator(".update-warning").filter({ hasText: "Temporary detail failure" })).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
+  expect(await detail.evaluate((element) => element.getBoundingClientRect().top)).toBe(top);
+  await expect(page.locator(".selected-row").getByRole("button", { name: "Sample Transfer.bin" })).toBeAttached();
+  await page.clock.fastForward(10_000);
+  await expect.poll(() => detailReads).toBe(3);
+  await expect(panel.locator(".update-warning").filter({ hasText: "Temporary detail failure" })).toHaveCount(0);
 });
 
 test("preserves an eD2K handoff through sign-in and requires explicit confirmation", async ({ page }) => {
@@ -180,9 +221,9 @@ test("preserves an eD2K handoff through sign-in and requires explicit confirmati
   const link = "ed2k://|file|Sample%20%26%20Guide.bin|42|00112233445566778899aabbccddeeff|/";
   await page.addInitScript(() => window.sessionStorage.clear());
   await page.route("**/api/v1/**", installMockApi(requests));
-  await page.goto(`/transfers/#ed2k=${encodeURIComponent(link)}`);
+  await page.goto(`/downloads/#ed2k=${encodeURIComponent(link)}`);
   await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
-  await expect(page).toHaveURL(/\/transfers#ed2k=/);
+  await expect(page).toHaveURL(/\/downloads#ed2k=/);
   await page.getByLabel("API key", { exact: true }).fill("sample-key");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   const input = page.getByRole("textbox", { name: "eD2K links" });
@@ -190,13 +231,13 @@ test("preserves an eD2K handoff through sign-in and requires explicit confirmati
   expect(requests.some((request) => request.method === "POST" && request.path === "downloads")).toBe(false);
   await page.getByRole("button", { name: "Cancel links" }).click();
   await expect(input).toHaveValue("");
-  await expect(page).toHaveURL(/\/transfers$/);
+  await expect(page).toHaveURL(/\/downloads$/);
   await page.evaluate((raw) => { window.location.hash = `ed2k=${encodeURIComponent(raw)}`; }, link);
   await expect(input).toHaveValue(link);
   expect(requests.some((request) => request.method === "POST" && request.path === "downloads")).toBe(false);
   await page.getByRole("button", { name: "Add links" }).click();
   await expect.poll(() => requests.filter((request) => request.method === "POST" && request.path === "downloads").length).toBe(1);
-  await expect(page).toHaveURL(/\/transfers$/);
+  await expect(page).toHaveURL(/\/downloads$/);
   await expect(input).toHaveValue("");
 });
 
@@ -206,18 +247,25 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
 
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "eMuleBB WebUI" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "eMuleBB WebUI" })).toBeAttached();
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem("emulebb.webui.apiKey"))).toBeNull();
-  await expect(page.locator("summary.brand-version")).toHaveText("0.1.0-beta.2");
+  const brand = page.locator("summary", { hasText: "eMuleBB" });
+  await brand.click();
+  await expect(page.locator(".build-details").getByText("0.1.0-beta.2", { exact: true })).toBeVisible();
+  await brand.click();
   await expect(page.getByText("Sample Transfer.bin")).toBeVisible();
   const topbar = page.locator("header .topbar");
+  await expect(topbar).toHaveCSS("display", "grid");
   const primaryViews = topbar.getByRole("navigation", { name: "Primary views" });
-  const statusToolbar = page.getByRole("toolbar", { name: "Connection and transfer status" });
-  await expect(statusToolbar.getByRole("button", { name: "Server: HighID", exact: true })).toBeVisible();
-  await expect(statusToolbar.getByRole("button", { name: "Kad: Connected", exact: true })).toBeVisible();
-  await expect(statusToolbar.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
-  await expect(statusToolbar.getByRole("button", { name: "Upload: 1.0 KiB/s", exact: true })).toBeVisible();
-  await expect(statusToolbar.getByRole("button", { name: "Transfers: 1 unfinished", exact: true })).toBeVisible();
+  await expect(primaryViews.getByRole("link", { name: "Servers", exact: true })).toHaveAccessibleDescription("HighID");
+  await expect(primaryViews.getByRole("link", { name: "KAD", exact: true })).toHaveAccessibleDescription("Connected");
+  await expect(primaryViews.getByRole("link", { name: "Downloads", exact: true })).toHaveAccessibleDescription("2.0 KiB/s · 1 unfinished");
+  await expect(primaryViews.getByRole("link", { name: "Uploads", exact: true })).toHaveAccessibleDescription("1.0 KiB/s");
+  await expect(page.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(0);
+  const destinations = ["Dashboard", "Search", "Downloads", "Uploads", "Library", "Sharing", "Categories",
+    "Friends", "Servers", "KAD", "Network", "Settings", "Logs", "Diagnostics"];
+  expect(await primaryViews.getByRole("link").evaluateAll((links) =>
+    links.map((link) => link.getAttribute("aria-label")))).toEqual(destinations);
   await expect(page.locator(".page-header")).toHaveCount(0);
   await expect(primaryViews.getByRole("link")).toHaveCount(14);
   await expect(primaryViews.locator("a svg")).toHaveCount(14);
@@ -229,16 +277,14 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
     return primaryViews.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
   }).toBe(true);
   await expect.poll(async () => topbar.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
-  await expect.poll(async () => page.locator(".app-brand h1").evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeLessThanOrEqual(16);
-  await expect.poll(async () => page.locator(".brand-version").evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeLessThanOrEqual(12);
   expect(requests.some((request) => request.method === "GET" && request.path === "snapshot")).toBe(true);
   expect(requests.some((request) => request.method === "GET" && request.path === "events/status")).toBe(false);
   expect(requests.some((request) => request.method === "GET" && request.path === "settings")).toBe(false);
   expect(requests.some((request) => request.method === "GET" && request.path.startsWith("upload-queue"))).toBe(false);
 
-  await statusToolbar.getByRole("button", { name: "Transfers: 1 unfinished", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
-  await expect(page).toHaveURL(/\/transfers$/);
+  await primaryViews.getByRole("link", { name: "Downloads", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Downloads" })).toBeVisible();
+  await expect(page).toHaveURL(/\/downloads$/);
   await expect(page.locator("tr", { hasText: "Sample Transfer.bin" }).locator("select")).toHaveValue("Sample-Category");
   await page.getByRole("button", { name: "Sample Transfer.bin", exact: true }).click();
   await expect(page.getByText("Sample Peer")).toBeVisible();
@@ -289,10 +335,12 @@ test("shows connecting and connected-with-unknown-ID server states explicitly", 
     await fallback(route);
   });
 
+  await page.clock.install();
   await page.goto("/");
-  const statusToolbar = page.getByRole("toolbar", { name: "Connection and transfer status" });
-  await expect(statusToolbar.getByRole("button", { name: "Server: Connecting" })).toBeVisible();
-  await page.getByRole("link", { name: "Servers" }).click();
+  const navigation = page.getByRole("navigation", { name: "Primary views" });
+  const servers = navigation.getByRole("link", { name: "Servers", exact: true });
+  await expect(servers).toHaveAccessibleDescription("Connecting");
+  await servers.click();
   const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
   await expect(serversPanel.getByText(/Server network: Connecting/)).toBeVisible();
 
@@ -304,8 +352,13 @@ test("shows connecting and connected-with-unknown-ID server states explicitly", 
   };
   state.status.servers.currentServer.connected = true;
   state.status.servers.currentServer.connecting = false;
-  await page.reload();
-  await expect(statusToolbar.getByRole("button", { name: "Server: Connected" })).toBeVisible();
+  const bounds = await navigation.boundingBox();
+  state.status.stats.downloadSpeedKiBps = 125_000;
+  state.downloads.unfinished = 12_345;
+  await page.clock.fastForward(10_000);
+  await expect(servers).toHaveAccessibleDescription("Connected");
+  await expect(navigation.getByRole("link", { name: "Downloads" })).toHaveAccessibleDescription(/12345 unfinished/);
+  expect(await navigation.boundingBox()).toEqual(bounds);
   await expect(serversPanel.getByText(/Server network: Connected/)).toBeVisible();
   await expect(serversPanel.getByText(/has not supplied a usable eD2K ID state/)).toBeVisible();
   await expect(serversPanel.getByText("Unknown", { exact: true })).toBeVisible();
@@ -358,7 +411,7 @@ test("recovers from a stale API key without a manual refresh", async ({ page }) 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
   await expect(page.getByText(/Could not authenticate.*missing or invalid API key/)).toBeVisible();
-  await expect(page.getByRole("link", { name: "Overview" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Dashboard" })).toHaveCount(0);
 
   await page.getByPlaceholder("X-API-Key").fill("fresh-key");
   await page.getByRole("button", { name: "Connect" }).click();
@@ -376,7 +429,7 @@ test("recovers from a stale API key without a manual refresh", async ({ page }) 
     .poll(() => requests.some((request) => request.path === "settings" && request.headers["x-api-key"] === "fresh-key"))
     .toBe(true);
 
-  await page.getByTitle("Change API key").click();
+  await page.getByRole("button", { name: "Log out", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.sessionStorage.getItem("emulebb.webui.apiKey"))).toBeNull();
 });
@@ -386,8 +439,8 @@ test("submits a synthetic transfer operation", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("link", { name: "Transfers", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();
+  await page.getByRole("link", { name: "Downloads", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Downloads" })).toBeVisible();
 
   await page.getByTitle("Stop").click();
   await expect(page.getByText("Download stopped")).toBeVisible();
@@ -733,9 +786,9 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(page.getByText("server.met imported; the server list is ready")).toBeVisible();
   await serversPanel.locator("tbody tr", { hasText: "192.0.2.10:4661" }).getByTitle("Connect").click();
   await expect(serversPanel.getByText(/Server network: LowID/)).toBeVisible();
-  await expect(page.getByRole("toolbar", { name: "Connection and transfer status" }).getByRole("button", { name: "Server: LowID" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Primary views" }).getByRole("link", { name: "Servers" })).toHaveAccessibleDescription("LowID");
 
-  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "KAD", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
   await kadPanel.getByRole("button", { name: "Import" }).click();
@@ -746,7 +799,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await page.getByRole("link", { name: "Servers" }).click();
   await serversPanel.locator("button.btn").filter({ hasText: /^Disconnect$/ }).click();
   await expect(serversPanel.getByText(/Server network: Disconnected/)).toBeVisible();
-  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "KAD", exact: true }).click();
   await expect(kadPanel.getByText(/Kad network: Connected/)).toBeVisible();
   await page.getByRole("link", { name: "Servers" }).click();
   await serversPanel.locator("button.btn").filter({ hasText: /^Connect$/ }).click();
@@ -814,7 +867,7 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await expect(page.getByText("Search sessions cleared")).toBeVisible();
   await expect(page).toHaveURL(/\/searches$/);
 
-  await page.getByRole("link", { name: "Transfers", exact: true }).click();
+  await page.getByRole("link", { name: "Downloads", exact: true }).click();
   const transferRow = page.locator("tr", { hasText: "Linux Guide.pdf" });
   await expect(transferRow).toContainText("downloading");
   await transferRow.getByRole("button", { name: "Stop", exact: true }).click();
@@ -828,9 +881,9 @@ test("runs the complete server, Kad, search, download, and reconnect workflow", 
   await transferRow.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(page.getByText("Download removed", { exact: true })).toBeVisible();
   await expect(transferRow).toHaveCount(0);
-  await expect(page.getByText("No transfers.", { exact: true })).toBeVisible();
+  await expect(page.getByText("No downloads.", { exact: true })).toBeVisible();
 
-  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "KAD", exact: true }).click();
   await kadPanel.getByRole("button", { name: "Stop" }).click();
   await expect(kadPanel.getByText(/Kad network: Stopped/)).toBeVisible();
   await page.getByRole("link", { name: "Servers" }).click();
@@ -924,8 +977,8 @@ test("transfer add form validates eD2K link batches", async ({ page }) => {
   await page.route("**/api/v1/**", installMockApi(requests));
 
   await page.goto("/");
-  await page.getByRole("link", { name: "Transfers", exact: true }).click();
-  const transfersPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Transfers" }) });
+  await page.getByRole("link", { name: "Downloads", exact: true }).click();
+  const transfersPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Downloads" }) });
   const linkInput = transfersPanel.getByPlaceholder("One eD2K link per line");
   const addLinks = transfersPanel.getByRole("button", { name: "Add links" });
   const initialTransferPosts = requests.filter((request) => request.method === "POST" && request.path === "downloads").length;
@@ -990,7 +1043,7 @@ test("section resource operation forms validate endpoint addresses and ports", a
   expect(serverPost).toBeDefined();
   expect(JSON.parse(serverPost?.body ?? "{}")).toMatchObject({ address: "127.0.0.1", port: 4661 });
 
-  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "KAD", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   const initialKadBootstrapPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/bootstrap").length;
   await kadPanel.getByPlaceholder("Bootstrap address").fill("   ");
@@ -1044,7 +1097,7 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   expect(serverImportPost).toBeDefined();
   expect(JSON.parse(serverImportPost?.body ?? "{}")).toEqual({ url: "HTTPS://example.invalid/server.met" });
 
-  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "KAD", exact: true }).click();
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   const kadImportButton = kadPanel.getByRole("button", { name: "Import" });
   const initialKadImportPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url").length;
@@ -1072,7 +1125,7 @@ test("Kad node dates display calendar seconds including epoch zero", async ({ pa
     ] } } });
   });
   await page.goto("/");
-  await page.getByRole("link", { name: "Kad", exact: true }).click();
+  await page.getByRole("link", { name: "KAD", exact: true }).click();
   for (const [ip, seconds] of [["192.0.2.10", 0], ["192.0.2.11", 1_800_000_000]] as const) {
     const expected = await page.evaluate(time => new Date(time * 1000).toLocaleString(), seconds);
     await expect(page.getByRole("row").filter({ hasText: ip }).getByRole("cell").nth(7)).toHaveText(expected);
@@ -1206,10 +1259,11 @@ test("shared file metadata form validates rating and priority contract", async (
   expect(JSON.parse(sharedFilePatch?.body ?? "{}")).toEqual({ uploadPriority: "release", comment: "Verified release", rating: 5 });
 });
 
-test("top refresh preserves the library/files query, page, and selection", async ({ page }) => {
+test("background updates preserve the Library query, page, and selection", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
 
+  await page.clock.install();
   await page.goto("/");
   await page.getByRole("link", { name: "Library" }).click();
   const panel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Library", exact: true }) });
@@ -1224,8 +1278,10 @@ test("top refresh preserves the library/files query, page, and selection", async
   await expect(panel.getByText("Second Shared Sample.bin", { exact: true })).toBeVisible();
 
   const requestCount = requests.filter((request) => request.path === "library/files").length;
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect.poll(() => requests.filter((request) => request.path === "library/files").length).toBeGreaterThan(requestCount);
+  const snapshots = requests.filter((request) => request.path === "snapshot").length;
+  await page.clock.fastForward(10_000);
+  await expect.poll(() => requests.filter((request) => request.path === "snapshot").length).toBeGreaterThan(snapshots);
+  expect(requests.filter((request) => request.path === "library/files")).toHaveLength(requestCount);
 
   const latest = requests.filter((request) => request.path === "library/files").at(-1);
   const params = new URLSearchParams(latest?.query ?? "");

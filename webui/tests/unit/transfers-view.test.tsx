@@ -2,13 +2,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RestClient, RestError, type DownloadSummary } from "../../src/api";
-import { TransfersView } from "../../src/views";
+import { DownloadsView } from "../../src/views";
 
 afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-describe("TransfersView", () => {
+describe("DownloadsView", () => {
   it.each([
     ["network", "Waiting for network"],
     ["sources", "Waiting for useful sources"],
@@ -16,7 +16,7 @@ describe("TransfersView", () => {
   ] as const)("shows the %s waiting reason from the canonical row", async (waitingReason, label) => {
     const client = new RestClient();
     vi.spyOn(client, "getPage").mockResolvedValue({ data: [{ ...job("1", "Sample.bin"), state: "queued", waitingReason }], meta: { apiVersion: "v1", nextCursor: null, hasMore: false } });
-    render(<TransfersView categories={[]} client={client} run={async (operation) => { await operation(); }} refreshGeneration={0} />);
+    render(<DownloadsView categories={[]} client={client} run={async (operation) => { await operation(); }} refreshGeneration={0} />);
     expect(await screen.findByText(label)).toBeVisible();
   });
 
@@ -27,13 +27,13 @@ describe("TransfersView", () => {
       meta: { apiVersion: "2.0.0", nextCursor: path.includes("cursor=") ? null : "opaque-cursor", hasMore: !path.includes("cursor=") },
     }));
     const props = { categories: [], client, run: async (operation: () => Promise<unknown>) => { await operation(); } };
-    const { rerender } = render(<TransfersView {...props} refreshGeneration={0} />);
+    const { rerender } = render(<DownloadsView {...props} refreshGeneration={0} />);
     await screen.findByRole("button", { name: "First page.bin" });
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     await screen.findByRole("button", { name: "Second page.bin" });
     expect(screen.queryByRole("button", { name: "First page.bin" })).not.toBeInTheDocument();
     expect(getPage).toHaveBeenLastCalledWith("downloads?view=unfinished&limit=100&cursor=opaque-cursor", expect.any(AbortSignal));
-    rerender(<TransfersView {...props} refreshGeneration={1} />);
+    rerender(<DownloadsView {...props} refreshGeneration={1} />);
     await waitFor(() => expect(getPage).toHaveBeenCalledTimes(3));
     expect(getPage).toHaveBeenLastCalledWith("downloads?view=unfinished&limit=100&cursor=opaque-cursor", expect.any(AbortSignal));
     fireEvent.input(screen.getByRole("combobox", { name: "Download view" }), { target: { value: "completed" } });
@@ -50,7 +50,7 @@ describe("TransfersView", () => {
     let second!: (value: unknown) => void;
     const get = vi.spyOn(client, "get").mockReturnValueOnce(new Promise((resolve) => { first = resolve; }))
       .mockReturnValueOnce(new Promise((resolve) => { second = resolve; }));
-    render(<TransfersView categories={[]} client={client} refreshGeneration={0} run={async (operation) => { await operation(); }} />);
+    render(<DownloadsView categories={[]} client={client} refreshGeneration={0} run={async (operation) => { await operation(); }} />);
     fireEvent.click(await screen.findByRole("button", { name: "First copy.bin" }));
     await waitFor(() => expect(get).toHaveBeenLastCalledWith("downloads/1", expect.any(AbortSignal)));
     fireEvent.click(screen.getByRole("button", { name: "Second copy.bin" }));
@@ -76,20 +76,20 @@ describe("TransfersView", () => {
       .mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }))
       .mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const props = { categories: [], client, run: async (operation: () => Promise<unknown>) => { await operation(); } };
-    const { rerender } = render(<TransfersView {...props} refreshGeneration={0} />);
+    const { rerender } = render(<DownloadsView {...props} refreshGeneration={0} />);
     fireEvent.click(await screen.findByRole("button", { name: "Sample.bin" }));
     await screen.findByText("Loaded detail.bin", { selector: ".section-title span" });
-    rerender(<TransfersView {...props} refreshGeneration={1} />);
-    rerender(<TransfersView {...props} refreshGeneration={2} />);
+    rerender(<DownloadsView {...props} refreshGeneration={1} />);
+    rerender(<DownloadsView {...props} refreshGeneration={2} />);
     expect(get).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Loaded detail.bin", { selector: ".section-title span" })).toBeVisible();
     fail(new Error("Temporary detail failure"));
-    expect(await screen.findByText("Temporary detail failure")).toBeVisible();
+    expect(await screen.findByText(/Temporary detail failure/)).toBeVisible();
     expect(get).toHaveBeenCalledTimes(3);
     expect(screen.getByText("Loaded detail.bin", { selector: ".section-title span" })).toBeVisible();
     finish({ ...detail, name: "Updated detail.bin" });
     await screen.findByText("Updated detail.bin", { selector: ".section-title span" });
-    expect(screen.queryByText("Temporary detail failure")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Temporary detail failure/)).not.toBeInTheDocument();
   });
 
   it("assigns a category by name and clears it with null", async () => {
@@ -97,7 +97,7 @@ describe("TransfersView", () => {
     const client = new RestClient();
     vi.spyOn(client, "getPage").mockResolvedValue({ data: [{ id: "1", hash: "00112233445566778899aabbccddeeff", name: "Sample.bin", category: "Sample-Category", progress: 0, state: "stopped", intent: "stopped" }], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } });
     const patch = vi.spyOn(client, "patch").mockResolvedValue({});
-    render(<TransfersView
+    render(<DownloadsView
       refreshGeneration={0}
       categories={[
         { name: "Sample-Category", tempDir: null, destinationDir: null, comment: "" },
@@ -116,11 +116,11 @@ describe("TransfersView", () => {
 
   it("prefills an encoded external link, waits for submission and consumes the fragment", async () => {
     const link = "ed2k://|file|Sample%20%26%20Guide.bin|42|00112233445566778899aabbccddeeff|/";
-    window.history.replaceState(null, "", `/transfers#ed2k=${encodeURIComponent(link)}`);
+    window.history.replaceState(null, "", `/downloads#ed2k=${encodeURIComponent(link)}`);
     const client = new RestClient();
     vi.spyOn(client, "getPage").mockResolvedValue({ data: [{ id: "1", hash: "00112233445566778899aabbccddeeff", name: "Sample.bin", category: "Sample-Category", progress: 0, state: "stopped", intent: "stopped" }], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } });
     const post = vi.spyOn(client, "post").mockResolvedValue({});
-    render(<TransfersView refreshGeneration={0} categories={[]} client={client} run={async (operation) => { await operation(); }} />);
+    render(<DownloadsView refreshGeneration={0} categories={[]} client={client} run={async (operation) => { await operation(); }} />);
     expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue(link);
     expect(post).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Add links" }));
@@ -132,14 +132,14 @@ describe("TransfersView", () => {
 
   it("rejects ambiguous handoffs and cancels a later link without queuing anything", async () => {
     const link = "ed2k://|file|Sample.bin|42|00112233445566778899aabbccddeeff|/";
-    window.history.replaceState(null, "", `/transfers#ed2k=${encodeURIComponent(link)}&ed2k=${encodeURIComponent(link)}`);
+    window.history.replaceState(null, "", `/downloads#ed2k=${encodeURIComponent(link)}&ed2k=${encodeURIComponent(link)}`);
     const client = new RestClient();
     vi.spyOn(client, "getPage").mockResolvedValue({ data: [{ id: "1", hash: "00112233445566778899aabbccddeeff", name: "Sample.bin", category: "Sample-Category", progress: 0, state: "stopped", intent: "stopped" }], meta: { apiVersion: "2.0.0", nextCursor: null, hasMore: false } });
     const post = vi.spyOn(client, "post");
-    render(<TransfersView refreshGeneration={0} categories={[]} client={client} run={async (operation) => { await operation(); }} />);
+    render(<DownloadsView refreshGeneration={0} categories={[]} client={client} run={async (operation) => { await operation(); }} />);
     expect(screen.getByText("Unsupported or malformed eD2K file link")).toBeVisible();
     expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue("");
-    window.history.replaceState(null, "", `/transfers#ed2k=${encodeURIComponent(link)}`);
+    window.history.replaceState(null, "", `/downloads#ed2k=${encodeURIComponent(link)}`);
     fireEvent(window, new Event("hashchange"));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "eD2K links" })).toHaveValue(link));
     fireEvent.click(screen.getByRole("button", { name: "Cancel links" }));
@@ -164,7 +164,7 @@ describe("TransfersView", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(
-      <TransfersView
+      <DownloadsView
         refreshGeneration={0}
         categories={[]}
         client={client}

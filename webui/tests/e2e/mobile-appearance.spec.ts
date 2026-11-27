@@ -4,10 +4,15 @@ import { readFile } from "node:fs/promises";
 import { installMockApi, mockSnapshotFixture, mockDownloadFixture, type RecordedApiRequest } from "../fixtures/mockApi";
 import { pathForRoute, type Tab } from "../../src/routes";
 
-const views: Tab[] = ["overview", "transfers", "search", "sharing", "library", "uploads", "network", "servers", "kad", "categories", "friends", "settings", "diagnostics", "logs"];
-const headings: Record<Tab, string> = { overview: "Startup & Indexing", transfers: "Transfers", search: "Search", sharing: "Shared Folders",
+const views: Tab[] = ["overview", "downloads", "search", "sharing", "library", "uploads", "network", "servers", "kad", "categories", "friends", "settings", "diagnostics", "logs"];
+const headings: Record<Tab, string> = { overview: "Startup & Indexing", downloads: "Downloads", search: "Search", sharing: "Shared Folders",
   "library": "Library", uploads: "Upload Queue Inspector", network: "Network Health", servers: "Servers", kad: "Kad",
   categories: "Categories", friends: "Friends", settings: "Settings", diagnostics: "Diagnostics", logs: "Logs" };
+async function chooseAppearance(page: Page, label: string) {
+  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  await page.getByRole("group", { name: "Appearance choices" }).getByRole("button", { name: label, exact: true }).click();
+}
+
 const nightlyVersion = "0.1.0-beta.2.nightly.20261114.g00112233";
 
 async function noPageOverflow(page: Page) {
@@ -40,13 +45,13 @@ for (const width of [320, 390, 768, 1280]) {
     for (const view of views) {
       await page.goto(pathForRoute({ tab: view }));
       await expect(page.getByRole("heading", { name: headings[view], exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
       await noPageOverflow(page);
       if (width < 640) {
         await expect(page.getByRole("button", { name: "Menu", exact: true })).toHaveAttribute("aria-expanded", "false");
         await expect(page.getByRole("navigation", { name: "Primary views" })).toBeHidden();
       } else {
         await expect(page.getByRole("navigation", { name: "Primary views" })).toBeVisible();
+        await expect(page.getByRole("link", { name: "Downloads", exact: true })).toHaveAccessibleDescription("2.0 KiB/s · 1 unfinished");
         await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeHidden();
       }
     }
@@ -63,18 +68,18 @@ test("mobile menu closes for every link, current view, Escape, history, shortcut
     await menu.click();
     await expect(navigation.getByRole("link")).toHaveCount(14);
     const link = navigation.getByRole("link").nth(index);
-    const label = await link.innerText();
+    const label = await link.getAttribute("aria-label");
     await link.click();
     await expect(menu).toHaveAttribute("aria-expanded", "false");
-    await expect(page.locator(".mobile-menu-bar strong")).toHaveText(label.trim());
+    await expect(page.locator(".mobile-menu-bar strong")).toHaveText(label!);
   }
   await menu.click();
   await navigation.getByRole("link", { name: "Logs", exact: true }).click();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
-  const appearance = page.getByRole("combobox", { name: "Appearance" });
+  const appearance = page.getByRole("button", { name: "Appearance", exact: true });
   // A child control consuming bubbling key events must not prevent menu dismissal.
   await appearance.evaluate((element) => element.addEventListener("keydown", (event) => event.stopPropagation()));
-  for (const target of [appearance, navigation.getByRole("link").first(), page.getByRole("button", { name: "Refresh", exact: true })]) {
+  for (const target of [appearance, navigation.getByRole("link").first(), page.getByRole("button", { name: "Log out", exact: true })]) {
     await menu.click();
     await target.focus();
     await page.keyboard.press("Escape");
@@ -93,7 +98,7 @@ test("mobile menu closes for every link, current view, Escape, history, shortcut
   await page.goBack();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
   await menu.click();
-  await page.getByRole("button", { name: "Server: HighID", exact: true }).click();
+  await navigation.getByRole("link", { name: "Servers", exact: true }).click();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
   await menu.click();
   await page.setViewportSize({ width: 768, height: 844 });
@@ -110,24 +115,42 @@ test("appearance works while locked, follows System and persists explicit overri
   await page.route("**/api/v1/**", installMockApi([]));
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
-  const appearance = page.getByRole("combobox", { name: "Appearance" });
-  await expect(appearance).toHaveValue("system");
+  const appearance = page.getByRole("button", { name: "Appearance", exact: true });
+  await expect(appearance).toHaveAttribute("aria-expanded", "false");
+  await appearance.focus();
+  await page.keyboard.press("Enter");
+  const choices = page.getByRole("group", { name: "Appearance choices" });
+  await expect(choices.getByRole("button", { name: "System" })).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Tab");
+  await expect(choices.getByRole("button", { name: "System" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(choices).toBeHidden();
+  await expect(appearance).toBeFocused();
+  await appearance.click();
+  await page.getByRole("heading", { name: "Connect to the local daemon" }).click();
+  await expect(choices).toBeHidden();
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "dark");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "light");
-  await appearance.selectOption("dark");
+  await chooseAppearance(page, "Dark");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "dark");
   await page.reload();
-  await expect(appearance).toHaveValue("dark");
+  await appearance.click();
+  await expect(choices.getByRole("button", { name: "Dark" })).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Escape");
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "dark");
-  await appearance.selectOption("light");
+  await chooseAppearance(page, "Light");
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "light");
   await page.getByLabel("API key", { exact: true }).fill("sample-key");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
-  await expect(appearance).toHaveValue("light");
+  await appearance.click();
+  await expect(choices.getByRole("button", { name: "Light" })).toHaveAttribute("aria-pressed", "true");
+  await choices.getByRole("button", { name: "System" }).click();
+  await expect(appearance).toBeFocused();
+  await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "dark");
   await noPageOverflow(page);
 });
 
@@ -136,11 +159,12 @@ test("invalid appearance and unavailable storage retain usable session choices",
   await page.addInitScript(() => localStorage.setItem("emulebb.webui.theme", "invalid"));
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/");
-  await expect(page.getByRole("combobox", { name: "Appearance" })).toHaveValue("system");
+  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  await expect(page.getByRole("button", { name: "System", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "dark");
   await page.addInitScript(() => Object.defineProperty(window, "localStorage", { get() { throw new Error("Synthetic storage denial"); } }));
   await page.reload();
-  await page.getByRole("combobox", { name: "Appearance" }).selectOption("light");
+  await chooseAppearance(page, "Light");
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "light");
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.locator("html")).toHaveAttribute("data-bs-theme", "light");
@@ -150,7 +174,7 @@ test("mobile forms, row actions and direct diagnostic buttons preserve request m
   await page.setViewportSize({ width: 320, height: 844 });
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
-  await page.goto("/transfers");
+  await page.goto("/downloads");
   const table = page.locator(".table-wrap").first();
   await expect(table).toHaveAttribute("tabindex", "0");
   await expect(page.getByText("Swipe horizontally for more columns").first()).toBeVisible();
@@ -191,9 +215,9 @@ test("mobile Safari smoke: menu, forms, table scrolling and both appearances", a
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/v1/**", installMockApi([]));
   await page.route("**/api/v1/app", (route) => route.fulfill({ json: { data: { name: "eMuleBB", version: nightlyVersion, channel: "nightly" } } }));
-  await page.goto("/transfers");
+  await page.goto("/downloads");
   for (const theme of ["light", "dark"]) {
-    await page.getByRole("combobox", { name: "Appearance" }).selectOption(theme);
+    await chooseAppearance(page, theme === "light" ? "Light" : "Dark");
     await expect(page.locator("html")).toHaveAttribute("data-bs-theme", theme);
     await page.getByRole("button", { name: "Menu", exact: true }).click();
     await page.getByRole("navigation", { name: "Primary views" }).getByRole("link", { name: "Sharing", exact: true }).click();
@@ -203,7 +227,7 @@ test("mobile Safari smoke: menu, forms, table scrolling and both appearances", a
     await page.locator(".table-wrap").first().evaluate((element) => { element.scrollLeft = element.scrollWidth; });
     await page.screenshot({ path: testInfo.outputPath(`phone-${theme}.png`), fullPage: true });
     await page.getByRole("button", { name: "Menu", exact: true }).click();
-    await page.getByRole("navigation", { name: "Primary views" }).getByRole("link", { name: "Transfers", exact: true }).click();
+    await page.getByRole("navigation", { name: "Primary views" }).getByRole("link", { name: "Downloads", exact: true }).click();
   }
 });
 
@@ -216,8 +240,7 @@ for (const width of [320, 390]) {
     } }));
     for (const theme of ["light", "dark"]) {
       await page.goto("/");
-      await page.getByRole("combobox", { name: "Appearance" }).selectOption(theme);
-      await expect(page.getByRole("button", { name: "Download: 2.0 KiB/s", exact: true })).toBeVisible();
+      await chooseAppearance(page, theme === "light" ? "Light" : "Dark");
       await noPageOverflow(page);
       await page.screenshot({ path: testInfo.outputPath(`phone-${width}-overview-${theme}.png`), fullPage: true });
 
