@@ -162,6 +162,127 @@ async fn unsolicited_queue_rank_bursts_disconnect_then_ban() {
 }
 
 #[tokio::test]
+async fn recycled_download_releases_block_and_resumes_on_the_same_socket() {
+    let root = unique_test_dir("ed2k-download-slot-recycle");
+    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let payload = vec![0x6C; 32_768];
+    let file_size = payload.len() as u64;
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let job = crate::ed2k_transfer::test_support::admit_download_job(
+        &transfer_runtime,
+        file_hash,
+        "anti-abuse.bin".to_string(),
+        file_size,
+    );
+    transfer_runtime.ensure_job(&job).await.unwrap();
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let server_runtime = Arc::clone(&transfer_runtime);
+    let job_token = job.token;
+    let server = tokio::spawn(async move {
+        let mut stream = serve_download_startup(
+            &listener,
+            peer_addr,
+            file_hash,
+            file_size,
+            "anti-abuse.bin",
+            true,
+        )
+        .await;
+        stream.write_all(&encode_accept_upload_req()).await.unwrap();
+        let request = read_packet(&mut stream).await;
+        assert_eq!(request[5], OP_REQUESTPARTS);
+        assert_eq!(
+            decode_request_parts_payload(&request[6..], false).unwrap(),
+            (file_hash, vec![(0, file_size)])
+        );
+        assert!(
+            server_runtime
+                .requested_download_parts(job_token)
+                .contains(&0)
+        );
+
+        stream
+            .write_all(&encode_packet(
+                OP_EDONKEYPROT,
+                OP_QUEUERANK,
+                &3u32.to_le_bytes(),
+            ))
+            .await
+            .unwrap();
+        let (prefix, rest) = payload.split_at(4096);
+        let prefix_end = prefix.len() as u64;
+        stream
+            .write_all(&encode_sending_part(&file_hash, 0, prefix_end, prefix, false).unwrap())
+            .await
+            .unwrap();
+        stream
+            .write_all(&encode_packet(OP_EDONKEYPROT, OP_OUTOFPARTREQS, &[]))
+            .await
+            .unwrap();
+        stream.write_all(&encode_queue_ranking(7)).await.unwrap();
+        stream
+            .write_all(
+                &encode_sending_part(&file_hash, prefix_end, file_size, rest, false).unwrap(),
+            )
+            .await
+            .unwrap();
+        // The reply is a barrier for every preceding frame on this socket.
+        stream
+            .write_all(&encode_packet(OP_EMULEPROT, OP_PUBLICIP_REQ, &[]))
+            .await
+            .unwrap();
+        let reply = read_packet(&mut stream).await;
+        assert_eq!((reply[0], reply[5]), (OP_EMULEPROT, OP_PUBLICIP_ANSWER));
+        assert!(
+            server_runtime
+                .requested_download_parts(job_token)
+                .is_empty()
+        );
+        let manifest = server_runtime.manifest(job_token).await.unwrap();
+        assert_eq!(manifest.pieces[0].bytes_written, prefix_end);
+
+        stream.write_all(&encode_accept_upload_req()).await.unwrap();
+        let request = read_packet(&mut stream).await;
+        assert_eq!(request[5], OP_REQUESTPARTS);
+        assert_eq!(
+            decode_request_parts_payload(&request[6..], false).unwrap(),
+            (file_hash, vec![(prefix_end, file_size)])
+        );
+        stream
+            .write_all(
+                &encode_sending_part(&file_hash, prefix_end, file_size, rest, false).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let secure_ident = Arc::new(
+        Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
+    );
+    assert_eq!(
+        run_download(
+            &transfer_runtime,
+            &source(file_hash, peer_addr),
+            &secure_ident,
+            file_size
+        )
+        .await
+        .unwrap(),
+        Ed2kPeerDownloadOutcome::Completed
+    );
+    server.await.unwrap();
+    assert!(
+        transfer_runtime
+            .manifest(job.token)
+            .await
+            .unwrap()
+            .completed
+    );
+}
+
+#[tokio::test]
 async fn repeated_out_of_part_requests_suppress_later_accept_with_cancel() {
     let root = unique_test_dir("ed2k-download-out-of-part-guard");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
@@ -179,16 +300,16 @@ async fn repeated_out_of_part_requests_suppress_later_accept_with_cancel() {
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        for attempt in 0..3 {
-            let mut stream = serve_download_startup(
-                &listener,
-                peer_addr,
-                file_hash,
-                file_size,
-                "anti-abuse.bin",
-                attempt == 0,
-            )
-            .await;
+        let mut stream = serve_download_startup(
+            &listener,
+            peer_addr,
+            file_hash,
+            file_size,
+            "anti-abuse.bin",
+            true,
+        )
+        .await;
+        for _ in 0..3 {
             stream.write_all(&encode_accept_upload_req()).await.unwrap();
             let request = read_packet(&mut stream).await;
             assert_eq!(request[5], OP_REQUESTPARTS);
@@ -197,6 +318,10 @@ async fn repeated_out_of_part_requests_suppress_later_accept_with_cancel() {
                 .await
                 .unwrap();
         }
+        stream.write_all(&encode_accept_upload_req()).await.unwrap();
+        let cancel = read_packet(&mut stream).await;
+        assert_eq!((cancel[0], cancel[5]), (OP_EDONKEYPROT, OP_CANCELTRANSFER));
+        drop(stream);
 
         let mut guarded = serve_download_startup(
             &listener,
@@ -220,14 +345,12 @@ async fn repeated_out_of_part_requests_suppress_later_accept_with_cancel() {
     let secure_ident = Arc::new(
         Ed2kSecureIdent::from_private_key(generate_stock_ed2k_ident_keypair().unwrap()).unwrap(),
     );
-    for _ in 0..3 {
-        assert_eq!(
-            run_download(&transfer_runtime, &peer, &secure_ident, file_size)
-                .await
-                .unwrap(),
-            Ed2kPeerDownloadOutcome::NoNeededParts
-        );
-    }
+    assert_eq!(
+        run_download(&transfer_runtime, &peer, &secure_ident, file_size)
+            .await
+            .unwrap(),
+        Ed2kPeerDownloadOutcome::AcceptedButIncomplete
+    );
     assert_eq!(
         run_download(&transfer_runtime, &peer, &secure_ident, file_size)
             .await

@@ -552,11 +552,8 @@ pub(crate) fn download_stale_duplicate_block_abort(
     );
 }
 
-/// `download_out_of_part_reqs`: a download source reported No Needed Parts for our
-/// file (it sent `OP_OUTOFPARTREQS`). Mirrors MFC `CUpDownClient` -> bad_peer
-/// `download_out_of_part_reqs` (severity `low`, `action:"state_on_queue"`). Rust's
-/// driver may A4AF-swap the source rather than drop it, matching the oracle's
-/// on-queue disposition.
+/// Records a download source returning us to its waiting queue with
+/// `OP_OUTOFPARTREQS`, matching the oracle's on-queue disposition.
 pub(crate) fn download_out_of_part_reqs(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
     let keys = upload_keys(peer, peer_hash, file_hash);
     let body = json!({
