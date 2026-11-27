@@ -6,8 +6,8 @@ use crate::traversal::{
     MoreResultsMode, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
 };
 use crate::types::{
-    KadCallbackSearchDispatchOutcome, KadCallbackSearchNotDispatchedReason, KadSearchStartError,
-    NoteResult, SearchResult, SourceResult,
+    FirewallCheckHelper, KadCallbackSearchDispatchOutcome, KadCallbackSearchNotDispatchedReason,
+    KadSearchStartError, NoteResult, SearchResult, SourceResult,
 };
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::packet::{CallbackReq, FindBuddyReq};
@@ -130,6 +130,70 @@ impl DhtNode {
         config.ip_filter = self.ip_filter();
         config.res_contact_sink = Some(self.res_contact_sink());
         run_node_refresh_lookup(&self.inner.rpc, initial, config).await
+    }
+
+    /// Run NODEFWCHECKUDP. Its first valid reply supplies candidates to the
+    /// firewall tester only, so a referral never becomes a UDP contact here.
+    pub async fn discover_udp_firewall_helpers(&self) -> Vec<FirewallCheckHelper> {
+        let target = NodeId::from_bytes(rand::random());
+        let Ok(_permit) = self.try_acquire_search_permit(target) else {
+            return Vec::new();
+        };
+        let initial = self.closest_traversal_seed(&target).await;
+        let own_id = self.own_id();
+        let bind_ip = self.bind_addr().ok().map(|addr| addr.ip());
+        let public_ip = self.public_ip_for_udp_keys();
+        let helpers = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&helpers);
+        let mut config = NodeRefreshConfig::new(target, RpcWorkClass::Maintenance);
+        config.ip_filter = self.ip_filter();
+        config.res_contact_sink = Some(std::sync::Arc::new(move |entry| {
+            let ip = entry.ip_addr();
+            if entry.version >= 6
+                && entry.tcp_port != 0
+                && entry.node_id != own_id
+                && bind_ip != Some(IpAddr::V4(ip))
+                && public_ip != Some(ip)
+            {
+                sink.lock().push(FirewallCheckHelper {
+                    id: entry.node_id,
+                    ip,
+                    udp_port: entry.udp_port,
+                    tcp_port: entry.tcp_port,
+                    kad_version: entry.version,
+                });
+            }
+        }));
+        run_node_refresh_lookup(&self.inner.rpc, initial, config).await;
+        std::mem::take(&mut *helpers.lock())
+    }
+
+    /// Whether routing already knows this IPv4, regardless of port or node ID.
+    pub async fn is_known_kad_ip(&self, ip: std::net::Ipv4Addr) -> bool {
+        self.inner
+            .routing_table
+            .lock()
+            .await
+            .all_contacts()
+            .iter()
+            .any(|contact| contact.ip == ip)
+    }
+
+    /// Exclude ordinary UDP to a selected firewall tester until the round ends.
+    pub fn reserve_fresh_udp_probe(
+        &self,
+        ip: IpAddr,
+    ) -> Option<emulebb_kad_net::KadUdpProbeReservation> {
+        self.inner.rpc.reserve_fresh_udp_probe(ip)
+    }
+
+    /// Identity for firewall operations that cannot span a lifecycle or IP change.
+    #[must_use]
+    pub fn udp_probe_binding(&self) -> (Option<std::net::Ipv4Addr>, u64) {
+        (
+            self.public_ip_for_udp_keys(),
+            self.inner.rpc.udp_probe_epoch(),
+        )
     }
 
     /// NODECOMPLETE self-lookup (oracle `CSearchManager::FindNode(GetKadID(),
@@ -1020,11 +1084,59 @@ mod tests {
         );
     }
 
-    /// The 4-hour NODECOMPLETE self-lookup targets our OWN KadID and goes on
-    /// the wire as a `KADEMLIA2_REQ` with the NODE-family contact-count byte
-    /// `KADEMLIA_FIND_NODE` (0x0B) — oracle
-    /// `CSearchManager::FindNode(GetKadID(), true)` (Kademlia.cpp:261-264)
-    /// through `CSearch::GetRequestContactCount` (Search.cpp:1643-1647).
+    #[tokio::test]
+    async fn firewall_lookup_keeps_referrals_out_of_routing() {
+        let bind_ip = crate::test_bind_ip();
+        let peer = tokio::net::UdpSocket::bind((bind_ip, 0)).await.unwrap();
+        let dht = empty_test_dht().await;
+        let receiver = dht.start();
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x42; 16]),
+            bind_ip,
+            peer.local_addr().unwrap().port(),
+            4662,
+            9,
+        ))
+        .await
+        .unwrap();
+        let lookup = tokio::spawn({
+            let dht = dht.clone();
+            async move { dht.discover_udp_firewall_helpers().await }
+        });
+        let mut data = [0; 512];
+        let (size, from) = tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut data))
+            .await
+            .unwrap()
+            .unwrap();
+        let KadPacket::Req(request) = KadPacket::decode(&data[..size]).unwrap() else {
+            panic!("firewall discovery must send a NODE lookup");
+        };
+        let candidate = std::net::Ipv4Addr::new(192, 0, 2, 15);
+        let reply = KadPacket::Res(KadRes {
+            target: request.target,
+            contacts: vec![emulebb_kad_proto::ContactEntry {
+                node_id: NodeId::from_bytes([0x43; 16]),
+                ip: u32::from(candidate),
+                udp_port: 4672,
+                tcp_port: 4662,
+                version: 9,
+            }],
+        });
+        peer.send_to(&reply.encode().unwrap(), from).await.unwrap();
+        let helpers = tokio::time::timeout(Duration::from_secs(3), lookup)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(helpers.len(), 1);
+        assert_eq!(helpers[0].ip, candidate);
+        assert_eq!(helpers[0].tcp_port, 4662);
+        assert!(!dht.is_known_kad_ip(candidate).await);
+        assert!(dht.reserve_fresh_udp_probe(candidate.into()).is_some());
+        receiver.abort();
+    }
+
+    /// The 4-hour NODECOMPLETE self-lookup targets our own KadID with the
+    /// NODE-family contact-count byte (`KADEMLIA_FIND_NODE`).
     #[tokio::test]
     async fn self_node_complete_lookup_sends_find_node_req_for_own_id() {
         let bind_ip = crate::test_bind_ip();

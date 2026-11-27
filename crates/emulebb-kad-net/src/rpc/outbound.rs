@@ -368,6 +368,7 @@ impl RpcManager {
                 .unwrap_or_else(|| "-".to_string()),
         );
         let wire = ObfuscationLayer::encrypt_outbound(outbound, &encoded);
+        self.inner.recent_udp.lock().record_send(addr.ip())?;
         let targeted_reply = targeted_request_reply(packet);
         let mut detached_guard = None;
         {

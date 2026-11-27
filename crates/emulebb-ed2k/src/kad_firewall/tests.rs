@@ -257,24 +257,15 @@ fn udp_round_times_out_as_firewalled_after_completed_failed_tests() {
 }
 
 #[test]
-fn udp_round_discovers_external_port_after_two_corroborating_reporters() {
+fn udp_round_prefers_a_timely_internal_port_after_external_success() {
     let mut state = KadFirewallState::default();
     let helper_a = "203.0.113.20".parse().unwrap();
     let helper_b = "203.0.113.21".parse().unwrap();
     let started_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 33, 0).unwrap();
     let observed_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 33, 5).unwrap();
 
-    // We only predicted our internal port; the NAT remaps to 53000 externally.
-    assert!(state.begin_udp_check([helper_a, helper_b], [41000], started_at));
-
-    // First off-list reporter: recorded but not yet trusted.
-    let first = state.record_firewall_udp_packet(helper_a, 0, 53000, observed_at);
-    assert_eq!(first, FirewallUdpPacketOutcome::Recorded);
-    assert!(!state.udp_open);
-
-    // Second corroborating reporter: now trusted as the real external port.
-    let second = state.record_firewall_udp_packet(helper_b, 0, 53000, observed_at);
-    match second {
+    assert!(state.begin_udp_check([helper_a, helper_b], [41000, 53000], started_at));
+    match state.record_firewall_udp_packet(helper_a, 0, 53000, observed_at) {
         FirewallUdpPacketOutcome::Open(summary) => {
             assert!(summary.open);
             assert_eq!(summary.external_udp_port, Some(53000));
@@ -283,7 +274,21 @@ fn udp_round_discovers_external_port_after_two_corroborating_reporters() {
     }
     assert!(state.udp_open);
     assert!(state.udp_verified);
-    assert_eq!(state.external_udp_port_for_request(), 53000);
+    assert!(matches!(
+        state.record_firewall_udp_packet(
+            helper_b,
+            0,
+            41000,
+            observed_at + chrono::Duration::seconds(10)
+        ),
+        FirewallUdpPacketOutcome::Ignored
+    ));
+    assert!(matches!(
+        state.record_firewall_udp_packet(
+            helper_a, 0, 41000, observed_at + chrono::Duration::seconds(1)
+        ),
+        FirewallUdpPacketOutcome::Open(summary) if summary.external_udp_port.is_none()
+    ));
 }
 
 #[test]
@@ -295,9 +300,9 @@ fn udp_round_does_not_trust_a_single_off_list_port() {
     let completed_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 34, 20).unwrap();
 
     assert!(state.begin_udp_check([helper_a, helper_b], [41000], started_at));
-    // Two helpers report two *different* off-list ports: no corroboration.
+    // Only PONG reporters can establish an external candidate.
     let _ = state.record_firewall_udp_packet(helper_a, 0, 53000, completed_at);
-    let _ = state.record_firewall_udp_packet(helper_b, 0, 54000, completed_at);
+    let _ = state.record_firewall_udp_packet(helper_b, 0, 53000, completed_at);
     let summary = state.finish_udp_check(completed_at);
 
     assert!(summary.is_none());

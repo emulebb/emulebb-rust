@@ -915,7 +915,6 @@ impl EmulebbCore {
                         ed2k_listener: Arc::clone(&ed2k_listener),
                         server_state: Arc::clone(&server_state),
                         kad_firewall: Arc::clone(&kad_firewall),
-                        reachability: self.ed2k_reachability.clone(),
                         reachability_writer: reachability_writer.clone(),
                         network: network.clone(),
                         recheck_signal: Arc::clone(&recheck_signal),

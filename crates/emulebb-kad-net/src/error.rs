@@ -25,6 +25,9 @@ pub enum NetError {
     /// The local outbound rate limiter rejected the send attempt.
     #[error("rate limited")]
     RateLimited,
+    /// UDP to this destination would invalidate an unsolicited firewall test.
+    #[error("peer {0} is reserved for an unsolicited firewall test")]
+    FirewallTesterReserved(std::net::IpAddr),
     /// The datagram was too short to be a valid Kad UDP frame.
     #[error("packet too short ({len} bytes)")]
     PacketTooShort { len: usize },

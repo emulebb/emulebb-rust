@@ -41,6 +41,9 @@ impl RpcManager {
     /// Clear all peer receiver keys after our public IPv4 binding changes and
     /// control whether newly observed keys may be retained under that binding.
     pub fn reset_peer_keys(&self, accept_new_keys: bool) {
+        self.inner
+            .udp_probe_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.obfuscation.reset_peer_keys(accept_new_keys);
     }
 

@@ -19,9 +19,9 @@ pub use error::NetError;
 pub use obfuscation::ObfuscationLayer;
 pub use rate_limit::RateLimiter;
 pub use rpc::{
-    ForeignDatagramHandler, ReceivedKadPacket, RpcClassBudgetConfig, RpcConfig, RpcManager,
-    RpcObservabilitySnapshot, RpcResponseOpcodeSnapshot, RpcTrackerBucketSnapshot, RpcWorkClass,
-    RpcWorkClassSnapshot, SearchResponseRegistration,
+    ForeignDatagramHandler, KadUdpProbeReservation, ReceivedKadPacket, RpcClassBudgetConfig,
+    RpcConfig, RpcManager, RpcObservabilitySnapshot, RpcResponseOpcodeSnapshot,
+    RpcTrackerBucketSnapshot, RpcWorkClass, RpcWorkClassSnapshot, SearchResponseRegistration,
 };
 pub use tracker::PacketTracker;
 pub use transport::{MockTransport, Transport, UdpTransport};
