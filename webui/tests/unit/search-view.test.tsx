@@ -219,6 +219,9 @@ describe("SearchView", () => {
     });
     expect(selectSearchSort).toHaveBeenCalledWith("bitrateKbps", "desc");
 
+    const sessionActions = screen.getByText("Session actions", { exact: true });
+    expect(sessionActions.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(sessionActions);
     fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
     await waitFor(() => expect(deleteRequest).toHaveBeenCalledWith("searches/9"));
     expect(onSearchDeleted).toHaveBeenCalledWith("9");
@@ -254,7 +257,7 @@ describe("SearchView collection control", () => {
     expect(screen.getByText("Sample.bin")).toBeTruthy();
     const stopped: SearchItem = {...search,status:"stopped"};
     view.rerender(<TestSearchView {...props} searches={[stopped]} selectedSearch={stopped} />);
-    expect((screen.getByRole("button",{name:"Stop search"}) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Stop search" })).not.toBeInTheDocument();
     expect(screen.getByText("Sample.bin")).toBeTruthy();
   });
 });
@@ -275,7 +278,9 @@ describe("SearchView linked creation", () => {
       searchSort="sources" searchOrder="desc" selectSearchSort={()=>{}} selectSearchPage={()=>{}}
       onSearchCreated={onCreated} onSearchDeleted={()=>{}} onSearchesCleared={()=>{}} />);
     expect(screen.getByRole("option",{name: new RegExp(search.id)})).toBeTruthy();
+    fireEvent.click(screen.getByText("Session actions", { exact: true }));
     fireEvent.click(screen.getByRole("button",{name:"Use criteria for new search"}));
+    expect(screen.getByText("Advanced search filters").closest("details")).toHaveAttribute("open");
     const input=screen.getByPlaceholderText("Search query") as HTMLInputElement;
     expect(input.value).toBe("Parent query");
     fireEvent.input(input,{target:{value:"Edited query"}});

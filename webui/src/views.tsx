@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { SearchObservations } from "./searchObservations";
 import { LibraryTags } from "./libraryTags";
 import { clearEd2kHandoff, readEd2kHandoff } from "./ed2kHandoff";
@@ -234,7 +234,15 @@ function ProgressLine(props: { label: string; completed?: number; total?: number
 }
 
 /** One independently paged evidence resource; refresh replaces its current page. */
-function DownloadEvidence<T>(props: { path: string; label: string; client: RestClient; refreshGeneration: number; render: (items: T[]) => ComponentChildren }) {
+function DownloadEvidence<T>(props: {
+  path: string;
+  label: string;
+  client: RestClient;
+  refreshGeneration: number;
+  render: (items: T[]) => ComponentChildren;
+  children?: ComponentChildren;
+}) {
+  const [open, setOpen] = useState(false);
   const [cursor, setCursor] = useState<string | null>(null);
   const [page, setPage] = useState<CursorPage<T> | null>(null);
   const [loading, setLoading] = useState(false);
@@ -254,13 +262,18 @@ function DownloadEvidence<T>(props: { path: string; label: string; client: RestC
       if (!signal.aborted) setLoading(false);
     }
   }, [props.client, props.path, cursor]);
-  useRefreshRead(readEvidence, props.refreshGeneration);
+  useRefreshRead(open ? readEvidence : null, props.refreshGeneration);
   const change = (value: string | null) => { setPage(null); setError(""); setCursor(value); };
-  return <section class="panel card">
-    <div class="section-title"><h2>{props.label}</h2><CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading} change={change} /></div>
-    {error && <div class="notice alert alert-danger">{error}</div>}
-    {props.render(page?.data ?? [])}
-  </section>;
+  return <details class="workflow-disclosure" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>{props.label}<UpdateWarning message={page ? error : ""} /></summary>
+    <div class="workflow-disclosure-content">
+      {page ? props.render(page.data)
+        : error ? <p role="alert">{error}</p> : <p role="status">Loading…</p>}
+      {(cursor || page?.meta.nextCursor) &&
+        <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading && !page} change={change} />}
+      {props.children}
+    </div>
+  </details>;
 }
 
 export type DownloadsViewProps = {
@@ -369,26 +382,33 @@ export function DownloadsView(props: DownloadsViewProps) {
     handoff, ed2kLinks, setEd2kLinks, stoppedCreate, setStoppedCreate, selectedId,
     details, detailError, selectDownload, linksError, consumeHandoff, changePage, createDownloads, remove
   } = useDownloads(props, () => setBrowse(null));
+  const [linksOpen, setLinksOpen] = useState(Boolean(handoff));
+  useLayoutEffect(() => {
+    if (handoff) setLinksOpen(true);
+  }, [handoff]);
   return <section class="view-stack">
     <section class="panel card">
-      <div class="section-title"><div class="section-heading"><h2>Downloads</h2><UpdateWarning message={page ? listError : ""} /></div><div class="row-actions">
+      <div class="section-title"><div class="section-heading"><h2>Downloads</h2><UpdateWarning message={page ? listError : ""} /></div><div class="row-actions workflow-download-filters">
         <select class="form-select" aria-label="Download view" value={view} onInput={(event) => { setView(event.currentTarget.value); changePage(null); }}>
           <option value="unfinished">Unfinished</option><option value="completed">Completed</option><option value="all">All downloads</option>
         </select>
         <select class="form-select" aria-label="Download category" value={category} onInput={(event) => { setCategory(event.currentTarget.value); changePage(null); }}>
           <option value="">All categories</option>{props.categories.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
         </select>
-        <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading && !page} change={changePage} />
+        <button class="btn" type="button" aria-expanded={linksOpen} aria-controls="download-link-form"
+          onClick={() => setLinksOpen((open) => !open)}>Add eD2K links</button>
       </div></div>
       {!page && listError && <div class="notice alert alert-danger" role="alert">{listError}</div>}
-      {handoff && <p class={handoff.error ? "field-error" : "text-secondary"}>{handoff.error ?? "Review the linked file and press Add links to queue it."}</p>}
-      <form class="form-row" onSubmit={(event) => { event.preventDefault(); void props.run(createDownloads, "Downloads queued"); }}>
-        <textarea class="form-control" aria-label="eD2K links" value={ed2kLinks} placeholder="One eD2K link per line" aria-invalid={linksError ? "true" : "false"} onInput={(event) => setEd2kLinks(event.currentTarget.value)} />
-        <label class="check"><input class="form-check-input" type="checkbox" checked={stoppedCreate} onInput={(event) => setStoppedCreate(event.currentTarget.checked)} />Stopped</label>
-        <button class="btn" type="submit" disabled={Boolean(linksError)}><Download size={16} />Add links</button>
-        {handoff && <button class="btn" type="button" onClick={() => { consumeHandoff(); setEd2kLinks(""); }}>Cancel links</button>}
-      </form>
-      {linksError && <p class="field-error">{linksError}</p>}
+      <div id="download-link-form" class="workflow-add-links" hidden={!linksOpen}>
+        {handoff && <p class={handoff.error ? "field-error" : "text-secondary"}>{handoff.error ?? "Review the linked file and press Add links to queue it."}</p>}
+        <form class="form-row" onSubmit={(event) => { event.preventDefault(); void props.run(createDownloads, "Downloads queued"); }}>
+          <textarea class="form-control" aria-label="eD2K links" value={ed2kLinks} placeholder="One eD2K link per line" aria-invalid={linksError ? "true" : "false"} onInput={(event) => setEd2kLinks(event.currentTarget.value)} />
+          <label class="check"><input class="form-check-input" type="checkbox" checked={stoppedCreate} onInput={(event) => setStoppedCreate(event.currentTarget.checked)} />Stopped</label>
+          <button class="btn" type="submit" disabled={Boolean(linksError)}><Download size={16} />Add links</button>
+          {handoff && <button class="btn" type="button" onClick={() => { consumeHandoff(); setEd2kLinks(""); }}>Cancel links</button>}
+        </form>
+        {linksError && <p class="field-error">{linksError}</p>}
+      </div>
       <TableScroll label="Downloads"><table class="table table-vcenter card-table workflow-table transfers-table" aria-label="Downloads"><thead><tr><th>Name</th><th>State</th><th>Progress</th><th>Category</th><th>Actions</th></tr></thead><tbody>
         {(page?.data ?? []).map((job) => <tr key={job.id} class={selectedId === job.id ? "selected-row" : ""}>
           <td><button type="button" class="link-button" onClick={() => selectDownload(job.id)}>{job.name}</button></td>
@@ -410,33 +430,52 @@ export function DownloadsView(props: DownloadsViewProps) {
         </tr>)}
         {page?.data.length === 0 && <EmptyRow colSpan={5} text="No downloads." />}
       </tbody></table></TableScroll>
+      <div class="workflow-results-pagination" role="group" aria-label="Download pages">
+        <CursorControls cursor={cursor} nextCursor={page?.meta.nextCursor ?? null} loading={loading && !page} change={changePage} />
+      </div>
     </section>
-    <section class="panel card"><div class="section-title"><div class="section-heading"><h2>Download details</h2>
-      <UpdateWarning message={details ? detailError : ""} /></div><span>{details?.name ?? (selectedId || "No selection")}</span></div>
-      {!details && detailError && <div class="notice alert alert-danger" role="alert">{detailError}</div>}<JsonPanel value={details} />
-    </section>
-    {selectedId && <>
-      <DownloadEvidence<DownloadSource> key={`${selectedId}:sources`} path={`downloads/${selectedId}/sources`} label="Download sources" client={props.client} refreshGeneration={props.refreshGeneration} render={(sources) => <TableScroll label="Transfer sources"><table class="table table-vcenter card-table"><thead><tr><th>Source</th><th>State</th><th>Rate</th><th>Reported names</th><th>Actions</th></tr></thead><tbody>
-        {sources.map((source) => {
-          const peer = source.clientId ?? "";
-          const path = `downloads/${selectedId}/sources/${encodeSegment(peer)}/operations`;
-          const canBrowse = Boolean(peer && source.viewSharedFiles);
-          const browseTitle = !canBrowse ? "Shared-file browsing unavailable" : source.sharedFilesRequestPending ? "View browse progress" : "Browse shared files";
-          return <tr key={peer}>
-          <td>{source.userName ?? peer}</td><td><StatusPill value={source.downloadState ?? "unknown"} /></td><td>{formatRate(source.downloadRateBytesPerSecond)}</td>
-          <td>{(source.reportedFileNames ?? []).map((name) => name.normalizedName).join(", ")}{source.reportedFileNamesHasMore ? " …" : ""}</td>
-          <td><div class="row-actions"><Action title={browseTitle} icon={<Search size={15} />} disabled={!canBrowse} onClick={() => setBrowse((previous) => ({
-            path: `${path}/browse`, peer: source.userName || peer, request: (previous?.request ?? 0) + 1,
-          }))} />
-            <Action title="Add friend" icon={<UserPlus size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/add-friend`), "Friend added")} />
-            <Action title="Remove source" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/remove`), "Source removed")} />
-            <Action title="Ban" icon={<Ban size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/ban`), "Source banned")} /></div></td>
-        </tr>; })}{sources.length === 0 && <EmptyRow colSpan={5} text="No sources for this download." />}
-      </tbody></table></TableScroll>} />
-      {browse && <SourceBrowsePanel key={`${browse.path}:${browse.request}`} path={browse.path} peer={browse.peer} client={props.client} close={() => setBrowse(null)} />}
-      <DownloadEvidence<unknown> key={`${selectedId}:parts`} path={`downloads/${selectedId}/parts`} label="Download parts" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
-      <DownloadEvidence<unknown> key={`${selectedId}:comments`} path={`downloads/${selectedId}/comments`} label="Download comments" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
-    </>}
+    {selectedId && <section class="panel card" key={selectedId}>
+      <div class="section-title"><div class="section-heading"><h2>Download details</h2>
+        <UpdateWarning message={details ? detailError : ""} /></div>
+        <span class="download-details-name">{details?.name ?? page?.data.find((job) => job.id === selectedId)?.name ?? selectedId}</span>
+      </div>
+      {details ? <dl class="workflow-facts">
+        <div><dt>State</dt><dd><DownloadStateLabel download={details} /></dd></div>
+        <div><dt>Progress</dt><dd>{formatProgress(details)}</dd></div>
+        <div><dt>Size</dt><dd>{details.sizeBytes === null ? "Unknown" : formatBytes(details.sizeBytes)}</dd></div>
+        <div><dt>Category</dt><dd>{details.category ?? "Uncategorized"}</dd></div>
+        {details.delivery && <div><dt>Delivery</dt><dd>{details.delivery.state === "delivered" ? "Delivered" : "Pending"}
+          {details.delivery.path && <span class="download-delivery-path">{details.delivery.path}</span>}</dd></div>}
+        {details.failure && <div><dt>Failure</dt><dd>{details.failure.message}</dd></div>}
+      </dl> : detailError ? <div class="notice alert alert-danger" role="alert">{detailError}</div>
+        : <p role="status">Loading download details…</p>}
+      <div class="workflow-sections">
+        <DownloadEvidence<DownloadSource> path={`downloads/${selectedId}/sources`} label="Sources" client={props.client} refreshGeneration={props.refreshGeneration} render={(sources) => <TableScroll label="Download sources"><table class="table table-vcenter card-table"><thead><tr><th>Source</th><th>State</th><th>Rate</th><th>Reported names</th><th>Actions</th></tr></thead><tbody>
+          {sources.map((source) => {
+            const peer = source.clientId ?? "";
+            const path = `downloads/${selectedId}/sources/${encodeSegment(peer)}/operations`;
+            const canBrowse = Boolean(peer && source.viewSharedFiles);
+            const browseTitle = !canBrowse ? "Shared-file browsing unavailable" : source.sharedFilesRequestPending ? "View browse progress" : "Browse shared files";
+            return <tr key={peer}>
+            <td>{source.userName ?? peer}</td><td><StatusPill value={source.downloadState ?? "unknown"} /></td><td>{formatRate(source.downloadRateBytesPerSecond)}</td>
+            <td>{(source.reportedFileNames ?? []).map((name) => name.normalizedName).join(", ")}{source.reportedFileNamesHasMore ? " …" : ""}</td>
+            <td><div class="row-actions"><Action title={browseTitle} icon={<Search size={15} />} disabled={!canBrowse} onClick={() => setBrowse((previous) => ({
+              path: `${path}/browse`, peer: source.userName || peer, request: (previous?.request ?? 0) + 1,
+            }))} />
+              <Action title="Add friend" icon={<UserPlus size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/add-friend`), "Friend added")} />
+              <Action title="Remove source" icon={<Trash2 size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/remove`), "Source removed")} />
+              <Action title="Ban" icon={<Ban size={15} />} onClick={() => void props.run(() => props.client.post(`${path}/ban`), "Source banned")} /></div></td>
+          </tr>; })}{sources.length === 0 && <EmptyRow colSpan={5} text="No sources for this download." />}
+        </tbody></table></TableScroll>}>
+          {browse && <SourceBrowsePanel key={`${browse.path}:${browse.request}`} path={browse.path} peer={browse.peer} client={props.client} close={() => setBrowse(null)} />}
+        </DownloadEvidence>
+        <DownloadEvidence<unknown> path={`downloads/${selectedId}/parts`} label="Parts" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
+        <DownloadEvidence<unknown> path={`downloads/${selectedId}/comments`} label="Comments" client={props.client} refreshGeneration={props.refreshGeneration} render={(items) => <JsonPanel value={items} />} />
+        <details class="workflow-disclosure"><summary>Raw data</summary>
+          <div class="workflow-disclosure-content">{details ? <JsonPanel value={details} /> : <p>Download data is unavailable.</p>}</div>
+        </details>
+      </div>
+    </section>}
   </section>;
 }
 
@@ -576,6 +615,17 @@ export function SearchView(props: SearchViewProps) {
   const [category, setCategory] = useState("");
   const [paused, setPaused] = useState(false);
   const [observationSelection, setObservationSelection] = useState<{ session: string; claim: string } | null>(null);
+  const queryInput = useRef<HTMLInputElement>(null);
+  const advancedFilters = useRef<HTMLDetailsElement>(null);
+  const observationsPanel = useRef<HTMLDivElement>(null);
+  const observationTrigger = useRef<HTMLButtonElement>(null);
+  const activeObservation = observationSelection?.session === props.selectedSearchId ? observationSelection : null;
+  useLayoutEffect(() => {
+    if (!activeObservation) return;
+    observationsPanel.current?.focus({ preventScroll: true });
+    observationsPanel.current?.scrollIntoView?.({ block: "start" });
+  }, [activeObservation]);
+
   const selectedSearch = props.selectedSearch?.id === props.selectedSearchId ? props.selectedSearch : null;
   const orderedSearches = props.searches;
   const selectedSummary = props.searches.find((search) => search.id === props.selectedSearchId);
@@ -642,6 +692,8 @@ export function SearchView(props: SearchViewProps) {
   const useSelectedCriteria = () => {
     if (!displayedSearch) return;
     const source = displayedSearch.criteria;
+    if (advancedFilters.current) advancedFilters.current.open = true;
+    queryInput.current?.focus();
     const numberText = (value: number | null | undefined) => value == null ? "" : String(value);
     setParentSearchId(displayedSearch.id);
     setQuery(displayedSearch.query ?? "");
@@ -678,37 +730,54 @@ export function SearchView(props: SearchViewProps) {
     <section class="panel card">
       <div class="section-title">
         <div class="section-heading"><h2>Search</h2><UpdateWarning message={props.resultPage ? props.readError : ""} /></div>
-        <span>{props.searches.length} sessions on this page</span>
       </div>
-      {parentSearchId && <div class="form-row"><span>New search linked to #{parentSearchId}</span>
-        <button class="btn" type="button" onClick={() => setParentSearchId(null)}>Clear link</button></div>}
-      <form class="form-row" onSubmit={(event) => {
+      <form class="workflow-search-form" onSubmit={(event) => {
         event.preventDefault();
         if (!searchQueryError) {
           void props.run(startSearch, "Search started", { refresh: false });
         }
       }}>
-        <input class="form-control" value={query} placeholder="Search query" aria-invalid={searchQueryError ? "true" : "false"} onInput={(event) => setQuery(event.currentTarget.value)} />
-        <select class="form-select" value={method} onInput={(event) => setMethod(event.currentTarget.value)}>
-          <option value="automatic">Automatic</option>
-          <option value="server">Server</option>
-          <option value="global">Global</option>
-          <option value="kad">Kad</option>
-        </select>
-        <select class="form-select" value={fileType} onInput={(event) => setFileType(event.currentTarget.value)}>
-          <option value="">Any</option>
-          <option value="audio">Audio</option>
-          <option value="video">Video</option>
-          <option value="image">Image</option>
-          <option value="doc">Document</option>
-          <option value="arc">Archive</option>
-          <option value="iso">ISO</option>
-          <option value="pro">Program</option>
-          <option value="emulecollection">eMule collection</option>
-        </select>
-        <button class="btn" type="submit" disabled={!normalizeSearchQuery(query) || Boolean(searchQueryError)}><Search size={16} />Start</button>
+        <div class="form-row">
+          <input ref={queryInput} class="form-control" aria-label="Search query" value={query} placeholder="Search query" aria-invalid={searchQueryError ? "true" : "false"} onInput={(event) => setQuery(event.currentTarget.value)} />
+          <select class="form-select" aria-label="Search method" value={method} onInput={(event) => setMethod(event.currentTarget.value)}>
+            <option value="automatic">Automatic</option>
+            <option value="server">Server</option>
+            <option value="global">Global</option>
+            <option value="kad">Kad</option>
+          </select>
+          <select class="form-select" aria-label="File type" value={fileType} onInput={(event) => setFileType(event.currentTarget.value)}>
+            <option value="">Any</option>
+            <option value="audio">Audio</option>
+            <option value="video">Video</option>
+            <option value="image">Image</option>
+            <option value="doc">Document</option>
+            <option value="arc">Archive</option>
+            <option value="iso">ISO</option>
+            <option value="pro">Program</option>
+            <option value="emulecollection">eMule collection</option>
+          </select>
+          <button class="btn" type="submit" disabled={!normalizeSearchQuery(query) || Boolean(searchQueryError)}><Search size={16} />Start</button>
+        </div>
+        {parentSearchId && <div class="form-row"><span>New search linked to #{parentSearchId}</span>
+          <button class="btn" type="button" onClick={() => setParentSearchId(null)}>Clear link</button></div>}
+        {searchQueryError && <p class="field-error">{searchQueryError}</p>}
+        <details ref={advancedFilters} class="search-filters workflow-disclosure">
+          <summary>Advanced search filters</summary>
+          <div class="form-row workflow-disclosure-content">
+            <input class="form-control" value={extension} maxlength={256} placeholder="Extension" onInput={(event) => setExtension(event.currentTarget.value)} />
+            <input class="form-control" type="number" min="0" step="1" value={minSizeBytes} placeholder="Minimum bytes" onInput={(event) => setMinSizeBytes(event.currentTarget.value)} />
+            <input class="form-control" type="number" min="0" step="1" value={maxSizeBytes} placeholder="Maximum bytes" onInput={(event) => setMaxSizeBytes(event.currentTarget.value)} />
+            <input class="form-control" type="number" min="0" max="1000000" step="1" value={minAvailability} placeholder="Minimum sources" onInput={(event) => setMinAvailability(event.currentTarget.value)} />
+            <input class="form-control" type="number" min="0" max="1000000" step="1" value={minCompleteSources} placeholder="Minimum complete sources" onInput={(event) => setMinCompleteSources(event.currentTarget.value)} />
+            <input class="form-control" type="number" min="0" max="4294967295" step="1" value={minBitrateKbps} placeholder="Minimum bitrate (kbps)" onInput={(event) => setMinBitrateKbps(event.currentTarget.value)} />
+            <input class="form-control" type="number" min="0" max="4294967295" step="1" value={minLengthSeconds} placeholder="Minimum length (seconds)" onInput={(event) => setMinLengthSeconds(event.currentTarget.value)} />
+            <input class="form-control" value={codec} maxlength={256} placeholder="Codec" onInput={(event) => setCodec(event.currentTarget.value)} />
+            <input class="form-control" value={title} maxlength={256} placeholder="Title" onInput={(event) => setTitle(event.currentTarget.value)} />
+            <input class="form-control" value={album} maxlength={256} placeholder="Album" onInput={(event) => setAlbum(event.currentTarget.value)} />
+            <input class="form-control" value={artist} maxlength={256} placeholder="Artist" onInput={(event) => setArtist(event.currentTarget.value)} />
+          </div>
+        </details>
       </form>
-      {searchQueryError && <p class="field-error">{searchQueryError}</p>}
       {(orderedSearches.length > 0 || displayedSearch != null) && (
         <div class="form-row subtle-row search-session-row">
           <label for="search-session">Search session</label>
@@ -728,125 +797,127 @@ export function SearchView(props: SearchViewProps) {
             ))}
           </select>
           {displayedSearch && <StatusPill value={displayedStatus} />}
-          <button class="btn btn-outline-secondary" type="button" disabled={!displayedSearch} onClick={useSelectedCriteria}>
-            Use criteria for new search
-          </button>
-          {displayedSearch?.parentSearchId && <button class="btn" type="button"
-            onClick={() => props.selectSearch(displayedSearch.parentSearchId!)}>View parent #{displayedSearch.parentSearchId}</button>}
-          <button class="btn btn-outline-secondary" type="button"
-            disabled={!displayedSearch || !["queued", "running"].includes(displayedStatus)}
-            onClick={() => { void props.run(() => props.client.post(`searches/${displayedSearch!.id}/stop`), "Search stopped"); }}>
-            Stop search
-          </button>
-          <button
-            class="btn btn-outline-secondary"
-            type="button"
-            disabled={!displayedSearch}
-            onClick={() => {
-              if (window.confirm("Delete this search session and its saved results?")) {
-                void props.run(deleteSelectedSearch, "Search session deleted", { refresh: false });
-              }
-            }}
-          >
-            <Trash2 size={15} />
-            Delete session
-          </button>
-          <button
-            class="btn btn-outline-danger"
-            type="button"
-            disabled={props.searches.length === 0 && !displayedSearch}
-            onClick={() => {
-              if (window.confirm("Clear every saved search session and result?")) {
-                void props.run(clearSearches, "Search sessions cleared", { refresh: false });
-              }
-            }}
-          >
-            <Trash2 size={15} />
-            Clear sessions
-          </button>
+          {displayedSearch && ["queued", "running"].includes(displayedStatus) && (
+            <button class="btn btn-outline-secondary" type="button"
+              onClick={() => { void props.run(() => props.client.post(`searches/${displayedSearch.id}/stop`), "Search stopped"); }}>
+              Stop search
+            </button>
+          )}
         </div>
       )}
-      {displayedSearch && (
-        <section class="search-session-inspector" aria-label="Search session details">
-          <div class="kv search-session-kv">
-            <span>Requested backend</span>
-            <strong>{displayedSearch.requestedMethod ?? "unknown"}</strong>
-            <span>Resolved backend</span>
-            <strong>{resolvedMethodLabel}</strong>
-            <span>File type</span>
-            <strong>{displayedSearch.type || "any"}</strong>
-            <span>Status reason</span>
-            <strong>{displayedSearch.statusReason ?? "—"}</strong>
-            <span>Search phase</span>
-            <strong>{searchPhaseLabel}</strong>
-            <span>Phase progress</span>
-            <strong>{searchProgressLabel}</strong>
+      {(orderedSearches.length > 0 || displayedSearch != null || props.sessionCursor) && <div class="workflow-sections">
+        <details class="workflow-disclosure">
+          <summary>Session actions</summary>
+          <div class="form-row workflow-disclosure-content">
+            <button class="btn btn-outline-secondary" type="button" disabled={!displayedSearch} onClick={useSelectedCriteria}>
+              Use criteria for new search
+            </button>
+            {displayedSearch?.parentSearchId && <button class="btn" type="button"
+              onClick={() => props.selectSearch(displayedSearch.parentSearchId!)}>View parent #{displayedSearch.parentSearchId}</button>}
+            <button
+              class="btn btn-outline-secondary"
+              type="button"
+              disabled={!displayedSearch}
+              onClick={() => {
+                if (window.confirm("Delete this search session and its saved results?")) {
+                  void props.run(deleteSelectedSearch, "Search session deleted", { refresh: false });
+                }
+              }}
+            >
+              <Trash2 size={15} />
+              Delete session
+            </button>
+            <button
+              class="btn btn-outline-danger"
+              type="button"
+              disabled={props.searches.length === 0 && !displayedSearch}
+              onClick={() => {
+                if (window.confirm("Clear every saved search session and result?")) {
+                  void props.run(clearSearches, "Search sessions cleared", { refresh: false });
+                }
+              }}
+            >
+              <Trash2 size={15} />
+              Clear sessions
+            </button>
           </div>
-          <div class="search-criteria" aria-label="Applied search criteria">
-            <strong>Applied criteria</strong>
-            {criteriaRows.length > 0 ? criteriaRows.map(([label, value]) => (
-              <span class="search-criterion" key={label}>{label}: {value}</span>
-            )) : <span class="text-secondary">No additional filters</span>}
+          <div class="form-row workflow-disclosure-content" role="group" aria-label="Search session pages">
+            <span>{props.searches.length} sessions on this page</span><CursorControls cursor={props.sessionCursor} nextCursor={props.sessionNextCursor}
+              loading={false} change={props.selectSearchSessionsPage} />
           </div>
-        </section>
-      )}
-      <details class="search-filters">
-        <summary>Advanced search filters</summary>
-        <div class="form-row subtle-row">
-          <input class="form-control" value={extension} maxlength={256} placeholder="Extension" onInput={(event) => setExtension(event.currentTarget.value)} />
-          <input class="form-control" type="number" min="0" step="1" value={minSizeBytes} placeholder="Minimum bytes" onInput={(event) => setMinSizeBytes(event.currentTarget.value)} />
-          <input class="form-control" type="number" min="0" step="1" value={maxSizeBytes} placeholder="Maximum bytes" onInput={(event) => setMaxSizeBytes(event.currentTarget.value)} />
-          <input class="form-control" type="number" min="0" max="1000000" step="1" value={minAvailability} placeholder="Minimum sources" onInput={(event) => setMinAvailability(event.currentTarget.value)} />
-          <input class="form-control" type="number" min="0" max="1000000" step="1" value={minCompleteSources} placeholder="Minimum complete sources" onInput={(event) => setMinCompleteSources(event.currentTarget.value)} />
-          <input class="form-control" type="number" min="0" max="4294967295" step="1" value={minBitrateKbps} placeholder="Minimum bitrate (kbps)" onInput={(event) => setMinBitrateKbps(event.currentTarget.value)} />
-          <input class="form-control" type="number" min="0" max="4294967295" step="1" value={minLengthSeconds} placeholder="Minimum length (seconds)" onInput={(event) => setMinLengthSeconds(event.currentTarget.value)} />
-          <input class="form-control" value={codec} maxlength={256} placeholder="Codec" onInput={(event) => setCodec(event.currentTarget.value)} />
-          <input class="form-control" value={title} maxlength={256} placeholder="Title" onInput={(event) => setTitle(event.currentTarget.value)} />
-          <input class="form-control" value={album} maxlength={256} placeholder="Album" onInput={(event) => setAlbum(event.currentTarget.value)} />
-          <input class="form-control" value={artist} maxlength={256} placeholder="Artist" onInput={(event) => setArtist(event.currentTarget.value)} />
+        </details>
+        {displayedSearch && (
+          <details class="workflow-disclosure"><summary>Session details</summary>
+            <section class="search-session-inspector workflow-disclosure-content" aria-label="Search session details">
+              <div class="kv search-session-kv">
+                <span>Requested backend</span>
+                <strong>{displayedSearch.requestedMethod ?? "unknown"}</strong>
+                <span>Resolved backend</span>
+                <strong>{resolvedMethodLabel}</strong>
+                <span>File type</span>
+                <strong>{displayedSearch.type || "any"}</strong>
+                <span>Status reason</span>
+                <strong>{displayedSearch.statusReason ?? "—"}</strong>
+                <span>Search phase</span>
+                <strong>{searchPhaseLabel}</strong>
+                <span>Phase progress</span>
+                <strong>{searchProgressLabel}</strong>
+              </div>
+              <div class="search-criteria" aria-label="Applied search criteria">
+                <strong>Applied criteria</strong>
+                {criteriaRows.length > 0 ? criteriaRows.map(([label, value]) => (
+                  <span class="search-criterion" key={label}>{label}: {value}</span>
+                )) : <span class="text-secondary">No additional filters</span>}
+              </div>
+            </section>
+          </details>
+        )}
+      </div>}
+      <div class="workflow-results-toolbar">
+        <h3>Results</h3>
+        <div class="form-row">
+          <label class="search-sort-label" for="search-result-sort">Sort results</label>
+          <select
+            id="search-result-sort"
+            class="form-select"
+            aria-label="Sort search results"
+            value={`${props.searchSort}:${props.searchOrder}`}
+            onInput={(event) => {
+              const [sort, order] = event.currentTarget.value.split(":");
+              props.selectSearchSort(sort, order);
+            }}
+          >
+            <option value="sources:desc">Sources, most first</option>
+            <option value="completeSources:desc">Complete sources, most first</option>
+            <option value="rating:desc">Rating, highest first</option>
+            <option value="sizeBytes:desc">Size, largest first</option>
+            <option value="sizeBytes:asc">Size, smallest first</option>
+            <option value="displayName:asc">Name, A–Z</option>
+            <option value="displayName:desc">Name, Z–A</option>
+            <option value="fileType:asc">Type, A–Z</option>
+            <option value="title:asc">Media title, A–Z</option>
+            <option value="artist:asc">Artist, A–Z</option>
+            <option value="album:asc">Album, A–Z</option>
+            <option value="lengthSeconds:desc">Duration, longest first</option>
+            <option value="bitrateKbps:desc">Bitrate, highest first</option>
+            <option value="codec:asc">Codec, A–Z</option>
+          </select>
+          <details class="workflow-disclosure">
+            <summary>Download options{category ? ` · ${category}` : ""}{paused ? " · Paused" : ""}</summary>
+            <div class="form-row workflow-disclosure-content">
+              <select class="form-select" aria-label="Download destination" value={category} onInput={(event) => setCategory(event.currentTarget.value)}>
+                <option value="">Download uncategorized</option>
+                {props.categories.map((category) => (
+                  <option key={category.name} value={category.name}>Download to {category.name}</option>
+                ))}
+              </select>
+              <label class="check">
+                <input class="form-check-input" type="checkbox" checked={paused} onInput={(event) => setPaused(event.currentTarget.checked)} />
+                Queue paused
+              </label>
+            </div>
+          </details>
         </div>
-      </details>
-      <div class="form-row subtle-row">
-        <select class="form-select" value={category} onInput={(event) => setCategory(event.currentTarget.value)}>
-          <option value="">Download uncategorized</option>
-          {props.categories.map((category) => (
-            <option key={category.name} value={category.name}>Download to {category.name}</option>
-          ))}
-        </select>
-        <label class="check">
-          <input class="form-check-input" type="checkbox" checked={paused} onInput={(event) => setPaused(event.currentTarget.checked)} />
-          Queue paused
-        </label>
-        <label class="search-sort-label" for="search-result-sort">Sort results</label>
-        <select
-          id="search-result-sort"
-          class="form-select"
-          aria-label="Sort search results"
-          value={`${props.searchSort}:${props.searchOrder}`}
-          onInput={(event) => {
-            const [sort, order] = event.currentTarget.value.split(":");
-            props.selectSearchSort(sort, order);
-          }}
-        >
-          <option value="sources:desc">Sources, most first</option>
-          <option value="completeSources:desc">Complete sources, most first</option>
-          <option value="rating:desc">Rating, highest first</option>
-          <option value="sizeBytes:desc">Size, largest first</option>
-          <option value="sizeBytes:asc">Size, smallest first</option>
-          <option value="displayName:asc">Name, A–Z</option>
-          <option value="displayName:desc">Name, Z–A</option>
-          <option value="fileType:asc">Type, A–Z</option>
-          <option value="title:asc">Media title, A–Z</option>
-          <option value="artist:asc">Artist, A–Z</option>
-          <option value="album:asc">Album, A–Z</option>
-          <option value="lengthSeconds:desc">Duration, longest first</option>
-          <option value="bitrateKbps:desc">Bitrate, highest first</option>
-          <option value="codec:asc">Codec, A–Z</option>
-        </select>
-      </div>
-      <div class="form-row" role="group" aria-label="Search session pages">
-        <span>Session pages</span><CursorControls cursor={props.sessionCursor} nextCursor={props.sessionNextCursor}
-          loading={false} change={props.selectSearchSessionsPage} />
       </div>
       {!props.resultPage && props.readError && <div class="notice alert alert-danger" role="alert">{props.readError}</div>}
       <TableScroll label="Search results">
@@ -883,9 +954,13 @@ export function SearchView(props: SearchViewProps) {
                 </td>
                 <td>{(result.rating ?? 0) > 0 ? `${result.rating}/5` : "—"}</td>
                 <td>{result.fileType ?? ""}</td>
-                <td><button class="btn" type="button" onClick={() => {
-                  if (props.selectedSearchId) setObservationSelection({ session: props.selectedSearchId, claim: result.id });
-                }}>Observations</button></td>
+                <td><button class="btn" type="button" aria-expanded={activeObservation?.claim === result.id}
+                  aria-controls={activeObservation?.claim === result.id ? "search-observations-panel" : undefined}
+                  onClick={(event) => {
+                    if (!props.selectedSearchId) return;
+                    observationTrigger.current = event.currentTarget;
+                    setObservationSelection({ session: props.selectedSearchId, claim: result.id });
+                  }}>Observations</button></td>
                 <td><code class="search-result-hash">{result.hash}</code></td>
                 <td>
                   {typeof downloadStatus === "string" ? <span class="badge bg-success-lt">Queued</span> : <button class="btn"
@@ -907,16 +982,22 @@ export function SearchView(props: SearchViewProps) {
           </tbody>
         </table>
       </TableScroll>
-      {observationSelection && observationSelection.session === props.selectedSearchId && (
-        <SearchObservations key={`${observationSelection.session}:${observationSelection.claim}`}
-          client={props.client} session={observationSelection.session} claim={observationSelection.claim}
-          close={() => setObservationSelection(null)} />
-      )}
       {selectedSearch && (
         <div class="form-row subtle-row search-pagination" role="group" aria-label="Search result pages">
           <span>{results.length.toLocaleString()} results on this page · {(displayedSearch?.resultCount ?? 0).toLocaleString()} collected</span>
           <CursorControls cursor={props.resultCursor} nextCursor={props.resultPage?.meta.nextCursor ?? null}
             loading={props.resultPage === null} change={props.selectSearchPage} />
+        </div>
+      )}
+      {activeObservation && (
+        <div id="search-observations-panel" class="workflow-observations" tabIndex={-1} ref={observationsPanel}>
+          <SearchObservations key={`${activeObservation.session}:${activeObservation.claim}`}
+            client={props.client} session={activeObservation.session} claim={activeObservation.claim}
+            close={() => {
+              setObservationSelection(null);
+              const target = observationTrigger.current;
+              (target?.isConnected ? target : queryInput.current)?.focus();
+            }} />
         </div>
       )}
     </section>

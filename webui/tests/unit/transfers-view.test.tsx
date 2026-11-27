@@ -172,6 +172,8 @@ describe("DownloadsView", () => {
       />
     );
 
+    expect(screen.queryByRole("textbox", { name: "eD2K links" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add eD2K links" }));
     fireEvent.input(screen.getByPlaceholderText("One eD2K link per line"), { target: { value: link } });
     fireEvent.click(screen.getByRole("button", { name: "Add links" }));
 

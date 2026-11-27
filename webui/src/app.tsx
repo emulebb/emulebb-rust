@@ -982,8 +982,11 @@ export function App({ appearance }: { appearance: Appearance }) {
 
             {authState === "authenticated" && (
               <>
-                {message && <div class="notice alert alert-success" role="status">{message}</div>}
-                {error && <div class="notice alert alert-danger">{error}</div>}
+                {/* WHY: Keep feedback in a stable sibling so an action cannot remount the active view. */}
+                <div class="desktop-action-feedback">
+                  {message && <div class="notice alert alert-success" role="status">{message}</div>}
+                  {error && <div class="notice alert alert-danger">{error}</div>}
+                </div>
 
                 {tab === "overview" && (
               <Overview
