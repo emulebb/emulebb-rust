@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
@@ -23,10 +24,11 @@ TEST_SPEC.loader.exec_module(WEBUI_TEST)
 
 
 class TestWebUiExecutionModes(unittest.TestCase):
-    def exercise(self, arguments, *, failure=None, platform="win32"):
+    def exercise(self, arguments, *, failure=None, platform="win32", system_dependencies_ready=False):
         workspace = SimpleNamespace(dist=Path("synthetic-dist"))
         pinned = Mock()
         with patch.dict(sys.modules, {"ci_environment": SimpleNamespace(prepare_command=pinned)}), \
+                patch.dict(os.environ, {"EMULEBB_WEBUI_SYSTEM_DEPS_READY": "1" if system_dependencies_ready else "0"}), \
                 patch.object(WEBUI_TEST.sys, "platform", platform), \
                 patch.object(WEBUI_TEST, "npm_command", return_value="pinned-npm"), \
                 patch.object(WEBUI_TEST, "prepare_webui_workspace", return_value=workspace) as stage, \
@@ -52,6 +54,15 @@ class TestWebUiExecutionModes(unittest.TestCase):
                     ["pinned-npm", "run", "test:e2e"],
                     ["pinned-npm", "run", "build", "--", "--outDir", "synthetic-dist", "--emptyOutDir"],
                 ])
+
+    def test_linux_system_dependency_setup_is_separate_from_browser_tests(self):
+        _, _, setup = self.exercise(["--install-system-deps"], platform="linux")
+        self.assertEqual(setup, [
+            ["pinned-npm", "ci", "--ignore-scripts"],
+            ["pinned-npm", "exec", "--", "playwright", "install-deps", "chromium", "webkit"],
+        ])
+        _, _, commands = self.exercise([], platform="linux", system_dependencies_ready=True)
+        self.assertEqual(commands[2], ["pinned-npm", "exec", "--", "playwright", "install", "chromium", "webkit"])
 
     def test_failed_browser_dependencies_prevent_browser_tests_and_build(self):
         for platform in ("win32", "linux"):
