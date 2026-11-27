@@ -14,7 +14,7 @@ import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** Shares only the daemon's closed diagnostic projection and non-identifying app metadata. */
+/** Shares bounded app-owned events and the daemon's closed diagnostic projection. */
 internal object DiagnosticsSharing {
     private const val MAX_JSON_BYTES = 256 * 1024
     private const val RETAINED_REPORTS = 4
@@ -38,6 +38,11 @@ internal object DiagnosticsSharing {
                 put("supported64BitAbis", JSONArray(Build.SUPPORTED_64_BIT_ABIS.toList()))
             })
         }
+        val daemonLogs = diagnostics.getJSONArray("recentLogs")
+        val daemonLogBytes = (0 until daemonLogs.length()).joinToString("") {
+            daemonLogs.getJSONObject(it).toString() + "\n"
+        }.toByteArray(Charsets.UTF_8)
+        val androidLogBytes = AndroidSupportLog.bytes(context)
         val diagnosticBytes = diagnostics.toString().toByteArray(Charsets.UTF_8)
         val metadataBytes = metadata.toString().toByteArray(Charsets.UTF_8)
         check(diagnosticBytes.size <= MAX_JSON_BYTES && metadataBytes.size <= 8192) { "Diagnostic report exceeds its sharing budget" }
@@ -58,7 +63,13 @@ internal object DiagnosticsSharing {
         val report = File(root, "emulebb-diagnostics-${UUID.randomUUID()}.zip")
         try {
             ZipOutputStream(Files.newOutputStream(report.toPath(), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)).use { zip ->
-                for ((name, bytes) in listOf("metadata.json" to metadataBytes, "diagnostics.json" to diagnosticBytes)) {
+                val entries = listOf(
+                    "metadata.json" to metadataBytes,
+                    "diagnostics.json" to diagnosticBytes,
+                    "logs/daemon.jsonl" to daemonLogBytes,
+                    "logs/android.jsonl" to androidLogBytes,
+                )
+                for ((name, bytes) in entries) {
                     zip.putNextEntry(ZipEntry(name))
                     zip.write(bytes)
                     zip.closeEntry()

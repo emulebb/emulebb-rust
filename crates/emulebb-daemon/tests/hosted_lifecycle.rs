@@ -162,7 +162,8 @@ async fn assert_running_shutdown(stop: Stop) {
     let address: SocketAddr = tokio::time::timeout(TEST_TIMEOUT, observer)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .address;
     assert!(address.ip().is_loopback());
     assert_ne!(address.port(), 0);
     let client = reqwest::Client::builder()

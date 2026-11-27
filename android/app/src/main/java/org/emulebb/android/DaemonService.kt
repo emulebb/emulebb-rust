@@ -13,6 +13,7 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.LinkProperties
+import java.net.Inet4Address
 import android.os.Bundle
 import android.os.Build
 import android.os.Environment
@@ -32,6 +33,7 @@ class DaemonService : Service() {
     companion object {
         const val START = "org.emulebb.android.START"
         const val STOP = "org.emulebb.android.STOP"
+        const val STOP_REQUEST = "stopRequest"
         const val STATUS = 1
         const val PREFERENCES = "service-lifecycle"
         const val DESIRED = "desired-running"
@@ -54,8 +56,14 @@ class DaemonService : Service() {
     private var starting = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var network: Network? = null
+    private var routeIpv4: Set<Inet4Address>? = null
+    private var publicIpv4: String? = null
+    private var confirmedStopped = false
+    private var stopRequest: String? = null
+    private var stopCommandPending = false
     private var restartForNetwork = false
     private var stopFailures = 0
+    private var statusFailures = 0
     private var notifiedPhase: String? = null
     private var waitingForNetwork = false
     private var destroyed = false
@@ -64,25 +72,48 @@ class DaemonService : Service() {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(available: Network) {
             handler.post {
-                if (destroyed) return@post
-                val changed = network != null && network != available
+                if (destroyed || available == network) return@post
                 network = available
-                notifyNetworkChanged()
-                if (changed && desired.get() && phase == "Running") {
-                    restartForNetwork = true
-                    phase = "Stopping"
-                    requestNativeStop()
-                }
+                routeIpv4 = null
+                defaultRouteChanged()
             }
         }
 
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
-            handler.post { notifyNetworkChanged() }
+            val addresses = properties.linkAddresses.mapNotNull { it.address as? Inet4Address }.toSet()
+            handler.post {
+                if (destroyed || this@DaemonService.network != network) return@post
+                val previous = routeIpv4
+                routeIpv4 = addresses
+                if (previous != null && previous != addresses) defaultRouteChanged()
+                else notifyNetworkChanged()
+            }
         }
 
         override fun onLost(network: Network) {
-            handler.post { notifyNetworkChanged() }
+            handler.post {
+                if (destroyed || this@DaemonService.network != network) return@post
+                this@DaemonService.network = null
+                routeIpv4 = null
+                defaultRouteChanged()
+            }
         }
+    }
+
+    private fun defaultRouteChanged() {
+        publicIpv4 = null
+        recordEvent(AndroidSupportLog.Event.NETWORK_CHANGED)
+        notifyNetworkChanged()
+        if (desired.get() && (phase == "Running" || (phase == "Starting" && !waitingForNetwork))) {
+            restartForNetwork = true
+            phase = "Stopping"
+            requestNativeStop()
+        }
+    }
+
+    private fun recordEvent(event: AndroidSupportLog.Event) {
+        val timestamp = System.currentTimeMillis()
+        commands.execute { AndroidSupportLog.record(this, timestamp, event) }
     }
 
     private fun notifyNetworkChanged() {
@@ -108,6 +139,10 @@ class DaemonService : Service() {
                         putString("phase", phase)
                         putString("error", error)
                         putString("address", address)
+                        putString("publicIpv4", publicIpv4.takeIf { phase == "Running" })
+                        putBoolean("confirmedStopped", confirmedStopped)
+                        putString("stopRequest", stopRequest)
+                        putBoolean("stopFailed", stopFailures >= 3 || statusFailures >= 3 || phase == "Failed")
                         putBoolean("waitingForNetwork", waitingForNetwork)
                     }
                 }
@@ -118,7 +153,7 @@ class DaemonService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        ServiceRecovery.mayResume(this)
+        confirmedStopped = !ServiceRecovery.mayResume(this)
         error = prefs.getString("last-error", null)
         if (error != null) phase = "Failed"
         requireNotNull(getSystemService(NotificationManager::class.java)).createNotificationChannel(
@@ -131,7 +166,7 @@ class DaemonService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) {
-            stopExplicitly()
+            stopExplicitly(intent.getStringExtra(STOP_REQUEST))
             return START_NOT_STICKY
         }
         if (intent?.action != START && !ServiceRecovery.mayResume(this)) {
@@ -153,8 +188,12 @@ class DaemonService : Service() {
             return START_NOT_STICKY
         }
         desired.set(true)
+        confirmedStopped = false
+        stopRequest = null
+        recordEvent(AndroidSupportLog.Event.START_REQUESTED)
         error = null
         stopFailures = 0
+        statusFailures = 0
         try {
             val foregroundType = if (Build.VERSION.SDK_INT >= 34) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -167,8 +206,9 @@ class DaemonService : Service() {
             // Promotion happens before native startup. A platform/AppOp denial
             // must be visible rather than becoming an automatic crash loop.
             error = "Android refused the foreground service: ${failure.javaClass.simpleName}"
-            setDesired(false)
+            confirmedStopped = setDesired(false)
             phase = "Failed"
+            recordEvent(AndroidSupportLog.Event.START_FAILED)
             prefs.edit().putString("last-error", error).commit()
             releaseWakeLock()
             stopSelf()
@@ -217,7 +257,11 @@ class DaemonService : Service() {
                 if (desired.get()) ShellFiles.start(this)
                 handler.post { starting = false; handler.removeCallbacks(poll); handler.post(poll) }
             } catch (failure: Exception) {
-                handler.post { starting = false; fail(failure.message ?: "Service startup failed") }
+                handler.post {
+                    starting = false
+                    recordEvent(AndroidSupportLog.Event.START_FAILED)
+                    fail(failure.message ?: "Service startup failed")
+                }
             }
         }
     }
@@ -237,8 +281,20 @@ class DaemonService : Service() {
                     setDesired(false)
                     requestNativeStop()
                 }
+                if (starting || stopCommandPending) {
+                    handler.postDelayed(this, 1_000)
+                    return
+                }
                 val status = NativeBridge.call("status") as JSONObject
-                phase = status.getString("phase")
+                val nextPhase = status.getString("phase")
+                statusFailures = 0
+                if (phase != "Running" && nextPhase == "Running" && desired.get() && !restartForNetwork) {
+                    recordEvent(AndroidSupportLog.Event.RUNNING)
+                }
+                phase = nextPhase
+                publicIpv4 = status.optString("publicIpv4").takeUnless {
+                    it.isEmpty() || it == "null" || network == null || !desired.get() || restartForNetwork
+                }
                 waitingForNetwork = status.getBoolean("waitingForNetwork")
                 address = status.optString("address").takeUnless { it.isEmpty() || it == "null" }
                 if (phase == "Failed") {
@@ -247,7 +303,7 @@ class DaemonService : Service() {
                     finishStopped()
                     return
                 }
-                if (!desired.get() && (phase == "Running" || phase == "Starting")) {
+                if ((!desired.get() || restartForNetwork) && (phase == "Running" || phase == "Starting")) {
                     phase = "Stopping"
                     if (stopFailures in 1..2) requestNativeStop()
                     if (stopFailures >= 3) error = "Native Stop failed. Use Android app settings to force-stop eMuleBB."
@@ -270,6 +326,7 @@ class DaemonService : Service() {
                 }
                 handler.postDelayed(this, 1_000)
             } catch (failure: Exception) {
+                statusFailures = (statusFailures + 1).coerceAtMost(3)
                 error = failure.message ?: "Cannot inspect native runtime"
                 setDesired(false)
                 restartForNetwork = false
@@ -278,22 +335,35 @@ class DaemonService : Service() {
                 else {
                     // Unknown native state is not Stopped. Retain the foreground
                     // owner until JNI reports drained; never start a second core.
-                    if (stopFailures < 3) requestNativeStop()
-                    else error = "Native shutdown could not be confirmed. Use Android app settings to force-stop eMuleBB."
+                    if (statusFailures >= 3 || stopFailures >= 3) {
+                        error = "Native shutdown could not be confirmed. Use Android app settings to force-stop eMuleBB."
+                    } else if (statusFailures == 1) {
+                        requestNativeStop()
+                    }
                     handler.postDelayed(this, 1_000)
                 }
             }
         }
     }
 
-    private fun setDesired(enabled: Boolean) {
+    private fun setDesired(enabled: Boolean): Boolean {
         desired.set(enabled)
-        if (!prefs.edit().putBoolean(DESIRED, enabled).commit()) error = "Cannot persist service state"
+        val saved = prefs.edit().putBoolean(DESIRED, enabled).commit()
+        if (!saved) error = "Cannot persist service state"
+        return saved
     }
 
-    private fun stopExplicitly() {
+    private fun stopExplicitly(request: String?) {
+        if (request != null) {
+            if (request == stopRequest) return
+            stopRequest = request
+        }
+        recordEvent(AndroidSupportLog.Event.STOP_REQUESTED)
         setDesired(false)
         restartForNetwork = false
+        confirmedStopped = false
+        stopFailures = 0
+        statusFailures = 0
         phase = "Stopping"
         requestNativeStop()
     }
@@ -307,18 +377,27 @@ class DaemonService : Service() {
     }
 
     private fun requestNativeStop() {
+        if (stopCommandPending) return
+        stopCommandPending = true
         commands.execute {
             try { NativeBridge.call("stop") }
             catch (failure: Exception) {
                 handler.post { stopFailures++; error = failure.message ?: "Native Stop failed" }
             }
-            handler.post { handler.removeCallbacks(poll); handler.post(poll) }
+            handler.post {
+                stopCommandPending = false
+                handler.removeCallbacks(poll)
+                handler.post(poll)
+            }
         }
     }
 
     private fun finishStopped() {
-        setDesired(false)
+        val persisted = setDesired(false)
+        confirmedStopped = persisted
         phase = if (error == null) "Stopped" else "Failed"
+        publicIpv4 = null
+        recordEvent(if (error == null) AndroidSupportLog.Event.STOPPED else AndroidSupportLog.Event.RUNTIME_FAILED)
         waitingForNetwork = false
         if (error != null) prefs.edit().putString("last-error", error).commit()
         releaseWakeLock()

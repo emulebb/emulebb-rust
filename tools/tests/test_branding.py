@@ -42,7 +42,7 @@ class BrandingTests(unittest.TestCase):
             icon = ET.parse(ANDROID / f"res/mipmap-anydpi-v{version}/ic_launcher.xml").getroot()
             self.assertEqual(icon.tag, "adaptive-icon")
             self.assertEqual(icon.find("foreground").get(ATTR + "drawable"), "@drawable/ic_launcher_foreground")
-            self.assertEqual(icon.find("background").get(ATTR + "drawable"), "@android:color/white")
+            self.assertEqual(icon.find("background").get(ATTR + "drawable"), "@android:color/black")
             self.assertEqual(icon.find("monochrome") is not None, version == 33)
         foreground = ET.parse(ANDROID / "res/drawable/ic_launcher_foreground.xml").getroot()
         self.assertEqual(foreground.get(ATTR + "drawable"), "@drawable/donkey_launcher")

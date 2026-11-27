@@ -12,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Build
@@ -34,6 +35,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.util.UUID
 import java.util.concurrent.Executors
 
 /** Bootstrap and service control only. Client operations belong to the browser WebUI. */
@@ -49,6 +51,11 @@ class MainActivity : Activity() {
     private var pendingLink: String? = null
     private var pendingLinkError = ""
     private var sharingDiagnostics = false
+    private var confirmedStopped = false
+    private var pendingStop: String? = null
+    private var exitAfterStop = false
+    private lateinit var phoneAddresses: PhoneAddresses
+    private lateinit var wanAddress: TextView
     private lateinit var status: TextView
     private lateinit var error: TextView
     private lateinit var networkWait: TextView
@@ -60,6 +67,7 @@ class MainActivity : Activity() {
     private lateinit var key: EditText
     private lateinit var start: Button
     private lateinit var stop: Button
+    private lateinit var stopAndExit: Button
     private lateinit var save: Button
     private lateinit var regenerate: Button
     private lateinit var open: Button
@@ -68,11 +76,33 @@ class MainActivity : Activity() {
     private val replies = Messenger(object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(message: Message) {
             if (message.what != DaemonService.STATUS) return
-            phase = message.data.getString("phase") ?: "Stopped"
+            phase = message.data.getString("phase") ?: "Starting"
+            confirmedStopped = message.data.getBoolean("confirmedStopped")
+            val stopError = message.data.getString("error")
+            val thisStop = pendingStop
+            if (thisStop != null && message.data.getString("stopRequest") == thisStop) {
+                if (confirmedStopped) {
+                    pendingStop = null
+                    if (exitAfterStop) {
+                        exitAfterStop = false
+                        finishAndRemoveTask()
+                        return
+                    }
+                } else if (stopError != null) {
+                    // Keep the requested exit pending while native shutdown is still progressing.
+                    // A terminal error leaves the controls available again.
+                    if (message.data.getBoolean("stopFailed")) {
+                        pendingStop = null
+                        exitAfterStop = false
+                    }
+                }
+            }
+            val publicIp = message.data.getString("publicIpv4").takeIf { phase == "Running" }
+            wanAddress.show("WAN IPv4  " + (publicIp ?: "Unknown"))
             address = message.data.getString("address")
-            status.show(phase)
+            status.show(if (pendingStop != null) "Stopping" else phase)
             networkWait.show(if (message.data.getBoolean("waitingForNetwork")) "Waiting for a usable default network" else "")
-            error.show(message.data.getString("error") ?: "")
+            error.show(stopError ?: "")
             updateControls()
         }
     })
@@ -80,10 +110,13 @@ class MainActivity : Activity() {
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
             remote = Messenger(service)
+            pendingStop?.let(::sendStop)
             queryStatus()
         }
         override fun onServiceDisconnected(name: ComponentName) {
             remote = null
+            confirmedStopped = false
+            wanAddress.show("WAN IPv4  Unknown")
             phase = "Starting"
             status.text = "Service connection interrupted"
             updateControls()
@@ -92,6 +125,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingStop = savedInstanceState?.getString("pendingStop")
+        exitAfterStop = savedInstanceState?.getBoolean("exitAfterStop") == true
         // The setup screen deliberately shows credentials; keep them out of
         // screenshots, recent-task previews, autofill and saved instance state.
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -120,6 +155,11 @@ class MainActivity : Activity() {
         status = label("Stopped", R.id.service_status)
         error = label("")
         networkWait = label("", R.id.network_wait_status)
+        val localAddresses = label("LAN and interface addresses\nNone", R.id.local_addresses)
+        wanAddress = label("WAN IPv4  Unknown", R.id.wan_address)
+        phoneAddresses = PhoneAddresses(requireNotNull(getSystemService(ConnectivityManager::class.java)), handler) {
+            localAddresses.show(it)
+        }
         permissions = label("")
         pending = label("", R.id.pending_link)
         linkError = label("", R.id.pending_link_error)
@@ -162,12 +202,8 @@ class MainActivity : Activity() {
         label("Starting enables the eD2K/Kad peer service; new profiles connect automatically. Incoming files are shared automatically.")
         label("New-profile folders:\nCompleted and shared: ${ShellFiles.defaultIncoming()}\nAdditional sharing: ${ShellFiles.defaultShared()}\nIncomplete files stay in app-managed storage. Manage current folders in WebUI Settings and Sharing; changes are preserved.", R.id.storage_paths)
         start = button("Start", R.id.start_service) { saveSettings(true) }
-        stop = button("Stop", R.id.stop_service) {
-            phase = "Stopping"
-            status.text = phase
-            updateControls()
-            startService(Intent(this, DaemonService::class.java).setAction(DaemonService.STOP))
-        }
+        stop = button("Stop daemon", R.id.stop_service) { requestStop(exit = false) }
+        stopAndExit = button("Stop daemon & exit app", R.id.stop_service_and_exit) { requestStop(exit = true) }
         open = button("Open WebUI", R.id.open_webui) {
             address?.let { endpoint ->
                 try {
@@ -184,7 +220,7 @@ class MainActivity : Activity() {
                 catch (_: android.content.ActivityNotFoundException) { error.text = "Install a browser to open the WebUI" }
             }
         }
-        label("Share version, service and Android details plus up to 200 recent log summaries. Keys, configuration, paths, peer/content data and free-form messages are excluded.")
+        label("Share version, service and Android details with recent app and daemon logs. The ZIP includes only share-safe log fields.")
         shareDiagnostics = button("Share diagnostics", R.id.share_diagnostics) { shareDiagnosticReport() }
         label("Client settings, sharing, transfers and diagnostics are available in the WebUI. Copy the API key into its sign-in screen.")
         label("Continuous operation uses battery and network traffic. All-files access is required; notifications and battery exemption are recommended.")
@@ -240,6 +276,8 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("pending-link", pendingLink)
         outState.putString("pending-link-error", pendingLinkError)
+        outState.putString("pendingStop", pendingStop)
+        outState.putBoolean("exitAfterStop", exitAfterStop)
         super.onSaveInstanceState(outState)
     }
 
@@ -329,9 +367,10 @@ class MainActivity : Activity() {
                 handler.post {
                     if (!isDestroyed) {
                         busy = false
-                        if (andStart && resumed) {
+                        if (andStart && resumed && pendingStop == null) {
                             try {
                                 startForegroundService(Intent(this, DaemonService::class.java).setAction(DaemonService.START))
+                                confirmedStopped = false
                                 phase = "Starting"
                                 status.text = phase
                             } catch (failure: Exception) { error.text = failure.message ?: "Cannot start service" }
@@ -345,15 +384,39 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun requestStop(exit: Boolean) {
+        if (busy || pendingStop != null) return
+        val request = UUID.randomUUID().toString()
+        pendingStop = request
+        exitAfterStop = exit
+        status.show("Stopping")
+        updateControls()
+        sendStop(request)
+    }
+
+    private fun sendStop(request: String) {
+        try {
+            checkNotNull(startService(Intent(this, DaemonService::class.java)
+                .setAction(DaemonService.STOP).putExtra(DaemonService.STOP_REQUEST, request)))
+        } catch (_: Exception) {
+            pendingStop = null
+            exitAfterStop = false
+            status.show(phase)
+            error.show("Cannot send the stop request")
+            updateControls()
+        }
+    }
+
     private fun updateControls() {
-        val stopped = phase == "Stopped" || phase == "Failed"
+        val stopped = pendingStop == null && (phase == "Stopped" || phase == "Failed")
         bind.isEnabled = !busy && stopped
         key.isEnabled = !busy && stopped
         regenerate.isEnabled = !busy && stopped
         save.isEnabled = !busy && stopped
         start.isEnabled = !busy && stopped
-        stop.isEnabled = phase == "Starting" || phase == "Running"
-        open.isEnabled = phase == "Running" && address != null
+        stop.isEnabled = remote != null && !busy && pendingStop == null && !confirmedStopped
+        stopAndExit.isEnabled = remote != null && !busy && pendingStop == null
+        open.isEnabled = pendingStop == null && phase == "Running" && address != null
     }
 
     private fun queryStatus() {
@@ -376,8 +439,19 @@ class MainActivity : Activity() {
         super.onStart()
         bound = bindService(Intent(this, DaemonService::class.java), connection, Context.BIND_AUTO_CREATE)
     }
-    override fun onResume() { super.onResume(); resumed = true; handler.post(poll) }
-    override fun onPause() { resumed = false; handler.removeCallbacks(poll); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        phoneAddresses.start()
+        handler.post(poll)
+    }
+
+    override fun onPause() {
+        resumed = false
+        phoneAddresses.stop()
+        handler.removeCallbacks(poll)
+        super.onPause()
+    }
     override fun onStop() {
         if (bound) { unbindService(connection); bound = false; remote = null }
         super.onStop()
