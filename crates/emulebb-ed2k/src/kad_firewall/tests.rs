@@ -246,6 +246,8 @@ fn udp_round_times_out_as_firewalled_after_completed_failed_tests() {
     let completed_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 31, 20).unwrap();
 
     assert!(state.begin_udp_check([helper_a, helper_b], [41000], started_at));
+    state.record_udp_check_request_sent(helper_a);
+    state.record_udp_check_request_sent(helper_b);
     state.record_helper_test_failed(helper_a, "helper disconnected during UDP probe");
     state.record_helper_test_failed(helper_b, "helper disconnected during UDP probe");
     let summary = state.finish_udp_check(completed_at).expect("summary");
@@ -265,6 +267,10 @@ fn udp_round_prefers_a_timely_internal_port_after_external_success() {
     let observed_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 33, 5).unwrap();
 
     assert!(state.begin_udp_check([helper_a, helper_b], [41000, 53000], started_at));
+    state.record_udp_check_request_sent(helper_a);
+    state.record_udp_check_request_sent(helper_b);
+    state.record_helper_test_failed(helper_a, "helper disconnected after write");
+    state.record_helper_test_failed(helper_b, "helper disconnected after write");
     match state.record_firewall_udp_packet(helper_a, 0, 53000, observed_at) {
         FirewallUdpPacketOutcome::Open(summary) => {
             assert!(summary.open);
@@ -285,7 +291,7 @@ fn udp_round_prefers_a_timely_internal_port_after_external_success() {
     ));
     assert!(matches!(
         state.record_firewall_udp_packet(
-            helper_a, 0, 41000, observed_at + chrono::Duration::seconds(1)
+            helper_b, 0, 41000, observed_at + chrono::Duration::seconds(1)
         ),
         FirewallUdpPacketOutcome::Open(summary) if summary.external_udp_port.is_none()
     ));
@@ -325,6 +331,23 @@ fn udp_round_stays_unverified_when_no_tcp_request_can_be_sent() {
         state.last_error.as_deref(),
         Some("all UDP firewall-check TCP requests failed")
     );
+}
+
+#[test]
+fn udp_round_needs_two_post_request_disconnects_to_verify_closed() {
+    let mut state = KadFirewallState::default();
+    let disconnected = "203.0.113.24".parse().unwrap();
+    let silent = "203.0.113.25".parse().unwrap();
+    let started_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 35, 0).unwrap();
+
+    assert!(state.begin_udp_check([disconnected, silent], [41000], started_at));
+    state.record_helper_test_failed(silent, "disconnect before successful request");
+    state.record_udp_check_request_sent(silent);
+    state.record_udp_check_request_sent(disconnected);
+    state.record_helper_test_failed(disconnected, "disconnect after successful request");
+
+    assert!(state.finish_udp_check(started_at).is_none());
+    assert!(!state.udp_verified);
 }
 
 #[test]

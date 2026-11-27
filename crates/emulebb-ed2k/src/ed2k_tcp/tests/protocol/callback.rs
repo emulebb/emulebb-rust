@@ -1244,7 +1244,7 @@ async fn udp_firewall_check_request_completes_hello_exchange_before_request() {
         fwcheck.expect("expected OP_FWCHECKUDPREQ after hello exchange")
     });
 
-    request_udp_firewall_check(
+    let disposition = request_udp_firewall_check(
         None,
         crate::networking::EgressBinding::new(
             test_bind_ip(),
@@ -1275,6 +1275,10 @@ async fn udp_firewall_check_request_completes_hello_exchange_before_request() {
     .await
     .unwrap();
 
+    assert_eq!(
+        disposition,
+        crate::ed2k_tcp::UdpFirewallHelperOutcome::PeerDisconnected
+    );
     let fwcheck = server.await.unwrap();
     assert_eq!(&fwcheck[6..8], &41000u16.to_le_bytes());
     assert_eq!(&fwcheck[8..10], &41000u16.to_le_bytes());

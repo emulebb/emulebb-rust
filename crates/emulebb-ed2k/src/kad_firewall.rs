@@ -498,7 +498,8 @@ impl KadFirewallState {
     /// Mark one helper request as failed before any UDP probe arrives.
     pub fn record_helper_request_failed(&mut self, helper_ip: IpAddr, error: &str) {
         if let Some(round) = &mut self.active_round
-            && let Some(outcome) = round.helper_outcomes.get_mut(&helper_ip)
+            && let Some(outcome @ HelperOutcome::Pending) =
+                round.helper_outcomes.get_mut(&helper_ip)
         {
             *outcome = HelperOutcome::RequestFailed;
             self.last_helper_ip = Some(helper_ip.to_string());
@@ -506,10 +507,11 @@ impl KadFirewallState {
         }
     }
 
-    /// Mark one helper test as failed after the helper accepted the UDP probe request.
+    /// Record a disconnect after the request was written to a helper.
     pub fn record_helper_test_failed(&mut self, helper_ip: IpAddr, error: &str) {
         if let Some(round) = &mut self.active_round
-            && let Some(outcome) = round.helper_outcomes.get_mut(&helper_ip)
+            && let Some(outcome @ HelperOutcome::AwaitingResult) =
+                round.helper_outcomes.get_mut(&helper_ip)
         {
             *outcome = HelperOutcome::TestFailed;
             self.last_helper_ip = Some(helper_ip.to_string());
@@ -544,9 +546,11 @@ impl KadFirewallState {
         let Some(outcome) = round.helper_outcomes.get_mut(&helper_ip) else {
             return FirewallUdpPacketOutcome::Ignored;
         };
+        // WHY: TCP shutdown can reach us before the helper's UDP probe. Keep
+        // the armed helper eligible until the receive window closes.
         if !matches!(
             outcome,
-            HelperOutcome::Pending | HelperOutcome::AwaitingResult
+            HelperOutcome::Pending | HelperOutcome::AwaitingResult | HelperOutcome::TestFailed
         ) {
             return FirewallUdpPacketOutcome::Ignored;
         }
@@ -568,6 +572,7 @@ impl KadFirewallState {
                             status,
                             HelperOutcome::Pending
                                 | HelperOutcome::AwaitingResult
+                                | HelperOutcome::TestFailed
                                 | HelperOutcome::Succeeded
                         )
                     })

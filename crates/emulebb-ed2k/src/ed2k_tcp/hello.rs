@@ -464,6 +464,7 @@ pub(super) struct DecodedHelloIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DecodedHelloProfile {
     pub(super) identity: DecodedHelloIdentity,
+    pub(super) kad_version: u8,
     pub(super) is_mule_hello: bool,
     pub(super) emule_version_tag: Option<u32>,
     pub(super) supports_aich: bool,
@@ -580,6 +581,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     cursor = &cursor[4..];
 
     let mut is_mule_hello = false;
+    let mut kad_version = 0;
     let mut emule_version_tag = None;
     let mut client_software = None;
     let mut supports_ext_multipacket = false;
@@ -614,6 +616,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         if tag.tag_name == Some(CT_EMULE_MISCOPTIONS2)
             && let Some(misc_options2) = decode_hello_tag_u32(&tag)
         {
+            kad_version = (misc_options2 & 0x0F) as u8;
             supports_file_identifiers = ((misc_options2 >> 13) & 1) != 0;
             supports_direct_udp_callback = ((misc_options2 >> 12) & 1) != 0;
             supports_source_exchange2 = ((misc_options2 >> 10) & 1) != 0;
@@ -655,6 +658,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
 
     Ok(DecodedHelloProfile {
         identity,
+        kad_version,
         is_mule_hello,
         emule_version_tag,
         supports_aich: misc_options1.supports_aich(),
