@@ -64,8 +64,9 @@ impl Ed2kTransferRuntime {
         }
         self.prepare_download_job_storage(token).await?;
         let file_hash = job.file_hash;
-        let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
-        self.recover_delivery_attempt_unlocked(token).await?;
+        let lifecycle_guard = self.lock_lifecycle(token.job_id).await;
+        self.recover_delivery_attempt_unlocked(token, &lifecycle_guard)
+            .await?;
         let snapshot = {
             let _manifest_guard = self.lock_manifest(token).await;
             let Some(manifest) = self.load_manifest_optional_unlocked(token).await? else {

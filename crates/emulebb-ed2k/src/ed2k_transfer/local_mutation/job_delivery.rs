@@ -5,6 +5,26 @@ use emulebb_metadata::{JobId, JobToken, NativeFileFingerprint};
 use std::path::Path;
 
 impl LocalMutationRegistry {
+    /// A cancelled delivery waiter must leave its job and filesystem admission
+    /// fenced until the underlying syscall has returned.
+    pub(in crate::ed2k_transfer) fn submit_delivery_io<T: Send + 'static>(
+        &self,
+        guard: transfer::store::ScopedLockGuard<JobId>,
+        operation: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<oneshot::Receiver<Result<T>>> {
+        let mut state = self.state.lock().map_err(|_| LocalMutationError::Unknown)?;
+        Self::reap(&mut state);
+        // Copy and hashing are sequential and use bounded buffers.
+        const DELIVERY_IO_WORKSPACE: usize = 512 * 1024;
+        let lease = Self::reserve_long_fs(&mut state, DELIVERY_IO_WORKSPACE)?;
+        let (sender, receipt) = oneshot::channel();
+        Self::spawn_unit_reply(&mut state, lease, sender, move |_| {
+            let _guard = guard;
+            (operation(), 0)
+        });
+        Ok(receipt)
+    }
+
     /// The caller already verified bytes and holds this exact job guard. The
     /// registry owns the SQL/cache boundary even if its receipt is abandoned.
     #[expect(

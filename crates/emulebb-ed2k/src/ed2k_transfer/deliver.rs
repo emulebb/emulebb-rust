@@ -42,7 +42,7 @@ use emulebb_kad_proto::Ed2kHash;
 #[cfg(test)]
 use emulebb_metadata::NativePath;
 use emulebb_metadata::{
-    JobToken, MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
+    JobId, JobToken, MetadataTransferDeliveryAttempt, MetadataTransferDeliveryAttemptPhase,
     NativeFileFingerprint,
 };
 use md4::{Digest, Md4};
@@ -50,11 +50,13 @@ use uuid::Uuid;
 
 use crate::long_path::long_path;
 
+#[cfg(test)]
+use super::fs_durability::move_path_no_replace;
 use super::fs_durability::{
-    AtomicMoveUnsupported, NoReplaceMoveOutcome, move_path_no_replace, sync_file_for_publish,
-    sync_parent_directory,
+    AtomicMoveUnsupported, NoReplaceMoveOutcome, move_path_no_replace_retained,
+    sync_delivery_parent, sync_delivery_parent_retained, sync_parent_directory,
 };
-use super::{ED2K_PART_SIZE, Ed2kTransferRuntime};
+use super::{ED2K_PART_SIZE, Ed2kTransferRuntime, store::ScopedLockGuard};
 
 #[cfg(test)]
 pub(super) const DELIVERY_PENDING_FILE_NAME: &str = "delivery.pending";
@@ -102,7 +104,7 @@ impl Ed2kTransferRuntime {
         token: JobToken,
         dest_dir: &Path,
     ) -> Result<Ed2kDeliveryOutcome> {
-        let _lifecycle_guard = self.lock_lifecycle(token.job_id).await;
+        let lifecycle_guard = self.lock_lifecycle(token.job_id).await;
         let metadata = self.metadata.clone();
         let record = tokio::task::spawn_blocking(move || metadata.download_job(token.job_id))
             .await
@@ -113,7 +115,8 @@ impl Ed2kTransferRuntime {
         if record.delivery_state == emulebb_metadata::MetadataTransferDeliveryState::Pending
             && record.completed_at_s.is_none()
         {
-            self.recover_delivery_attempt_unlocked(token).await?;
+            self.recover_delivery_attempt_unlocked(token, &lifecycle_guard)
+                .await?;
         }
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
@@ -154,13 +157,17 @@ impl Ed2kTransferRuntime {
         };
 
         if let Some(recorded_path) = recorded_path {
-            match classify_delivered_output(
-                &recorded_path,
-                recorded_fingerprint.as_ref(),
-                expected_size,
-                expected_hash,
-            )
-            .await
+            match self
+                .classify_delivery_output(
+                    &recorded_path,
+                    recorded_fingerprint.as_ref(),
+                    DeliveryPayloadIdentity {
+                        size: expected_size,
+                        hash: expected_hash,
+                    },
+                    &lifecycle_guard,
+                )
+                .await
             {
                 Ok(DeliveredOutputIdentity::Matching(Some(current))) => {
                     if recorded_fingerprint.as_ref() != Some(&current) {
@@ -210,8 +217,11 @@ impl Ed2kTransferRuntime {
                 &source,
                 dest_dir,
                 &display_name,
-                expected_size,
-                expected_hash,
+                DeliveryPayloadIdentity {
+                    size: expected_size,
+                    hash: expected_hash,
+                },
+                &lifecycle_guard,
             )
             .await
             .with_context(|| format!("failed to deliver completed transfer {file_hash}"))?;
@@ -266,6 +276,7 @@ struct VerifiedStagingFile {
     fingerprint: NativeFileFingerprint,
 }
 
+#[derive(Clone, Copy)]
 struct DeliveryPayloadIdentity {
     size: u64,
     hash: [u8; 16],
@@ -330,41 +341,48 @@ pub(super) async fn classify_delivered_output(
     let path = long_path(path);
     let recorded_fingerprint = recorded_fingerprint.cloned();
     tokio::task::spawn_blocking(move || {
-        let metadata = match path.symlink_metadata() {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(DeliveredOutputIdentity::Missing);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to stat {}", path.display()));
-            }
-        };
-        if !metadata.file_type().is_file() || metadata.len() != expected_size {
-            return Ok(DeliveredOutputIdentity::Foreign);
-        }
-        let current_fingerprint = super::ingest::native_file_fingerprint(&path);
-        if recorded_fingerprint
-            .as_ref()
-            .zip(current_fingerprint.as_ref())
-            .is_some_and(|(recorded, current)| recorded.safely_matches(current))
-        {
-            return Ok(DeliveredOutputIdentity::Matching(current_fingerprint));
-        }
-        if compute_ed2k_hash(&path, expected_size)? != Some(expected_hash) {
-            return Ok(DeliveredOutputIdentity::Foreign);
-        }
-        let post_hash_fingerprint = path
-            .symlink_metadata()
-            .ok()
-            .filter(|metadata| metadata.file_type().is_file() && metadata.len() == expected_size)
-            .and_then(|_| super::ingest::native_file_fingerprint(&path));
-        if current_fingerprint.is_some() && current_fingerprint != post_hash_fingerprint {
-            return Ok(DeliveredOutputIdentity::Foreign);
-        }
-        Ok(DeliveredOutputIdentity::Matching(post_hash_fingerprint))
+        classify_delivered_output_blocking(
+            &path,
+            recorded_fingerprint.as_ref(),
+            expected_size,
+            expected_hash,
+        )
     })
     .await
     .context("delivered-output identity task failed")?
+}
+
+fn classify_delivered_output_blocking(
+    path: &Path,
+    recorded_fingerprint: Option<&NativeFileFingerprint>,
+    expected_size: u64,
+    expected_hash: [u8; 16],
+) -> Result<DeliveredOutputIdentity> {
+    let metadata = match path.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DeliveredOutputIdentity::Missing);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to stat {}", path.display()));
+        }
+    };
+    if !metadata.file_type().is_file() || metadata.len() != expected_size {
+        return Ok(DeliveredOutputIdentity::Foreign);
+    }
+    let mut file = open_staging_file_without_follow(path)?;
+    let current = delivery_handle_fingerprint(&file, path)?;
+    if recorded_fingerprint.is_some_and(|recorded| recorded.safely_matches(&current))
+        && delivery_path_fingerprint(path)? == current
+    {
+        return Ok(DeliveredOutputIdentity::Matching(Some(current)));
+    }
+    Ok(
+        match verify_delivery_handle(&mut file, path, expected_size, expected_hash)? {
+            Some(fingerprint) => DeliveredOutputIdentity::Matching(Some(fingerprint)),
+            None => DeliveredOutputIdentity::Foreign,
+        },
+    )
 }
 
 async fn classify_attempt_artifact(
@@ -403,10 +421,10 @@ impl Ed2kTransferRuntime {
         source: &Path,
         dest_dir: &Path,
         display_name: &str,
-        expected_size: u64,
-        expected_hash: [u8; 16],
+        expected: DeliveryPayloadIdentity,
+        guard: &ScopedLockGuard<JobId>,
     ) -> Result<MetadataTransferDeliveryAttempt> {
-        validate_delivery_source(source, expected_size).await?;
+        validate_delivery_source(source, expected.size).await?;
         tokio::fs::create_dir_all(long_path(dest_dir))
             .await
             .with_context(|| {
@@ -436,29 +454,28 @@ impl Ed2kTransferRuntime {
             let staging_path = dest_dir.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
             self.begin_delivery_attempt(token, attempt_id, &target_path, &staging_path)
                 .await?;
-            stage_delivery_payload(source, &staging_path).await?;
-            let verified_staging =
-                open_verified_staging_file(&staging_path, expected_size, expected_hash).await?;
+            let source = source.to_owned();
+            let staging = staging_path.clone();
+            tracing::debug!("copying delivery payload");
+            let verified_staging = self
+                .run_delivery_io(guard, move || {
+                    stage_delivery_payload_blocking(&source, &staging, expected.size)?;
+                    open_verified_staging_file(&staging, expected)
+                })
+                .await?;
             let attempt = self
                 .mark_delivery_attempt_staged(token, attempt_id, &verified_staging.fingerprint)
                 .await?
                 .context("delivery attempt disappeared before staging committed")?;
 
-            let installation = match install_staged_payload(&staging_path, &target_path).await {
+            let installation = match self
+                .install_delivery_payload(&staging_path, &target_path, guard)
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(error) if error.downcast_ref::<AtomicMoveUnsupported>().is_some() => {
                     let direct = self
-                        .publish_direct_copy(
-                            token,
-                            &attempt,
-                            &staging_path,
-                            &target_path,
-                            verified_staging,
-                            DeliveryPayloadIdentity {
-                                size: expected_size,
-                                hash: expected_hash,
-                            },
-                        )
+                        .publish_direct_copy(token, &attempt, verified_staging, expected, guard)
                         .await?;
                     if let Some(published) = direct {
                         return Ok(published);
@@ -472,13 +489,14 @@ impl Ed2kTransferRuntime {
                 InstallOutcome::Installed => {
                     #[cfg(test)]
                     run_after_publish_move_hook(&target_path);
-                    let installed_fingerprint = capture_published_fingerprint(
-                        verified_staging.file,
-                        &target_path,
-                        expected_size,
-                        expected_hash,
-                    )
-                    .await?;
+                    let installed_fingerprint = self
+                        .verify_installed_delivery(
+                            verified_staging.file,
+                            &target_path,
+                            expected,
+                            guard,
+                        )
+                        .await?;
                     return self
                         .mark_delivery_attempt_published(token, attempt_id, &installed_fingerprint)
                         .await?
@@ -486,11 +504,13 @@ impl Ed2kTransferRuntime {
                 }
                 InstallOutcome::AlreadyExists => {
                     drop(verified_staging.file);
-                    if !remove_file_if_fingerprint_matches(
-                        &staging_path,
-                        &verified_staging.fingerprint,
-                    )
-                    .await?
+                    if !self
+                        .remove_delivery_staging(
+                            &staging_path,
+                            &verified_staging.fingerprint,
+                            guard,
+                        )
+                        .await?
                     {
                         tracing::warn!(
                             job_id = %token.job_id,
@@ -515,13 +535,13 @@ impl Ed2kTransferRuntime {
         &self,
         token: JobToken,
         attempt: &MetadataTransferDeliveryAttempt,
-        staging_path: &Path,
-        target_path: &Path,
         verified: VerifiedStagingFile,
         expected: DeliveryPayloadIdentity,
+        guard: &ScopedLockGuard<JobId>,
     ) -> Result<Option<MetadataTransferDeliveryAttempt>> {
-        use tokio::io::AsyncSeekExt;
         let attempt_id = attempt.attempt_id;
+        let staging_path = &attempt.staging_path;
+        let target_path = &attempt.target_path;
 
         // WHY: The reservation must survive cancellation and crashes before a
         // partial final-looking file can ever be considered for sharing.
@@ -530,7 +550,8 @@ impl Ed2kTransferRuntime {
             .reserve_delivery_output(token, target_path, attempt_id)?
         {
             drop(verified.file);
-            remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
+            self.remove_delivery_staging(staging_path, &verified.fingerprint, guard)
+                .await?;
             return Ok(None);
         }
         let reservation = self
@@ -538,45 +559,141 @@ impl Ed2kTransferRuntime {
             .delivery_output_reservation(token.job_id, attempt_id)?
             .context("delivery output reservation disappeared before creation")?;
         self.refresh_complete_shared_catalog().await?;
-        let mut output = match tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(long_path(target_path))
-            .await
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                anyhow::ensure!(
-                    self.metadata
-                        .release_delivery_output(token, &reservation, attempt)?,
-                    "delivery reservation changed before collision release"
-                );
-                drop(verified.file);
-                remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        #[cfg(test)]
-        run_after_direct_create_hook(target_path).await;
-        let mut input = tokio::fs::File::from_std(verified.file);
-        input.seek(std::io::SeekFrom::Start(0)).await?;
-        tokio::io::copy(&mut input, &mut output).await?;
-        let output = output.into_std().await;
-        sync_file_for_publish(output.try_clone()?).await?;
-        sync_parent_directory(target_path).await?;
-        let fingerprint =
-            capture_published_fingerprint(output, target_path, expected.size, expected.hash)
+        let target = long_path(target_path);
+        let metadata = self.metadata.clone();
+        let staging = long_path(staging_path);
+        let staging_fingerprint = verified.fingerprint;
+        let retained_staging_fingerprint = staging_fingerprint.clone();
+        let outcome = self
+            .run_delivery_io(guard, move || {
+                let mut output = match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                #[cfg(test)]
+                run_after_direct_create_hook(&target)?;
+                tracing::debug!("copying delivery payload to a reserved output");
+                let mut input = verified.file;
+                input.seek(SeekFrom::Start(0))?;
+                std::io::copy(&mut input, &mut output)?;
+                output.sync_all()?;
+                sync_delivery_parent_retained(&target)?;
+                let fingerprint =
+                    verify_delivery_handle(&mut output, &target, expected.size, expected.hash)?
+                        .context("reserved delivery failed verification")?;
+                // Retain the exclusion until the verified publication receipt commits,
+                // including when the caller has stopped waiting for this unit.
+                let published = metadata
+                    .publish_reserved_delivery_attempt(token, attempt_id, &fingerprint)?
+                    .context(
+                        "direct delivery reservation disappeared before publication committed",
+                    )?;
+                drop(input);
+                remove_file_if_fingerprint_matches_retained(
+                    &staging,
+                    &retained_staging_fingerprint,
+                )?;
+                Ok(Some(published))
+            })
+            .await?;
+        if outcome.is_none() {
+            anyhow::ensure!(
+                self.metadata
+                    .release_delivery_output(token, &reservation, attempt)?,
+                "delivery reservation changed before collision release"
+            );
+            self.remove_delivery_staging(staging_path, &staging_fingerprint, guard)
                 .await?;
-        // Keep the barrier until the published journal record is committed.
-        let published = self
-            .metadata
-            .publish_reserved_delivery_attempt(token, attempt_id, &fingerprint)?
-            .context("direct delivery reservation disappeared before publication committed")?;
-        drop(input);
-        remove_file_if_fingerprint_matches(staging_path, &verified.fingerprint).await?;
-        Ok(Some(published))
+        }
+        Ok(outcome)
+    }
+
+    async fn run_delivery_io<T: Send + 'static>(
+        &self,
+        guard: &ScopedLockGuard<JobId>,
+        operation: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.local_mutations
+            .submit_delivery_io(guard.clone(), operation)?
+            .await
+            .context("delivery filesystem owner stopped")?
+    }
+
+    async fn classify_delivery_output(
+        &self,
+        path: &Path,
+        recorded: Option<&NativeFileFingerprint>,
+        expected: DeliveryPayloadIdentity,
+        guard: &ScopedLockGuard<JobId>,
+    ) -> Result<DeliveredOutputIdentity> {
+        let path = long_path(path);
+        let recorded = recorded.cloned();
+        self.run_delivery_io(guard, move || {
+            classify_delivered_output_blocking(
+                &path,
+                recorded.as_ref(),
+                expected.size,
+                expected.hash,
+            )
+        })
+        .await
+    }
+
+    async fn verify_installed_delivery(
+        &self,
+        mut file: File,
+        path: &Path,
+        expected: DeliveryPayloadIdentity,
+        guard: &ScopedLockGuard<JobId>,
+    ) -> Result<NativeFileFingerprint> {
+        let path = long_path(path);
+        tracing::debug!("verifying published delivery");
+        self.run_delivery_io(guard, move || {
+            verify_delivery_handle(&mut file, &path, expected.size, expected.hash)?.with_context(
+                || format!("published delivery failed verification: {}", path.display()),
+            )
+        })
+        .await
+    }
+
+    async fn remove_delivery_staging(
+        &self,
+        path: &Path,
+        expected: &NativeFileFingerprint,
+        guard: &ScopedLockGuard<JobId>,
+    ) -> Result<bool> {
+        let path = long_path(path);
+        let expected = expected.clone();
+        self.run_delivery_io(guard, move || {
+            remove_file_if_fingerprint_matches_retained(&path, &expected)
+        })
+        .await
+    }
+
+    async fn install_delivery_payload(
+        &self,
+        staging: &Path,
+        target: &Path,
+        guard: &ScopedLockGuard<JobId>,
+    ) -> Result<InstallOutcome> {
+        let staging = long_path(staging);
+        let target = long_path(target);
+        tracing::info!("publishing delivery payload");
+        self.run_delivery_io(guard, move || {
+            match move_path_no_replace_retained(&staging, &target)? {
+                NoReplaceMoveOutcome::Moved => Ok(InstallOutcome::Installed),
+                NoReplaceMoveOutcome::AlreadyExists => Ok(InstallOutcome::AlreadyExists),
+            }
+        })
+        .await
     }
 
     async fn begin_delivery_attempt(
@@ -654,20 +771,45 @@ impl Ed2kTransferRuntime {
             .context("ED2K delivery-attempt load task panicked")?
     }
 
-    pub(super) async fn recover_delivery_attempt_unlocked(&self, token: JobToken) -> Result<()> {
+    pub(super) async fn recover_delivery_attempt_unlocked(
+        &self,
+        token: JobToken,
+        guard: &ScopedLockGuard<JobId>,
+    ) -> Result<()> {
         let Some(attempt) = self.delivery_attempt(token).await? else {
             return Ok(());
         };
         validate_delivery_attempt_paths(&attempt)?;
-        if self
+        if let Some(reservation) = self
             .metadata
-            .has_delivery_reservation(token.job_id, attempt.attempt_id)?
+            .delivery_output_reservation(token.job_id, attempt.attempt_id)?
         {
-            // WHY: A crash may have interrupted direct creation or copying.
-            // Preserve both artifacts; their identity cannot be proven here.
-            anyhow::bail!(
+            // The lifecycle guard also fences retained exclusive-create work.
+            // A definitely missing target can release the exact reservation.
+            // Existing partial files and unavailable storage remain excluded.
+            let path = long_path(&reservation.path);
+            let missing = self
+                .run_delivery_io(guard, move || match path.symlink_metadata() {
+                    Ok(_) => Ok(false),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        sync_delivery_parent_retained(&path)?;
+                        Ok(true)
+                    }
+                    Err(error) => Err(error.into()),
+                })
+                .await?;
+            anyhow::ensure!(
+                missing,
                 "direct delivery reservation remains pending for job {:?}",
                 token.job_id
+            );
+            anyhow::ensure!(
+                self.metadata.release_recovered_delivery_output(
+                    token,
+                    &reservation,
+                    Some(&attempt)
+                )?,
+                "delivery reservation changed during recovery"
             );
         }
         let manifest = {
@@ -708,28 +850,35 @@ impl Ed2kTransferRuntime {
                         attempt.attempt_id
                     )
                 })?;
-            match classify_attempt_artifact(
-                &attempt.target_path,
-                published_fingerprint,
-                manifest.file_size,
-                expected_hash,
-            )
-            .await?
+            match self
+                .classify_delivery_output(
+                    &attempt.target_path,
+                    Some(published_fingerprint),
+                    DeliveryPayloadIdentity {
+                        size: manifest.file_size,
+                        hash: expected_hash,
+                    },
+                    guard,
+                )
+                .await?
             {
-                AttemptArtifactIdentity::Owned => {
+                DeliveredOutputIdentity::Matching(Some(current)) => {
+                    let ownership = if current == *published_fingerprint {
+                        super::Ed2kDeliveryOwnership::Owned
+                    } else {
+                        super::Ed2kDeliveryOwnership::Unowned
+                    };
                     return self
-                        .commit_recovered_delivery(
-                            token,
-                            &attempt,
-                            published_fingerprint,
-                            super::Ed2kDeliveryOwnership::Owned,
-                        )
+                        .commit_recovered_delivery(token, &attempt, &current, ownership)
                         .await;
                 }
-                AttemptArtifactIdentity::Missing => {
+                DeliveredOutputIdentity::Missing => {
                     sync_parent_directory(&attempt.target_path).await?;
                 }
-                AttemptArtifactIdentity::Foreign => {
+                DeliveredOutputIdentity::Matching(None) => {
+                    anyhow::bail!("published delivery remains pending without native identity");
+                }
+                DeliveredOutputIdentity::Foreign => {
                     tracing::warn!(
                         job_id = %token.job_id,
                         path = %attempt.target_path.display(),
@@ -750,64 +899,69 @@ impl Ed2kTransferRuntime {
         .await?
         {
             AttemptArtifactIdentity::Owned => {
-                let verified_staging = open_verified_staging_file(
-                    &attempt.staging_path,
-                    manifest.file_size,
-                    expected_hash,
-                )
-                .await?;
+                let expected = DeliveryPayloadIdentity {
+                    size: manifest.file_size,
+                    hash: expected_hash,
+                };
+                let staging = attempt.staging_path.clone();
+                let verified_staging = self
+                    .run_delivery_io(guard, move || {
+                        open_verified_staging_file(&staging, expected)
+                    })
+                    .await?;
                 anyhow::ensure!(
                     verified_staging.fingerprint == *staging_fingerprint,
                     "delivery staging identity changed for attempt {}",
                     attempt.attempt_id
                 );
-                let installation =
-                    match install_staged_payload(&attempt.staging_path, &attempt.target_path).await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(error) if error.downcast_ref::<AtomicMoveUnsupported>().is_some() => {
-                            if let Some(published) = self
-                                .publish_direct_copy(
+                let installation = match self
+                    .install_delivery_payload(&attempt.staging_path, &attempt.target_path, guard)
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) if error.downcast_ref::<AtomicMoveUnsupported>().is_some() => {
+                        if let Some(published) = self
+                            .publish_direct_copy(
+                                token,
+                                &attempt,
+                                verified_staging,
+                                DeliveryPayloadIdentity {
+                                    size: manifest.file_size,
+                                    hash: expected_hash,
+                                },
+                                guard,
+                            )
+                            .await?
+                        {
+                            return self
+                                .commit_recovered_delivery(
                                     token,
-                                    &attempt,
-                                    &attempt.staging_path,
-                                    &attempt.target_path,
-                                    verified_staging,
-                                    DeliveryPayloadIdentity {
-                                        size: manifest.file_size,
-                                        hash: expected_hash,
-                                    },
+                                    &published,
+                                    published
+                                        .published_fingerprint
+                                        .as_ref()
+                                        .context("published attempt lacks fingerprint")?,
+                                    super::Ed2kDeliveryOwnership::Owned,
                                 )
-                                .await?
-                            {
-                                return self
-                                    .commit_recovered_delivery(
-                                        token,
-                                        &published,
-                                        published
-                                            .published_fingerprint
-                                            .as_ref()
-                                            .context("published attempt lacks fingerprint")?,
-                                        super::Ed2kDeliveryOwnership::Owned,
-                                    )
-                                    .await;
-                            }
-                            self.clear_delivery_attempt(token, &attempt).await?;
-                            return Ok(());
+                                .await;
                         }
-                        Err(error) => return Err(error),
-                    };
+                        self.clear_delivery_attempt(token, &attempt).await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
                 match installation {
                     InstallOutcome::Installed => {
                         #[cfg(test)]
                         run_after_publish_move_hook(&attempt.target_path);
-                        let published_fingerprint = capture_published_fingerprint(
-                            verified_staging.file,
-                            &attempt.target_path,
-                            manifest.file_size,
-                            expected_hash,
-                        )
-                        .await?;
+                        let published_fingerprint = self
+                            .verify_installed_delivery(
+                                verified_staging.file,
+                                &attempt.target_path,
+                                expected,
+                                guard,
+                            )
+                            .await?;
                         let published = self
                             .mark_delivery_attempt_published(
                                 token,
@@ -827,11 +981,13 @@ impl Ed2kTransferRuntime {
                     }
                     InstallOutcome::AlreadyExists => {
                         drop(verified_staging.file);
-                        if !remove_file_if_fingerprint_matches(
-                            &attempt.staging_path,
-                            staging_fingerprint,
-                        )
-                        .await?
+                        if !self
+                            .remove_delivery_staging(
+                                &attempt.staging_path,
+                                staging_fingerprint,
+                                guard,
+                            )
+                            .await?
                         {
                             tracing::warn!(
                                 job_id = %token.job_id,
@@ -846,15 +1002,20 @@ impl Ed2kTransferRuntime {
             }
             AttemptArtifactIdentity::Missing => {
                 sync_parent_directory(&attempt.staging_path).await?;
-                match classify_delivered_output(
-                    &attempt.target_path,
-                    None,
-                    manifest.file_size,
-                    expected_hash,
-                )
-                .await?
+                match self
+                    .classify_delivery_output(
+                        &attempt.target_path,
+                        None,
+                        DeliveryPayloadIdentity {
+                            size: manifest.file_size,
+                            hash: expected_hash,
+                        },
+                        guard,
+                    )
+                    .await?
                 {
                     DeliveredOutputIdentity::Matching(Some(current_fingerprint)) => {
+                        sync_delivery_parent(&attempt.target_path).await?;
                         return self
                             .commit_recovered_delivery(
                                 token,
@@ -989,7 +1150,7 @@ impl Ed2kTransferRuntime {
 #[cfg(test)]
 type DirectCreateHook = (
     tokio::sync::oneshot::Sender<()>,
-    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::mpsc::Receiver<()>,
 );
 
 #[cfg(test)]
@@ -1002,22 +1163,30 @@ fn direct_create_hooks()
 }
 
 #[cfg(test)]
-pub(super) fn pause_after_direct_create(path: &Path) -> tokio::sync::oneshot::Receiver<()> {
+pub(super) fn pause_after_direct_create(
+    path: &Path,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    direct_create_hooks().lock().unwrap().insert(
-        path.to_owned(),
-        (sender, std::sync::Arc::new(tokio::sync::Notify::new())),
-    );
-    receiver
+    let (release, gate) = std::sync::mpsc::channel();
+    direct_create_hooks()
+        .lock()
+        .unwrap()
+        .insert(long_path(path), (sender, gate));
+    (receiver, release)
 }
 
 #[cfg(test)]
-async fn run_after_direct_create_hook(path: &Path) {
+fn run_after_direct_create_hook(path: &Path) -> Result<()> {
     let hook = direct_create_hooks().lock().unwrap().remove(path);
     if let Some((sender, gate)) = hook {
         let _ = sender.send(());
-        gate.notified().await;
+        let _ = gate.recv();
+        anyhow::bail!("injected interruption after direct delivery creation");
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1041,7 +1210,7 @@ async fn deliver_payload_file(
             continue;
         }
         let staging_path = dest_dir.join(format!(".emulebb-delivery-{}.tmp", Uuid::new_v4()));
-        stage_delivery_payload(source, &staging_path).await?;
+        stage_delivery_payload(source, &staging_path, expected_size).await?;
         let _ = verify_delivery_fingerprint(&staging_path, expected_size, expected_hash).await?;
         match install_staged_payload(&staging_path, &target_path).await? {
             InstallOutcome::Installed => {
@@ -1088,6 +1257,7 @@ async fn validate_delivery_source(source: &Path, expected_size: u64) -> Result<(
     Ok(())
 }
 
+#[cfg(test)]
 async fn verify_delivery_fingerprint(
     path: &Path,
     expected_size: u64,
@@ -1107,112 +1277,119 @@ async fn verify_delivery_fingerprint(
     }
 }
 
-async fn open_verified_staging_file(
+fn open_verified_staging_file(
+    path: &Path,
+    expected: DeliveryPayloadIdentity,
+) -> Result<VerifiedStagingFile> {
+    let path = long_path(path);
+    let mut file = open_staging_file_without_follow(&path)
+        .with_context(|| format!("failed to open delivery staging file {}", path.display()))?;
+    let fingerprint = verify_delivery_handle(&mut file, &path, expected.size, expected.hash)?
+        .with_context(|| {
+            format!(
+                "delivery staging file failed verification: {}",
+                path.display()
+            )
+        })?;
+    Ok(VerifiedStagingFile { file, fingerprint })
+}
+
+fn delivery_handle_fingerprint(file: &File, path: &Path) -> Result<NativeFileFingerprint> {
+    let metadata = file.metadata()?;
+    super::ingest::native_file_fingerprint_from_handle(file, &metadata).with_context(|| {
+        format!(
+            "delivery has no stable native identity at {}",
+            path.display()
+        )
+    })
+}
+
+fn delivery_path_fingerprint(path: &Path) -> Result<NativeFileFingerprint> {
+    #[cfg(unix)]
+    {
+        super::ingest::native_file_fingerprint_from_unix_metadata(&path.symlink_metadata()?)
+            .with_context(|| {
+                format!(
+                    "delivery path has no stable native identity: {}",
+                    path.display()
+                )
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::ensure!(
+            path.symlink_metadata()?.file_type().is_file(),
+            "delivery path no longer names a regular file: {}",
+            path.display()
+        );
+        delivery_handle_fingerprint(
+            &super::ingest::open_regular_file_without_follow(path)?,
+            path,
+        )
+    }
+}
+
+/// A definite content mismatch is distinct from uncertain filesystem evidence.
+fn verify_delivery_handle(
+    file: &mut File,
     path: &Path,
     expected_size: u64,
     expected_hash: [u8; 16],
-) -> Result<VerifiedStagingFile> {
-    let path = long_path(path);
-    tokio::task::spawn_blocking(move || -> Result<VerifiedStagingFile> {
-        let mut file = open_staging_file_without_follow(&path)
-            .with_context(|| format!("failed to open delivery staging file {}", path.display()))?;
-        let opened_metadata = file.metadata()?;
-        let opened_fingerprint =
-            super::ingest::native_file_fingerprint_from_handle(&file, &opened_metadata)
-                .with_context(|| {
-                    format!(
-                        "delivery staging file has no stable native identity: {}",
-                        path.display()
-                    )
-                })?;
-        anyhow::ensure!(
-            opened_fingerprint.size_bytes == expected_size,
-            "delivery staging file size changed at {}",
-            path.display()
-        );
-        anyhow::ensure!(
-            compute_ed2k_hash_from_handle(&mut file, expected_size)? == expected_hash,
-            "delivery staging file failed verification: {}",
-            path.display()
-        );
-        let verified_metadata = file.metadata()?;
-        let verified_fingerprint =
-            super::ingest::native_file_fingerprint_from_handle(&file, &verified_metadata)
-                .with_context(|| {
-                    format!(
-                        "delivery staging file lost its native identity: {}",
-                        path.display()
-                    )
-                })?;
-        anyhow::ensure!(
-            opened_fingerprint == verified_fingerprint,
-            "delivery staging file changed during verification: {}",
-            path.display()
-        );
-        anyhow::ensure!(
-            super::ingest::native_file_fingerprint(&path).as_ref() == Some(&verified_fingerprint),
-            "delivery staging path changed during verification: {}",
-            path.display()
-        );
-        Ok(VerifiedStagingFile {
-            file,
-            fingerprint: verified_fingerprint,
-        })
-    })
-    .await
-    .context("delivery staging verification task failed")?
+) -> Result<Option<NativeFileFingerprint>> {
+    verify_delivery_handle_with(
+        file,
+        path,
+        expected_size,
+        expected_hash,
+        compute_ed2k_hash_from_handle,
+    )
 }
 
-async fn capture_published_fingerprint(
-    mut file: File,
-    target_path: &Path,
+fn verify_delivery_handle_with(
+    file: &mut File,
+    path: &Path,
     expected_size: u64,
     expected_hash: [u8; 16],
-) -> Result<NativeFileFingerprint> {
-    let target_path = long_path(target_path);
-    tokio::task::spawn_blocking(move || -> Result<NativeFileFingerprint> {
-        let metadata = file.metadata()?;
-        let fingerprint = super::ingest::native_file_fingerprint_from_handle(&file, &metadata)
-            .with_context(|| {
-                format!(
-                    "published delivery has no stable native identity: {}",
-                    target_path.display()
-                )
-            })?;
+    mut hash_pass: impl FnMut(&mut File, u64) -> Result<[u8; 16]>,
+) -> Result<Option<NativeFileFingerprint>> {
+    let opened = delivery_handle_fingerprint(file, path)?;
+    if opened.size_bytes != expected_size {
+        return Ok(None);
+    }
+    // WHY: Android FUSE passthrough can refresh timestamps on the first read.
+    // Take the baseline after that read. The digest still covers every byte.
+    if expected_size != 0 {
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut [0])?;
+    }
+    let mut before = delivery_handle_fingerprint(file, path)?;
+    for attempt in 0..2 {
         anyhow::ensure!(
-            fingerprint.size_bytes == expected_size,
-            "published delivery size changed at {}",
-            target_path.display()
+            before.identity == opened.identity && before.size_bytes == expected_size,
+            "delivery identity or size changed at {}",
+            path.display()
         );
+        let hash = hash_pass(file, expected_size)?;
+        let after = delivery_handle_fingerprint(file, path)?;
+        let named = delivery_path_fingerprint(path)?;
         anyhow::ensure!(
-            compute_ed2k_hash_from_handle(&mut file, expected_size)? == expected_hash,
-            "published delivery failed verification: {}",
-            target_path.display()
+            after.identity == before.identity
+                && after.size_bytes == expected_size
+                && named == after,
+            "delivery path or file identity changed at {}",
+            path.display()
         );
-        let verified_metadata = file.metadata()?;
-        let verified_fingerprint =
-            super::ingest::native_file_fingerprint_from_handle(&file, &verified_metadata)
-                .with_context(|| {
-                    format!(
-                        "published delivery lost its stable native identity: {}",
-                        target_path.display()
-                    )
-                })?;
+        if before == after {
+            return Ok((hash == expected_hash).then_some(after));
+        }
         anyhow::ensure!(
-            fingerprint == verified_fingerprint,
-            "published delivery changed during verification: {}",
-            target_path.display()
+            attempt == 0 && hash == expected_hash,
+            "delivery changed during verification: {}",
+            path.display()
         );
-        anyhow::ensure!(
-            super::ingest::native_file_fingerprint(&target_path).as_ref()
-                == Some(&verified_fingerprint),
-            "published delivery path does not identify the staged object: {}",
-            target_path.display()
-        );
-        Ok(verified_fingerprint)
-    })
-    .await
-    .context("delivery publication fingerprint task failed")?
+        before = after;
+    }
+    unreachable!("verification loop returns or rejects its second observation")
 }
 
 #[cfg(test)]
@@ -1258,7 +1435,18 @@ fn open_staging_file_without_follow(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn open_staging_file_without_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // A racing nonregular file must not block the verifier at open.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_staging_file_without_follow(path: &Path) -> std::io::Result<File> {
     super::ingest::open_regular_file_without_follow(path)
 }
@@ -1269,36 +1457,37 @@ enum InstallOutcome {
     AlreadyExists,
 }
 
-/// Materialize one independent payload copy at an exact, attempt-owned staging
-/// path. The caller persists that path before invoking this function.
-async fn stage_delivery_payload(source: &Path, staging_path: &Path) -> Result<()> {
-    let source_lp = long_path(source);
-    let staging_lp = long_path(staging_path);
-    let mut output = tokio::fs::OpenOptions::new()
+fn stage_delivery_payload_blocking(source: &Path, staging_path: &Path, size: u64) -> Result<()> {
+    let staging_path = long_path(staging_path);
+    let mut output = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&staging_lp)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create delivery staging file {}",
-                staging_path.display()
-            )
-        })?;
-
-    if path_exists(source).await {
-        let mut input = tokio::fs::File::open(&source_lp)
-            .await
-            .with_context(|| format!("failed to open delivery payload {}", source.display()))?;
-        tokio::io::copy(&mut input, &mut output)
-            .await
-            .with_context(|| format!("failed to copy payload {}", source.display()))?;
+        .open(&staging_path)?;
+    match File::open(source) {
+        Ok(mut input) => {
+            std::io::copy(&mut input, &mut output)?;
+        }
+        Err(error) if size == 0 && error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    sync_file_for_publish(output.into_std().await).await?;
-    sync_parent_directory(staging_path).await?;
-    Ok(())
+    output.sync_all()?;
+    sync_delivery_parent_retained(&staging_path)
 }
 
+#[cfg(test)]
+/// Materialize one independent payload copy at an exact, attempt-owned staging
+/// path. The caller persists that path before invoking this function.
+async fn stage_delivery_payload(source: &Path, staging_path: &Path, size: u64) -> Result<()> {
+    let source = source.to_owned();
+    let staging_path = staging_path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        stage_delivery_payload_blocking(&source, &staging_path, size)
+    })
+    .await
+    .context("delivery staging task failed")?
+}
+
+#[cfg(test)]
 /// Publish a staged file without replacing a pre-existing destination. The
 /// platform move is atomic within the shared parent directory and preserves the
 /// staged object's native identity at the final path.
@@ -1376,44 +1565,50 @@ pub(super) fn remove_file_if_fingerprint_matches_retained(
     expected_fingerprint: &NativeFileFingerprint,
 ) -> Result<bool> {
     let owned_path = long_path(path);
-    let removed = (|| -> Result<bool> {
-        let metadata = match owned_path.symlink_metadata() {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.file_type().is_file() {
-            return Ok(false);
+    let metadata = match owned_path.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            super::fs_durability::sync_parent_directory_retained(path)?;
+            return Ok(true);
         }
-        let Some(current_fingerprint) = super::ingest::native_file_fingerprint(&owned_path) else {
-            return Ok(false);
-        };
-        if *expected_fingerprint != current_fingerprint {
-            return Ok(false);
-        }
-        #[cfg(test)]
-        run_before_fingerprint_remove_hook(&owned_path)?;
-        let metadata = match owned_path.symlink_metadata() {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.file_type().is_file()
-            || super::ingest::native_file_fingerprint(&owned_path).as_ref()
-                != Some(expected_fingerprint)
-        {
-            return Ok(false);
-        }
-        match std::fs::remove_file(&owned_path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-            Err(error) => Err(error.into()),
-        }
-    })()?;
-    if removed {
-        super::fs_durability::sync_parent_directory_retained(path)?;
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(false);
     }
-    Ok(removed)
+    let Some(current_fingerprint) = super::ingest::native_file_fingerprint(&owned_path) else {
+        return Ok(false);
+    };
+    if *expected_fingerprint != current_fingerprint {
+        return Ok(false);
+    }
+    #[cfg(test)]
+    run_before_fingerprint_remove_hook(&owned_path)?;
+    let metadata = match owned_path.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            super::fs_durability::sync_parent_directory_retained(path)?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file()
+        || super::ingest::native_file_fingerprint(&owned_path).as_ref()
+            != Some(expected_fingerprint)
+    {
+        return Ok(false);
+    }
+    match std::fs::remove_file(&owned_path) {
+        Ok(()) => {
+            sync_delivery_parent_retained(&owned_path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            super::fs_durability::sync_parent_directory_retained(path)?;
+            Ok(true)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) async fn remove_file_if_fingerprint_matches(
@@ -1457,24 +1652,6 @@ fn run_before_fingerprint_remove_hook(path: &Path) -> std::io::Result<()> {
         hook(path)?;
     }
     Ok(())
-}
-
-fn compute_ed2k_hash(path: &Path, expected_size: u64) -> Result<Option<[u8; 16]>> {
-    let metadata = match path.symlink_metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to stat {}", path.display()));
-        }
-    };
-    if !metadata.is_file() || metadata.len() != expected_size {
-        return Ok(None);
-    }
-    let mut file = File::open(path)?;
-    Ok(Some(compute_ed2k_hash_from_handle(
-        &mut file,
-        expected_size,
-    )?))
 }
 
 pub(super) fn compute_ed2k_hash_from_handle(
@@ -1578,6 +1755,52 @@ fn split_stem_extension(file_name: &str) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delivery_rehashes_once_after_timestamp_drift() {
+        for (second_drift, change_bytes) in [(false, false), (true, false), (false, true)] {
+            use std::io::Write;
+            use std::time::{Duration, UNIX_EPOCH};
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("payload");
+            std::fs::write(&path, b"valid").unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let expected = compute_ed2k_hash_from_handle(&mut file, 5).unwrap();
+            let mut passes = 0;
+            let result =
+                verify_delivery_handle_with(&mut file, &path, 5, expected, |file, size| {
+                    let digest = compute_ed2k_hash_from_handle(file, size)?;
+                    passes += 1;
+                    if change_bytes && passes == 1 {
+                        file.seek(SeekFrom::Start(0))?;
+                        file.write_all(b"wrong")?;
+                        file.sync_all()?;
+                    }
+                    if passes == 1 || second_drift {
+                        file.set_times(std::fs::FileTimes::new().set_modified(
+                            UNIX_EPOCH + Duration::from_secs(1_700_000_000 + passes),
+                        ))?;
+                    }
+                    Ok(digest)
+                });
+            assert_eq!(passes, 2);
+            if second_drift {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("changed during verification")
+                );
+            } else {
+                assert_eq!(result.unwrap().is_some(), !change_bytes);
+            }
+        }
+    }
+
     #[test]
     fn collision_suffixes_widen_after_each_full_group() {
         use super::delivery_candidate_name;

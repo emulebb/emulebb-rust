@@ -23,6 +23,7 @@ impl std::fmt::Display for AtomicMoveUnsupported {
 
 impl std::error::Error for AtomicMoveUnsupported {}
 
+#[cfg(test)]
 pub(super) async fn move_path_no_replace(
     source: &Path,
     destination: &Path,
@@ -44,7 +45,7 @@ pub(super) fn move_path_no_replace_retained(
     if forced_unsupported_moves()
         .lock()
         .unwrap()
-        .remove(destination)
+        .remove(&crate::long_path::long_path(destination))
     {
         return Err(AtomicMoveUnsupported(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -59,7 +60,15 @@ pub(super) fn move_path_no_replace_retained(
         other => other?,
     };
     if outcome == NoReplaceMoveOutcome::Moved {
-        sync_parent_directory_retained(destination)?;
+        #[cfg(test)]
+        if forced_parent_sync_failures()
+            .lock()
+            .unwrap()
+            .remove(&crate::long_path::long_path(destination))
+        {
+            return Err(io::Error::other("forced parent sync failure after rename").into());
+        }
+        sync_delivery_parent_retained(destination)?;
     }
     Ok(outcome)
 }
@@ -78,14 +87,24 @@ pub(super) fn force_unsupported_move(path: &Path) {
     forced_unsupported_moves()
         .lock()
         .unwrap()
-        .insert(path.to_owned());
+        .insert(crate::long_path::long_path(path));
 }
 
-pub(super) async fn sync_file_for_publish(file: std::fs::File) -> Result<()> {
-    tokio::task::spawn_blocking(move || sync_file_for_publish_blocking(&file))
-        .await
-        .context("file durability task failed")??;
-    Ok(())
+#[cfg(test)]
+fn forced_parent_sync_failures()
+-> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static PATHS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    PATHS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(super) fn force_parent_sync_failure(path: &Path) {
+    forced_parent_sync_failures()
+        .lock()
+        .unwrap()
+        .insert(crate::long_path::long_path(path));
 }
 
 pub(super) async fn sync_parent_directory(path: &Path) -> Result<()> {
@@ -93,6 +112,28 @@ pub(super) async fn sync_parent_directory(path: &Path) -> Result<()> {
     tokio::task::spawn_blocking(move || sync_parent_directory_retained(&path))
         .await
         .context("directory sync task failed")?
+}
+
+pub(super) async fn sync_delivery_parent(path: &Path) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_delivery_parent_retained(&path))
+        .await
+        .context("delivery parent sync task failed")?
+}
+
+pub(super) fn sync_delivery_parent_retained(path: &Path) -> Result<()> {
+    // WHY: Publication changes the exact parent, even when it is reached
+    // through a directory symlink. Syncing an ancestor would miss that entry.
+    let parent = path
+        .parent()
+        .context("delivery path has no parent directory")?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    sync_directory(parent)
+        .with_context(|| format!("failed to sync delivery parent {}", parent.display()))
 }
 
 /// The same nearest-existing-parent durability rule for retained blocking units.
@@ -120,7 +161,17 @@ pub(super) fn sync_parent_directory_retained(path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(path)?
+        .sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }
@@ -140,23 +191,6 @@ pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(long_path(path))?
         .sync_all()
-}
-
-#[cfg(target_os = "macos")]
-fn sync_file_for_publish_blocking(file: &std::fs::File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-
-    file.sync_all()?;
-    // SAFETY: the descriptor belongs to `file` and remains valid for the call.
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sync_file_for_publish_blocking(file: &std::fs::File) -> io::Result<()> {
-    file.sync_all()
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
