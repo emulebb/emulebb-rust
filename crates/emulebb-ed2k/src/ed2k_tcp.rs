@@ -513,11 +513,11 @@ pub struct Ed2kHelloIdentity {
     pub direct_udp_callback: bool,
 }
 
-/// Kad facts which participate in stock `CemuleApp::GetID()` selection for an
-/// eD2k peer HELLO. Kad connection liveness is intentionally distinct from DHT
-/// bootstrap completion.
+/// Kad runtime facts used for eD2k peer HELLO identity and capabilities.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KadHelloIdentityState {
+    /// Whether Kad is running, independently of recent contact.
+    pub running: bool,
     /// Whether Kad observed a packet inside its twenty-minute contact window.
     pub connected: bool,
     /// Public IPv4 currently bound to Kad's UDP-key identity, when known.
@@ -782,10 +782,12 @@ pub async fn enrich_hello_identity(
         (apply_server_state(identity, &state), state.clone())
     };
     let firewall = kad_firewall.lock().await;
-    identity.client_id =
-        resolve_hello_client_id(&server_state, kad_identity, firewall.tcp_firewalled());
-    identity.direct_udp_callback = identity.client_id != 0
-        && identity.client_id < 0x0100_0000
+    let kad_tcp_firewalled = firewall.tcp_firewalled();
+    identity.client_id = resolve_hello_client_id(&server_state, kad_identity, kad_tcp_firewalled);
+    // WHY: stock advertises this through Kad reachability independently of
+    // the client ID selected for the HELLO packet.
+    identity.direct_udp_callback = kad_identity.running
+        && kad_tcp_firewalled.unwrap_or(true)
         && firewall.udp_verified
         && firewall.udp_open;
     identity

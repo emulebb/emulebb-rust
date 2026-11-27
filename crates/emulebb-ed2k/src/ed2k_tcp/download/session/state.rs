@@ -142,10 +142,8 @@ pub(super) struct DownloadSessionState {
     /// to drive ICH block salvage. Drained by the session once a trusted AICH
     /// root is known and the peer supports AICH.
     pub(super) pending_aich_recovery_parts: Vec<u16>,
-    /// Parts with an OP_AICHREQUEST already sent and awaiting an OP_AICHANSWER,
-    /// so a part is not re-requested while a request is outstanding (master
-    /// `CAICHRecoveryHashSet::IsClientRequestPending`).
-    pub(super) aich_requests_inflight: Vec<u16>,
+    /// Ownership follows this exact peer session and active transfer execution.
+    pub(super) aich_request: Option<crate::ed2k_transfer::AichRecoveryPermit>,
     /// Rolling 32-in-15s stale block-packet cancel guard (oracle
     /// `ShouldAbortAfterStaleBlockPacket`, DownloadClient.cpp:2690-2712): stale
     /// / duplicate block payload is dropped and counted here instead of ending
@@ -228,7 +226,7 @@ impl DownloadSessionState {
             peer_buddy_endpoint: connection_state.peer_buddy_endpoint,
             peer_part_bitmap: None,
             pending_aich_recovery_parts: Vec::new(),
-            aich_requests_inflight: Vec::new(),
+            aich_request: None,
             stale_block_guard: StaleBlockPacketGuard::default(),
         }
     }

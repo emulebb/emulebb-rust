@@ -7,7 +7,9 @@ use crate::normalize_ed2k_file_name;
 use md4::{Digest as Md4Digest, Md4};
 
 use super::{
-    ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferJob, Ed2kTransferState,
+    ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferJob,
+    Ed2kTransferState,
+    hashset::{aich_part_spec, build_aich_block_tree_root, decode_aich_hash_hex},
 };
 
 #[derive(Debug)]
@@ -130,6 +132,52 @@ pub(super) fn verify_piece_against_manifest(
     piece_index: u32,
     data: &[u8],
 ) -> Result<bool> {
+    if !verify_piece_md4(manifest, piece_index, data)? {
+        return Ok(false);
+    }
+    let Some(expected) = trusted_aich_part_hash(manifest, piece_index)? else {
+        return Ok(true);
+    };
+    let spec = aich_part_spec(manifest.file_size, piece_index);
+    let leaves: Vec<[u8; 20]> = data
+        .chunks(ED2K_EMBLOCK_SIZE as usize)
+        .map(|block| sha1::Sha1::digest(block).into())
+        .collect();
+    let actual = build_aich_block_tree_root(spec.size, spec.is_left_branch, &leaves, 0)?;
+    Ok(actual == expected)
+}
+
+pub(super) fn trusted_aich_master(manifest: &Ed2kResumeManifest) -> Result<Option<[u8; 20]>> {
+    if manifest.aich_root_origin.is_none() {
+        return Ok(None);
+    }
+    manifest
+        .aich_root
+        .as_deref()
+        .map(decode_aich_hash_hex)
+        .transpose()
+}
+
+pub(super) fn trusted_aich_part_hash(
+    manifest: &Ed2kResumeManifest,
+    piece_index: u32,
+) -> Result<Option<[u8; 20]>> {
+    if manifest.file_size <= ED2K_PART_SIZE {
+        return trusted_aich_master(manifest);
+    }
+    if manifest.aich_root_origin.is_none() || !manifest.aich_hashset_acquired {
+        return Ok(None);
+    }
+    // The acquired set was validated against the accepted master before it was
+    // stored, and changing the master invalidates that set.
+    let hash = manifest
+        .aich_hashset
+        .get(piece_index as usize)
+        .with_context(|| format!("missing trusted AICH hash for part {piece_index}"))?;
+    decode_aich_hash_hex(hash).map(Some)
+}
+
+fn verify_piece_md4(manifest: &Ed2kResumeManifest, piece_index: u32, data: &[u8]) -> Result<bool> {
     let digest: [u8; 16] = Md4::digest(data).into();
     if manifest.md4_hashset_acquired {
         if manifest.md4_hashset.is_empty() {

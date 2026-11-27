@@ -210,6 +210,27 @@ pub(super) fn aich_part_specs_for_size(file_size: u64) -> Result<Vec<AichPartSpe
     Ok(specs)
 }
 
+pub(super) fn aich_part_spec(file_size: u64, index: u32) -> AichPartSpec {
+    let mut size = file_size;
+    let mut offset = u64::from(index) * ED2K_PART_SIZE;
+    let mut is_left_branch = true;
+    while size > ED2K_PART_SIZE {
+        let parts = chunk_count_for_size(size, ED2K_PART_SIZE);
+        let left_size = ((parts + u64::from(is_left_branch)) / 2) * ED2K_PART_SIZE;
+        is_left_branch = offset < left_size;
+        if is_left_branch {
+            size = left_size;
+        } else {
+            size -= left_size;
+            offset -= left_size;
+        }
+    }
+    AichPartSpec {
+        size,
+        is_left_branch,
+    }
+}
+
 fn collect_aich_part_specs(
     size: u64,
     is_left_branch: bool,

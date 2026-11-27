@@ -25,14 +25,28 @@ const AICH_ANSWER_HEADER_LEN: usize = 38;
 /// answer carries a recovery body for a part we are downloading.
 pub(super) async fn handle_aich_recovery_answer(
     transfer_runtime: &Ed2kTransferRuntime,
-    token: emulebb_metadata::JobToken,
-    file_hash_hex: &str,
+    pending: &mut Option<crate::ed2k_transfer::AichRecoveryPermit>,
+    history: &mut super::download::AichRequestHistory,
     answer: &AichRecoveryAnswer,
     packet_payload: &[u8],
     peer_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
 ) -> Result<()> {
-    let (Some(part), Some(master_hash)) = (answer.part, answer.master_hash) else {
+    let Some(request) = pending.as_ref() else {
+        return Ok(());
+    };
+    if request.expired() {
+        pending.take();
+        return Ok(());
+    }
+    if !request.matches(answer.file_hash, answer.part, answer.master_hash)
+        || (answer.part.is_none() && !history.unambiguous_failure(answer.file_hash))
+    {
+        return Ok(());
+    }
+    let request = pending.take().expect("matched recovery request");
+    let file_hash_hex = answer.file_hash;
+    let Some(part) = answer.part else {
         // A bare 16-byte answer is the peer's recovery-unavailable failure form.
         dump_ed2k_tcp_download_meta(
             peer_addr,
@@ -54,10 +68,11 @@ pub(super) async fn handle_aich_recovery_answer(
     let recovery_body = &packet_payload[AICH_ANSWER_HEADER_LEN..];
 
     match transfer_runtime
-        .begin_part_salvage(token, part, master_hash, recovery_body)
+        .salvage_requested_part(request, recovery_body)
         .await
     {
         Ok(Some(outcome)) => {
+            history.accepted_proof(answer.file_hash, part);
             dump_ed2k_tcp_download_meta(
                 peer_addr,
                 Some(transport_mode),

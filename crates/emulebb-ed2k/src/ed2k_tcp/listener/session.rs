@@ -195,6 +195,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         server_state,
         kad_firewall,
         KadHelloIdentityState {
+            running: dht.is_running(),
             connected: dht.has_had_contact(),
             public_ip: dht.public_ip_for_udp_keys(),
         },

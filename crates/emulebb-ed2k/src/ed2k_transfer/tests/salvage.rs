@@ -123,7 +123,133 @@ async fn initialized_salvage_transfer(
         .await
         .unwrap();
     fs::write(runtime.payload_path(job.token.job_id).unwrap(), &data).unwrap();
+    runtime.mark_fixture_part_corrupt(job.token, 0).await;
     (runtime, job.token, data, aich)
+}
+
+#[tokio::test]
+async fn recovery_reservations_exclude_the_same_part_and_peer_and_release_on_drop() {
+    let (runtime, token, _, aich) = initialized_salvage_transfer("aich-reservations").await;
+    let other_job = super::super::test_support::admit_download_job(
+        &runtime,
+        Ed2kHash([7; 16]),
+        "second.bin".to_string(),
+        ED2K_EMBLOCK_SIZE * 2,
+    );
+    runtime.ensure_job(&other_job).await.unwrap();
+    runtime
+        .reconcile_aich_root(other_job.token, Some([8; 20]))
+        .await
+        .unwrap();
+    runtime.mark_fixture_part_corrupt(other_job.token, 0).await;
+    let peer = ([192, 0, 2, 1], 4662).into();
+    let other = ([192, 0, 2, 2], 4662).into();
+    let file: Ed2kHash = runtime
+        .manifest(token)
+        .await
+        .unwrap()
+        .file_hash
+        .parse()
+        .unwrap();
+    let request = runtime
+        .reserve_aich_recovery(token, 0, peer, Some([1; 16]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(request.matches(file, Some(0), Some(aich.master_hash)));
+    assert!(request.matches(file, None, None));
+    assert!(!request.matches(Ed2kHash([0; 16]), Some(0), Some(aich.master_hash)));
+    assert!(!request.matches(file, Some(1), Some(aich.master_hash)));
+    assert!(!request.matches(file, Some(0), Some([0; 20])));
+    for (job, address, hash) in [
+        (token, other, [2; 16]),
+        (other_job.token, peer, [2; 16]),
+        (other_job.token, other, [1; 16]),
+    ] {
+        assert!(
+            runtime
+                .reserve_aich_recovery(job, 0, address, Some(hash))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    drop(request);
+    assert!(
+        runtime
+            .reserve_aich_recovery(token, 0, other, Some([1; 16]))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let expired = runtime
+        .reserve_aich_recovery(token, 0, peer, None)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    let replacement = runtime
+        .reserve_aich_recovery(token, 0, other, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(expired.expired());
+    assert!(
+        runtime
+            .salvage_requested_part(expired, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 0);
+    assert!(!replacement.expired());
+}
+
+#[tokio::test]
+async fn recovery_checks_current_piece_and_trust_before_payload_reads() {
+    let (runtime, token, _, _) = initialized_salvage_transfer("aich-request-fence").await;
+    let peer = ([192, 0, 2, 1], 4662).into();
+    for change_trust in [false, true] {
+        let request = runtime
+            .reserve_aich_recovery(token, 0, peer, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let guard = runtime.lock_manifest(token).await;
+        let mut manifest = runtime
+            .load_manifest_unlocked(token)
+            .await
+            .unwrap()
+            .edit()
+            .unwrap();
+        if change_trust {
+            // The same master with a new accepted provenance advances the generation.
+            let root = manifest.aich_root.clone();
+            super::super::aich_trust::set_identity(
+                &mut manifest,
+                root,
+                Some(super::super::Ed2kAichRootOrigin::StockImport),
+            )
+            .unwrap();
+        } else {
+            manifest.pieces[0].bytes_written = 1;
+        }
+        runtime
+            .store_manifest_unlocked(&manifest, guard)
+            .await
+            .unwrap();
+        let before = runtime.manifest(token).await.unwrap();
+        assert!(
+            runtime
+                .salvage_requested_part(request, &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runtime.raw_part_read_attempts.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.manifest(token).await.unwrap(), before);
+    }
 }
 
 #[tokio::test]
@@ -375,6 +501,7 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     );
 
     // Begin salvage with a valid recovery answer for part 0.
+    runtime.mark_fixture_part_corrupt(job.token, 0).await;
     let body = recovery_body_for(&data, 0);
     runtime.cbb_record_received_data(job.token, 0, ED2K_PART_SIZE, GOOD_SENDER, None);
     runtime.cbb_record_received_data(job.token, cb_start as u64, cb_end as u64, BAD_SENDER, None);
@@ -479,6 +606,7 @@ async fn block_bitmap_persists_round_trip() {
         .unwrap();
 
     // Corrupt two non-adjacent blocks (3 and 40) of part 0.
+    runtime.mark_fixture_part_corrupt(job.token, 0).await;
     let corrupt = [3usize, 40usize];
     let mut on_disk = data.clone();
     for &b in &corrupt {

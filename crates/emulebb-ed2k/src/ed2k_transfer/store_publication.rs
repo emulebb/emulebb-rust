@@ -15,6 +15,18 @@ impl Ed2kTransferRuntime {
         manifest: &Ed2kResumeManifest,
         io: ScopedLockGuard<JobId>,
     ) -> Result<()> {
+        self.store_manifest_checked_unlocked(manifest, io, |_| Ok(()))
+            .await
+    }
+
+    /// Validate the reconciled row inside the SQLite transaction so a newer
+    /// import or accepted identity can invalidate a trust-dependent write.
+    pub(super) async fn store_manifest_checked_unlocked(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        io: ScopedLockGuard<JobId>,
+        check: impl FnOnce(&emulebb_metadata::MetadataTransferManifest) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         ensure!(
             *io.key() == manifest.token.job_id,
             "manifest I/O guard belongs to another job"
@@ -61,6 +73,7 @@ impl Ed2kTransferRuntime {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let (_io, _content, _category) = (io, content, category);
             let current = metadata.upsert_transfer_manifest_reconciled(&row, |stored| {
+                check(&stored)?;
                 permit.publish(manifest_from_metadata(stored)?)
             })?;
             #[cfg(test)]

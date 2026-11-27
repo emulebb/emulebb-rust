@@ -303,6 +303,14 @@ pub(super) async fn run_one_server_session(
     // from the ~60s TCP keepalive tick. Sending it every keepalive tick (as the
     // old code did) is a ~270x over-ping and a live-network ban risk.
     let mut last_status_ping: Option<TokioInstant> = None;
+    // Anchor the timer once so a stream of TCP packets and background
+    // commands cannot postpone status indefinitely.
+    let maintenance_period = context
+        .keepalive_interval
+        .unwrap_or(KEEPALIVE_DISABLED_STATUS_TICK);
+    let mut maintenance_tick =
+        tokio::time::interval_at(TokioInstant::now() + maintenance_period, maintenance_period);
+    maintenance_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         if context.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
@@ -992,7 +1000,7 @@ pub(super) async fn run_one_server_session(
                     ),
                 }
             }
-            _ = tokio::time::sleep(context.keepalive_interval.unwrap_or(KEEPALIVE_DISABLED_STATUS_TICK)) => {
+            _ = maintenance_tick.tick(), if session.login_accepted => {
                 // eMule KeepConnectionAlive (ServerConnect.cpp:672-674) only
                 // "pings" the server when the keepalive timeout is enabled AND
                 // the TCP link has been idle for at least that interval. With the

@@ -32,7 +32,9 @@ use crate::config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig};
 mod aich_answer_cache;
 mod aich_cache;
 mod aich_recovery;
+mod aich_request;
 pub use aich_cache::validate_aich_recovery_set;
+pub(crate) use aich_request::AichRecoveryPermit;
 pub use hashset::{validate_aich_part_hashes, validate_md4_hashset};
 mod aich_tree;
 mod aich_trust;
@@ -363,6 +365,9 @@ pub struct Ed2kTransferRuntime {
     /// registry therefore disappears on restart and its lease guards release
     /// synchronously on cancellation or task drop.
     download_block_leases: block_lease::DownloadBlockLeaseRegistry,
+    aich_requests: aich_request::AichRequestRegistry,
+    /// Each salvage worker owns up to one full eD2K part of retained bytes.
+    aich_salvage_workers: Arc<tokio::sync::Semaphore>,
     next_download_block_lease_id: Arc<AtomicU64>,
     /// Cached read+write payload handles, one per transfer with active piece
     /// writes, so the per-block download path does not re-open the piece
@@ -918,6 +923,8 @@ impl Ed2kTransferRuntime {
             manifest_cache,
             manifest_checkpoint_state: checkpoint_state,
             download_block_leases: block_lease::DownloadBlockLeaseRegistry::default(),
+            aich_requests: aich_request::AichRequestRegistry::default(),
+            aich_salvage_workers: Arc::new(tokio::sync::Semaphore::new(2)),
             next_download_block_lease_id: Arc::new(AtomicU64::new(1)),
             payload_handles: Arc::new(StdMutex::new(HashMap::new())),
             source_exchange: SourceExchangeState::default(),

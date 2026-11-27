@@ -7,6 +7,15 @@ use super::*;
 /// part carrying the file's trusted AICH master hash.
 #[tokio::test]
 async fn corrupt_part_triggers_aich_recovery_request() {
+    exercise_recovery(false).await;
+}
+
+#[tokio::test]
+async fn solicited_recovery_answer_is_consumed_once_on_the_download_session() {
+    exercise_recovery(true).await;
+}
+
+async fn exercise_recovery(answer_request: bool) {
     let root = unique_test_dir("ed2k-corrupt-part-aich-request");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     // 200 KB single-part file: larger than EMBLOCKSIZE so the master recovery
@@ -21,7 +30,8 @@ async fn corrupt_part_triggers_aich_recovery_request() {
     );
     transfer_runtime.ensure_job(&file_hash_job).await.unwrap();
     // Seed a trusted AICH master root so recovery can be solicited.
-    let trusted_root = [0xABu8; 20];
+    let (trusted_root, proof) =
+        crate::ed2k_transfer::test_support::recovery_answer_for_part(&payload, 0);
     transfer_runtime
         .reconcile_aich_root(file_hash_job.token, Some(trusted_root))
         .await
@@ -56,7 +66,10 @@ async fn corrupt_part_triggers_aich_recovery_request() {
                         decode_request_parts_payload(&packet[6..], false).unwrap();
                     assert_eq!(requested_hash, file_hash);
                     for (start, end) in ranges {
-                        let corrupt = vec![0x00u8; usize::try_from(end - start).unwrap()];
+                        let mut corrupt = payload[start as usize..end as usize].to_vec();
+                        if start == 0 {
+                            corrupt[0] ^= 1;
+                        }
                         let frame =
                             encode_sending_part(&file_hash, start, end, &corrupt, false).unwrap();
                         stream.write_all(&frame).await.unwrap();
@@ -71,6 +84,15 @@ async fn corrupt_part_triggers_aich_recovery_request() {
         assert_eq!(request.file_hash, file_hash);
         assert_eq!(request.part, 0);
         assert_eq!(request.master_hash, trusted_root);
+        if answer_request {
+            let response =
+                crate::ed2k_tcp::encode_aich_recovery_answer(&file_hash, 0, trusted_root, &proof);
+            stream.write_all(&response).await.unwrap();
+            stream.write_all(&response).await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut remainder = Vec::new();
+            let _ = stream.read_to_end(&mut remainder).await;
+        }
     });
 
     let result = download_file_from_peer_test!(
@@ -110,8 +132,7 @@ async fn corrupt_part_triggers_aich_recovery_request() {
     )
     .await
     .unwrap();
-    // The peer closes after asserting the request, so the session ends
-    // incomplete (no recovery answer was supplied).
+    // A proof can salvage the good block; the corrupt block still needs bytes.
     assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
 
     // The corrupt part was reset for re-download, not left verified.
@@ -124,6 +145,12 @@ async fn corrupt_part_triggers_aich_recovery_request() {
     // the part and requests AICH recovery (PartFile.cpp:5184-5199); a ban
     // requires AICH block attribution crossing the CorruptionBlackBox 32%
     // corrupt-share threshold (CorruptionBlackBox.cpp:233-309).
-    assert!(!transfer_runtime.is_client_banned(Some(test_bind_ip()), None));
+    if !answer_request {
+        assert!(!transfer_runtime.is_client_banned(Some(test_bind_ip()), None));
+    }
+    assert_eq!(
+        transfer_runtime.recovery_payload_reads(),
+        usize::from(answer_request)
+    );
     server.await.unwrap();
 }

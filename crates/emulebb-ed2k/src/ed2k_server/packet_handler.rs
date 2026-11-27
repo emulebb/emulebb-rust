@@ -365,9 +365,15 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_CALLBACK_FAIL => {
+            let attributed = packet.payload.is_empty()
+                && session
+                    .callback_requests
+                    .refuse(tokio::time::Instant::now());
             debug!(
-                "ED2K server callback failed notification from {}",
-                session.endpoint
+                endpoint = %session.endpoint,
+                attributed,
+                payload_len = packet.payload.len(),
+                "ED2K server callback failed notification"
             );
         }
         OP_REJECT => {

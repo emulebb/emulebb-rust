@@ -272,6 +272,7 @@ const READ_BUFFER_CHUNK: usize = 32 * 1024;
 
 #[derive(Debug)]
 pub(super) struct Ed2kTransport {
+    pub(super) aich_request_history: super::download::AichRequestHistory,
     pub(super) stream: TcpStream,
     pub(super) prefetched: VecDeque<u8>,
     pub(super) receive_cipher: Option<Rc4KeyStream>,
@@ -339,6 +340,7 @@ impl Ed2kTransport {
             receive_cipher,
             send_cipher,
             mode,
+            aich_request_history: Default::default(),
             read_buf: Vec::new(),
             read_pos: 0,
             #[cfg(feature = "packet-diagnostics")]

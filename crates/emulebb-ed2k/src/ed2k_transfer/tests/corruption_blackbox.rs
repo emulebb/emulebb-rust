@@ -202,6 +202,7 @@ async fn salvage_verdicts_ban_only_the_corrupt_block_writer() {
         .unwrap();
 
     // On-disk part 0 with exactly block 10 corrupted.
+    runtime.mark_fixture_part_corrupt(job.token, 0).await;
     let corrupt_block = 10usize;
     let cb_start = corrupt_block as u64 * ED2K_EMBLOCK_SIZE;
     let cb_end = cb_start + ED2K_EMBLOCK_SIZE;

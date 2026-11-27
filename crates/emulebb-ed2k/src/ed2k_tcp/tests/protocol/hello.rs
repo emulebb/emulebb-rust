@@ -661,7 +661,7 @@ fn connect_options_disable_crypt_layer_when_obfuscation_is_off() {
 }
 
 #[tokio::test]
-async fn enrich_hello_identity_sets_direct_udp_callback_for_low_id_with_verified_udp() {
+async fn enrich_hello_identity_sets_direct_udp_callback_for_initial_kad_verdict() {
     let server_state = Arc::new(RwLock::new(Ed2kServerState {
         endpoint: Some(SocketAddr::from((Ipv4Addr::new(185, 237, 185, 226), 31031))),
         client_id: Some(0x0000_1234),
@@ -686,7 +686,10 @@ async fn enrich_hello_identity_sets_direct_udp_callback_for_low_id_with_verified
         },
         &server_state,
         &kad_firewall,
-        KadHelloIdentityState::default(),
+        KadHelloIdentityState {
+            running: true,
+            ..KadHelloIdentityState::default()
+        },
     )
     .await;
 
@@ -727,37 +730,48 @@ async fn enrich_hello_identity_keeps_server_endpoint_zero_until_connected() {
 }
 
 #[tokio::test]
-async fn enrich_hello_identity_keeps_direct_udp_callback_off_for_high_id() {
-    let server_state = Arc::new(RwLock::new(Ed2kServerState {
-        endpoint: Some(SocketAddr::from((Ipv4Addr::new(185, 237, 185, 226), 31031))),
-        client_id: Some(0x521B_5895),
-        connected: true,
-        ..Ed2kServerState::default()
-    }));
-    let mut firewall = KadFirewallState::default();
-    firewall.udp_open = true;
-    firewall.udp_verified = true;
-    let kad_firewall = Arc::new(Mutex::new(firewall));
-
-    let identity = enrich_hello_identity(
-        Ed2kHelloIdentity {
-            user_hash: [0xCD; 16],
-            client_id: 0,
-            tcp_port: 41001,
-            udp_port: 41000,
-            server_ip: 0,
-            server_port: 0,
-            connect_options: emule_connect_options(true),
-            direct_udp_callback: false,
-        },
-        &server_state,
-        &kad_firewall,
-        KadHelloIdentityState::default(),
-    )
-    .await;
-
-    assert!(!identity.direct_udp_callback);
-    assert_eq!(identity.client_id, 0x521B_5895);
+async fn enrich_hello_identity_advertises_direct_callback_using_kad_reachability() {
+    let base = Ed2kHelloIdentity {
+        user_hash: [0xCD; 16],
+        client_id: 0,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(true),
+        direct_udp_callback: false,
+    };
+    let high_id = 0x521B_5895;
+    let low_id = 6;
+    for (server_id, running, tcp_firewalled, udp_open, udp_verified, expected) in [
+        (high_id, true, true, true, true, true),
+        (low_id, true, false, true, true, false),
+        (low_id, false, true, true, true, false),
+        (low_id, true, true, false, true, false),
+        (low_id, true, true, true, false, false),
+    ] {
+        let server_state = Arc::new(RwLock::new(Ed2kServerState {
+            client_id: Some(server_id),
+            connected: true,
+            ..Ed2kServerState::default()
+        }));
+        let mut firewall = KadFirewallState::default();
+        firewall.tcp_firewalled_verdict = Some(tcp_firewalled);
+        firewall.udp_open = udp_open;
+        firewall.udp_verified = udp_verified;
+        let identity = enrich_hello_identity(
+            base,
+            &server_state,
+            &Arc::new(Mutex::new(firewall)),
+            KadHelloIdentityState {
+                running,
+                ..KadHelloIdentityState::default()
+            },
+        )
+        .await;
+        assert_eq!(identity.direct_udp_callback, expected);
+        assert_eq!(identity.client_id, server_id);
+    }
 }
 
 #[tokio::test]
@@ -788,6 +802,7 @@ async fn kad_open_identity_precedes_the_connected_server_assignment() {
         &server_state,
         &kad_firewall,
         KadHelloIdentityState {
+            running: true,
             connected: true,
             public_ip: None,
         },
@@ -806,6 +821,7 @@ async fn kad_open_identity_precedes_the_connected_server_assignment() {
         &server_state,
         &kad_firewall,
         KadHelloIdentityState {
+            running: true,
             connected: true,
             public_ip: Some(public_ip),
         },
@@ -838,6 +854,7 @@ async fn kad_firewalled_identity_uses_the_server_then_the_stock_sentinel() {
         direct_udp_callback: false,
     };
     let kad_identity = KadHelloIdentityState {
+        running: true,
         connected: true,
         public_ip: None,
     };

@@ -4,7 +4,7 @@
 //! but it is not the final completion authority: bytes in an earlier verified
 //! part may change before the last part arrives. The durable pending bit is
 //! written before this module rereads the complete payload so neither delivery
-//! nor a restart can skip the final MD4 pass.
+//! nor a restart can skip the final MD4 pass and any applicable trusted AICH check.
 
 use std::{
     fs::File,
@@ -20,7 +20,8 @@ use md4::{Digest, Md4};
 
 use super::{
     ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState,
-    manifest::rebuild_verified_ranges,
+    hashset::{aich_part_spec, build_aich_block_tree_root, reconstruct_aich_root_from_part_hashes},
+    manifest::{rebuild_verified_ranges, trusted_aich_master, trusted_aich_part_hash},
 };
 
 #[derive(Debug)]
@@ -29,6 +30,7 @@ struct FinalRehashComputation {
     actual_len: u64,
     file_hash: Option<[u8; 16]>,
     part_hashes: Vec<Option<[u8; 16]>>,
+    aich_part_hashes: Vec<[u8; 20]>,
     payload_fingerprint: Option<NativeFileFingerprint>,
 }
 
@@ -66,7 +68,7 @@ impl Ed2kTransferRuntime {
         token: emulebb_metadata::JobToken,
     ) -> Result<bool> {
         let manifest = self.manifest(token).await?;
-        if manifest.completed || manifest.is_fully_verified() {
+        if manifest.completed || manifest.durable_present_bytes() == manifest.file_size {
             self.final_rehash(token, true).await
         } else {
             self.recheck_verified_partial_pieces(manifest).await
@@ -106,10 +108,8 @@ impl Ed2kTransferRuntime {
                 .await
                 .context("ED2K partial recheck task failed")??
         };
-        let damaged_parts = damaged_verified_part_indexes(&snapshot, &computation)?;
-
         let _guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?.edit()?;
         anyhow::ensure!(
             manifest.file_size == snapshot.file_size
                 && manifest.piece_size == snapshot.piece_size
@@ -120,6 +120,9 @@ impl Ed2kTransferRuntime {
                 && !manifest.is_fully_verified(),
             "ED2K transfer {file_hash} changed while its verified pieces were being rechecked"
         );
+        // Evaluate against the current AICH authority, including part hashes
+        // accepted while the read was in flight without a generation change.
+        let damaged_parts = damaged_part_indexes(&manifest, &computation, true)?;
 
         let previous_ranges = manifest.verified_ranges.clone();
         for piece in &mut manifest.pieces {
@@ -140,7 +143,7 @@ impl Ed2kTransferRuntime {
         if damaged_parts.is_empty() && manifest.verified_ranges == previous_ranges {
             return Ok(false);
         }
-        self.store_manifest_unlocked(&manifest, _guard.clone())
+        self.store_rechecked_manifest(&manifest, _guard.clone())
             .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         tracing::warn!(
@@ -167,7 +170,9 @@ impl Ed2kTransferRuntime {
             if !force && !manifest.final_rehash_pending {
                 return Ok(manifest.completed);
             }
-            if force && !(manifest.completed || manifest.is_fully_verified()) {
+            if force
+                && !(manifest.completed || manifest.durable_present_bytes() == manifest.file_size)
+            {
                 return Ok(false);
             }
 
@@ -207,7 +212,7 @@ impl Ed2kTransferRuntime {
                 .context("ED2K final completion rehash task failed")??;
 
         let _guard = self.lock_manifest(token).await;
-        let mut manifest = self.load_manifest_unlocked(token).await?.edit()?;
+        let mut manifest = self.load_aich_manifest_unlocked(token).await?.edit()?;
         if !manifest.final_rehash_pending {
             return Ok(manifest.completed);
         }
@@ -215,19 +220,24 @@ impl Ed2kTransferRuntime {
         let expected_file_hash = Ed2kHash::from_str(&manifest.file_hash)
             .with_context(|| format!("invalid ED2K file hash {}", manifest.file_hash))?
             .0;
-        let mut damaged_parts = damaged_part_indexes(&manifest, &computation)?;
-        let whole_file_matches = computation.actual_len == manifest.file_size
+        let mut damaged_parts = damaged_part_indexes(&manifest, &computation, false)?;
+        let md4_matches = computation.actual_len == manifest.file_size
             && computation.file_hash == Some(expected_file_hash);
+        let aich_matches = trusted_aich_master(&manifest)?.is_none_or(|root| {
+            computation
+                .recovery
+                .as_ref()
+                .is_some_and(|set| set.root == root)
+        });
 
-        if whole_file_matches {
+        if md4_matches && aich_matches && damaged_parts.is_empty() {
+            mark_verified_parts(&mut manifest, &[]);
             manifest.completed = true;
             manifest.final_rehash_pending = false;
             manifest.payload_fingerprint = computation.payload_fingerprint;
+            rebuild_verified_ranges(&mut manifest);
             let recovery = computation.recovery;
-            if let Some(set) = recovery.as_ref()
-                && (manifest.aich_root.is_none()
-                    || manifest.aich_root.as_deref() == Some(hex::encode(set.root).as_str()))
-            {
+            if let Some(set) = recovery.as_ref() {
                 super::aich_trust::set_identity(
                     &mut manifest,
                     Some(hex::encode(set.root)),
@@ -244,32 +254,25 @@ impl Ed2kTransferRuntime {
             // crash must not leave a completed file missing its computed tree.
             // Optional cache failure still permits durable MD4 completion.
             if let Some(set) = recovery {
-                if manifest.aich_root.as_deref() == Some(hex::encode(set.root).as_str()) {
-                    let metadata = self.metadata.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        metadata.store_aich_recovery_set(
-                            &hex::encode(set.root),
-                            set.size,
-                            &set.parts,
-                            &set.part_roots,
-                        )
-                    })
-                    .await;
-                    if !matches!(result, Ok(Ok(()))) {
-                        tracing::warn!(
-                            ?result,
-                            "Completed MD4 content retained without AICH recovery cache"
-                        );
-                    }
-                } else {
+                let metadata = self.metadata.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    metadata.store_aich_recovery_set(
+                        &hex::encode(set.root),
+                        set.size,
+                        &set.parts,
+                        &set.part_roots,
+                    )
+                })
+                .await;
+                if !matches!(result, Ok(Ok(()))) {
                     tracing::warn!(
-                        file_hash,
-                        "Completed payload AICH differs from trusted identity; recovery unavailable"
+                        ?result,
+                        "Verified download retained without AICH recovery cache"
                     );
                 }
             }
 
-            self.store_manifest_unlocked(&manifest, _guard.clone())
+            self.store_rechecked_manifest(&manifest, _guard.clone())
                 .await?;
             self.upsert_verified_catalog_entry(&manifest).await;
 
@@ -280,6 +283,26 @@ impl Ed2kTransferRuntime {
                 "ED2K final completion rehash succeeded"
             );
             return Ok(true);
+        }
+
+        if md4_matches && !aich_matches && damaged_parts.is_empty() {
+            // A trusted master alone cannot identify which multipart data is
+            // wrong. Preserve every byte for an explicit recheck with better
+            // evidence and withdraw authority to share or deliver the payload.
+            manifest.final_rehash_pending = false;
+            for piece in &mut manifest.pieces {
+                piece.state = Ed2kTransferState::Missing;
+                piece.ich_corrupted = false;
+            }
+            manifest.verified_ranges.clear();
+            self.store_rechecked_manifest(&manifest, _guard.clone())
+                .await?;
+            tracing::warn!(
+                event = "final_completion_aich_conflict",
+                file_hash,
+                "ED2K and trusted AICH identifiers disagree; payload preserved for recheck"
+            );
+            return Ok(false);
         }
 
         let mut payload_reset = computation.actual_len == 0 && manifest.file_size > 0;
@@ -301,6 +324,9 @@ impl Ed2kTransferRuntime {
         if damaged_parts.is_empty() {
             damaged_parts.extend(manifest.pieces.iter().map(|piece| piece.piece_index));
         }
+        if !payload_reset {
+            mark_verified_parts(&mut manifest, &damaged_parts);
+        }
         for piece in &mut manifest.pieces {
             if damaged_parts.contains(&piece.piece_index) {
                 piece.state = Ed2kTransferState::Missing;
@@ -313,7 +339,7 @@ impl Ed2kTransferRuntime {
         manifest.final_rehash_pending = false;
         manifest.payload_fingerprint = None;
         rebuild_verified_ranges(&mut manifest);
-        self.store_manifest_unlocked(&manifest, _guard.clone())
+        self.store_rechecked_manifest(&manifest, _guard.clone())
             .await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         tracing::warn!(
@@ -326,36 +352,60 @@ impl Ed2kTransferRuntime {
         );
         Ok(false)
     }
+
+    async fn store_rechecked_manifest(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        guard: super::store::ScopedLockGuard<emulebb_metadata::JobId>,
+    ) -> Result<()> {
+        let generation = manifest.aich_trust_generation;
+        let root = manifest.aich_root.clone();
+        let acquired = manifest.aich_hashset_acquired;
+        self.store_manifest_checked_unlocked(manifest, guard, move |stored| {
+            anyhow::ensure!(
+                stored.aich_trust_generation == generation
+                    && stored.aich_root == root
+                    && stored.aich_hashset_acquired == acquired,
+                "ED2K AICH authority changed during payload verification"
+            );
+            Ok(())
+        })
+        .await
+    }
+}
+
+fn mark_verified_parts(manifest: &mut Ed2kResumeManifest, damaged: &[u32]) {
+    for piece in &mut manifest.pieces {
+        if damaged.binary_search(&piece.piece_index).is_err() {
+            piece.state = Ed2kTransferState::Verified;
+            piece.bytes_written = super::expected_piece_length(
+                manifest.file_size,
+                manifest.piece_size,
+                u64::from(piece.piece_index),
+            );
+            piece.block_bitmap = None;
+            piece.ich_corrupted = false;
+        }
+    }
 }
 
 fn damaged_part_indexes(
     manifest: &Ed2kResumeManifest,
     computation: &FinalRehashComputation,
+    verified_only: bool,
 ) -> Result<Vec<u32>> {
     let mut damaged = Vec::new();
     for piece in &manifest.pieces {
-        let index = usize::try_from(piece.piece_index).unwrap_or(usize::MAX);
-        let expected = expected_part_hash(manifest, index)?;
-        if expected.is_none() || computation.part_hashes.get(index).copied().flatten() != expected {
-            damaged.push(piece.piece_index);
+        if verified_only && piece.state != Ed2kTransferState::Verified {
+            continue;
         }
-    }
-    Ok(damaged)
-}
-
-fn damaged_verified_part_indexes(
-    manifest: &Ed2kResumeManifest,
-    computation: &FinalRehashComputation,
-) -> Result<Vec<u32>> {
-    let mut damaged = Vec::new();
-    for piece in manifest
-        .pieces
-        .iter()
-        .filter(|piece| piece.state == Ed2kTransferState::Verified)
-    {
         let index = usize::try_from(piece.piece_index).unwrap_or(usize::MAX);
-        let expected = expected_part_hash(manifest, index)?;
-        if expected.is_none() || computation.part_hashes.get(index).copied().flatten() != expected {
+        let md4 = expected_part_hash(manifest, index)?;
+        let md4_matches =
+            md4.is_some() && computation.part_hashes.get(index).copied().flatten() == md4;
+        let aich_matches = trusted_aich_part_hash(manifest, piece.piece_index)?
+            .is_none_or(|hash| computation.aich_part_hashes.get(index).copied() == Some(hash));
+        if !md4_matches || !aich_matches {
             damaged.push(piece.piece_index);
         }
     }
@@ -393,6 +443,7 @@ fn failed_content_computation(expected_size: u64, actual_len: u64) -> FinalRehas
         recovery: None,
         file_hash: None,
         part_hashes: vec![None; usize::try_from(part_count).unwrap_or(0)],
+        aich_part_hashes: Vec::new(),
         payload_fingerprint: None,
     }
 }
@@ -442,8 +493,9 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
     file.seek(SeekFrom::Start(0))
         .with_context(|| format!("failed to seek ED2K payload {}", path.display()))?;
     let mut recovery_parts = Vec::new();
+    let mut aich_part_hashes = Vec::new();
     let mut remaining = expected_size;
-    for _ in 0..part_count {
+    for index in 0..part_count {
         let part_len = remaining.min(ED2K_PART_SIZE);
         let mut hasher = Md4::new();
         let mut part_remaining = part_len;
@@ -468,13 +520,21 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
             leaves.extend_from_slice(&sha1::Sha1::digest(&buffer[..chunk_len]));
             part_remaining -= chunk_len as u64;
         }
-        recovery_parts.push(leaves);
         part_hashes.push(readable.then(|| hasher.finalize().into()));
         remaining = remaining.saturating_sub(part_len);
         if !readable {
             part_hashes.resize(usize::try_from(part_count).unwrap_or(0), None);
             break;
         }
+        let spec = aich_part_spec(expected_size, u32::try_from(index)?);
+        let (block_hashes, _) = leaves.as_chunks::<20>();
+        aich_part_hashes.push(build_aich_block_tree_root(
+            part_len,
+            spec.is_left_branch,
+            block_hashes,
+            0,
+        )?);
+        recovery_parts.push(leaves);
     }
 
     let computed_file_hash = if part_hashes.iter().any(Option::is_none) {
@@ -535,18 +595,13 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
         && post_hash_metadata.len() == expected_size
         && part_hashes.iter().all(Option::is_some)
     {
-        match super::aich_cache::recovery_roots(expected_size, &recovery_parts) {
-            Ok((root, part_roots)) => Some(emulebb_metadata::MetadataAichRecoverySet {
-                root,
-                size: expected_size,
-                parts: recovery_parts,
-                part_roots,
-            }),
-            Err(error) => {
-                tracing::warn!(%error,"AICH recovery unavailable after payload verification");
-                None
-            }
-        }
+        let root = reconstruct_aich_root_from_part_hashes(expected_size, &aich_part_hashes)?;
+        Some(emulebb_metadata::MetadataAichRecoverySet {
+            root,
+            size: expected_size,
+            parts: recovery_parts,
+            part_roots: aich_part_hashes.clone(),
+        })
     } else {
         None
     };
@@ -555,6 +610,7 @@ fn compute_final_rehash(path: &Path, expected_size: u64) -> Result<FinalRehashCo
         recovery,
         file_hash: computed_file_hash,
         part_hashes,
+        aich_part_hashes,
         payload_fingerprint,
     })
 }

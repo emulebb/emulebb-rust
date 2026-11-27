@@ -10,9 +10,9 @@ use std::{
 use super::{
     ED2K_CALLBACK_TICKET_MAX_LIFETIME, Ed2kCallbackClaim, Ed2kCallbackClaimError,
     Ed2kCallbackClaimToken, Ed2kCallbackDispatchOutcome, Ed2kCallbackDispatchPermit,
-    Ed2kCallbackDownload, Ed2kCallbackHelloIdentity, Ed2kCallbackPeer, Ed2kCallbackReservation,
-    Ed2kCallbackRoute, Ed2kCallbackTicketError, Ed2kCallbackTicketId, Ed2kCallbackTicketRequest,
-    Ed2kTransferRuntime,
+    Ed2kCallbackDownload, Ed2kCallbackHelloIdentity, Ed2kCallbackPeer, Ed2kCallbackPreparationId,
+    Ed2kCallbackReservation, Ed2kCallbackRoute, Ed2kCallbackTicketError, Ed2kCallbackTicketId,
+    Ed2kCallbackTicketRequest, Ed2kTransferRuntime,
 };
 
 const CALLBACK_TICKET_CAPACITY: usize = 1_024;
@@ -107,6 +107,14 @@ pub struct Ed2kCallbackDispatchGuard {
 }
 
 impl Ed2kCallbackDispatchGuard {
+    /// Exact reservation that a later server response may settle.
+    pub fn ticket_id(&self) -> Ed2kCallbackTicketId {
+        self.permit
+            .as_ref()
+            .expect("live dispatch guard always owns a permit")
+            .ticket_id
+    }
+
     /// Exact pre-dispatch deadline established by ticket reservation.
     pub fn expires_at(&self) -> Instant {
         self.permit
@@ -689,6 +697,31 @@ impl CallbackTicketStore {
             }
             return false;
         };
+        self.cancel_unclaimed(index, now);
+        true
+    }
+
+    fn refuse_server_callback(
+        &mut self,
+        ticket_id: Ed2kCallbackTicketId,
+        now: Instant,
+    ) -> Option<Vec<Ed2kCallbackPreparationId>> {
+        let index = self.tickets.iter().position(|ticket| {
+            ticket.id == ticket_id
+                && matches!(ticket.route, Ed2kCallbackRoute::Server { .. })
+                && ticket.state == CallbackTicketState::Armed
+                && ticket.expires_at > now
+        })?;
+        let preparations = self.tickets[index]
+            .downloads
+            .iter()
+            .filter_map(|download| download.preparation_id)
+            .collect();
+        self.cancel_unclaimed(index, now);
+        Some(preparations)
+    }
+
+    fn cancel_unclaimed(&mut self, index: usize, now: Instant) {
         if self.tickets[index].cancel_restores_needs_dispatch {
             if let Some(deadline) = now.checked_add(self.tickets[index].redispatch_lifetime) {
                 self.tickets[index].expires_at = deadline;
@@ -698,7 +731,6 @@ impl CallbackTicketStore {
             self.tickets.remove(index);
         }
         self.reap(now);
-        true
     }
 
     fn lease(
@@ -1219,6 +1251,21 @@ impl Ed2kTransferRuntime {
         self.cancel_callback_ticket_at(permit, Instant::now()).await
     }
 
+    /// Settle a confirmed server refusal only while this dispatch still owns
+    /// an unclaimed ticket. Wake all waiting preparations joined to this ticket.
+    pub fn refuse_server_callback(&self, ticket_id: Ed2kCallbackTicketId) {
+        let preparations = self
+            .callback_tickets
+            .lock()
+            .unwrap()
+            .refuse_server_callback(ticket_id, Instant::now());
+        if let Some(preparations) = preparations {
+            for preparation in preparations {
+                self.callback_preparations.defer(preparation);
+            }
+        }
+    }
+
     async fn cancel_callback_ticket_at(
         &self,
         permit: Ed2kCallbackDispatchPermit,
@@ -1495,6 +1542,66 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(claim.downloads, vec![download(&metadata, 1)]);
+    }
+
+    #[tokio::test]
+    async fn background_callback_refusal_defers_joined_downloads_on_one_server() {
+        let runtime =
+            Ed2kTransferRuntime::load_or_create(&unique_test_dir("ed2k-callback-refusal")).unwrap();
+        let metadata = runtime.metadata.clone();
+        let server = "192.0.2.10:4661".parse().unwrap();
+        let alternate_server = "192.0.2.20:4661".parse().unwrap();
+        let window = Duration::from_secs(45);
+        let mut first = server_request(&metadata, server, 17, 1);
+        let mut first_preparation = runtime
+            .prepare_callback_download(first.download, window)
+            .unwrap();
+        first.download = first_preparation.download().clone();
+        let permit = dispatch_permit(runtime.reserve_callback_ticket(first).await.unwrap());
+        let dispatch = runtime.begin_callback_ticket_dispatch(permit).unwrap();
+        let ticket_id = dispatch.ticket_id();
+        assert_eq!(
+            dispatch.mark_dispatched(),
+            Ed2kCallbackDispatchOutcome::Armed
+        );
+
+        let mut joined = server_request(&metadata, server, 17, 2);
+        let mut joined_preparation = runtime
+            .prepare_callback_download(joined.download, window)
+            .unwrap();
+        joined.download = joined_preparation.download().clone();
+        assert_eq!(
+            runtime.reserve_callback_ticket(joined).await.unwrap(),
+            Ed2kCallbackReservation::Joined { ticket_id }
+        );
+        runtime
+            .reserve_callback_ticket(server_request(&metadata, alternate_server, 17, 3))
+            .await
+            .unwrap();
+
+        runtime.refuse_server_callback(ticket_id);
+        for preparation in [&mut first_preparation, &mut joined_preparation] {
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), preparation.availability())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                super::super::Ed2kCallbackPreparationOutcome::Deferred
+            ));
+        }
+        assert!(
+            runtime
+                .lease_callback_tickets(hello(Some(server), 17, [0x55; 16]))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let alternate = runtime
+            .lease_callback_tickets(hello(Some(alternate_server), 17, [0x55; 16]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alternate.downloads, vec![download(&metadata, 3)]);
     }
 
     #[tokio::test]

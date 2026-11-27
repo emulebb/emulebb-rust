@@ -44,7 +44,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant as TokioInstant};
 
 use crate::ed2k_server::{
-    Ed2kServerSearchInbox, OP_CALLBACKREQUEST, OP_SERVERLIST, ProbeSearchState,
+    Ed2kServerSearchInbox, OP_CALLBACK_FAIL, OP_CALLBACKREQUEST, OP_SERVERLIST, ProbeSearchState,
     background::{BackgroundServerSearchContext, start_background_server_search},
 };
 
@@ -143,10 +143,35 @@ async fn background_callback_writes_only_on_the_expected_server_generation() {
     .unwrap();
 
     assert!(pending.is_none());
-    assert!(receive_response.await.unwrap().is_ok());
+    let mut refusal = receive_response.await.unwrap().unwrap();
     let (opcode, payload) = read_source_request_frame(&mut peer).await;
     assert_eq!(opcode, OP_CALLBACKREQUEST);
     assert_eq!(payload, target_low_id.to_le_bytes());
+    let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
+    handle_test_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_CALLBACK_FAIL,
+            payload: vec![1],
+        },
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(refusal.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    handle_test_server_packet(
+        &mut session,
+        Ed2kPacket {
+            opcode: OP_CALLBACK_FAIL,
+            payload: vec![],
+        },
+        &context,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(refusal.try_recv(), Ok(()));
 }
 
 #[tokio::test]
@@ -1882,6 +1907,85 @@ async fn silent_server_returns_timed_out_and_keeps_the_session_connected() {
     );
     assert_eq!(search_result, Ed2kBackgroundKeywordSearchOutcome::TimedOut);
     server_task.abort();
+}
+
+#[tokio::test]
+async fn connected_udp_status_is_due_during_regular_command_traffic() {
+    let bind_ip = crate::test_bind_ip();
+    let mut sockets = None;
+    for _ in 0..16 {
+        let udp = tokio::net::UdpSocket::bind((bind_ip, 0)).await.unwrap();
+        let tcp_port = udp.local_addr().unwrap().port() - 4;
+        if let Ok(listener) = TcpListener::bind((bind_ip, tcp_port)).await {
+            sockets = Some((listener, udp));
+            break;
+        }
+    }
+    let (listener, status_socket) = sockets.expect("could not allocate paired server ports");
+    let server = background_test_server(listener.local_addr().unwrap());
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let mut context = background_test_context(Arc::clone(&state), Duration::from_secs(5));
+    context.session.offer_files_capability_enabled = false;
+    let cancel = context.session_cancel.clone();
+    let (handle, inbox) = new_ed2k_server_search_channel(1);
+    let task = tokio::spawn(async move {
+        run_test_server_session(&server, &context, &Arc::new(Mutex::new(inbox))).await
+    });
+    let (mut peer, _) = listener.accept().await.unwrap();
+    read_login_request(&mut peer).await;
+    let client_id = u32::from_le_bytes([192, 0, 2, 7]);
+    peer.write_all(&encode_packet(OP_IDCHANGE, &client_id.to_le_bytes(), false).unwrap())
+        .await
+        .unwrap();
+
+    let refresh = || {
+        super::super::publish_shared_catalog_via_background_session(
+            &handle,
+            Duration::from_secs(5),
+            &cancel,
+        )
+    };
+    refresh().await.unwrap();
+    assert!(state.read().await.connected);
+    tokio::time::pause();
+
+    // Stock checks its never-pinged server on the first eligible status tick.
+    // Allow the Rust status wake interval plus one command interval, even
+    // though each acknowledged refresh interrupts the session's idle wait.
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(20)).await;
+        refresh().await.unwrap();
+    }
+    let mut packet = [0; 32];
+    let received = tokio::time::timeout(Duration::from_secs(1), status_socket.recv(&mut packet))
+        .await
+        .expect("connected server did not receive its first UDP status request during commands")
+        .unwrap();
+    assert_eq!(received, 6);
+    assert_eq!(
+        packet[..2],
+        [OP_EDONKEYPROT, super::super::OP_GLOBSERVSTATREQ]
+    );
+
+    tokio::time::advance(Duration::from_secs(80)).await;
+    refresh().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), status_socket.recv(&mut packet))
+            .await
+            .is_err(),
+        "ordinary commands must not retrigger status before the reask interval"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), peer.read(&mut packet))
+            .await
+            .is_err(),
+        "disabling TCP keepalive must leave the empty catalog's TCP session quiet"
+    );
+    cancel.cancel();
+    assert_eq!(
+        task.await.unwrap().unwrap(),
+        ServerSessionExit::ContinueOrder
+    );
 }
 
 #[tokio::test]

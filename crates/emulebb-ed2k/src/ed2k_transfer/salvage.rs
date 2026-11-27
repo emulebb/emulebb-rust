@@ -52,23 +52,44 @@ impl Ed2kTransferRuntime {
     /// and returns the still-needed corrupt ranges. Returns `None` when the file
     /// or part is unknown, the part is not currently corrupt, there is no
     /// trusted AICH root, or the recovery data fails verification.
-    pub(crate) async fn begin_part_salvage(
+    pub(crate) async fn salvage_requested_part(
         &self,
-        token: emulebb_metadata::JobToken,
-        part: u16,
-        master_hash: [u8; 20],
+        permit: super::AichRecoveryPermit,
         recovery_body: &[u8],
     ) -> Result<Option<PartSalvageOutcome>> {
+        let request = &permit.0;
+        let token = request.token;
+        let part = u16::try_from(request.piece.piece_index)?;
+        let Ok(worker) = tokio::time::timeout_at(
+            request.deadline,
+            self.aich_salvage_workers.clone().acquire_owned(),
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+        let worker = worker?;
         let _guard = self.lock_manifest(token).await;
         let mut manifest = self.load_aich_manifest_unlocked(token).await?.edit()?;
         let file_hash = manifest.file_hash.clone();
+        // WHY: an answer can wait behind ordinary block writes, a replacement
+        // job, or a new AICH decision. Its request describes exactly the job,
+        // identity generation and corrupt progress which authorized that read.
+        if permit.expired()
+            || manifest.token != token
+            || manifest.file_size != request.size
+            || manifest.aich_trust_generation != request.generation
+            || manifest.pieces.get(usize::from(part)) != Some(&request.piece)
+        {
+            return Ok(None);
+        }
 
         // Need a trusted AICH root that matches the answer's master hash.
         let Some(root_hex) = manifest.aich_root.as_deref() else {
             return Ok(None);
         };
         let trusted_root = decode_aich_hash_hex(root_hex)?;
-        if trusted_root != master_hash {
+        if trusted_root != request.master {
             return Ok(None);
         }
 
@@ -102,29 +123,24 @@ impl Ed2kTransferRuntime {
         )?;
         // WHY: reject untrusted recovery proofs before any raw payload read;
         // proof validation depends only on geometry and the trusted root.
+        if permit.expired() {
+            return Ok(None);
+        }
         let part_bytes = self
             .read_part_raw_unlocked(token, part_start, part_len)
             .await?;
-        let recovery = compute_part_recovery(
-            manifest.file_size,
-            u64::from(part_index),
-            &part_bytes,
-            &trusted_block_hashes,
-        )?;
-
-        // Feed the per-block AICH verdicts into the corruption blackbox and
-        // evaluate the senders: good blocks credit their recorded senders, bad
-        // blocks debit them, and a sender whose corrupt share crosses 32% is
-        // banned (oracle `CPartFile::AICHRecoveryDataAvailable` ->
-        // `VerifiedData`/`CorruptedData` per block + `EvaluateData`,
-        // PartFile.cpp:6555-6566).
-        for (block_start, block_end) in &recovery.recovered_ranges {
-            self.cbb_record_verified_data(token, *block_start, *block_end);
-        }
-        for (block_start, block_end) in &recovery.corrupt_ranges {
-            self.cbb_record_corrupted_data(token, *block_start, *block_end);
-        }
-        self.cbb_evaluate_part(token, part);
+        let file_size = manifest.file_size;
+        let recovery = tokio::task::spawn_blocking(move || {
+            let _worker = worker;
+            compute_part_recovery(
+                file_size,
+                u64::from(part_index),
+                &part_bytes,
+                &trusted_block_hashes,
+            )
+        })
+        .await
+        .context("AICH salvage worker failed")??;
 
         // Build the per-part bitmap from the good/bad verdict: good blocks become
         // present, corrupt blocks become missing/needed.
@@ -147,8 +163,30 @@ impl Ed2kTransferRuntime {
         // re-requests only the missing blocks, mirroring eMule leaving the bad
         // blocks in the gap list while the good blocks were `FillGap`-ed.
         piece.state = Ed2kTransferState::Missing;
-        self.store_manifest_unlocked(&manifest, _guard.clone())
-            .await?;
+        if permit.expired() {
+            return Ok(None);
+        }
+        let pending = std::sync::Arc::downgrade(&permit.0);
+        self.store_manifest_checked_unlocked(&manifest, _guard.clone(), move |stored| {
+            let request = pending
+                .upgrade()
+                .context("AICH recovery request retired before commit")?;
+            anyhow::ensure!(
+                stored.aich_trust_generation == request.generation
+                    && tokio::time::Instant::now() < request.deadline,
+                "AICH recovery authority changed before commit"
+            );
+            Ok(())
+        })
+        .await?;
+        // Only a committed, solicited bitmap may produce sender attribution.
+        for (block_start, block_end) in &recovery.recovered_ranges {
+            self.cbb_record_verified_data(token, *block_start, *block_end);
+        }
+        for (block_start, block_end) in &recovery.corrupt_ranges {
+            self.cbb_record_corrupted_data(token, *block_start, *block_end);
+        }
+        self.cbb_evaluate_part(token, part);
 
         Ok(Some(PartSalvageOutcome {
             recovered_ranges: recovery.recovered_ranges,

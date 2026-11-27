@@ -18,6 +18,38 @@ async fn close_hello_session(mut stream: TcpStream) {
 }
 
 #[tokio::test]
+async fn accepted_inbound_tcp_connection_records_kad_firewall_ack() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-kad-firewall-ack",
+        listener_hello_identity(),
+        [0x41; 16],
+        0x1122_3344,
+    )
+    .await;
+    let helper_ip = runtime.peer_addr.ip();
+    {
+        let mut firewall = runtime.kad_firewall.lock().await;
+        let now = chrono::Utc::now();
+        firewall.begin_tcp_recheck(now);
+        firewall.add_tcp_firewall_check_ip(helper_ip, now);
+        assert!(firewall.last_helper_ip.is_none());
+    }
+    let server = runtime.spawn_listener_connections(1);
+    let mut stream =
+        connect_peer_and_exchange_hello(runtime.peer_addr, peer_hello_identity()).await;
+    stream
+        .write_all(&encode_packet(OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK, &[]))
+        .await
+        .unwrap();
+    close_hello_session(stream).await;
+    server.await.unwrap();
+
+    let firewall = runtime.kad_firewall.lock().await;
+    assert_eq!(firewall.last_helper_ip, Some(helper_ip.to_string()));
+    assert!(firewall.last_tcp_check_completed_at.is_some());
+}
+
+#[tokio::test]
 async fn listener_tracks_a_never_seen_endpoint_identity() {
     let mut runtime = ListenerTestRuntime::new(
         "ed2k-listener-tracked-identity-new",
