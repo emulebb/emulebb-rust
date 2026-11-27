@@ -873,7 +873,7 @@ impl Ed2kTransferRuntime {
                         .await;
                 }
                 DeliveredOutputIdentity::Missing => {
-                    sync_parent_directory(&attempt.target_path).await?;
+                    sync_delivery_parent(&attempt.target_path).await?;
                 }
                 DeliveredOutputIdentity::Matching(None) => {
                     anyhow::bail!("published delivery remains pending without native identity");
@@ -1026,7 +1026,7 @@ impl Ed2kTransferRuntime {
                             .await;
                     }
                     DeliveredOutputIdentity::Missing => {
-                        sync_parent_directory(&attempt.target_path).await?;
+                        sync_delivery_parent(&attempt.target_path).await?;
                     }
                     DeliveredOutputIdentity::Matching(None) | DeliveredOutputIdentity::Foreign => {
                         tracing::warn!(
