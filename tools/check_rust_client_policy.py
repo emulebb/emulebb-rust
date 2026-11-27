@@ -695,7 +695,7 @@ def check_required_ci_gates(
         ),
         "required-ci:": (ci, "CI aggregate job"),
         "name: Required CI": (ci, "stable CI check name"),
-        "needs: [change-scope, single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain]": (
+        "needs: [change-scope, single-active-pr, workflow-lint, preflight, build-linux, build-test, build-musl, rest-openapi, quality, supply-chain, extra-platforms]": (
             ci,
             "complete CI aggregate dependency set",
         ),
@@ -722,6 +722,14 @@ def check_required_ci_gates(
         if fragment not in source
     ]
     jobs = (yaml.safe_load(ci) or {}).get("jobs", {})
+    ready = "(github.event_name != 'pull_request' || github.event.pull_request.draft == false)"
+    draft = "(github.event_name == 'pull_request' && github.event.pull_request.draft == true)"
+    native_fanout = "${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}"
+    draft_fanout = (
+        "${{ always() && needs.single-active-pr.result == 'success' && needs.workflow-lint.result == 'success'"
+        " && needs.change-scope.result == 'success' && needs.change-scope.outputs.scope == 'full'"
+        f" && (needs.preflight.result == 'success' || ({draft} && needs.preflight.result == 'skipped')) }}}}"
+    )
     for job in ("workflow-lint", "preflight", "build-linux", "build-test", "build-musl", "quality", "supply-chain"):
         needs = jobs.get(job, {}).get("needs", [])
         needs = [needs] if isinstance(needs, str) else needs
@@ -732,7 +740,8 @@ def check_required_ci_gates(
         elif job in {"preflight", "build-linux", "build-test", "build-musl", "quality"} and "workflow-lint" not in needs:
             errors.append(f"{job} must wait for workflow-lint before expensive validation")
         if job in {"build-linux", "build-test", "build-musl"}:
-            if "preflight" not in needs or jobs[job].get("if") != "${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}":
+            expected = draft_fanout if job == "build-test" else native_fanout
+            if "preflight" not in needs or jobs[job].get("if") != expected:
                 errors.append(f"{job} must require explicit successful preflight before platform fanout")
     preflight = jobs.get("preflight", {})
     steps = preflight.get("steps", [])
@@ -758,10 +767,17 @@ def check_required_ci_gates(
             errors.append(f"optional {name} must retain coordination and workflow-lint dependencies")
         if job.get("continue-on-error") or any(step.get("continue-on-error") for step in job.get("steps", [])):
             errors.append(f"optional {name} must report failures without continue-on-error")
-    primary_native = {jobs.get("build-linux", {}).get("runs-on"),
-                      *jobs.get("build-test", {}).get("strategy", {}).get("matrix", {}).get("runner", [])}
-    if primary_native != {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm"}:
+    matrix = jobs.get("build-test", {}).get("strategy", {}).get("matrix", {}).get("runner")
+    expected_matrix = ("${{ fromJSON(" + draft + " && '[\"windows-latest\"]'"
+                       " || '[\"ubuntu-24.04-arm\",\"windows-latest\",\"windows-11-arm\"]') }}")
+    if matrix != expected_matrix or jobs.get("build-linux", {}).get("runs-on") != "ubuntu-24.04":
         errors.append("mandatory CI must preserve native Windows/Linux x64 and ARM64 targets")
+    extra = jobs.get("extra-platforms", {})
+    if (extra.get("uses") != "./.github/workflows/optional-platforms.yml"
+            or extra.get("if") != "${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false }}"
+            or aggregate.get("env", {}).get("EXTRA_PLATFORMS_RESULT") != "${{ needs.extra-platforms.result }}"
+            or 'test "$EXTRA_PLATFORMS_RESULT" = success' not in aggregate.get("run", "")):
+        errors.append("Required CI must verify the Ready PR macOS and Android workflow")
     optional_native = set(optional_jobs.get("build-macos", {}).get("strategy", {}).get("matrix", {}).get("runner", []))
     if optional_native != {"macos-15-intel", "macos-15"}:
         errors.append("optional CI must preserve both native macOS targets")
@@ -804,7 +820,8 @@ def check_required_ci_gates(
             job = workflow_jobs.get(name, {})
             job_needs = job.get("needs", [])
             job_needs = [job_needs] if isinstance(job_needs, str) else job_needs
-            if "change-scope" not in job_needs or job.get("if") != full_condition:
+            condition = full_condition if filename == "optional-platforms.yml" else full_condition[:-3] + " && " + ready + " }}"
+            if "change-scope" not in job_needs or job.get("if") != condition:
                 errors.append(f"{filename} {name} must require full trusted scope")
     if len(set(bootstrap_commands)) != 1:
         errors.append("all CI workflows must use the identical trusted-base bootstrap")

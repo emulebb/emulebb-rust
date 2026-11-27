@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   schedule:
     - cron: "41 4 * * 0"
   workflow_dispatch:
@@ -102,7 +103,7 @@ jobs:
 
   analyze:
     needs: change-scope
-    if: ${{ needs.change-scope.outputs.scope == 'full' }}
+    if: ${{ needs.change-scope.outputs.scope == 'full' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30

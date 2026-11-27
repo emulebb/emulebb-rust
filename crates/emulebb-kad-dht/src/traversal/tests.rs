@@ -1284,33 +1284,37 @@ async fn test_run_search_phase_emits_even_when_idle_grace_exceeds_remaining_budg
         version: 9,
     };
 
-    let _ = run_search_phase(
-        &rpc,
-        SearchPhaseConfig {
-            responded: std::slice::from_ref(&contact),
-            kind: TraversalKind::Keyword {
-                request: SearchKeyReq {
-                    target,
-                    start_position: 0,
-                    restrictive_payload: Vec::new(),
-                },
-            },
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(300);
+    let first = compute_initial_jumpstart_emit_at(Some(now), now, Duration::from_secs(3), deadline);
+    assert_eq!(first, deadline - JUMPSTART_DEADLINE_MARGIN);
+    assert!(
+        first < deadline,
+        "idle grace must not consume the send budget"
+    );
+
+    let kind = TraversalKind::Keyword {
+        request: SearchKeyReq {
             target,
-            query_timeout: Duration::from_millis(200),
-            // Only ~300ms of budget remains, far shorter than the 3s idle grace.
-            emit_deadline: Instant::now() + Duration::from_millis(300),
-            response_deadline: Instant::now() + Duration::from_millis(300),
-            phase2_fanout: 10,
-            // Lookup just responded -> grace would defer the first emit by 3s.
-            last_lookup_response_at: Some(Instant::now()),
-            jumpstart_idle_grace: Duration::from_secs(3),
-            jumpstart_tick: Duration::from_secs(1),
-            work_class: RpcWorkClass::Interactive,
-            cancel: &CancellationToken::new(),
-            result_tx: None,
+            start_position: 0,
+            restrictive_payload: Vec::new(),
         },
+    };
+    let mut pending = VecDeque::from([&contact]);
+    let mut queried = HashMap::new();
+    let mut registrations = Vec::new();
+    let emission = emit_next_search_packet(
+        &rpc,
+        &kind,
+        target,
+        RpcWorkClass::Interactive,
+        Duration::from_secs(1),
+        &mut pending,
+        &mut queried,
+        &mut registrations,
     )
     .await;
+    assert!(matches!(emission, Some((_, true))));
 
     let outgoing = transport.drain_outgoing();
     assert!(

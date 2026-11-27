@@ -355,7 +355,8 @@ class TestRequiredCiGates(unittest.TestCase):
         optional = yaml.safe_load(
             (CHECKER.ROOT / ".github/workflows/optional-platforms.yml").read_text(encoding="utf-8")
         )
-        ci["jobs"]["build-test"]["strategy"]["matrix"]["runner"].remove("windows-11-arm")
+        matrix = ci["jobs"]["build-test"]["strategy"]["matrix"]
+        matrix["runner"] = matrix["runner"].replace(',"windows-11-arm"', "")
         optional["jobs"]["build-macos"]["strategy"]["matrix"]["runner"].append("windows-11-arm")
         errors = CHECKER.check_required_ci_gates(yaml.safe_dump(ci), optional_text=yaml.safe_dump(optional))
         self.assertTrue(any("mandatory CI must preserve native Windows/Linux" in error for error in errors))

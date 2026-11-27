@@ -3,8 +3,7 @@ name: Optional platform CI
 on:
   push:
     branches: [main]
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
@@ -19,8 +18,8 @@ env:
   RUST_BACKTRACE: 1
   EMULEBB_BUILD_REF: 00ef942397ad7e069813f3ff5d0d6bcb9bc58acb
   EMULEBB_ANDROID_BUILD_REF: 00ef942397ad7e069813f3ff5d0d6bcb9bc58acb
-  EMULEBB_BUILD_TESTS_REF: 4f248cdf568cdbc08e7a7f285174793251248d54
-  EMULEBB_TOOLING_REF: f0a18a9bdd7fbafaeb26b1238be499c8971c5198
+  EMULEBB_BUILD_TESTS_REF: c377a82ae9d31464f762d3ade1a29a77da577b1e
+  EMULEBB_TOOLING_REF: 0163a64c2139a32e60c427c7559501ab887b536e
   # Pin the native NAT sources linked by the sys crates.
   MINIUPNP_REF: 4e7a10948004ca2085ac8103e14fc77edb898b4c
   PCPNATPMP_REF: a6e787f837e507336a8774522c33b54264ef4a4b

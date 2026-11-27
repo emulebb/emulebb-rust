@@ -1,0 +1,158 @@
+name: Windows ARM64 package replay
+run-name: ARM64 package replay ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Unique correlation ID (32 lowercase hexadecimal characters)
+        required: true
+        type: string
+      run_id:
+        description: Original Nightly run ID
+        required: true
+        type: string
+      attempt:
+        description: Exact original attempt
+        required: true
+        type: string
+      artifact_name:
+        description: Exact retained artifact name
+        required: true
+        type: string
+      artifact_sha256:
+        description: Independently supplied GitHub archive SHA-256
+        required: true
+        type: string
+      source_sha:
+        description: Original Rust source SHA
+        required: true
+        type: string
+      harness_sha:
+        description: Exact reviewed test harness SHA
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: arm64-package-replay-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    name: Windows ARM64 retained package lifecycle
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_REST_OPENAPI_CONTRACT_PATH: ${{ github.workspace }}/.ci/emulebb-tooling/docs/products/emulebb-rust/api/REST-API-OPENAPI.yaml
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      HARNESS_SHA: ${{ inputs.harness_sha }}
+      REQUEST_ID: ${{ inputs.request_id }}
+    steps:
+      - name: Set up pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - name: Validate immutable workflow inputs
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          for name, length in (("SOURCE_SHA", 40), ("HARNESS_SHA", 40), ("REQUEST_ID", 32)):
+              if not re.fullmatch(f"[0-9a-f]{{{length}}}", os.environ[name]):
+                  raise SystemExit(f"{name} requires {length} lowercase hexadecimal characters")
+          output = Path(os.environ["RUNNER_TEMP"]) / "arm64-package-replay"
+          output.mkdir(parents=True, exist_ok=False)
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as stream:
+              print(f"EMULEBB_WORKSPACE_OUTPUT_ROOT={output}", file=stream)
+      - name: Checkout original Rust schema
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: .ci/candidate
+          persist-credentials: false
+      - name: Checkout reviewed replay owner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build
+          ref: 7242f5cd2edacf24467918a96da357ed2eda6714
+          path: .ci/emulebb-build
+          persist-credentials: false
+      - name: Checkout reviewed harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: ${{ inputs.harness_sha }}
+          path: .ci/emulebb-build-tests
+          persist-credentials: false
+      - name: Checkout the pinned OpenAPI contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: 0163a64c2139a32e60c427c7559501ab887b536e
+          path: .ci/emulebb-tooling
+          persist-credentials: false
+      - name: Download and verify retained Windows ARM64 package
+        id: original
+        working-directory: .ci/emulebb-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN: ${{ inputs.run_id }}
+          PRODUCER_ATTEMPT: ${{ inputs.attempt }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+        run: >-
+          python -B -m emule_workspace.nightly_replay
+          --release "$env:EMULEBB_WORKSPACE_OUTPUT_ROOT/payload"
+          --run-id "$env:PRODUCER_RUN" --attempt "$env:PRODUCER_ATTEMPT"
+          --source-sha "$env:SOURCE_SHA" --artifact-name "$env:ARTIFACT_NAME"
+          --artifact-sha256 "$env:ARTIFACT_SHA256"
+      - name: Install pinned package smoke dependencies
+        run: python -m pip install psutil==7.2.2
+      - name: Prove retained package lifecycle
+        env:
+          PACKAGE_VERSION: ${{ steps.original.outputs.version }}
+          PACKAGE_SHA256: ${{ steps.original.outputs.package_sha256 }}
+        run: >-
+          python -B .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py
+          --release-dir "$env:EMULEBB_WORKSPACE_OUTPUT_ROOT/payload"
+          --release-version "$env:PACKAGE_VERSION" --rust-repo .ci/candidate
+          --expected-source-sha "$env:SOURCE_SHA" --expected-harness-sha "$env:HARNESS_SHA"
+          --retained-package-sha256 "$env:PACKAGE_SHA256" --expected-channel nightly
+          --report-path "$env:EMULEBB_WORKSPACE_OUTPUT_ROOT/evidence/lifecycle.json"
+          --target-os windows --platform ARM64 --verify-profile-ownership
+      - name: Retain diagnostic evidence
+        if: always()
+        shell: python
+        env:
+          PRODUCER_RUN: ${{ inputs.run_id }}
+          PRODUCER_ATTEMPT: ${{ inputs.attempt }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          ARTIFACT_ID: ${{ steps.original.outputs.artifact_id }}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path(os.environ["EMULEBB_WORKSPACE_OUTPUT_ROOT"]) / "evidence"
+          if evidence.is_dir():
+              fields = ("PRODUCER_RUN", "PRODUCER_ATTEMPT", "ARTIFACT_NAME", "ARTIFACT_SHA256",
+                        "ARTIFACT_ID", "SOURCE_SHA", "HARNESS_SHA", "REQUEST_ID")
+              receipt = {name.lower(): os.environ[name] for name in fields}
+              (evidence / "inputs.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arm64-package-replay-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/arm64-package-replay/evidence/
+          if-no-files-found: warn
+          retention-days: 14
