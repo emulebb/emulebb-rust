@@ -242,6 +242,9 @@ pub async fn search_keyword_udp_servers(
                 continue;
             }
         };
+        if excluded_endpoint == Some(resolved_server.base_endpoint()) {
+            continue;
+        }
         debug!(
             "ED2K UDP keyword search attempt={}/{} endpoint={} name={}",
             attempt_index + 1,
@@ -601,9 +604,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        SearchCriteria, drain_keyword_udp_responses, eligible_udp_keyword_search_servers,
-        encode_search_request_with_criteria, encode_udp_keyword_search_payloads,
-        search_keyword_on_server,
+        Ed2kUdpKeywordSearchOptions, SearchCriteria, drain_keyword_udp_responses,
+        eligible_udp_keyword_search_servers, encode_search_request_with_criteria,
+        encode_udp_keyword_search_payloads, search_keyword_on_server, search_keyword_udp_servers,
     };
 
     async fn read_active_keyword_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
@@ -746,6 +749,45 @@ mod tests {
         assert_eq!(servers.len(), 98);
         assert_eq!(servers.first().unwrap().host, "192.0.2.1");
         assert_eq!(servers.last().unwrap().host, "192.0.2.100");
+    }
+
+    #[tokio::test]
+    async fn udp_keyword_search_excludes_connected_server_after_dns_resolution() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let tcp_port = receiver.local_addr().unwrap().port() - 4;
+        let config = Ed2kRuntimeConfig {
+            server_entries: vec![crate::config::Ed2kServerEntry {
+                host: "localhost".into(),
+                port: tcp_port,
+                ..Default::default()
+            }],
+            ..Ed2kRuntimeConfig::default()
+        };
+        let criteria = SearchCriteria::default();
+        let cancel = CancellationToken::new();
+        let results = tokio::time::timeout(
+            Duration::from_secs(2),
+            search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
+                bind_ip: Ipv4Addr::LOCALHOST,
+                config: &config,
+                excluded_endpoint: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port))),
+                dead_server_endpoints: &[],
+                query: "sample",
+                criteria: &criteria,
+                result_sink: None,
+                progress_sink: None,
+                cancel: &cancel,
+            }),
+        )
+        .await
+        .expect("excluded server must not start a UDP reply wait")
+        .unwrap();
+        assert!(results.is_empty());
+        let mut data = [0; 64];
+        assert_eq!(
+            receiver.try_recv(&mut data).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[tokio::test]
