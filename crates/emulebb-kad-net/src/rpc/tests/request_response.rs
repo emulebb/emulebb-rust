@@ -147,6 +147,33 @@ async fn detached_lookup_correlates_the_target_and_keeps_reply_metadata() {
 }
 
 #[tokio::test]
+async fn withdrawn_publication_is_retired_before_udp_dispatch() {
+    let transport = Arc::new(MockTransport::new(make_local_addr()));
+    let rpc = make_rpc_with_shared_transport(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(emulebb_kad_proto::NodeId::ZERO, 0, false),
+    );
+    let source = KadPacket::PublishSourceReq(emulebb_kad_proto::PublishSourceReq {
+        target: emulebb_kad_proto::NodeId::from_bytes([1; 16]),
+        publisher_id: emulebb_kad_proto::NodeId::ZERO,
+        tags: Vec::new(),
+    });
+    let result = rpc
+        .request_with_class_and_metadata_when(
+            make_peer_addr(),
+            &source,
+            opcode::PUBLISH_RES,
+            Duration::from_secs(1),
+            RpcWorkClass::Publish,
+            &|| false,
+        )
+        .await;
+    assert!(matches!(result, Err(NetError::RequestCancelled)));
+    assert!(transport.drain_outgoing().is_empty());
+    assert_eq!(rpc.pending_len(), 0);
+}
+
+#[tokio::test]
 async fn test_request_timeout() {
     let rpc = make_rpc(RpcConfig {
         max_outbound_pps: 0,

@@ -135,7 +135,9 @@ use hello::{
     build_hello_responses, emule_misc_options1, emule_misc_options2, emule_version_tag,
     encode_emule_info_request,
 };
-pub use hello_buddy::{HelloBuddySnapshot, set_hello_buddy_snapshot};
+pub use hello_buddy::{
+    HelloBuddySnapshot, set_hello_buddy_snapshot, set_live_hello_buddy_snapshot,
+};
 pub use identity::Ed2kSecureIdent;
 pub(in crate::ed2k_tcp) use identity::{
     Ed2kPeerSecureIdentState, begin_secure_ident_probe, credit_accrual_allowed,

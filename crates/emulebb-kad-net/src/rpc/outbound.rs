@@ -137,6 +137,28 @@ impl RpcManager {
         timeout_duration: Duration,
         work_class: RpcWorkClass,
     ) -> Result<ReceivedKadPacket, NetError> {
+        self.request_with_class_and_metadata_when(
+            addr,
+            packet,
+            expected_opcode,
+            timeout_duration,
+            work_class,
+            &|| true,
+        )
+        .await
+    }
+
+    /// Wait for a correlated response if the caller still authorizes actual UDP dispatch.
+    /// The predicate is evaluated after both outbound budgets are acquired.
+    pub async fn request_with_class_and_metadata_when(
+        &self,
+        addr: SocketAddr,
+        packet: &KadPacket,
+        expected_opcode: u8,
+        timeout_duration: Duration,
+        work_class: RpcWorkClass,
+        may_dispatch: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<ReceivedKadPacket, NetError> {
         if !self.kad_enabled() {
             return Err(NetError::KadStopped);
         }
@@ -191,7 +213,7 @@ impl RpcManager {
         }
 
         if let Err(e) = self
-            .send_with_class_for_request(addr, packet, work_class, Some(id), None)
+            .send_with_class_for_request(addr, packet, work_class, Some(id), None, may_dispatch)
             .await
         {
             if let Some(entry) = guard.take() {
@@ -253,7 +275,7 @@ impl RpcManager {
         packet: &KadPacket,
         work_class: RpcWorkClass,
     ) -> Result<(), NetError> {
-        self.send_with_class_for_request(addr, packet, work_class, None, None)
+        self.send_with_class_for_request(addr, packet, work_class, None, None, &|| true)
             .await
     }
 
@@ -273,6 +295,7 @@ impl RpcManager {
             work_class,
             None,
             Some((key, response.key_epoch)),
+            &|| true,
         )
         .await
     }
@@ -284,6 +307,7 @@ impl RpcManager {
         work_class: RpcWorkClass,
         request_id: Option<u64>,
         reply_key: Option<(u32, u64)>,
+        may_dispatch: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), NetError> {
         if !self.kad_enabled() {
             dump_kad_udp_packet(
@@ -427,7 +451,11 @@ impl RpcManager {
                 crypt_target,
             );
         }
-        let send_result = self.inner.transport.send_raw(addr, &wire).await;
+        let send_result = if may_dispatch() {
+            self.inner.transport.send_raw(addr, &wire).await
+        } else {
+            Err(NetError::RequestCancelled)
+        };
         let (outcome, drop_reason, detail) = match &send_result {
             Ok(()) => (KadUdpOutcome::SendSucceeded, None, None),
             Err(error) => (

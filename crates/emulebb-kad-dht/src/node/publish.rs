@@ -110,6 +110,27 @@ impl DhtNode {
         work_class: RpcWorkClass,
         publish_contact_fanout: usize,
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
+        self.publish_source_while_relay_is_live(
+            file_hash,
+            publisher_id,
+            tags,
+            work_class,
+            publish_contact_fanout,
+            None,
+        )
+        .await
+    }
+
+    /// Publish sources whose relay may be withdrawn while the lookup is running.
+    pub async fn publish_source_while_relay_is_live(
+        &self,
+        file_hash: Ed2kHash,
+        publisher_id: NodeId,
+        tags: Vec<Tag>,
+        work_class: RpcWorkClass,
+        publish_contact_fanout: usize,
+        relay_lease: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
         // Oracle CSearchManager: dedup/cap the source store traversal by target.
         let target = NodeId::from_be_bytes(file_hash.0);
         let _permit = self
@@ -125,6 +146,7 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
+            relay_lease,
         );
         match time::timeout(Duration::from_secs(STORE_SOURCE_TIMEOUT_SECS), result).await {
             Ok(result) => result,

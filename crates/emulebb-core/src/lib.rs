@@ -51,7 +51,7 @@ use emulebb_ed2k::{
         Ed2kPeerDownloadOutcome, Ed2kPeerDownloadReport, Ed2kPeerUploadContext, Ed2kSecureIdent,
         HelloBuddySnapshot, OutboundBuddyLinkOptions, download_files_from_peer,
         ed2k_callback_session_channel, emule_connect_options, encode_kad_callback_relay_frame,
-        run_ed2k_listener, run_outbound_buddy_link, set_hello_buddy_snapshot,
+        run_ed2k_listener, run_outbound_buddy_link, set_live_hello_buddy_snapshot,
         set_publish_rust_identity,
     },
     ed2k_transfer::{
@@ -3838,22 +3838,23 @@ async fn publish_kad_due_shared_files(
     // `None` = firewalled with neither relay path usable right now (e.g. the
     // buddy dropped after the gate check); source publishes skip this cycle,
     // mirroring the oracle's PrepareToStop for that state.
-    let source_publish_reachability = if !gate.tcp_firewalled {
-        Some(SourcePublishReachability::Open)
+    let (source_publish_reachability, buddy_publication_lease) = if !gate.tcp_firewalled {
+        (Some(SourcePublishReachability::Open), None)
     } else if gate.udp_open {
-        Some(SourcePublishReachability::DirectUdpCallback)
+        (Some(SourcePublishReachability::DirectUdpCallback), None)
     } else {
-        runtime
-            .kad_buddy
-            .lock()
-            .await
-            .outgoing_buddy_udp_endpoint()
-            .map(
-                |(buddy_ip, buddy_kad_port)| SourcePublishReachability::BuddyRelay {
-                    buddy_ip,
-                    buddy_kad_port,
-                },
-            )
+        let buddy = runtime.kad_buddy.lock().await;
+        (
+            buddy
+                .outgoing_buddy_udp_endpoint()
+                .map(
+                    |(buddy_ip, buddy_kad_port)| SourcePublishReachability::BuddyRelay {
+                        buddy_ip,
+                        buddy_kad_port,
+                    },
+                ),
+            buddy.outgoing_publication_lease(),
+        )
     };
     let source_publish_buddy_ip = match source_publish_reachability {
         Some(SourcePublishReachability::BuddyRelay { buddy_ip, .. }) => Some(buddy_ip),
@@ -4083,16 +4084,25 @@ async fn publish_kad_due_shared_files(
                 runtime.file_publication.source_started(&file_hash_text);
                 available_publish_starts = available_publish_starts.saturating_sub(1);
                 active_counts.started(KadSharedPublishKind::Source);
+                let buddy_lease = buddy_publication_lease.clone();
                 publish_tasks.spawn(async move {
-                    let result = dht
-                        .publish_source_with_class_and_fanout(
-                            file_hash,
-                            source_publish_identity,
-                            source_tags,
-                            RpcWorkClass::Publish,
-                            fanout,
-                        )
-                        .await;
+                    let publish = dht.publish_source_while_relay_is_live(
+                        file_hash,
+                        source_publish_identity,
+                        source_tags,
+                        RpcWorkClass::Publish,
+                        fanout,
+                        buddy_lease.clone(),
+                    );
+                    let result = if let Some(lease) = buddy_lease {
+                        tokio::select! {
+                            biased;
+                            () = lease.cancelled() => Err(DhtError::SearchBusy),
+                            result = publish => result,
+                        }
+                    } else {
+                        publish.await
+                    };
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Source,
                         file_hashes: vec![file_hash_text],
@@ -5294,6 +5304,7 @@ fn configured_kad_bootstrap_endpoints_text(endpoints: &[String]) -> Option<Strin
     }
 }
 
+#[derive(Clone)]
 struct KadLocalStoreRuntime {
     dht: DhtNode,
     local_store: Arc<Mutex<KadLocalStore>>,
@@ -5321,14 +5332,17 @@ struct KadLocalStoreRuntime {
 }
 
 async fn run_kad_local_store_loop(runtime: KadLocalStoreRuntime, shutdown: Arc<AtomicBool>) {
+    let _cancel_links = CancelBuddyLinkOnDrop(Arc::clone(&runtime.buddy_link_cancel));
+    let mut links = tokio::task::JoinSet::new();
     let mut packets = runtime.dht.subscribe_packets();
     let mut metrics = KadLocalStoreLoopMetrics::new(Instant::now());
     while !shutdown.load(Ordering::SeqCst) {
+        while links.try_join_next().is_some() {}
         match tokio::time::timeout(Duration::from_millis(250), packets.recv()).await {
             Ok(Ok(received)) => {
                 let packet_kind = kad_packet_kind(&received.packet);
                 let started = Instant::now();
-                let result = handle_kad_local_store_packet(&runtime, received).await;
+                let result = handle_kad_local_store_packet(&runtime, received, &mut links).await;
                 metrics.record(packet_kind, started.elapsed(), result.is_err());
                 metrics.emit_if_due(Instant::now());
                 if let Err(error) = result {
@@ -5345,7 +5359,18 @@ async fn run_kad_local_store_loop(runtime: KadLocalStoreRuntime, shutdown: Arc<A
     metrics.emit(Instant::now());
 }
 
+struct CancelBuddyLinkOnDrop(Arc<std::sync::Mutex<Option<CancellationToken>>>);
+
+impl Drop for CancelBuddyLinkOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.0.lock().unwrap().take() {
+            cancel.cancel();
+        }
+    }
+}
+
 /// Shared inputs for the buddy-management task.
+#[derive(Clone)]
 struct KadBuddyRuntime {
     dht: DhtNode,
     ed2k_listener: Arc<TcpListener>,
@@ -5374,6 +5399,7 @@ const KAD_BUDDY_LINK_TIMEOUT: Duration = Duration::from_secs(10);
 /// (`KADEMLIA_FINDBUDDY_REQ`). The `FINDBUDDY_RES` reply is recorded by the
 /// inbound dispatch. Re-search resumes automatically after a buddy is lost.
 async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>) {
+    let mut searches = tokio::task::JoinSet::new();
     let mut periodic_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(KAD_BUDDY_TICK_SECS),
         Duration::from_secs(KAD_BUDDY_TICK_SECS),
@@ -5383,12 +5409,20 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
         tokio::select! {
             _ = periodic_tick.tick() => {}
             () = runtime.buddy_manager_wake.notified() => {}
+            result = searches.join_next(), if !searches.is_empty() => {
+                if let Some(Ok(Err(error))) = result {
+                    tracing::debug!("Kad buddy search failed: {error:#}");
+                }
+            }
         }
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
         let need = current_buddy_need(&runtime).await;
+        if !need.needs_buddy() {
+            searches.abort_all();
+        }
 
         // kad_event routing_summary (uniform-diagnostics-v2 §3.3): emit the
         // routing-table + connection gauge from this periodic maintenance tick
@@ -5419,7 +5453,6 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
                 }
                 if !need.needs_buddy() {
                     runtime.buddy_registry.evict_outbound();
-                    set_hello_buddy_snapshot(None); // no outgoing buddy: stop advertising
                     // LOWID-G8: tear down the persistent outbound buddy link (and
                     // its OP_BUDDYPING keepalive) now that we no longer need a
                     // buddy, instead of leaving it running until the socket dies
@@ -5446,33 +5479,47 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
                 );
                 runtime.buddy_registry.clear_inbound();
             }
-            if !state.should_search(need, now) {
+            if !searches.is_empty() || !state.should_search(need, now) {
                 continue;
             }
             state.mark_search_started(now);
         }
-        if let Err(error) = run_kad_buddy_search(&runtime).await {
-            tracing::debug!("Kad buddy search failed: {error:#}");
-        }
+        let search_runtime = runtime.clone();
+        searches.spawn(async move { run_kad_buddy_search(&search_runtime).await });
+    }
+    let mut state = runtime.kad_buddy.lock().await;
+    state.clear_outgoing_buddy();
+    if let Some(cancel) = runtime.buddy_link_cancel.lock().unwrap().take() {
+        cancel.cancel();
     }
 }
 
 /// Evaluate the current "do we need a buddy?" inputs from live state.
 async fn current_buddy_need(runtime: &KadBuddyRuntime) -> BuddyNeedInput {
-    let tcp_firewalled = current_kad_tcp_firewalled(
+    read_buddy_need(
+        &runtime.dht,
         &runtime.ed2k_listener,
         &runtime.server_state,
         &runtime.kad_firewall,
     )
-    .await;
+    .await
+}
+
+async fn read_buddy_need(
+    dht: &DhtNode,
+    listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+) -> BuddyNeedInput {
+    let tcp_firewalled = current_kad_tcp_firewalled(listener, server_state, kad_firewall).await;
     let udp_firewalled_verified = {
-        let firewall = runtime.kad_firewall.lock().await;
+        let firewall = kad_firewall.lock().await;
         firewall.udp_verified && !firewall.udp_open
     };
     BuddyNeedInput {
         tcp_firewalled,
         udp_firewalled_verified,
-        kad_connected: runtime.dht.is_bootstrapped(),
+        kad_connected: dht.is_running() && dht.is_bootstrapped(),
     }
 }
 
@@ -5672,6 +5719,7 @@ fn kad_packet_kind(packet: &KadPacket) -> &'static str {
 async fn handle_kad_local_store_packet(
     runtime: &KadLocalStoreRuntime,
     received: ReceivedKadPacket,
+    links: &mut tokio::task::JoinSet<()>,
 ) -> Result<()> {
     let dht = &runtime.dht;
     let local_store = &runtime.local_store;
@@ -6184,24 +6232,7 @@ async fn handle_kad_local_store_packet(
             .await?;
         }
         KadPacket::FindBuddyRes(res) => {
-            // Snapshot the reask handle into an owned Option before the await so no
-            // MutexGuard is held across it (the future must stay Send).
-            let reask_handle = runtime.reask_handle.lock().unwrap().clone();
-            handle_kad_find_buddy_res(
-                dht,
-                kad_buddy,
-                buddy_registry,
-                &runtime.buddy_link_cancel,
-                &runtime.buddy_manager_wake,
-                &runtime.reachability,
-                &runtime.transfer_runtime,
-                &runtime.callback_sessions,
-                reask_handle,
-                network,
-                from,
-                res,
-            )
-            .await;
+            handle_kad_find_buddy_res(runtime, from, res, links).await;
         }
         KadPacket::CallbackReq(req) => {
             handle_kad_callback_req(kad_buddy, buddy_registry, from, &req).await;
@@ -6438,120 +6469,183 @@ async fn handle_kad_find_buddy_req(
 
 /// Inbound `KADEMLIA_FINDBUDDY_RES` (a candidate accepted our buddy request).
 ///
-/// Mirrors `Process_KADEMLIA_FINDBUDDY_RES`: verify the echoed `buddy_id`
-/// against our own Kad id, then record the buddy (oracle `RequestBuddy`). The
-/// buddy-management task keeps the TCP connection.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "flat protocol or runtime boundary"
-)]
+/// A UDP offer is a candidate until the TCP handshake proves the identity.
 async fn handle_kad_find_buddy_res(
-    dht: &DhtNode,
-    kad_buddy: &Arc<Mutex<KadBuddyState>>,
-    buddy_registry: &BuddySocketRegistry,
-    buddy_link_cancel: &Arc<std::sync::Mutex<Option<CancellationToken>>>,
-    buddy_manager_wake: &Arc<tokio::sync::Notify>,
-    reachability: &ExternalReachability,
-    transfer_runtime: &Arc<Ed2kTransferRuntime>,
-    callback_sessions: &Ed2kCallbackSessionHandle,
-    reask_handle: Option<ReaskSourceHandle>,
-    network: &Ed2kNetworkConfig,
+    runtime: &KadLocalStoreRuntime,
     from: SocketAddr,
     res: FindBuddyRes,
+    links: &mut tokio::task::JoinSet<()>,
 ) {
-    if !find_buddy_res_matches(dht.own_id(), res.buddy_id) {
+    if !find_buddy_res_matches(runtime.dht.own_id(), res.buddy_id) {
         tracing::debug!("dropping Kad FINDBUDDY_RES from {from}: buddy_id echo mismatch");
         return;
     }
-    // We are IPv4-only; a non-IPv4 buddy source cannot be connected.
-    let IpAddr::V4(buddy_ip) = from.ip() else {
-        tracing::debug!("dropping Kad FINDBUDDY_RES from {from}: non-IPv4 buddy source");
+    if !from.is_ipv4() || res.tcp_port == 0 || !runtime.dht.is_running() {
         return;
-    };
-    let connect_options = res.connect_options.unwrap_or(0);
+    }
     let buddy = OutgoingBuddy {
         client_hash: res.client_hash,
         tcp_addr: SocketAddr::new(from.ip(), res.tcp_port),
         udp_addr: from,
-        connect_options,
+        connect_options: res.connect_options.unwrap_or(0),
         acquired_at: Utc::now(),
     };
+    let cancel = CancellationToken::new();
     {
-        let mut state = kad_buddy.lock().await;
-        // The oracle keeps a single buddy; ignore a second concurrent response.
-        if state.has_outgoing_buddy() {
-            tracing::debug!("ignoring Kad FINDBUDDY_RES from {from}: already hold a buddy");
+        let mut state = runtime.kad_buddy.lock().await;
+        if !state.offer_outgoing_buddy(&buddy) {
             return;
         }
-        state.set_outgoing_buddy(buddy.clone());
+        if let Some(previous) = runtime
+            .buddy_link_cancel
+            .lock()
+            .unwrap()
+            .replace(cancel.clone())
+        {
+            previous.cancel();
+        }
     }
-    set_hello_buddy_snapshot(Some(HelloBuddySnapshot {
-        ip: buddy_ip,
-        udp_port: from.port(),
-    }));
-    // kad_event buddy milestone `buddy_established` (uniform-diagnostics-v2 §3.3).
-    crate::diag_kad_event::buddy(true, from);
-    tracing::info!("acquired Kad buddy {from} (tcp_port={})", res.tcp_port);
+    links.spawn(run_outgoing_buddy_offers(
+        runtime.clone(),
+        buddy,
+        cancel,
+        runtime.dht.udp_probe_binding(),
+    ));
+}
 
-    // Establish + hold the persistent buddy TCP link so callbacks can be relayed
-    // back to us, then ping it at the oracle cadence. When the link drops, clear
-    // our acquired buddy so the buddy-management loop re-searches (oracle
-    // buddy-loss SetFindBuddy).
+async fn run_outgoing_buddy_offers(
+    runtime: KadLocalStoreRuntime,
+    mut buddy: OutgoingBuddy,
+    cancel: CancellationToken,
+    kad_binding: (Option<Ipv4Addr>, u64),
+) {
+    let network = &runtime.network;
     let binding =
         emulebb_ed2k::networking::EgressBinding::new(network.bind_ip, network.egress_route);
-    let hello_identity = buddy_hello_identity(network, reachability);
-    let buddy_user_hash = res.client_hash.0;
-    let buddy_addr = SocketAddr::new(from.ip(), res.tcp_port);
-    let registry = buddy_registry.clone();
-    let kad_buddy = Arc::clone(kad_buddy);
-    let dht = dht.clone();
-    let transfer_runtime = Arc::clone(transfer_runtime);
-    let callback_sessions = callback_sessions.clone();
-    let buddy_link_cancel = Arc::clone(buddy_link_cancel);
-    let buddy_manager_wake = Arc::clone(buddy_manager_wake);
-    // LOWID-G8: install a fresh cancellation handle for this link so the
-    // buddy-management loop can tear it down (and stop its keepalive pings) when
-    // the buddy relationship is no longer warranted.
-    let cancel = CancellationToken::new();
-    // A newly-acquired buddy replaces any stale handle; the previous link (if any)
-    // has already exited or is being torn down.
-    *buddy_link_cancel.lock().unwrap() = Some(cancel.clone());
-    tokio::spawn(async move {
-        if let Err(error) = run_outbound_buddy_link(OutboundBuddyLinkOptions {
-            binding,
-            buddy_addr,
-            buddy_user_hash,
-            buddy_connect_options: connect_options,
-            hello_identity,
-            dht,
-            transfer_runtime,
-            callback_sessions,
-            registry,
-            reask_handle,
-            timeout: KAD_BUDDY_LINK_TIMEOUT,
-            cancel: cancel.clone(),
-        })
-        .await
-        {
-            tracing::debug!("outbound Kad buddy link to {buddy_addr} failed: {error:#}");
+    loop {
+        let reask_handle = runtime.reask_handle.lock().unwrap().clone();
+        let result = {
+            let link = run_outbound_buddy_link(
+                OutboundBuddyLinkOptions {
+                    binding,
+                    buddy_addr: buddy.tcp_addr,
+                    buddy_user_hash: buddy.client_hash.0,
+                    buddy_connect_options: buddy.connect_options,
+                    hello_identity: buddy_hello_identity(network, &runtime.reachability),
+                    dht: runtime.dht.clone(),
+                    transfer_runtime: Arc::clone(&runtime.transfer_runtime),
+                    callback_sessions: runtime.callback_sessions.clone(),
+                    registry: runtime.buddy_registry.clone(),
+                    reask_handle,
+                    timeout: KAD_BUDDY_LINK_TIMEOUT,
+                    cancel: cancel.clone(),
+                },
+                authorize_outgoing_buddy(&runtime, &buddy, &cancel, kad_binding),
+            );
+            tokio::pin!(link);
+            tokio::select! {
+                biased;
+                () = wait_for_buddy_binding_change(&runtime, kad_binding) => {
+                    cancel.cancel();
+                    link.await
+                }
+                result = &mut link => result,
+            }
+        };
+        let failed_before_end = result.is_err();
+        if let Err(error) = result {
+            tracing::debug!(peer = %buddy.tcp_addr, "outbound Kad buddy link failed: {error:#}");
         }
         if complete_outgoing_buddy_link(
-            &kad_buddy,
-            &buddy_link_cancel,
-            &buddy_manager_wake,
+            &runtime.kad_buddy,
+            &runtime.buddy_link_cancel,
+            &runtime.buddy_manager_wake,
             &buddy,
             &cancel,
         )
         .await
         {
-            set_hello_buddy_snapshot(None);
-            crate::diag_kad_event::buddy(false, buddy_addr);
-        } else {
-            tracing::debug!(
-                "outbound Kad buddy link to {buddy_addr} ended after its state was replaced"
-            );
+            return;
         }
-    });
+        let mut state = runtime.kad_buddy.lock().await;
+        let mut current_cancel = runtime.buddy_link_cancel.lock().unwrap();
+        if current_cancel.as_ref() != Some(&cancel) {
+            return;
+        }
+        if !failed_before_end {
+            state.clear_outgoing_buddy();
+            current_cancel.take();
+            return;
+        }
+        let Some(next) = state.next_outgoing_buddy_offer(buddy.tcp_addr, Utc::now()) else {
+            current_cancel.take();
+            return;
+        };
+        buddy = next;
+    }
+}
+
+async fn wait_for_buddy_binding_change(
+    runtime: &KadLocalStoreRuntime,
+    binding: (Option<Ipv4Addr>, u64),
+) {
+    while runtime.dht.udp_probe_binding() == binding
+        && read_buddy_need(
+            &runtime.dht,
+            &runtime.ed2k_listener,
+            &runtime.server_state,
+            &runtime.kad_firewall,
+        )
+        .await
+        .needs_buddy()
+    {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn authorize_outgoing_buddy(
+    runtime: &KadLocalStoreRuntime,
+    buddy: &OutgoingBuddy,
+    cancel: &CancellationToken,
+    binding: (Option<Ipv4Addr>, u64),
+) -> Option<emulebb_ed2k::buddy_socket::OutboundBuddyToken> {
+    if !read_buddy_need(
+        &runtime.dht,
+        &runtime.ed2k_listener,
+        &runtime.server_state,
+        &runtime.kad_firewall,
+    )
+    .await
+    .needs_buddy()
+    {
+        return None;
+    }
+    let IpAddr::V4(ip) = buddy.udp_addr.ip() else {
+        return None;
+    };
+    let mut state = runtime.kad_buddy.lock().await;
+    let current = runtime.buddy_link_cancel.lock().unwrap();
+    if cancel.is_cancelled()
+        || current.as_ref() != Some(cancel)
+        || !runtime.dht.is_running()
+        || runtime.dht.udp_probe_binding() != binding
+        || !state.can_establish_outgoing_buddy(Utc::now())
+    {
+        return None;
+    }
+    let registry_token = runtime
+        .buddy_registry
+        .register_outbound(ip, buddy.client_hash.0);
+    state.set_outgoing_buddy_with_lease(buddy.clone(), cancel.clone());
+    set_live_hello_buddy_snapshot(
+        HelloBuddySnapshot {
+            ip,
+            udp_port: buddy.udp_addr.port(),
+        },
+        cancel.clone(),
+    );
+    crate::diag_kad_event::buddy(true, buddy.udp_addr);
+    Some(registry_token)
 }
 
 async fn complete_outgoing_buddy_link(
@@ -6562,16 +6656,16 @@ async fn complete_outgoing_buddy_link(
     cancel: &CancellationToken,
 ) -> bool {
     {
+        let mut state = kad_buddy.lock().await;
         let mut current_cancel = buddy_link_cancel.lock().unwrap();
-        if current_cancel.as_ref() == Some(cancel) {
-            current_cancel.take();
+        if current_cancel.as_ref() != Some(cancel) || !state.clear_outgoing_buddy_if(buddy) {
+            return false;
         }
+        current_cancel.take();
     }
-    let cleared = kad_buddy.lock().await.clear_outgoing_buddy_if(buddy);
-    if cleared {
-        buddy_manager_wake.notify_one();
-    }
-    cleared
+    crate::diag_kad_event::buddy(false, buddy.tcp_addr);
+    buddy_manager_wake.notify_one();
+    true
 }
 
 /// Build the hello identity used by buddy links / callback completion, mirroring

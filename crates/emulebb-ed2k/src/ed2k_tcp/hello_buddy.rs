@@ -5,6 +5,7 @@
 use std::net::Ipv4Addr;
 
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// Buddy endpoint a firewalled client advertises in its hello so peers can reach
 /// it through the buddy's UDP callback relay (`buddySnapshot.dwBuddyIP` /
@@ -23,18 +24,28 @@ pub struct HelloBuddySnapshot {
 /// Kad buddy is acquired and clears it when the buddy is dropped (which it does
 /// as soon as we are no longer firewalled), so its presence is exactly the
 /// oracle `bShouldAdvertise = IsFirewalled() && hasBuddy`.
-static HELLO_BUDDY_SNAPSHOT: Mutex<Option<HelloBuddySnapshot>> = Mutex::new(None);
+static HELLO_BUDDY_SNAPSHOT: Mutex<Option<(HelloBuddySnapshot, Option<CancellationToken>)>> =
+    Mutex::new(None);
 
 /// Publish (or clear with `None`) the buddy endpoint advertised in subsequent
 /// hellos. Called by core from the Kad buddy subsystem when the outgoing buddy
 /// is acquired or released.
 pub fn set_hello_buddy_snapshot(snapshot: Option<HelloBuddySnapshot>) {
-    *HELLO_BUDDY_SNAPSHOT.lock() = snapshot;
+    *HELLO_BUDDY_SNAPSHOT.lock() = snapshot.map(|snapshot| (snapshot, None));
+}
+
+/// Publish a HELLO relay only while its owning link generation remains live.
+pub fn set_live_hello_buddy_snapshot(snapshot: HelloBuddySnapshot, lease: CancellationToken) {
+    *HELLO_BUDDY_SNAPSHOT.lock() = Some((snapshot, Some(lease)));
 }
 
 /// Read the current buddy hello snapshot for the hello tag builder.
 pub(super) fn hello_buddy_snapshot() -> Option<HelloBuddySnapshot> {
-    *HELLO_BUDDY_SNAPSHOT.lock()
+    HELLO_BUDDY_SNAPSHOT
+        .lock()
+        .as_ref()
+        .filter(|(_, lease)| lease.as_ref().is_none_or(|lease| !lease.is_cancelled()))
+        .map(|(snapshot, _)| *snapshot)
 }
 
 /// A peer's buddy endpoint decoded from its eD2k hello tags `CT_EMULE_BUDDYIP`

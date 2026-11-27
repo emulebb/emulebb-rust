@@ -108,6 +108,7 @@ async fn execute_publish_fanout_for_contacts(
     rpc: &RpcManager,
     contacts: &[TraversalContact],
     work_class: RpcWorkClass,
+    relay_lease: Option<CancellationToken>,
     mut build_packet: impl FnMut(&TraversalContact) -> KadPacket,
 ) -> Vec<(PublishAttempt, Result<KadPacket, emulebb_kad_net::NetError>)> {
     let mut join_set = JoinSet::new();
@@ -115,6 +116,7 @@ async fn execute_publish_fanout_for_contacts(
 
     for (index, contact) in contacts.iter().cloned().enumerate() {
         let rpc = rpc.clone();
+        let lease = relay_lease.clone();
         let packet = build_packet(&contact);
         let attempt = PublishAttempt {
             rank: index as u32 + 1,
@@ -124,12 +126,13 @@ async fn execute_publish_fanout_for_contacts(
         join_set.spawn(async move {
             let expected_opcode = publish_response_opcode(&packet);
             let result = rpc
-                .request_with_class_and_metadata(
+                .request_with_class_and_metadata_when(
                     attempt.contact.addr,
                     &packet,
                     expected_opcode,
                     PUBLISH_RESPONSE_TIMEOUT,
                     work_class,
+                    &|| lease.as_ref().is_none_or(|lease| !lease.is_cancelled()),
                 )
                 .await;
             (
@@ -703,6 +706,7 @@ pub async fn publish_source(
     work_class: RpcWorkClass,
     ip_filter: Option<crate::traversal::KadIpFilter>,
     res_contact_sink: Option<crate::traversal::KadResContactSink>,
+    relay_lease: Option<CancellationToken>,
 ) -> Result<PublishAttemptStats, DhtError> {
     let target = NodeId::from_be_bytes(file_hash.0);
     let (publish_contacts, mut stats) = resolve_publish_contacts(
@@ -730,11 +734,14 @@ pub async fn publish_source(
             publisher_id,
         );
     }
-    let results =
-        execute_publish_fanout_for_contacts(rpc, &publish_contacts, work_class, |contact| {
-            build_source_publish_packet(target, publisher_id, &tags, contact.version)
-        })
-        .await;
+    let results = execute_publish_fanout_for_contacts(
+        rpc,
+        &publish_contacts,
+        work_class,
+        relay_lease,
+        |contact| build_source_publish_packet(target, publisher_id, &tags, contact.version),
+    )
+    .await;
     record_publish_results(&mut stats, "source", "publish_source", true, results);
 
     Ok(stats)
@@ -805,7 +812,7 @@ pub async fn publish_notes(
     .await?;
 
     let results =
-        execute_publish_fanout_for_contacts(rpc, &publish_contacts, work_class, |contact| {
+        execute_publish_fanout_for_contacts(rpc, &publish_contacts, work_class, None, |contact| {
             build_notes_publish_packet(target, publisher_id, &tags, contact.version)
         })
         .await;

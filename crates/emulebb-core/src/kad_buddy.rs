@@ -21,10 +21,16 @@
 //! - `srchybrid/kademlia/kademlia/Kademlia.cpp` buddy timers
 //!   (`m_tNextFindBuddy`, find-buddy delayed 5 min after a firewall recheck).
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::{
+    collections::VecDeque,
+    net::{Ipv4Addr, SocketAddr},
+};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
+use tokio_util::sync::CancellationToken;
+
+const MAX_RESERVE_BUDDY_OFFERS: usize = 8;
 
 /// Read the advertised relay addresses in the stock IPv4 DWORD byte order.
 pub(crate) fn source_publish_buddy_ips(tags: &[Tag]) -> impl Iterator<Item = Ipv4Addr> + '_ {
@@ -155,6 +161,9 @@ pub struct KadBuddyState {
     incoming: Option<IncomingBuddy>,
     /// The buddy we acquired for ourselves while firewalled. Also at most one.
     outgoing: Option<OutgoingBuddy>,
+    outgoing_connecting: bool,
+    reserve_buddy_offers: VecDeque<OutgoingBuddy>,
+    publication_cancel: Option<CancellationToken>,
     /// Timestamp of our last buddy search attempt (rate-limiting the search).
     last_search_at: Option<DateTime<Utc>>,
     /// Liveness watermark for the [`Self::incoming`] claim: the last time we
@@ -190,6 +199,10 @@ impl KadBuddyState {
     #[must_use]
     pub fn has_outgoing_buddy(&self) -> bool {
         self.outgoing.is_some()
+            && self
+                .publication_cancel
+                .as_ref()
+                .is_some_and(|lease| !lease.is_cancelled())
     }
 
     /// Kad UDP endpoint of the buddy we acquired for ourselves, when present —
@@ -198,12 +211,20 @@ impl KadBuddyState {
     /// both captured from the `FINDBUDDY_RES` datagram source).
     #[must_use]
     pub fn outgoing_buddy_udp_endpoint(&self) -> Option<(Ipv4Addr, u16)> {
+        if !self.has_outgoing_buddy() {
+            return None;
+        }
         self.outgoing
             .as_ref()
             .and_then(|buddy| match buddy.udp_addr.ip() {
                 std::net::IpAddr::V4(ip) => Some((ip, buddy.udp_addr.port())),
                 std::net::IpAddr::V6(_) => None,
             })
+    }
+
+    /// A source publish may hold this lease only while the selected relay is live.
+    pub(crate) fn outgoing_publication_lease(&self) -> Option<CancellationToken> {
+        self.publication_cancel.clone()
     }
 
     /// Release any buddy relationships that are no longer warranted, mirroring
@@ -214,8 +235,8 @@ impl KadBuddyState {
     /// relationship was dropped so the caller can log/refresh.
     pub fn release_buddies_if_unneeded(&mut self, need: BuddyNeedInput) -> bool {
         let mut changed = false;
-        if !need.needs_buddy() && self.has_outgoing_buddy() {
-            self.outgoing = None;
+        if !need.needs_buddy() && (self.outgoing.is_some() || self.outgoing_connecting) {
+            self.clear_outgoing_buddy();
             changed = true;
         }
         // If we became firewalled we can no longer relay for an incoming buddy.
@@ -321,8 +342,76 @@ impl KadBuddyState {
             .filter(|buddy| buddy.buddy_id == callback_buddy_id)
     }
 
-    /// Record an accepted buddy of our own (after a verified `FINDBUDDY_RES`).
+    /// Admit an offer from the active search. A single connecting task owns the
+    /// attempt sequence and can take a reserve after a failed HELLO.
+    pub(crate) fn offer_outgoing_buddy(&mut self, buddy: &OutgoingBuddy) -> bool {
+        let now = buddy.acquired_at;
+        if self.outgoing.is_some() || !self.outgoing_search_is_current(now) {
+            return false;
+        }
+        if self.outgoing_connecting {
+            if self.reserve_buddy_offers.len() < MAX_RESERVE_BUDDY_OFFERS
+                && !self
+                    .reserve_buddy_offers
+                    .iter()
+                    .any(|offer| offer.tcp_addr == buddy.tcp_addr)
+            {
+                self.reserve_buddy_offers.push_back(buddy.clone());
+            }
+            return false;
+        }
+        self.outgoing_connecting = true;
+        true
+    }
+
+    fn outgoing_search_is_current(&self, now: DateTime<Utc>) -> bool {
+        self.last_search_at.is_some_and(|started| {
+            now >= started
+                && now - started
+                    < ChronoDuration::seconds(
+                        emulebb_kad_proto::constants::SEARCHFINDBUDDY_LIFETIME_SECS as i64,
+                    )
+        })
+    }
+
+    pub(crate) fn can_establish_outgoing_buddy(&self, now: DateTime<Utc>) -> bool {
+        self.outgoing_connecting && self.outgoing_search_is_current(now)
+    }
+
+    /// Advance the active attempt sequence or end it at the search deadline.
+    pub(crate) fn next_outgoing_buddy_offer(
+        &mut self,
+        failed_endpoint: SocketAddr,
+        now: DateTime<Utc>,
+    ) -> Option<OutgoingBuddy> {
+        if self.outgoing_connecting && self.outgoing_search_is_current(now) {
+            while let Some(offer) = self.reserve_buddy_offers.pop_front() {
+                if offer.tcp_addr != failed_endpoint {
+                    return Some(offer);
+                }
+            }
+        }
+        self.outgoing_connecting = false;
+        self.reserve_buddy_offers.clear();
+        None
+    }
+
+    /// Record the authorized buddy only after its identity-bearing TCP exchange.
+    #[cfg(test)]
     pub fn set_outgoing_buddy(&mut self, buddy: OutgoingBuddy) {
+        self.set_outgoing_buddy_with_lease(buddy, CancellationToken::new());
+    }
+
+    pub(crate) fn set_outgoing_buddy_with_lease(
+        &mut self,
+        buddy: OutgoingBuddy,
+        lease: CancellationToken,
+    ) {
+        self.outgoing_connecting = false;
+        self.reserve_buddy_offers.clear();
+        if let Some(previous) = self.publication_cancel.replace(lease) {
+            previous.cancel();
+        }
         self.outgoing = Some(buddy);
     }
 
@@ -332,6 +421,11 @@ impl KadBuddyState {
     /// clearing the search cooldown so the re-search happens promptly.
     pub fn clear_outgoing_buddy(&mut self) {
         self.outgoing = None;
+        self.outgoing_connecting = false;
+        self.reserve_buddy_offers.clear();
+        if let Some(cancel) = self.publication_cancel.take() {
+            cancel.cancel();
+        }
         self.last_search_at = None;
     }
 
@@ -353,7 +447,7 @@ impl KadBuddyState {
     /// transient status never triggers a search.
     #[must_use]
     pub fn should_search(&self, need: BuddyNeedInput, now: DateTime<Utc>) -> bool {
-        if !need.needs_buddy() || self.outgoing.is_some() {
+        if !need.needs_buddy() || self.outgoing.is_some() || self.outgoing_connecting {
             return false;
         }
         match self.last_search_at {
@@ -592,6 +686,38 @@ mod tests {
             connect_options: 0,
             acquired_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn only_a_verified_offer_can_activate_the_relay_and_its_publication_lease() {
+        let first = outgoing();
+        let mut second = outgoing();
+        second.tcp_addr = addr(8, 4662);
+        second.udp_addr = addr(8, 4672);
+        let mut state = KadBuddyState::new();
+        state.mark_search_started(first.acquired_at);
+        assert!(state.offer_outgoing_buddy(&first));
+        assert!(!state.offer_outgoing_buddy(&second));
+        assert!(state.outgoing_buddy_udp_endpoint().is_none());
+        assert!(state.outgoing_publication_lease().is_none());
+
+        let replacement = state
+            .next_outgoing_buddy_offer(first.tcp_addr, second.acquired_at)
+            .unwrap();
+        assert_eq!(replacement, second);
+        assert!(state.can_establish_outgoing_buddy(second.acquired_at));
+        state.set_outgoing_buddy(replacement.clone());
+        let lease = state.outgoing_publication_lease().unwrap();
+        assert_eq!(
+            state.outgoing_buddy_udp_endpoint(),
+            Some((Ipv4Addr::new(10, 0, 0, 8), 4672))
+        );
+        assert!(!state.clear_outgoing_buddy_if(&first));
+        assert!(!lease.is_cancelled());
+        lease.cancel();
+        assert!(state.outgoing_buddy_udp_endpoint().is_none());
+        assert!(state.clear_outgoing_buddy_if(&replacement));
+        assert!(lease.is_cancelled());
     }
 
     #[test]
