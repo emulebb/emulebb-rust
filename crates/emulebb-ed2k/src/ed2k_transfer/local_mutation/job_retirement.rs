@@ -231,9 +231,10 @@ fn cleanup_removed_output(
     {
         // An unproven partial direct output remains excluded. Missing output
         // permits exact-snapshot barrier release, never authority adoption.
-        match std::fs::symlink_metadata(crate::long_path::long_path(&attempt.target_path)) {
+        let reserved_path = crate::long_path::long_path(&reservation.path);
+        match std::fs::symlink_metadata(&reserved_path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                transfer::fs_durability::sync_parent_directory_retained(&attempt.target_path)?;
+                transfer::fs_durability::sync_delivery_parent_retained(&reserved_path)?;
                 ensure!(
                     metadata.release_recovered_delivery_output(
                         token,
@@ -326,6 +327,14 @@ impl transfer::Ed2kTransferRuntime {
             match self.cleanup_removed_download_job(id).await {
                 Ok(true) => report.recovered += 1,
                 Ok(false) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<LocalMutationError>()
+                        .is_some_and(|error| matches!(error, LocalMutationError::Busy)) =>
+                {
+                    report.deferred_due_to_capacity += 1;
+                    tracing::debug!(job_id = %id, "download cleanup waiting for local capacity");
+                }
                 Err(error) => report.failures.push(format!("job {id}: {error:#}")),
             }
         }
@@ -354,6 +363,14 @@ impl transfer::Ed2kTransferRuntime {
             match self.retire_download_storage(id).await {
                 Ok(true) => report.recovered += 1,
                 Ok(false) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<LocalMutationError>()
+                        .is_some_and(|error| matches!(error, LocalMutationError::Busy)) =>
+                {
+                    report.deferred_due_to_capacity += 1;
+                    tracing::debug!(job_id = %id, "download cleanup waiting for local capacity");
+                }
                 Err(error) => report.failures.push(format!("job {id}: {error:#}")),
             }
         }

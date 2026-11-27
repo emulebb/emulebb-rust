@@ -145,9 +145,18 @@ fn project_record(record: &Value) -> Option<Value> {
         }
         Some("publishing delivery payload") => "delivery_publish",
         Some("verifying published delivery") => "delivery_verify",
+        Some("delivery filesystem operation was slow") => "delivery_io_slow",
         Some("download delivery deferred" | "download delivery remains pending") => {
             "delivery_deferred"
         }
+        Some(
+            "download cleanup deferred by local capacity"
+            | "download cleanup waiting for local capacity",
+        ) => "download_cleanup_capacity_deferred",
+        Some(
+            "download storage retirement remains pending"
+            | "download removal cleanup remains pending",
+        ) => "download_cleanup_failed",
         Some("automatic Kad startup failed; REST start remains available") => "kad_start_failed",
         Some("automatic ED2K/Kad startup failed; REST connect remains available") => {
             "peer_connect_failed"
@@ -165,12 +174,27 @@ fn project_record(record: &Value) -> Option<Value> {
         .and_then(|suffix| suffix.strip_suffix(')'))
         .and_then(|code| code.parse::<i32>().ok())
         .filter(|code| (1..=65535).contains(code));
-    Some(
-        json!({"timestamp": timestamp.to_rfc3339(), "level": level, "component": component,
-            "eventCode": event, "errorPresent": fields.get("error").is_some(),
-            "osError": os_error.map(|code| json!({"code": code, "kind": format!("{:?}", std::io::Error::from_raw_os_error(code).kind())})),
-        }),
-    )
+    let mut summary = json!({
+        "timestamp": timestamp.to_rfc3339(), "level": level, "component": component,
+        "eventCode": event, "errorPresent": fields.get("error").is_some(),
+        "osError": os_error.map(|code| json!({
+            "code": code, "kind": format!("{:?}", std::io::Error::from_raw_os_error(code).kind())
+        })),
+    });
+    if event == "delivery_io_slow"
+        && let (Some(dispatch), Some(elapsed)) = (
+            fields.get("dispatch_ms").and_then(Value::as_u64),
+            fields.get("elapsed_ms").and_then(Value::as_u64),
+        )
+    {
+        summary["timing"] = json!({"dispatchMs": dispatch, "elapsedMs": elapsed});
+    }
+    if event == "download_cleanup_capacity_deferred"
+        && let Some(deferred) = fields.get("deferred").and_then(Value::as_u64)
+    {
+        summary["deferredJobs"] = json!(deferred);
+    }
+    Some(summary)
 }
 
 #[cfg(test)]

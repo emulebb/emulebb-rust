@@ -20,6 +20,10 @@ impl EmulebbCore {
             .recover_download_retirements_page(cursors.1, 4)
             .await?;
         cursors.1 = next;
+        let deferred = removed.deferred_due_to_capacity + retired.deferred_due_to_capacity;
+        if deferred > 0 {
+            tracing::debug!(deferred, "download cleanup deferred by local capacity");
+        }
         for failure in retired.failures {
             tracing::warn!(%failure,"download storage retirement remains pending");
         }
