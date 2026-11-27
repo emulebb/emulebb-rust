@@ -82,8 +82,9 @@ class TestPlatformGraph(unittest.TestCase):
         self.assertEqual(main["env"], optional["env"])
         self.assertEqual(optional["jobs"]["optional-platform-ci"]["needs"],
                          ["change-scope", "single-active-pr", "workflow-lint", "build-macos", "build-android"])
-        self.assertFalse(any("optional" in name or "android" in name or "macos" in name
-                             for name in main["jobs"]["required-ci"]["needs"]))
+        self.assertIn("extra-platforms", main["jobs"]["required-ci"]["needs"])
+        self.assertEqual(main["jobs"]["extra-platforms"]["uses"], "./.github/workflows/optional-platforms.yml")
+        self.assertIn("github.event.pull_request.draft == false", main["jobs"]["extra-platforms"]["if"])
 
     def test_reduced_profile_publication_is_rejected_before_loading_any_packaging_owner(self):
         for command in ("publish-images", "release-assets"):
@@ -96,7 +97,7 @@ class TestPlatformGraph(unittest.TestCase):
 
     @unittest.skipUnless(BASH, "Aggregate scripts require Bash")
     def test_actual_aggregate_shell_fails_for_each_failed_cancelled_or_skipped_dependency(self):
-        scope_keys = {"SCOPE_RESULT", "SCOPE", "DOCS_VALIDATED", "CLASSIFIED_TESTED_SHA", "CLASSIFIER_BLOB", "EXPECTED_TESTED_SHA"}
+        scope_keys = {"SCOPE_RESULT", "SCOPE", "DOCS_VALIDATED", "CLASSIFIED_TESTED_SHA", "CLASSIFIER_BLOB", "EXPECTED_TESTED_SHA", "PR_EVENT"}
         heavy_keys = {"PREFLIGHT_RESULT", "BUILD_LINUX_RESULT", "BUILD_TEST_RESULT", "BUILD_MUSL_RESULT", "REST_OPENAPI_RESULT",
                       "MACOS_RESULT", "ANDROID_RESULT", "ANALYZE_RESULT"}
         for workflow, name in (("ci.yml", "required-ci"), ("optional-platforms.yml", "optional-platform-ci"),
@@ -105,6 +106,8 @@ class TestPlatformGraph(unittest.TestCase):
             environment = {**os.environ, **dict.fromkeys(step["env"], "success"), "GITHUB_STEP_SUMMARY": "/dev/null",
                            "SCOPE": "full", "DOCS_VALIDATED": "false", "CLASSIFIED_TESTED_SHA": "a" * 40,
                            "EXPECTED_TESTED_SHA": "a" * 40, "CLASSIFIER_BLOB": "b" * 40}
+            if "PR_EVENT" in step["env"]:
+                environment["PR_EVENT"] = "true"
             def execute():
                 return subprocess.run([BASH, "-c", step["run"]], env=environment,
                                       capture_output=True, text=True, timeout=5).returncode
@@ -114,6 +117,12 @@ class TestPlatformGraph(unittest.TestCase):
                 for key in heavy_keys & set(step["env"]):
                     environment[key] = "skipped" if scope == "docs" else "success"
                 self.assertEqual(execute(), 0, (workflow, scope))
+                if "PR_EVENT" in step["env"]:
+                    environment.update(PR_EVENT="false", EXTRA_PLATFORMS_RESULT="skipped")
+                    self.assertEqual(execute(), 0, (workflow, scope, "main"))
+                    environment.update(PR_EVENT="true", EXTRA_PLATFORMS_RESULT="skipped")
+                    self.assertNotEqual(execute(), 0, (workflow, scope, "unqualified PR"))
+                    environment["EXTRA_PLATFORMS_RESULT"] = "success"
                 for key in set(step["env"]) - (scope_keys - {"SCOPE_RESULT"}):
                     original = environment[key]
                     for failed in ({"success", "failure", "cancelled", "skipped", ""} - {original}):

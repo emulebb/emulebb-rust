@@ -35,11 +35,14 @@ class CiParityTests(unittest.TestCase):
     def test_required_and_optional_matrices_cover_six_native_targets_and_both_musl_cpus(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
         optional = yaml.safe_load((ROOT / ".github/workflows/optional-platforms.yml").read_text(encoding="utf-8"))["jobs"]
-        native = {jobs["build-linux"]["runs-on"], *jobs["build-test"]["strategy"]["matrix"]["runner"]}
-        self.assertEqual(native, {"ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm"})
+        self.assertEqual(jobs["build-linux"]["runs-on"], "ubuntu-24.04")
+        self.assertIn(
+            """&& '["windows-latest"]' || '["ubuntu-24.04-arm","windows-latest","windows-11-arm"]'""",
+            jobs["build-test"]["strategy"]["matrix"]["runner"],
+        )
         self.assertEqual(set(optional["build-macos"]["strategy"]["matrix"]["runner"]), {"macos-15-intel", "macos-15"})
         self.assertEqual(set(optional["build-android"]["strategy"]["matrix"]["abi"]), {"arm64-v8a", "x86_64"})
-        self.assertNotIn("build-android", jobs["required-ci"]["needs"])
+        self.assertIn("extra-platforms", jobs["required-ci"]["needs"])
         musl = jobs["build-musl"]
         self.assertEqual({(row["architecture"], row["runner"]) for row in musl["strategy"]["matrix"]["include"]},
                          {("amd64", "ubuntu-24.04"), ("arm64", "ubuntu-24.04-arm")})
@@ -68,7 +71,8 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(preflight["needs"], ["single-active-pr", "workflow-lint", "change-scope"])
         self.assertEqual(preflight["runs-on"], "ubuntu-24.04")
         self.assertEqual(preflight["timeout-minutes"], 30)
-        self.assertEqual(preflight["if"], "${{ needs.change-scope.outputs.scope == 'full' }}")
+        self.assertIn("needs.change-scope.outputs.scope == 'full'", preflight["if"])
+        self.assertIn("github.event.pull_request.draft == false", preflight["if"])
         self.assertNotIn("EMULEBB_WORKSPACE_OUTPUT_ROOT", preflight["env"])
         for step in preflight["steps"]:
             if step.get("run", "").startswith("python tools/"):
@@ -86,7 +90,10 @@ class CiParityTests(unittest.TestCase):
             self.assertEqual(first["with"], existing["with"])
         for name in ("build-linux", "build-test", "build-musl"):
             self.assertIn("preflight", jobs[name]["needs"])
-            self.assertEqual(jobs[name]["if"], "${{ needs.preflight.result == 'success' && needs.change-scope.outputs.scope == 'full' }}")
+            self.assertIn("needs.preflight.result == 'success'", jobs[name]["if"])
+        self.assertIn("github.event.pull_request.draft == true", jobs["build-test"]["if"])
+        self.assertNotIn("needs.preflight.result == 'skipped'", jobs["build-linux"]["if"])
+        self.assertNotIn("needs.preflight.result == 'skipped'", jobs["build-musl"]["if"])
         self.assertIn("preflight", jobs["required-ci"]["needs"])
         self.assertEqual(jobs["required-ci"]["steps"][0]["env"]["PREFLIGHT_RESULT"], "${{ needs.preflight.result }}")
 

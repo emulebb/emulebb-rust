@@ -19,6 +19,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--typecheck-only", action="store_true",
                         help="Run locked installation and TypeScript checks without tests, browsers or a build.")
+    parser.add_argument("--install-system-deps", action="store_true",
+                        help="Install Linux browser dependencies as a separate CI step.")
     args = parser.parse_args(argv)
     if args.typecheck_only:
         from ci_environment import prepare_command
@@ -28,13 +30,16 @@ def main(argv: list[str] | None = None) -> int:
     # staged sources/dist; both keep the same locked installation contract.
     workspace = prepare_webui_workspace("webui-typecheck" if args.typecheck_only else "webui-test")
     run([npm, "ci", "--ignore-scripts"], workspace)
+    if args.install_system_deps:
+        run([npm, "exec", "--", "playwright", "install-deps", "chromium", "webkit"], workspace)
+        return 0
     if args.typecheck_only:
         run([npm, "run", "typecheck"], workspace)
         return 0
     run([npm, "run", "test:unit"], workspace)
     # WHY: Linux WebKit needs native libraries absent from the hosted base image;
     # Windows browser installation does not need the media-feature-pack path.
-    dependencies = ["--with-deps"] if sys.platform == "linux" else []
+    dependencies = ["--with-deps"] if sys.platform == "linux" and os.environ.get("EMULEBB_WEBUI_SYSTEM_DEPS_READY") != "1" else []
     run([npm, "exec", "--", "playwright", "install", *dependencies, "chromium", "webkit"], workspace)
     run([npm, "run", "test:e2e"], workspace)
     run(
