@@ -2104,7 +2104,10 @@ async fn active_probe_pages_until_final_result_then_rejects_late_pages() {
     .unwrap();
     let (opcode, _payload) = read_client_frame(&mut peer).await;
     assert_eq!(opcode, OP_SEARCHREQUEST);
-    assert_eq!(session.probe_search_state, ProbeSearchState::Active);
+    assert_eq!(
+        session.probe_search_state,
+        ProbeSearchState::Active { received_pages: 0 }
+    );
     assert_eq!(session.phase, ServerSessionPhase::SearchActive);
 
     handle_test_server_packet(
@@ -2121,7 +2124,10 @@ async fn active_probe_pages_until_final_result_then_rejects_late_pages() {
     let (opcode, payload) = read_client_frame(&mut peer).await;
     assert_eq!(opcode, OP_QUERY_MORE_RESULT);
     assert!(payload.is_empty());
-    assert_eq!(session.probe_search_state, ProbeSearchState::Active);
+    assert_eq!(
+        session.probe_search_state,
+        ProbeSearchState::Active { received_pages: 1 }
+    );
     assert_eq!(session.phase, ServerSessionPhase::AwaitingMore);
 
     handle_test_server_packet(
@@ -2157,6 +2163,126 @@ async fn active_probe_pages_until_final_result_then_rejects_late_pages() {
             .is_err(),
         "a late page must not restart a completed probe"
     );
+}
+
+#[tokio::test]
+async fn probe_keyword_search_sends_only_five_more_requests() {
+    let (mut session, mut peer) = connected_background_test_session().await;
+    let context = background_test_context(Arc::clone(&session.state), Duration::from_secs(1));
+    session.probe_search_state = ProbeSearchState::Active { received_pages: 0 };
+    for page in 1..=6 {
+        handle_test_server_packet(
+            &mut session,
+            Ed2kPacket {
+                opcode: OP_SEARCHRESULT,
+                payload: empty_search_result_page(true),
+            },
+            &context,
+            true,
+        )
+        .await
+        .unwrap();
+        if page < 6 {
+            assert_eq!(
+                read_client_frame(&mut peer).await,
+                (OP_QUERY_MORE_RESULT, Vec::new())
+            );
+        }
+    }
+    assert_eq!(session.probe_search_state, ProbeSearchState::Completed);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), peer.read_u8())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn connected_keyword_search_keeps_six_pages_and_requests_more_only_five_times() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_login_request(&mut stream).await;
+        stream
+            .write_all(&encode_packet(OP_IDCHANGE, &0x40302010u32.to_le_bytes(), false).unwrap())
+            .await
+            .unwrap();
+        loop {
+            let (opcode, _) = read_client_frame(&mut stream).await;
+            if opcode == OP_SEARCHREQUEST {
+                break;
+            }
+        }
+        for page in 1..=6 {
+            stream
+                .write_all(&encode_packet(OP_SEARCHRESULT, &[1], false).unwrap())
+                .await
+                .unwrap();
+            let reply = encode_packet(
+                OP_SEARCHRESULT,
+                &search_result_page_fixture(page, true),
+                false,
+            )
+            .unwrap();
+            stream.write_all(&reply).await.unwrap();
+            if page < 6 {
+                assert_eq!(
+                    read_client_frame(&mut stream).await,
+                    (OP_QUERY_MORE_RESULT, Vec::new())
+                );
+            }
+        }
+        assert!(
+            !matches!(
+                tokio::time::timeout(Duration::from_millis(100), stream.read_u8()).await,
+                Ok(Ok(_))
+            ),
+            "search sent a sixth More request"
+        );
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let timeout = Duration::from_secs(3);
+    let context = background_test_context(Arc::clone(&state), timeout);
+    let (handle, inbox) = new_ed2k_server_search_channel(1);
+    let inbox = Arc::new(Mutex::new(inbox));
+    let server = background_test_server(endpoint);
+    let search = async {
+        tokio::time::timeout(timeout, async {
+            while !state.read().await.connected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = search_keyword_via_background_session(
+            &handle,
+            "six pages",
+            Default::default(),
+            timeout,
+            &CancellationToken::new(),
+            None,
+        )
+        .await;
+        context
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        result
+    };
+    let (_, result) = tokio::join!(run_test_server_session(&server, &context, &inbox), search);
+    let Ed2kBackgroundKeywordSearchOutcome::Replied(rows) = result.unwrap() else {
+        panic!("expected accumulated result pages");
+    };
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.file_hash.0[0])
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5, 6]
+    );
+    tokio::time::timeout(timeout, server_task)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

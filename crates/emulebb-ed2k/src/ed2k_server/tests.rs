@@ -98,6 +98,15 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(super) fn search_result_page_fixture(hash_byte: u8, more: bool) -> Vec<u8> {
+    let mut payload = 1u32.to_le_bytes().to_vec();
+    payload.extend_from_slice(&[hash_byte; 16]);
+    payload.extend_from_slice(&[0; 6]); // client ID and TCP port
+    payload.extend_from_slice(&0u32.to_le_bytes()); // optional tags
+    payload.push(u8::from(more));
+    payload
+}
+
 fn test_server(obfuscation_port_tcp: u16, udp_flags: u32) -> ResolvedServerEntry {
     ResolvedServerEntry {
         entry: ConfiguredServerEntry {

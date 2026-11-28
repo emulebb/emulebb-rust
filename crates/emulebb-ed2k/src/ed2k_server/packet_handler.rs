@@ -162,7 +162,7 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_SEARCHRESULT => {
-            if session.probe_search_state != ProbeSearchState::Active {
+            let ProbeSearchState::Active { received_pages } = session.probe_search_state else {
                 debug!(
                     endpoint = %session.endpoint,
                     probe_state = ?session.probe_search_state,
@@ -170,7 +170,7 @@ pub(super) async fn handle_server_packet(
                     "ignoring uncorrelated ED2K OP_SEARCHRESULT"
                 );
                 return Ok(());
-            }
+            };
             let page = match decode_search_result_page(&packet.payload) {
                 Ok(page) => page,
                 Err(error) => {
@@ -183,7 +183,9 @@ pub(super) async fn handle_server_packet(
                 }
             };
             log_search_result_page(session.endpoint, &page.files);
-            if page.more_results_available {
+            let received_pages = received_pages + 1;
+            if page.should_request_more(received_pages) {
+                session.probe_search_state = ProbeSearchState::Active { received_pages };
                 session.set_phase(
                     ServerSessionPhase::AwaitingMore,
                     "probe search reported more results; requesting another page",
@@ -191,10 +193,7 @@ pub(super) async fn handle_server_packet(
                 session.send_packet(OP_QUERY_MORE_RESULT, &[]).await?;
             } else {
                 session.probe_search_state = ProbeSearchState::Completed;
-                session.set_phase(
-                    ServerSessionPhase::Completed,
-                    "probe search completed without additional pages",
-                );
+                session.set_phase(ServerSessionPhase::Completed, "probe search completed");
             }
         }
         OP_SERVERSTATUS => {
@@ -518,7 +517,7 @@ async fn maybe_send_probe_search(
     session
         .send_packet(OP_SEARCHREQUEST, &search_payload)
         .await?;
-    session.probe_search_state = ProbeSearchState::Active;
+    session.probe_search_state = ProbeSearchState::Active { received_pages: 0 };
     debug!(endpoint = %session.endpoint, "sent ED2K server search probe");
     Ok(())
 }

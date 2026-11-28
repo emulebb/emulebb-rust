@@ -492,16 +492,25 @@ async fn search_keyword_on_server(
     let mut response_deadline = None;
 
     loop {
-        if cancel.is_cancelled() {
-            return Ok(Vec::new());
+        let received = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(Vec::new()),
+            received = async {
+                if let Some(deadline) = response_deadline {
+                    tokio::time::timeout_at(deadline, session.read_packet()).await
+                } else {
+                    tokio::time::timeout(idle_timeout, session.read_packet()).await
+                }
+            } => received,
+        };
+        if received.is_err() && page_count > 0 {
+            session.set_phase(
+                ServerSessionPhase::TimedOut,
+                "returning received search pages",
+            );
+            break;
         }
-
-        let packet = if let Some(deadline) = response_deadline {
-            tokio::time::timeout_at(deadline, session.read_packet()).await
-        } else {
-            tokio::time::timeout(idle_timeout, session.read_packet()).await
-        }
-        .with_context(|| {
+        let packet = received.with_context(|| {
             format!("timed out waiting for ED2K server search reply from {transport_endpoint}")
         })??;
         let Some(packet) = packet else {
@@ -509,7 +518,7 @@ async fn search_keyword_on_server(
         };
 
         match packet.opcode {
-            OP_IDCHANGE => {
+            OP_IDCHANGE if response_deadline.is_none() => {
                 let id_change = decode_id_change_payload(&packet.payload)
                     .with_context(|| format!("invalid OP_IDCHANGE from {transport_endpoint}"))?;
                 session.server_flags = id_change.server_flags;
@@ -548,7 +557,7 @@ async fn search_keyword_on_server(
                     })?;
                 response_deadline = Some(TokioInstant::now() + idle_timeout);
             }
-            OP_SEARCHRESULT => {
+            OP_SEARCHRESULT if response_deadline.is_some() => {
                 let page = match decode_search_result_page(&packet.payload) {
                     Ok(page) => page,
                     Err(error) => {
@@ -560,8 +569,9 @@ async fn search_keyword_on_server(
                     }
                 };
                 page_count += 1;
+                let request_more = page.should_request_more(page_count);
                 results.extend(page.files);
-                if page.more_results_available {
+                if request_more {
                     session.set_phase(
                         ServerSessionPhase::AwaitingMore,
                         format!("received active result page {page_count}; requesting more"),
@@ -644,6 +654,91 @@ mod tests {
             .unwrap(),
             ip: *endpoint.ip(),
         }
+    }
+
+    #[tokio::test]
+    async fn one_shot_keyword_search_keeps_six_pages_and_requests_more_only_five_times() {
+        use super::super::{
+            OP_IDCHANGE, OP_LOGINREQUEST, OP_QUERY_MORE_RESULT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
+            encode_packet, encode_search_request, tests::search_result_page_fixture,
+        };
+
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(
+                read_active_keyword_frame(&mut stream).await.0,
+                OP_LOGINREQUEST
+            );
+            let unsolicited = encode_packet(
+                OP_SEARCHRESULT,
+                &search_result_page_fixture(99, true),
+                false,
+            )
+            .unwrap();
+            stream.write_all(&unsolicited).await.unwrap();
+            let login = encode_packet(OP_IDCHANGE, &0x40302010u32.to_le_bytes(), false).unwrap();
+            stream.write_all(&login).await.unwrap();
+            loop {
+                let (opcode, _) = read_active_keyword_frame(&mut stream).await;
+                assert_ne!(
+                    opcode, OP_QUERY_MORE_RESULT,
+                    "unsolicited page requested continuation"
+                );
+                if opcode == OP_SEARCHREQUEST {
+                    break;
+                }
+            }
+            for page in 1..=6 {
+                let reply = encode_packet(
+                    OP_SEARCHRESULT,
+                    &search_result_page_fixture(page, true),
+                    false,
+                )
+                .unwrap();
+                stream.write_all(&reply).await.unwrap();
+                if page < 6 {
+                    assert_eq!(
+                        read_active_keyword_frame(&mut stream).await,
+                        (OP_QUERY_MORE_RESULT, Vec::new())
+                    );
+                }
+            }
+            assert!(
+                stream.read_u8().await.is_err(),
+                "search sent a sixth More request"
+            );
+        });
+
+        let payload = encode_search_request("six pages").unwrap();
+        let results = search_keyword_on_server(
+            crate::networking::EgressBinding::new(
+                crate::test_bind_ip(),
+                crate::networking::EgressRoute::StrictInterface,
+            ),
+            &active_keyword_server(endpoint),
+            active_keyword_identity(),
+            "eMule",
+            &[],
+            &payload,
+            Duration::from_secs(3),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            results
+                .into_iter()
+                .map(|row| row.file_hash.0[0])
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
