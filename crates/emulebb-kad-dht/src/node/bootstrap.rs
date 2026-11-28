@@ -4,20 +4,99 @@ use super::{
 };
 use crate::bootstrap::{BootstrapContact, parse_nodes_text};
 use crate::error::DhtError;
-use emulebb_kad_net::RpcWorkClass;
+use emulebb_kad_net::{NetError, RpcWorkClass};
 use emulebb_kad_proto::{KadPacket, KadUdpKey, NodeId, opcode};
 use emulebb_kad_routing::Contact;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 const BOOTSTRAP_ATTEMPTS_PER_ROUND: usize = 10;
 
+#[derive(Default)]
+pub(super) struct BootstrapSweep {
+    generation: CancellationToken,
+    pending: VecDeque<SocketAddrV4>,
+    attempted: HashSet<SocketAddrV4>,
+}
+
+impl BootstrapSweep {
+    pub(super) fn restart(&mut self) {
+        self.generation.cancel();
+        *self = Self::default();
+    }
+
+    fn plan_round(&mut self, contacts: Vec<BootstrapContact>) -> Vec<BootstrapContact> {
+        let mut current = HashMap::with_capacity(contacts.len());
+        let mut ordered = Vec::with_capacity(contacts.len());
+        for contact in contacts {
+            let endpoint = endpoint_of(&contact);
+            if let std::collections::hash_map::Entry::Vacant(entry) = current.entry(endpoint) {
+                entry.insert(contact);
+                ordered.push(endpoint);
+            }
+        }
+        self.pending
+            .retain(|endpoint| current.contains_key(endpoint));
+        self.attempted
+            .retain(|endpoint| current.contains_key(endpoint));
+        let queued: HashSet<_> = self.pending.iter().copied().collect();
+        for endpoint in ordered {
+            if !self.attempted.contains(&endpoint) && !queued.contains(&endpoint) {
+                self.pending.push_back(endpoint);
+            }
+        }
+        self.pending
+            .iter()
+            .take(BOOTSTRAP_ATTEMPTS_PER_ROUND)
+            .map(|endpoint| current.remove(endpoint).expect("retained current endpoint"))
+            .collect()
+    }
+
+    fn claim(&mut self, endpoint: SocketAddrV4) -> bool {
+        let Some(position) = self
+            .pending
+            .iter()
+            .position(|candidate| *candidate == endpoint)
+        else {
+            return false;
+        };
+        self.pending.remove(position);
+        self.attempted.insert(endpoint)
+    }
+}
+
+fn endpoint_of(contact: &BootstrapContact) -> SocketAddrV4 {
+    SocketAddrV4::new(contact.ip, contact.udp_port)
+}
+
 impl DhtNode {
+    pub(super) fn bootstrap_sweep(&self) -> std::sync::MutexGuard<'_, BootstrapSweep> {
+        self.inner
+            .bootstrap_sweep
+            .lock()
+            .expect("bootstrap sweep lock poisoned")
+    }
+
+    fn bootstrap_generation(&self) -> Result<CancellationToken, DhtError> {
+        let sweep = self.bootstrap_sweep();
+        self.check_bootstrap_generation(&sweep.generation)?;
+        Ok(sweep.generation.clone())
+    }
+
+    fn check_bootstrap_generation(&self, generation: &CancellationToken) -> Result<(), DhtError> {
+        if generation.is_cancelled() || !self.is_running() {
+            return Err(NetError::KadStopped.into());
+        }
+        Ok(())
+    }
+
     /// Join through the operator's chosen UDP endpoint, without substituting
     /// configured or hardcoded seeds. Learn its contacts and perform a self lookup.
     pub async fn bootstrap_from_endpoint(&self, endpoint: SocketAddrV4) -> Result<(), DhtError> {
+        let generation = self.bootstrap_generation()?;
         let contact = BootstrapContact {
             node_id: NodeId::ZERO,
             ip: *endpoint.ip(),
@@ -29,20 +108,14 @@ impl DhtNode {
             verified: false,
         };
         if !self
-            .bootstrap_contact(&contact, RpcWorkClass::Interactive)
+            .bootstrap_contact(&contact, RpcWorkClass::Interactive, &generation)
             .await
         {
+            self.check_bootstrap_generation(&generation)?;
             return Err(DhtError::BootstrapFailed);
         }
-        self.lookup_nodes_with_class(&self.inner.own_id, RpcWorkClass::Interactive)
-            .await?;
-        let size = self.inner.routing_table.lock().await.len();
-        if bootstrap_ready_with_contacts(self.inner.config.bootstrap_min_routing_contacts, size) {
-            self.inner
-                .bootstrapped
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        Ok(())
+        self.finish_bootstrap(RpcWorkClass::Interactive, &generation)
+            .await
     }
 
     /// Bootstrap from configured sources. Populates the routing table.
@@ -52,7 +125,7 @@ impl DhtNode {
 
     /// Bootstrap from configured sources. Populates the routing table.
     pub async fn bootstrap_with_class(&self, work_class: RpcWorkClass) -> Result<(), DhtError> {
-        let mut pending = self.inner.bootstrap_pending.lock().await;
+        let generation = self.bootstrap_generation()?;
         let mut contacts = self.load_bootstrap_contacts();
 
         // eMule `CRoutingZone::Bootstrap` seeds the bootstrap self-lookup from the
@@ -63,34 +136,59 @@ impl DhtNode {
         // probe. Configured seeds are tried first, table contacts after.
         contacts.extend(self.routing_table_bootstrap_contacts().await);
 
-        if contacts.is_empty() {
-            pending.clear();
+        let had_candidates = !contacts.is_empty();
+        let round = {
+            let mut sweep = self.bootstrap_sweep();
+            self.check_bootstrap_generation(&generation)?;
+            sweep.plan_round(contacts)
+        };
+        if !had_candidates {
             return Err(DhtError::NoBootstrapNodes);
         }
-
-        info!("bootstrapping from {} contacts", contacts.len());
-
+        if round.is_empty() {
+            return Err(DhtError::BootstrapSweepExhausted);
+        }
+        info!(
+            "bootstrapping from {} candidates in this round",
+            round.len()
+        );
         let mut responded = 0usize;
-
-        // Keep the current sweep's endpoint order even if the routing table
-        // changes. Stock and aMule advance through retained seed queues.
-        let round = next_bootstrap_round(&mut pending, contacts);
-        drop(pending);
-        for bc in &round {
-            if self.bootstrap_contact(bc, work_class).await {
+        for contact in &round {
+            let claimed = {
+                let mut sweep = self.bootstrap_sweep();
+                self.check_bootstrap_generation(&generation)?;
+                sweep.claim(endpoint_of(contact))
+            };
+            if claimed
+                && self
+                    .bootstrap_contact(contact, work_class, &generation)
+                    .await
+            {
                 responded += 1;
             }
         }
 
+        self.check_bootstrap_generation(&generation)?;
         if responded == 0 {
             return Err(DhtError::BootstrapFailed);
         }
+        self.finish_bootstrap(work_class, &generation).await
+    }
 
-        // Run node lookup for own ID to fill routing table
-        self.lookup_nodes_with_class(&self.inner.own_id, work_class)
-            .await?;
-
-        let size = self.inner.routing_table.lock().await.len();
+    async fn finish_bootstrap(
+        &self,
+        work_class: RpcWorkClass,
+        generation: &CancellationToken,
+    ) -> Result<(), DhtError> {
+        tokio::select! {
+            biased;
+            _ = generation.cancelled() => return Err(NetError::KadStopped.into()),
+            result = self.lookup_nodes_with_class(&self.inner.own_id, work_class) => { result?; }
+        }
+        let table = self.inner.routing_table.lock().await;
+        let _sweep = self.bootstrap_sweep();
+        self.check_bootstrap_generation(generation)?;
+        let size = table.len();
         info!("bootstrap complete - routing table has {} contacts", size);
 
         if bootstrap_ready_with_contacts(self.inner.config.bootstrap_min_routing_contacts, size) {
@@ -139,26 +237,40 @@ impl DhtNode {
             .collect()
     }
 
-    async fn bootstrap_contact(&self, bc: &BootstrapContact, work_class: RpcWorkClass) -> bool {
+    async fn bootstrap_contact(
+        &self,
+        bc: &BootstrapContact,
+        work_class: RpcWorkClass,
+        generation: &CancellationToken,
+    ) -> bool {
         let addr = SocketAddr::new(IpAddr::V4(bc.ip), bc.udp_port);
-        self.register_bootstrap_contact(addr, bc);
+        {
+            let _sweep = self.bootstrap_sweep();
+            if self.check_bootstrap_generation(generation).is_err() {
+                return false;
+            }
+            self.register_bootstrap_contact(addr, bc);
+        }
         debug!("bootstrap attempt to {}", addr);
 
-        match self
-            .inner
-            .rpc
-            .request_with_class(
+        let may_dispatch = || !generation.is_cancelled();
+        let response = tokio::select! {
+            biased;
+            _ = generation.cancelled() => return false,
+            response = self.inner.rpc.request_with_class_and_metadata_when(
                 addr,
                 &KadPacket::BootstrapReq,
                 opcode::BOOTSTRAP_RES,
                 Duration::from_secs(5),
                 work_class,
+                &may_dispatch,
             )
-            .await
-        {
+            => response.map(|response| response.packet),
+        };
+        match response {
             Ok(KadPacket::BootstrapRes(res)) => {
-                self.add_bootstrap_response_contacts(bc, addr, res).await;
-                true
+                self.add_bootstrap_response_contacts(bc, addr, res, generation)
+                    .await
             }
             Ok(_) => {
                 warn!("unexpected packet type during bootstrap from {}", addr);
@@ -186,8 +298,13 @@ impl DhtNode {
         bc: &BootstrapContact,
         addr: SocketAddr,
         res: emulebb_kad_proto::packet::BootstrapRes,
-    ) {
+        generation: &CancellationToken,
+    ) -> bool {
         let mut rt = self.inner.routing_table.lock().await;
+        let _sweep = self.bootstrap_sweep();
+        if self.check_bootstrap_generation(generation).is_err() {
+            return false;
+        }
         let mut sender_contact = Contact::new(
             res.sender_id,
             bc.ip,
@@ -229,35 +346,8 @@ impl DhtNode {
             addr,
             rt.len()
         );
+        true
     }
-}
-
-fn next_bootstrap_round(
-    pending: &mut VecDeque<SocketAddrV4>,
-    contacts: Vec<BootstrapContact>,
-) -> Vec<BootstrapContact> {
-    let mut current = HashMap::with_capacity(contacts.len());
-    let mut ordered = VecDeque::with_capacity(contacts.len());
-    for contact in contacts {
-        let endpoint = SocketAddrV4::new(contact.ip, contact.udp_port);
-        if let std::collections::hash_map::Entry::Vacant(entry) = current.entry(endpoint) {
-            entry.insert(contact);
-            ordered.push_back(endpoint);
-        }
-    }
-    pending.retain(|endpoint| current.contains_key(endpoint));
-    if pending.is_empty() {
-        *pending = ordered;
-    }
-    let count = pending.len().min(BOOTSTRAP_ATTEMPTS_PER_ROUND);
-    pending
-        .drain(..count)
-        .map(|endpoint| {
-            current
-                .remove(&endpoint)
-                .expect("retained current endpoint")
-        })
-        .collect()
 }
 
 fn bootstrap_contact_entry(entry: emulebb_kad_proto::packet::ContactEntry) -> Option<Contact> {
@@ -282,21 +372,24 @@ mod tests {
         packet::{BootstrapRes, Res as KadRes},
     };
     use emulebb_kad_routing::Contact;
-    use std::collections::VecDeque;
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::net::UdpSocket;
 
     #[test]
     fn bootstrap_sweep_keeps_pending_endpoints_across_reorder_and_replacement() {
-        let mut pending = VecDeque::new();
+        let mut sweep = super::BootstrapSweep::default();
         let mut round_ports = |ports: Vec<u16>| {
             let endpoints = ports
                 .iter()
                 .map(|port| format!("192.0.2.20:{port}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            super::next_bootstrap_round(&mut pending, super::parse_nodes_text(&endpoints))
+            let round = sweep.plan_round(super::parse_nodes_text(&endpoints));
+            for contact in &round {
+                assert!(sweep.claim(super::endpoint_of(contact)));
+            }
+            round
                 .iter()
                 .map(|contact| contact.udp_port)
                 .collect::<Vec<_>>()
@@ -309,7 +402,12 @@ mod tests {
         changed.insert(1, 4621);
         let expected: Vec<_> = (4610..4621).filter(|port| *port != 4611).collect();
         assert_eq!(round_ports(changed.clone()), expected);
-        assert_eq!(round_ports(changed.clone()), changed[..10]);
+        assert_eq!(round_ports(changed.clone()), vec![4621]);
+        assert!(round_ports(changed.clone()).is_empty());
+        changed.reverse();
+        assert!(round_ports(changed.clone()).is_empty());
+        changed.push(4622);
+        assert_eq!(round_ports(changed), vec![4622]);
         assert!(round_ports(Vec::new()).is_empty());
         assert_eq!(round_ports(vec![4621]), vec![4621]);
     }
@@ -322,6 +420,65 @@ mod tests {
                 .expect("expected a Kad packet")
                 .unwrap();
         (KadPacket::decode(&buffer[..length]).unwrap(), sender)
+    }
+
+    #[tokio::test]
+    async fn pausing_bootstrap_discards_the_inflight_round_and_rearms_on_resume() {
+        let bind_addr = (crate::test_bind_ip(), 0);
+        let first = UdpSocket::bind(bind_addr).await.unwrap();
+        let second = UdpSocket::bind(bind_addr).await.unwrap();
+        let nodes_text = format!(
+            "{}\n{}",
+            first.local_addr().unwrap(),
+            second.local_addr().unwrap()
+        );
+        let node = DhtNode::new(DhtConfig {
+            bind_addr: Some(bind_addr.into()),
+            nodes_text: Some(nodes_text),
+            obfuscation_enabled: false,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let receive_loop = node.start();
+        let round = tokio::spawn({
+            let node = node.clone();
+            async move { node.bootstrap().await }
+        });
+        assert!(matches!(
+            receive_kad_packet(&first).await.0,
+            KadPacket::BootstrapReq
+        ));
+        node.set_running(false);
+        assert!(matches!(
+            node.bootstrap().await,
+            Err(DhtError::Net(emulebb_kad_net::NetError::KadStopped))
+        ));
+        node.set_running(true);
+        assert!(matches!(
+            round.await.unwrap(),
+            Err(DhtError::Net(emulebb_kad_net::NetError::KadStopped))
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), second.readable())
+                .await
+                .is_err()
+        );
+
+        let resumed = tokio::spawn({
+            let node = node.clone();
+            async move { node.bootstrap().await }
+        });
+        assert!(matches!(
+            receive_kad_packet(&first).await.0,
+            KadPacket::BootstrapReq
+        ));
+        node.set_running(false);
+        assert!(matches!(
+            resumed.await.unwrap(),
+            Err(DhtError::Net(emulebb_kad_net::NetError::KadStopped))
+        ));
+        receive_loop.abort();
     }
 
     #[tokio::test]
@@ -398,6 +555,10 @@ mod tests {
                 .unwrap();
         });
         second_round.unwrap();
+        assert!(matches!(
+            dht.bootstrap().await,
+            Err(DhtError::BootstrapSweepExhausted)
+        ));
         receive_loop.abort();
     }
 

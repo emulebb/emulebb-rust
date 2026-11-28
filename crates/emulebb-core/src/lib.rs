@@ -3229,9 +3229,8 @@ async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
     tokio::time::sleep(Duration::from_secs(KAD_BOOTSTRAP_INITIAL_DELAY_SECS)).await;
 
     while !shutdown.load(Ordering::SeqCst) {
-        if dht.is_bootstrapped() {
-            // Already connected: re-check on the retry cadence so a routing-table
-            // collapse (all contacts expired) re-drives the bootstrap.
+        if !dht.is_running() || dht.is_bootstrapped() {
+            // Check again on the retry cadence after resume or loss of routes.
             tokio::time::sleep(Duration::from_secs(KAD_BOOTSTRAP_RETRY_SECS)).await;
             continue;
         }
@@ -3242,6 +3241,7 @@ async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
                 dht.is_bootstrapped(),
                 dht.routing_table_size()
             ),
+            Err(emulebb_kad_dht::DhtError::BootstrapSweepExhausted) => {}
             Err(error) => {
                 if !shutdown.load(Ordering::SeqCst) {
                     tracing::warn!("Kad bootstrap attempt failed (will retry): {error}");

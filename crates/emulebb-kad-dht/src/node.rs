@@ -34,10 +34,9 @@ use emulebb_kad_net::{
 };
 use emulebb_kad_proto::{KadUdpKey, NodeId};
 use emulebb_kad_routing::{Contact, RoutingTable};
-use std::collections::VecDeque;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::Arc;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
@@ -60,7 +59,7 @@ struct DhtInner {
     /// cap). Acquired around every `run_traversal` invocation.
     search_concurrency: SearchConcurrency,
     bootstrapped: std::sync::atomic::AtomicBool,
-    bootstrap_pending: Mutex<VecDeque<SocketAddrV4>>,
+    bootstrap_sweep: StdMutex<bootstrap::BootstrapSweep>,
     /// Pending pre-v8 contact-verification challenges (oracle
     /// `CPacketTracking::listChallengeRequests`).
     legacy_challenges: Mutex<LegacyChallengeTracker>,
@@ -221,7 +220,7 @@ impl DhtNode {
                 config,
                 search_concurrency,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
-                bootstrap_pending: Mutex::new(VecDeque::new()),
+                bootstrap_sweep: StdMutex::new(bootstrap::BootstrapSweep::default()),
                 legacy_challenges: Mutex::new(LegacyChallengeTracker::default()),
                 ip_filter: std::sync::OnceLock::new(),
                 res_contact_tx,
@@ -240,6 +239,10 @@ impl DhtNode {
     /// Pause or resume Kad protocol traffic while retaining the shared UDP
     /// socket for eD2K client-UDP packets.
     pub fn set_running(&self, running: bool) {
+        let mut sweep = self.bootstrap_sweep();
+        if self.is_running() != running {
+            sweep.restart();
+        }
         self.inner.rpc.set_kad_enabled(running);
     }
 
