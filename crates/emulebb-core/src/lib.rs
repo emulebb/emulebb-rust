@@ -3139,16 +3139,20 @@ impl EmulebbCore {
         };
         let contact_count = dht.routing_table_size() as u32;
         let connected = dht.is_bootstrapped();
-        // Report the real UDP-firewall verdict (oracle
-        // `CUDPFirewallTester::IsFirewalledUDP`): unverified is treated as OPEN.
-        let firewalled = kad_firewall.lock().await.is_udp_firewalled();
+        let (wire_firewalled, firewalled) = {
+            let state = kad_firewall.lock().await;
+            (
+                state.is_udp_firewalled(),
+                state.udp_verified.then_some(!state.udp_open),
+            )
+        };
         // Kad DHT population estimate (oracle `CKademlia::GetKademliaUsers` via
         // `CRoutingZone::EstimateCount`) and the derived file estimate (oracle
         // `CPrefs::SetKademliaFiles`, using its ~108 files-per-user floor since rust
         // does not track the live ed2k-server file average). Only meaningful once the
         // routing tree is populated, so gate on `connected` like the oracle.
         let kad_users = if connected {
-            u64::from(dht.estimate_kad_users(firewalled).await)
+            u64::from(dht.estimate_kad_users(wire_firewalled).await)
         } else {
             0
         };
@@ -3172,7 +3176,7 @@ impl EmulebbCore {
             running: true,
             connected,
             peer_count: contact_count,
-            firewalled: Some(firewalled),
+            firewalled,
             bootstrapping: Some(bootstrapping),
             // Joining a changing network has no measurable completion fraction.
             bootstrap_progress: connected.then_some(1.0),
