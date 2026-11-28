@@ -26,6 +26,14 @@ pub(super) struct SearchResultPage {
     pub(super) more_results_available: bool,
 }
 
+impl SearchResultPage {
+    pub(super) fn should_request_more(&self, received_pages: u32) -> bool {
+        // Stock SearchResultsWnd allows at most MAX_MORE_SEARCH_REQ follow-ups.
+        const MAX_MORE_SEARCH_REQ: u32 = 5;
+        self.more_results_available && received_pages <= MAX_MORE_SEARCH_REQ
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DecodedFoundSources {
     /// File identity carried by the response envelope, including count-zero replies.

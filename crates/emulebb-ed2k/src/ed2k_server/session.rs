@@ -84,8 +84,8 @@ pub(super) enum ServerSessionPhase {
 pub(super) enum ProbeSearchState {
     /// No probe request has claimed the server's untagged search-result stream.
     NotStarted,
-    /// The probe owns incoming `OP_SEARCHRESULT` pages until a final page.
-    Active,
+    /// The probe owns incoming `OP_SEARCHRESULT` pages up to its page cap.
+    Active { received_pages: u32 },
     /// The final page was observed; later search results are uncorrelated.
     Completed,
 }

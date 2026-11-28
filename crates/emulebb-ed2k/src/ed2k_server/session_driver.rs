@@ -643,8 +643,9 @@ pub(super) async fn run_one_server_session(
                                 result_sink.as_ref(), session.endpoint, &page.files,
                             ).await;
                             page_count += 1;
+                            let request_more = page.should_request_more(page_count);
                             results.extend(page.files);
-                            if page.more_results_available {
+                            if request_more {
                                 session.set_phase(
                                     ServerSessionPhase::AwaitingMore,
                                     format!(

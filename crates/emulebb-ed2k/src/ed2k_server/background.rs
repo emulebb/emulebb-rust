@@ -819,9 +819,16 @@ pub(super) fn fail_pending_background_search(
 ) {
     if let Some(request) = request.take() {
         match request {
-            Keyword { response, .. } => {
+            Keyword {
+                response,
+                results,
+                page_count,
+                ..
+            } => {
                 if failure.interrupted {
                     let _ = response.send(Err(failure.clone()));
+                } else if page_count > 0 {
+                    let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::Replied(results)));
                 } else {
                     let _ = response.send(Ok(Ed2kBackgroundKeywordSearchOutcome::TimedOut));
                 }
