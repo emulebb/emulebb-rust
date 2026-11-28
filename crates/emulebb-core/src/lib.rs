@@ -690,6 +690,13 @@ impl EmulebbCore {
                 &transfer_config,
             )?
         };
+        if let Some(network) = &ed2k_network {
+            server_list::publish_known_server_endpoints(
+                &ed2k_transfers,
+                &network.ed2k,
+                &core_state,
+            );
+        }
         // Connection budgets and source caps use the same admitted settings capture.
         ed2k_transfers.apply_download_coordinator_config(ed2k_download_coordinator_config(
             core_state.settings.values(),
