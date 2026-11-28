@@ -1347,7 +1347,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_root_overlap_comparison_ignores_case_without_collapsing_siblings() {
+    fn windows_root_admission_without_filesystem_evidence_keeps_case_variants() {
         let store = MetadataStore::in_memory().unwrap();
         store
             .create_library_root(Path::new(r"C:\Library\Shared"), false, true)
@@ -1355,19 +1355,19 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .create_library_root(Path::new(r"c:\library\SHARED\Rare"), false, true)
+                .create_library_root(Path::new(r"C:\Library\Shared\Rare"), false, true)
                 .unwrap()
                 .is_none()
         );
         assert!(
             store
-                .create_library_root(Path::new(r"c:\LIBRARY"), false, true)
+                .create_library_root(Path::new(r"C:\Library\shared"), false, true)
                 .unwrap()
-                .is_none()
+                .is_some()
         );
         assert!(
             store
-                .create_library_root(Path::new(r"c:\Library\SharedOther"), false, true)
+                .create_library_root(Path::new(r"C:\Library\SharedOther"), false, true)
                 .unwrap()
                 .is_some()
         );

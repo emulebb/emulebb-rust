@@ -60,22 +60,15 @@ fn library_root_on_connection(
     .map_err(Into::into)
 }
 
-fn root_paths_overlap(left: &Path, right: &Path) -> bool {
-    // Compare native components, so sibling names sharing a textual prefix do
-    // not overlap. Windows follows the existing root policy's case folding;
-    // undecodable native components retain exact equality.
-    left.components()
-        .zip(right.components())
-        .all(|(left, right)| {
-            if cfg!(windows) {
-                match (left.as_os_str().to_str(), right.as_os_str().to_str()) {
-                    (Some(left), Some(right)) => left.to_lowercase() == right.to_lowercase(),
-                    _ => left == right,
-                }
-            } else {
-                left == right
-            }
-        })
+fn active_library_root_paths(conn: &rusqlite::Connection) -> Result<Vec<PathBuf>> {
+    let mut roots = conn.prepare_cached(
+        "SELECT p.platform,p.native_path
+        FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx
+        JOIN local_paths p ON p.id=r.path_id WHERE r.enabled=1 AND r.deleted_at_s IS NULL
+        ORDER BY r.id",
+    )?;
+    let paths = roots.query_map([], |row| crate::native_path::path_from_row(row, 0, 1))?;
+    Ok(paths.collect::<rusqlite::Result<_>>()?)
 }
 
 #[derive(Debug)]
@@ -97,20 +90,36 @@ impl MetadataStore {
         watch_enabled: bool,
         accessible: bool,
     ) -> Result<Option<crate::MetadataLibraryRoot>> {
+        self.create_library_root_with_overlap(path, watch_enabled, accessible, |left, right| {
+            left.starts_with(right) || right.starts_with(left)
+        })
+    }
+
+    /// Use the caller's filesystem comparison when available. Recheck the
+    /// active path set under the writer transaction before inserting.
+    pub fn create_library_root_with_overlap(
+        &self,
+        path: &Path,
+        watch_enabled: bool,
+        accessible: bool,
+        mut overlaps: impl FnMut(&Path, &Path) -> bool,
+    ) -> Result<Option<crate::MetadataLibraryRoot>> {
         ensure!(path.is_absolute(), "root path must be absolute");
         let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        {
-            // WHY: validate and insert under the same writer transaction, so
-            // simultaneous parent/child requests cannot both pass admission.
-            let mut roots = tx.prepare_cached("SELECT p.platform,p.native_path FROM shared_directory_roots r INDEXED BY shared_directory_roots_active_id_idx JOIN local_paths p ON p.id=r.path_id WHERE r.enabled=1 AND r.deleted_at_s IS NULL")?;
-            let paths = roots.query_map([], |row| crate::native_path::path_from_row(row, 0, 1))?;
-            for existing in paths {
-                if root_paths_overlap(path, &existing?) {
-                    return Ok(None);
-                }
+        let tx = loop {
+            let observed = active_library_root_paths(&conn)?;
+            let conflict = observed.iter().any(|existing| overlaps(path, existing));
+            // WHY: native observation can block on an offline volume. Keep it
+            // outside the writer lock while fencing concurrent root changes.
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if active_library_root_paths(&tx)? != observed {
+                continue;
             }
-        }
+            if conflict {
+                return Ok(None);
+            }
+            break tx;
+        };
         let path_id = crate::store::upsert_local_path(&tx, path)?;
         let inserted = tx.execute(
             "INSERT INTO shared_directory_roots(path_id,watch_enabled,accessible,created_at_s)

@@ -415,6 +415,78 @@ fn unavailable_configured_parent_still_covers_its_children() {
 }
 
 #[test]
+fn consolidation_uses_the_native_case_behavior_for_aliases() {
+    let temp = scratch_dir("native-case-root-alias");
+    let root = temp.join("Library");
+    let alias = temp.join("library");
+    fs::create_dir(&root).unwrap();
+    let mut paths = SharedRootPaths::default();
+    assert_eq!(paths.overlap(&root, &alias), alias.is_dir());
+    fs::remove_dir_all(temp).ok();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn consolidation_uses_the_mounted_filesystems_unicode_normalization_behavior() {
+    let temp = scratch_dir("native-normalization-root-alias");
+    let root = temp.join("caf\u{e9}");
+    let alias = temp.join("cafe\u{301}");
+    fs::create_dir(&root).unwrap();
+    let mut paths = SharedRootPaths::default();
+    assert_eq!(paths.overlap(&root, &alias), alias.is_dir());
+    fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn consolidation_preserves_explicit_roots_beneath_ignored_directories() {
+    let temp = scratch_dir("ignored-root-ancestor");
+    let child = temp.join(".git").join("shared");
+    fs::create_dir_all(&child).unwrap();
+    for pair in [[&temp, &child], [&child, &temp]] {
+        let roots =
+            consolidate_shared_directory_roots(pair.map(|path| MetadataSharedDirectoryRoot {
+                path: path.display().to_string(),
+                watch_enabled: false,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }));
+        assert_eq!(roots.len(), 2);
+    }
+    fs::remove_dir_all(temp).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn consolidation_does_not_cover_paths_that_leave_the_root() {
+    let temp = scratch_dir("root-parent-component");
+    let parent = temp.join("Library");
+    let other = temp.join("Other");
+    fs::create_dir(&parent).unwrap();
+    fs::create_dir(&other).unwrap();
+    let mut paths = SharedRootPaths::default();
+    assert!(!paths.overlap(&parent, &parent.join("../Other")));
+    fs::remove_dir_all(temp).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn consolidation_distinguishes_root_aliases_from_nested_links() {
+    let temp = scratch_dir("root-link-ancestor");
+    let library = temp.join("Library");
+    let target = temp.join("Target");
+    fs::create_dir_all(target.join("Child")).unwrap();
+    fs::create_dir(&library).unwrap();
+    let link = library.join("Link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let mut paths = SharedRootPaths::default();
+    assert!(paths.overlap(&link, &target));
+    assert!(paths.overlap(&link, &link.join("Child")));
+    assert!(!paths.overlap(&library, &link.join("Child")));
+    fs::remove_dir_all(temp).ok();
+}
+
+#[test]
 fn unavailable_parent_does_not_hide_an_available_child() {
     let temp = scratch_dir("available-child-root");
     let parent = temp.join("Parent");

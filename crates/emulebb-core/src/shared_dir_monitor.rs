@@ -2501,10 +2501,7 @@ mod tests {
             .filter(|item| !long_path(Path::new(&item.path)).is_dir())
             .collect();
         assert_eq!(missing.len(), 1);
-        assert_eq!(
-            crate::shared_directories::shared_root_comparison_key(Path::new(&missing[0].path)),
-            crate::shared_directories::shared_root_comparison_key(&root)
-        );
+        assert_eq!(long_path(Path::new(&missing[0].path)), long_path(&root));
         assert!(core.metadata_store.shared_directory_roots().unwrap()[0].accessible);
         let (entered, entered_rx) = tokio::sync::oneshot::channel();
         let (release, release_rx) = std::sync::mpsc::channel();

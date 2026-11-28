@@ -139,7 +139,7 @@ use hashset::{
 pub use inbound_admission::Ed2kInboundConnectionGuard;
 pub use ingest::{
     LocalIngestOptions, LocalIngestProgressEvent, LocalIngestProgressObserver,
-    LocalIngestProgressStage,
+    LocalIngestProgressStage, NativeDirectoryScanIdentity, native_directory_scan_identity,
 };
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;

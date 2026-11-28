@@ -1,4 +1,4 @@
-#![cfg(any(windows, target_os = "macos"))]
+#![cfg(any(windows, target_os = "linux", target_os = "macos"))]
 
 use std::{
     fs,
@@ -12,8 +12,88 @@ use std::path::Path;
 use emulebb_core::EmulebbCore;
 #[cfg(target_os = "macos")]
 use emulebb_core::LocalShareCreate;
+#[cfg(any(windows, target_os = "macos"))]
 use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
 use emulebb_index::FileIndex;
+
+#[cfg(any(windows, target_os = "linux"))]
+#[tokio::test]
+async fn case_distinct_library_roots_keep_independent_memberships() {
+    let runtime_dir = unique_test_dir("case-distinct-roots");
+    #[cfg(windows)]
+    if !enable_windows_case_sensitive_directory(&runtime_dir) {
+        eprintln!("skipping Windows case-sensitive root test: volume capability unavailable");
+        fs::remove_dir_all(&runtime_dir).unwrap();
+        return;
+    }
+    let upper = runtime_dir.join("Library");
+    let lower = runtime_dir.join("library");
+    fs::create_dir(&upper).unwrap();
+    fs::create_dir(&lower)
+        .expect("fixture must support two directory names differing only by case");
+    fs::write(upper.join("upper.bin"), b"upper branch bytes").unwrap();
+    fs::write(lower.join("lower.bin"), b"lower branch bytes").unwrap();
+
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let first = core
+        .create_library_root(upper.to_str().unwrap(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = core
+        .create_library_root(lower.to_str().unwrap(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    let mut shares = core.reload_shared_directories().await.unwrap();
+    shares.sort_by(|left, right| left.name.cmp(&right.name));
+    assert_eq!(
+        shares
+            .iter()
+            .map(|share| share.name.as_str())
+            .collect::<Vec<_>>(),
+        ["lower.bin", "upper.bin"]
+    );
+    assert!(matches!(
+        core.delete_library_root(first.id).await.unwrap(),
+        emulebb_metadata::MetadataLibraryRootDelete::Deleted(_)
+    ));
+    let shares = core.shares().await;
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].name, "lower.bin");
+    core.stop_shared_directory_monitor().await.unwrap();
+    fs::remove_dir_all(&runtime_dir).unwrap();
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[tokio::test]
+async fn native_case_alias_is_admitted_only_once() {
+    let runtime_dir = unique_test_dir("case-alias-roots");
+    let root = runtime_dir.join("Library");
+    let alias = runtime_dir.join("library");
+    fs::create_dir(&root).unwrap();
+    if !alias.is_dir() {
+        eprintln!("skipping native root alias test: fixture filesystem is case-sensitive");
+        fs::remove_dir_all(&runtime_dir).unwrap();
+        return;
+    }
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    assert!(
+        core.create_library_root(root.to_str().unwrap(), false)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        core.create_library_root(alias.to_str().unwrap(), false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    core.stop_shared_directory_monitor().await.unwrap();
+    fs::remove_dir_all(&runtime_dir).unwrap();
+}
 
 #[cfg(windows)]
 #[tokio::test]
@@ -90,14 +170,14 @@ fn enable_windows_case_sensitive_directory(path: &Path) -> bool {
     use std::{mem::size_of, os::windows::fs::OpenOptionsExt, os::windows::io::AsRawHandle};
     use windows_sys::Win32::{
         Storage::FileSystem::{
-            FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FileCaseSensitiveInfo,
-            SetFileInformationByHandle,
+            FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+            FileCaseSensitiveInfo, SetFileInformationByHandle,
         },
         System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR,
     };
 
     let directory = match fs::OpenOptions::new()
-        .read(true)
+        .access_mode(FILE_WRITE_ATTRIBUTES)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
     {

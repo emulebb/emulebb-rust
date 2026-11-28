@@ -347,12 +347,60 @@ pub(crate) fn native_file_identity_evidence_from_handle(
 }
 
 pub(crate) fn native_directory_identity(path: &Path) -> Option<NativeFileIdentity> {
+    let (directory, metadata) = open_native_directory(path)?;
+    native_file_identity_from_handle(&directory, &metadata)
+}
+
+/// Identity of a readable directory in its filesystem view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeDirectoryScanIdentity {
+    identity: NativeFileIdentity,
+    #[cfg(target_os = "linux")]
+    mount_id: u64,
+}
+
+/// Observe a directory without following a link at the final component.
+/// Linux also requires mount identity because separate bind mounts can expose
+/// different trees below the same inode.
+pub fn native_directory_scan_identity(path: &Path) -> Option<NativeDirectoryScanIdentity> {
+    let (directory, metadata) = open_native_directory(path)?;
+    Some(NativeDirectoryScanIdentity {
+        identity: native_file_identity_from_handle(&directory, &metadata)?,
+        #[cfg(target_os = "linux")]
+        mount_id: linux_directory_mount_id(&directory)?,
+    })
+}
+
+fn open_native_directory(path: &Path) -> Option<(File, std::fs::Metadata)> {
     let directory = open_directory_without_follow(path).ok()?;
     let metadata = directory.metadata().ok()?;
-    if !metadata.file_type().is_dir() {
+    metadata.is_dir().then_some((directory, metadata))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_directory_mount_id(directory: &File) -> Option<u64> {
+    use std::{mem::MaybeUninit, os::fd::AsRawFd};
+
+    let mut observation = MaybeUninit::<libc::statx>::zeroed();
+    // SAFETY: the directory descriptor and output buffer stay live. An empty
+    // path with AT_EMPTY_PATH selects the existing directory handle.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_statx,
+            directory.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_MNT_ID,
+            observation.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
         return None;
     }
-    native_file_identity_from_handle(&directory, &metadata)
+    // SAFETY: the storage started initialized to zero, and a successful
+    // statx call populated the advertised fields.
+    let observed = unsafe { observation.assume_init() };
+    (observed.stx_mask & libc::STATX_MNT_ID != 0).then_some(observed.stx_mnt_id)
 }
 
 #[cfg(unix)]
