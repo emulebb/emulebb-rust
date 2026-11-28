@@ -422,6 +422,42 @@ mod tests {
         (KadPacket::decode(&buffer[..length]).unwrap(), sender)
     }
 
+    async fn answer_bootstrap_and_self_lookup(
+        responder: &UdpSocket,
+        responder_id: NodeId,
+        local_id: NodeId,
+    ) {
+        let (packet, dht_addr) = receive_kad_packet(responder).await;
+        assert!(matches!(packet, KadPacket::BootstrapReq));
+        let response = KadPacket::BootstrapRes(BootstrapRes {
+            sender_id: responder_id,
+            sender_tcp_port: 4662,
+            sender_version: 9,
+            contacts: Vec::new(),
+        });
+        responder
+            .send_to(&response.encode().unwrap(), dht_addr)
+            .await
+            .unwrap();
+
+        let (packet, sender) = receive_kad_packet(responder).await;
+        assert_eq!(sender, dht_addr);
+        let KadPacket::Req(request) = packet else {
+            panic!("bootstrap response must be followed by a node lookup");
+        };
+        assert_eq!(request.count, KADEMLIA_FIND_NODE);
+        assert_eq!(request.target, local_id);
+        assert_eq!(request.recipient_id, responder_id);
+        let response = KadPacket::Res(KadRes {
+            target: request.target,
+            contacts: Vec::new(),
+        });
+        responder
+            .send_to(&response.encode().unwrap(), dht_addr)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn pausing_bootstrap_discards_the_inflight_round_and_rearms_on_resume() {
         let bind_addr = (crate::test_bind_ip(), 0);
@@ -523,43 +559,72 @@ mod tests {
         );
 
         let responder_id = NodeId::from_bytes([0x42; 16]);
-        let (second_round, ()) = tokio::join!(dht.bootstrap(), async {
-            let (packet, dht_addr) = receive_kad_packet(&responder).await;
-            assert!(matches!(packet, KadPacket::BootstrapReq));
-            let response = KadPacket::BootstrapRes(BootstrapRes {
-                sender_id: responder_id,
-                sender_tcp_port: 4662,
-                sender_version: 9,
-                contacts: Vec::new(),
-            });
-            responder
-                .send_to(&response.encode().unwrap(), dht_addr)
-                .await
-                .unwrap();
-
-            let (packet, sender) = receive_kad_packet(&responder).await;
-            assert_eq!(sender, dht_addr);
-            let KadPacket::Req(request) = packet else {
-                panic!("bootstrap response must be followed by a node lookup");
-            };
-            assert_eq!(request.count, KADEMLIA_FIND_NODE);
-            assert_eq!(request.target, dht.own_id());
-            assert_eq!(request.recipient_id, responder_id);
-            let response = KadPacket::Res(KadRes {
-                target: request.target,
-                contacts: Vec::new(),
-            });
-            responder
-                .send_to(&response.encode().unwrap(), dht_addr)
-                .await
-                .unwrap();
-        });
+        let (second_round, ()) = tokio::join!(
+            dht.bootstrap(),
+            answer_bootstrap_and_self_lookup(&responder, responder_id, dht.own_id())
+        );
         second_round.unwrap();
         assert!(matches!(
             dht.bootstrap().await,
             Err(DhtError::BootstrapSweepExhausted)
         ));
         receive_loop.abort();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_readiness_rearms_after_the_final_contact_expires() {
+        let bind_addr = (crate::test_bind_ip(), 0);
+        let responder = UdpSocket::bind(bind_addr).await.unwrap();
+        let endpoint = responder.local_addr().unwrap();
+        let SocketAddr::V4(endpoint) = endpoint else {
+            panic!("test responder must be IPv4");
+        };
+        let node = DhtNode::new(DhtConfig {
+            bind_addr: Some(bind_addr.into()),
+            nodes_text: Some(endpoint.to_string()),
+            bootstrap_min_routing_contacts: 1,
+            obfuscation_enabled: false,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let receiver = node.start();
+        let peer_id = NodeId::from_bytes([0x42; 16]);
+        let (first, ()) = tokio::join!(
+            node.bootstrap(),
+            answer_bootstrap_and_self_lookup(&responder, peer_id, node.own_id())
+        );
+        first.unwrap();
+        assert!(node.is_bootstrapped());
+        assert!(matches!(
+            node.bootstrap().await,
+            Err(DhtError::BootstrapSweepExhausted)
+        ));
+
+        {
+            let mut table = node.inner.routing_table.lock().await;
+            assert_eq!(node.routing_table_size(), 0);
+            assert!(
+                node.is_bootstrapped(),
+                "lock contention is not loss of routes"
+            );
+            assert!(table.remove(&peer_id));
+            let mut expired = Contact::new(peer_id, *endpoint.ip(), endpoint.port(), 4662, 9);
+            expired.probe_type = 4;
+            expired.expires_at = Some(std::time::SystemTime::UNIX_EPOCH);
+            table.add_contact(expired).unwrap();
+        }
+        assert!(node.routing_small_timer_maintenance().await.is_empty());
+        assert_eq!(node.routing_table_size(), 0);
+        assert!(!node.is_bootstrapped());
+
+        let (recovered, ()) = tokio::join!(
+            node.bootstrap(),
+            answer_bootstrap_and_self_lookup(&responder, peer_id, node.own_id())
+        );
+        recovered.unwrap();
+        assert!(node.is_bootstrapped());
+        receiver.abort();
     }
 
     async fn empty_node() -> DhtNode {

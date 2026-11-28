@@ -162,12 +162,19 @@ impl DhtNode {
     pub async fn routing_small_timer_maintenance(
         &self,
     ) -> Vec<emulebb_kad_routing::ProbeCandidate> {
-        self.inner
-            .routing_table
-            .lock()
-            .await
-            .small_timer_maintenance(std::time::SystemTime::now())
-            .probes
+        let mut table = self.inner.routing_table.lock().await;
+        let outcome = table.small_timer_maintenance(std::time::SystemTime::now());
+        // Check under the routing lock. The nonblocking size accessor also
+        // reports zero during contention and cannot establish a lost route.
+        if table.is_empty()
+            && self
+                .inner
+                .bootstrapped
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.bootstrap_sweep().restart();
+        }
+        outcome.probes
     }
 
     /// Take the next due big-timer random `FindNode` target: the first leaf
