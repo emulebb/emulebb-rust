@@ -652,7 +652,7 @@ export function App({ appearance }: { appearance: Appearance }) {
             retryIntervalMs: EVENT_STREAM_RETRY_MS
           }));
           await client.streamDownloadEvents((event: DownloadEvent, cursor?: string) => {
-            lastEventId = cursor;
+            lastEventId = cursor ?? lastEventId;
             setEventStreamStatus({
               mode: "streaming",
               enabled: true,
