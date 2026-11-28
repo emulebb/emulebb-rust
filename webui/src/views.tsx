@@ -2800,7 +2800,13 @@ export function DiagnosticsView(props: {
           <h2>Diagnostics</h2>
         </div>
         <div class="row-actions">
-          <button class="btn" type="button" onClick={() => void props.run(captureBundle, "Diagnostic bundle downloaded")}>
+          <button class="btn" type="button" onClick={() => {
+            if (window.confirm(
+              "Download a private diagnostic bundle? It includes the API key, local paths, content and peer identifiers, and raw logs and diagnostic data. Keep this file private."
+            )) {
+              void props.run(captureBundle, "Diagnostic bundle downloaded");
+            }
+          }}>
             <FileText size={15} />
             Capture private bundle
           </button>

@@ -51,6 +51,7 @@ describe("DiagnosticsView", () => {
       summary: { artifactFileCount: 1, missingArtifactFamilies: [], issueCount: 0 }
     };
     const client = new RestClient();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     const capture = vi.spyOn(client, "captureDiagnosticBundle").mockResolvedValue(bundle);
     const createObjectURL = vi.fn(() => "blob:diagnostic-bundle");
     const revokeObjectURL = vi.fn();
@@ -84,7 +85,12 @@ describe("DiagnosticsView", () => {
     expect(screen.getByText("CPU usage").parentElement).toHaveTextContent("n/a");
     expect(screen.getByText("Resident memory").parentElement).toHaveTextContent("n/a");
     fireEvent.click(screen.getByRole("button", { name: "Capture private bundle" }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/private.*API key.*local paths.*content and peer identifiers.*raw logs and diagnostic data/i));
+    expect(capture).not.toHaveBeenCalled();
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Downloaded:/)).not.toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("button", { name: "Capture private bundle" }));
     await waitFor(() => expect(capture).toHaveBeenCalledOnce());
     expect(capture).toHaveBeenCalledWith(16 * 1024 * 1024);
     expect(createObjectURL).toHaveBeenCalledOnce();

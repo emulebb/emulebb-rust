@@ -197,6 +197,7 @@ test("mobile forms, row actions and direct diagnostic buttons preserve request m
   await expect.poll(() => requests.some((request) => request.method === "PATCH" && request.path === "settings")).toBe(true);
   await noPageOverflow(page);
   await page.goto("/diagnostics");
+  page.once("dialog", (dialog) => dialog.accept());
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Capture private bundle" }).click();
   const downloaded = await download;
