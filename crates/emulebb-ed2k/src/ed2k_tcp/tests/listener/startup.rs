@@ -318,6 +318,9 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     let no_sources_hash = Ed2kHash::from_bytes(Md4::digest(&no_sources_payload).into());
     let root = unique_test_dir("ed2k-upload-listener-startup");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let standby_server: std::net::SocketAddrV4 = "203.0.113.9:4661".parse().unwrap();
+    let changed_low_id = 0x0012_3456_u32;
+    transfer_runtime.replace_known_server_endpoints([standby_server]);
     let job = crate::ed2k_transfer::test_support::admit_download_job(
         &transfer_runtime,
         file_hash,
@@ -717,8 +720,8 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
         .await
         .unwrap();
     let mut client_id_change_payload = Vec::new();
-    client_id_change_payload.extend_from_slice(&0x1122_3344u32.to_le_bytes());
-    client_id_change_payload.extend_from_slice(&0x5566_7788u32.to_le_bytes());
+    client_id_change_payload.extend_from_slice(&changed_low_id.to_le_bytes());
+    client_id_change_payload.extend_from_slice(&standby_server.ip().octets());
     stream
         .write_all(&super::encode_packet(
             OP_EDONKEYPROT,
@@ -964,6 +967,12 @@ async fn listener_established_session_tolerates_unknown_opcodes_and_continues() 
     let accept_upload =
         read_until_opcode(&mut stream, OP_EDONKEYPROT, super::OP_ACCEPTUPLOADREQ).await;
     assert_eq!(accept_upload.len(), 6);
+    let uploads = transfer_runtime.upload_queue_snapshot().await;
+    let upload = uploads
+        .iter()
+        .find(|entry| entry.user_hash == Some(peer_identity.user_hash))
+        .expect("listener queued the established peer");
+    assert_eq!(upload.client_id, Some(changed_low_id));
 
     stream
         .write_all(&super::encode_packet(

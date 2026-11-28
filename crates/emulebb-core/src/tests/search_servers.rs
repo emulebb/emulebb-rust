@@ -1375,6 +1375,7 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
         SnoopQueueConfig::default(),
     );
     let endpoint = "203.0.113.71:4661";
+    let peer_server_ip = "203.0.113.71".parse().unwrap();
     network.ed2k.server_endpoints = vec![endpoint.to_string()];
     let core = EmulebbCore::new_with_network(
         "test",
@@ -1383,6 +1384,11 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
         Some(network),
     )
     .unwrap();
+    assert_eq!(
+        core.ed2k_transfers.known_server_endpoint(peer_server_ip),
+        Some(endpoint.parse().unwrap()),
+        "the known server is available before connecting to any server"
+    );
     core.create_server_resource(&emulebb_metadata::MetadataServerCreate {
         address: "203.0.113.71".into(),
         port: 4661,
@@ -1439,7 +1445,6 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
     );
     assert!(disabled.config().server_entries.is_empty());
     assert!(disabled.config().server_endpoints.is_empty());
-    let peer_server_ip = "203.0.113.71".parse().unwrap();
     assert_eq!(
         core.ed2k_transfers.known_server_endpoint(peer_server_ip),
         Some(endpoint.parse().unwrap())

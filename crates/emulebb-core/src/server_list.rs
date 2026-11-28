@@ -95,20 +95,6 @@ impl EmulebbCore {
         .await
     }
 
-    pub(crate) async fn prepare_ed2k_server_connect_config(
-        &self,
-        base: &Ed2kRuntimeConfig,
-    ) -> Result<Ed2kRuntimeConfig> {
-        effective_config(
-            base,
-            self.ed2k_network.as_deref(),
-            &self.state,
-            &self.ed2k_reachability,
-            Some(&self.ed2k_transfers),
-        )
-        .await
-    }
-
     pub(crate) async fn refresh_ed2k_server_connect_plan(&self) -> Result<()> {
         ServerPlanPublisher::new(self).refresh().await
     }
@@ -250,7 +236,7 @@ async fn effective_config(
     Ok(config)
 }
 
-fn publish_known_server_endpoints(
+pub(super) fn publish_known_server_endpoints(
     transfers: &Ed2kTransferRuntime,
     base: &Ed2kRuntimeConfig,
     state: &crate::core_state::CoreState,

@@ -3,7 +3,10 @@ use super::*;
 #[tokio::test]
 async fn outbound_download_connection_serves_and_cancels_upload_without_closing() {
     let root = unique_test_dir("ed2k-outbound-duplex-upload");
-    let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let standby_server: std::net::SocketAddrV4 = "203.0.113.9:4661".parse().unwrap();
+    let changed_low_id = 0x0012_3456_u32;
+    transfer_runtime.replace_known_server_endpoints([standby_server]);
 
     let download_payload = vec![0x5A; 32_768];
     let download_hash = Ed2kHash::from_bytes(Md4::digest(&download_payload).into());
@@ -39,6 +42,7 @@ async fn outbound_download_connection_serves_and_cancels_upload_without_closing(
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
     let payload_for_server = download_payload.clone();
+    let runtime_for_server = Arc::clone(&transfer_runtime);
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
@@ -82,6 +86,14 @@ async fn outbound_download_connection_serves_and_cancels_upload_without_closing(
             .await
             .unwrap();
         stream
+            .write_all(&encode_packet(
+                OP_EDONKEYPROT,
+                super::OP_CHANGE_CLIENT_ID,
+                &[changed_low_id.to_le_bytes(), standby_server.ip().octets()].concat(),
+            ))
+            .await
+            .unwrap();
+        stream
             .write_all(&encode_start_upload_req(&upload_hash))
             .await
             .unwrap();
@@ -101,6 +113,12 @@ async fn outbound_download_connection_serves_and_cancels_upload_without_closing(
                 pair => panic!("unexpected duplex startup packet {pair:?}"),
             }
         }
+        let uploads = runtime_for_server.upload_queue_snapshot().await;
+        let upload = uploads
+            .iter()
+            .find(|entry| entry.user_hash == Some([0x42; 16]))
+            .expect("outbound session queued the established peer");
+        assert_eq!(upload.client_id, Some(changed_low_id));
 
         stream
             .write_all(&encode_packet(OP_EDONKEYPROT, OP_CANCELTRANSFER, &[]))
