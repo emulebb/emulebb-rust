@@ -1920,23 +1920,23 @@ async fn long_tcp_keepalive_timeout_does_not_delay_the_first_udp_status_request(
 }
 
 async fn assert_connected_udp_status_with_keepalive(keepalive: Option<Duration>) {
+    use rand::RngExt;
+
     let bind_ip = crate::test_bind_ip();
     let mut sockets = None;
-    let mut occupied_tcp_candidates = Vec::new();
-    // Let the OS choose an available TCP base port first. Independently
-    // allocated ephemeral UDP ports can map to a reserved TCP range.
+    // Plain eD2K status uses TCP base port + 4. Sample independent candidates
+    // below the default dynamic range: TCP and UDP reservations differ, and
+    // sequential ephemeral allocations can land in the same UDP exclusion.
     for _ in 0..32 {
-        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
-        if let Some(udp_port) = listener.local_addr().unwrap().port().checked_add(4)
-            && let Ok(udp) = tokio::net::UdpSocket::bind((bind_ip, udp_port)).await
+        let port = rand::rng().random_range(10_000..49_148);
+        if let Ok(listener) = TcpListener::bind((bind_ip, port)).await
+            && let Ok(udp) = tokio::net::UdpSocket::bind((bind_ip, port + 4)).await
         {
             sockets = Some((listener, udp));
             break;
         }
-        occupied_tcp_candidates.push(listener);
     }
     let (listener, status_socket) = sockets.expect("could not allocate paired server ports");
-    drop(occupied_tcp_candidates);
     let server = background_test_server(listener.local_addr().unwrap());
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let mut context = background_test_context(Arc::clone(&state), Duration::from_secs(5));
