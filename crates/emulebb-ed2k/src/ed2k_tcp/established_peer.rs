@@ -58,6 +58,7 @@ impl EstablishedPeerIdentity {
         self.client_id
     }
 
+    #[cfg(test)]
     pub(in crate::ed2k_tcp) const fn server_endpoint(self) -> Option<SocketAddr> {
         self.server_endpoint
     }
@@ -70,19 +71,16 @@ impl EstablishedPeerIdentity {
     /// Apply stock's guarded `OP_CHANGE_CLIENT_ID` identity transition.
     ///
     /// A changed LowID is meaningful only when the reported server is known.
-    /// Rust currently knows the active server route, which is also the only
-    /// route through which it can issue a server callback. HighID changes are
+    /// Server callbacks still require the active session. HighID changes are
     /// accepted only when the reported ID is the connected peer's IPv4 address.
     pub(in crate::ed2k_tcp) fn apply_client_id_change(
         &mut self,
         peer_ip: IpAddr,
-        known_server: Option<SocketAddr>,
+        resolve_server: impl FnOnce(Ipv4Addr) -> Option<SocketAddr>,
         payload: &[u8],
     ) -> Result<AppliedClientIdChange> {
         let change = decode_client_id_change_payload(payload)?;
-        let server_endpoint = known_server.filter(|endpoint| {
-            endpoint.ip() == IpAddr::V4(Ipv4Addr::from(change.new_server_ip.to_le_bytes()))
-        });
+        let server_endpoint = resolve_server(Ipv4Addr::from(change.new_server_ip.to_le_bytes()));
         let accepted = if change.new_user_id < 0x0100_0000 {
             server_endpoint.is_some()
         } else {
@@ -101,6 +99,30 @@ impl EstablishedPeerIdentity {
         }
 
         Ok(AppliedClientIdChange { change, accepted })
+    }
+
+    pub(in crate::ed2k_tcp) async fn apply_live_client_id_change(
+        &mut self,
+        peer_ip: IpAddr,
+        server_state: Option<&RwLock<Ed2kServerState>>,
+        transfers: &Ed2kTransferRuntime,
+        payload: &[u8],
+    ) -> Result<AppliedClientIdChange> {
+        let active = if let Some(state) = server_state {
+            let state = state.read().await;
+            state.endpoint.filter(|_| state.connected)
+        } else {
+            None
+        };
+        self.apply_client_id_change(
+            peer_ip,
+            |reported| {
+                active
+                    .filter(|endpoint| endpoint.ip() == IpAddr::V4(reported))
+                    .or_else(|| transfers.known_server_endpoint(reported))
+            },
+            payload,
+        )
     }
 
     pub(in crate::ed2k_tcp) fn apply_to_upload_identity(
@@ -196,7 +218,7 @@ mod tests {
         let applied = identity
             .apply_client_id_change(
                 IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
-                Some(new_endpoint),
+                |reported| (reported == new_server).then_some(new_endpoint),
                 &payload,
             )
             .unwrap();
@@ -220,7 +242,10 @@ mod tests {
         let applied = identity
             .apply_client_id_change(
                 IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
-                Some(SocketAddr::new(IpAddr::V4(old_server), 4661)),
+                |reported| {
+                    (reported == old_server)
+                        .then_some(SocketAddr::new(IpAddr::V4(old_server), 4661))
+                },
                 &payload,
             )
             .unwrap();
@@ -242,7 +267,10 @@ mod tests {
         let applied = identity
             .apply_client_id_change(
                 IpAddr::V4(peer_ip),
-                Some(SocketAddr::new(IpAddr::V4(old_server), 4661)),
+                |reported| {
+                    (reported == old_server)
+                        .then_some(SocketAddr::new(IpAddr::V4(old_server), 4661))
+                },
                 &payload,
             )
             .unwrap();
@@ -257,6 +285,95 @@ mod tests {
             Some(SocketAddr::new(IpAddr::V4(old_server), 4661))
         );
         assert!(!identity.is_low_id());
+    }
+
+    #[test]
+    fn changed_high_id_must_match_the_connected_peer_address() {
+        let server = Ipv4Addr::new(203, 0, 113, 10);
+        let mut identity = identity(0x0000_1234, server, 4661);
+        let original = identity;
+        let mut payload = u32::from_le_bytes([198, 51, 100, 21])
+            .to_le_bytes()
+            .to_vec();
+        payload.extend_from_slice(&server.octets());
+        let applied = identity
+            .apply_client_id_change(
+                "198.51.100.20".parse().unwrap(),
+                |_| Some(SocketAddr::new(server.into(), 4661)),
+                &payload,
+            )
+            .unwrap();
+        assert!(!applied.accepted);
+        assert_eq!(identity, original);
+    }
+
+    #[tokio::test]
+    async fn established_id_change_uses_the_shared_directory_and_live_endpoint() {
+        let transfers = Ed2kTransferRuntime::load_or_create(&crate::paths::unique_test_dir(
+            "known-server-peer-change",
+        ))
+        .unwrap();
+        let previous = Ipv4Addr::new(203, 0, 113, 10);
+        let standby = Ipv4Addr::new(203, 0, 113, 11);
+        let route = "203.0.113.11:4668"
+            .parse::<std::net::SocketAddrV4>()
+            .unwrap();
+        transfers.replace_known_server_endpoints([route, route]);
+        let state = RwLock::new(Ed2kServerState {
+            endpoint: Some("203.0.113.10:4661".parse().unwrap()),
+            connected: true,
+            ..Ed2kServerState::default()
+        });
+        let mut payload = 0x0000_4321_u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&standby.octets());
+        let peer = "198.51.100.20".parse().unwrap();
+        for live_state in [Some(&state), None] {
+            let mut peer_identity = identity(0x0102_0304, previous, 4661);
+            assert!(
+                peer_identity
+                    .apply_live_client_id_change(peer, live_state, &transfers, &payload)
+                    .await
+                    .unwrap()
+                    .accepted
+            );
+            assert_eq!(peer_identity.server_endpoint(), Some(route.into()));
+        }
+
+        transfers
+            .replace_known_server_endpoints([route, std::net::SocketAddrV4::new(standby, 4669)]);
+        let mut peer_identity = identity(0x0102_0304, previous, 4661);
+        assert!(
+            !peer_identity
+                .apply_live_client_id_change(peer, Some(&state), &transfers, &payload)
+                .await
+                .unwrap()
+                .accepted
+        );
+        assert_eq!(
+            peer_identity.server_endpoint(),
+            Some("203.0.113.10:4661".parse().unwrap())
+        );
+        {
+            let mut state = state.write().await;
+            state.endpoint = Some(route.into());
+            state.connected = false;
+        }
+        assert!(
+            !peer_identity
+                .apply_live_client_id_change(peer, Some(&state), &transfers, &payload)
+                .await
+                .unwrap()
+                .accepted
+        );
+        state.write().await.connected = true;
+        assert!(
+            peer_identity
+                .apply_live_client_id_change(peer, Some(&state), &transfers, &payload)
+                .await
+                .unwrap()
+                .accepted
+        );
+        assert_eq!(peer_identity.server_endpoint(), Some(route.into()));
     }
 
     #[test]

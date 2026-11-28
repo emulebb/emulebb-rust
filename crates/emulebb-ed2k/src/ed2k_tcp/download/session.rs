@@ -1545,16 +1545,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
                 }
                 (OP_EDONKEYPROT, OP_CHANGE_CLIENT_ID) => {
-                    let known_server = if let Some(context) = established_context {
-                        context.server_state.read().await.endpoint
-                    } else {
-                        session_state.peer_identity.server_endpoint()
-                    };
-                    let applied = session_state.peer_identity.apply_client_id_change(
+                    let applied = session_state.peer_identity.apply_live_client_id_change(
                         peer_addr.ip(),
-                        known_server,
+                        established_context.map(|context| context.server_state.as_ref()),
+                        transfer_runtime,
                         &packet.payload,
-                    )?;
+                    ).await?;
                     dump_ed2k_tcp_download_meta(
                         peer_addr,
                         Some(transport.mode),
