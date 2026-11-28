@@ -218,34 +218,29 @@ fn classify_mapping_ports(port_first: Option<u16>, port_second: Option<u16>) -> 
 }
 
 /// Send one Binding request to `host:port` over an already-bound *unconnected*
-/// socket and return the reflexive port, filtering replies by the server IP (we
-/// cannot `connect()` since the socket is shared across two servers).
+/// socket and return the reflexive port. Match the expected endpoint and
+/// transaction while keeping the socket reusable for the second server.
 async fn probe_port_unconnected(
     socket: &UdpSocket,
     host: &str,
     port: u16,
     timeout: Duration,
 ) -> Option<u16> {
-    let server = tokio::net::lookup_host((host, port))
-        .await
-        .ok()?
-        .find_map(|addr| match addr {
-            SocketAddr::V4(v4) => Some(v4),
-            SocketAddr::V6(_) => None,
-        })?;
-    let mut txid = [0u8; 12];
-    rand::rng().fill_bytes(&mut txid);
-    let request = build_request(&txid);
     tokio::time::timeout(timeout, async {
-        socket
-            .send_to(&request, SocketAddr::V4(server))
+        let server = tokio::net::lookup_host((host, port))
             .await
-            .ok()?;
+            .ok()?
+            .find(SocketAddr::is_ipv4)?;
+        let mut txid = [0u8; 12];
+        rand::rng().fill_bytes(&mut txid);
+        socket.send_to(&build_request(&txid), server).await.ok()?;
         let mut buf = [0u8; 1500];
         loop {
             let (len, from) = socket.recv_from(&mut buf).await.ok()?;
-            if from.ip() == IpAddr::V4(*server.ip()) {
-                return parse_response(&buf[..len], &txid).ok().map(|e| e.port());
+            if from == server
+                && let Ok(endpoint) = parse_response(&buf[..len], &txid)
+            {
+                return Some(endpoint.port());
             }
         }
     })
@@ -442,6 +437,68 @@ mod tests {
             parse_response(&msg, &TXID).unwrap(),
             SocketAddrV4::new(ip, 51413)
         );
+    }
+
+    #[tokio::test]
+    async fn mapping_probe_waits_for_the_expected_endpoint_and_transaction() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let wrong_port = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        let respond = async {
+            let mut request = [0; STUN_HEADER_LEN];
+            let (_, requester) = server.recv_from(&mut request).await.unwrap();
+            let txid: [u8; 12] = request[8..20].try_into().unwrap();
+            let mut stale = txid;
+            stale[0] ^= 1;
+            let mapped_ip = Ipv4Addr::new(203, 0, 113, 7);
+            wrong_port
+                .send_to(&success_response(mapped_ip, 10_000, true, &txid), requester)
+                .await
+                .unwrap();
+            server
+                .send_to(
+                    &success_response(mapped_ip, 20_000, true, &stale),
+                    requester,
+                )
+                .await
+                .unwrap();
+            server.send_to(&[0; 3], requester).await.unwrap();
+            server
+                .send_to(&success_response(mapped_ip, 30_000, true, &txid), requester)
+                .await
+                .unwrap();
+        };
+        let timeout = Duration::from_secs(5);
+        let (mapped, ()) = tokio::join!(
+            probe_port_unconnected(&client, "127.0.0.1", port, timeout),
+            async { tokio::time::timeout(timeout, respond).await.unwrap() },
+        );
+        assert_eq!(mapped, Some(30_000));
+    }
+
+    #[tokio::test]
+    async fn mapping_probe_keeps_its_original_deadline_after_an_invalid_reply() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        let timeout = Duration::from_millis(100);
+        let respond = async {
+            let mut request = [0; STUN_HEADER_LEN];
+            let (_, requester) = server.recv_from(&mut request).await.unwrap();
+            server.send_to(&[0; 3], requester).await.unwrap();
+        };
+        let started = tokio::time::Instant::now();
+        let (mapped, ()) = tokio::join!(
+            probe_port_unconnected(&client, "127.0.0.1", port, timeout),
+            async {
+                tokio::time::timeout(Duration::from_secs(5), respond)
+                    .await
+                    .unwrap()
+            },
+        );
+        assert_eq!(mapped, None);
+        assert!(started.elapsed() >= timeout);
     }
 
     #[test]
