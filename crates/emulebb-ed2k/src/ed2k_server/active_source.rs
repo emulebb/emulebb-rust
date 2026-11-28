@@ -1,7 +1,7 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -224,7 +224,7 @@ async fn search_sources_on_server(
     } else {
         session.send_packet(OP_LOGINREQUEST, &login_payload).await?;
     }
-    session.last_tx = Instant::now();
+    session.last_tcp_activity = TokioInstant::now();
     let mut response_deadline = None;
     session.set_phase(
         ServerSessionPhase::AwaitingIdChange,

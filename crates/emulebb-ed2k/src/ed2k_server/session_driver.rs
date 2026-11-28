@@ -30,10 +30,8 @@ use super::{
     start_background_server_search, validate_found_sources,
 };
 
-/// Wakeup cadence used to drive the periodic UDP server-status ping when the
-/// TCP keepalive is disabled (`keepalive_interval == None`). It sends no TCP
-/// traffic; it only keeps the status-ping schedule alive.
-const KEEPALIVE_DISABLED_STATUS_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// Check UDP status eligibility independently of the operator's idle TCP timeout.
+const SERVER_UDP_STATUS_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 const SERVER_CRYPT_PING_FALLBACK_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
 const PENDING_LOGIN_SHUTDOWN_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(50);
@@ -305,12 +303,11 @@ pub(super) async fn run_one_server_session(
     let mut last_status_ping: Option<TokioInstant> = None;
     // Anchor the timer once so a stream of TCP packets and background
     // commands cannot postpone status indefinitely.
-    let maintenance_period = context
-        .keepalive_interval
-        .unwrap_or(KEEPALIVE_DISABLED_STATUS_TICK);
-    let mut maintenance_tick =
-        tokio::time::interval_at(TokioInstant::now() + maintenance_period, maintenance_period);
-    maintenance_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut status_tick = tokio::time::interval_at(
+        TokioInstant::now() + SERVER_UDP_STATUS_TICK,
+        SERVER_UDP_STATUS_TICK,
+    );
+    status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         if context.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
@@ -341,6 +338,9 @@ pub(super) async fn run_one_server_session(
 
         let offer_files_wakeup = session.offer_files_wakeup_at();
         let pending_login_deadline = session.pending_login_deadline;
+        let keepalive_deadline = context
+            .keepalive_interval
+            .map(|idle| session.last_tcp_activity + idle);
         tokio::select! {
             () = context.session_cancel.cancelled() => {
                 let failure = BackgroundSearchFailure::interrupted(
@@ -1001,23 +1001,17 @@ pub(super) async fn run_one_server_session(
                     ),
                 }
             }
-            _ = maintenance_tick.tick(), if session.login_accepted => {
-                // eMule KeepConnectionAlive (ServerConnect.cpp:672-674) only
-                // "pings" the server when the keepalive timeout is enabled AND
-                // the TCP link has been idle for at least that interval. With the
-                // keepalive disabled (interval None) we still wake on a fixed
-                // cadence so the UDP status ping below keeps its own schedule.
-                if let Some(interval) = context.keepalive_interval
-                    && session.last_tx.elapsed() >= interval
-                {
-                    // Keepalive traffic must not advance the large-library
-                    // offer cursor. Full OP_OFFERFILES refreshes are driven by
-                    // startup and the core's rate-limited shared-catalog
-                    // publisher; the idle server session uses the stock empty
-                    // keepalive packet.
-                    session.send_packet(OP_OFFERFILES, &0u32.to_le_bytes()).await?;
-                    debug!("sent ED2K server keepalive to {}", server.base_endpoint());
+            _ = async {
+                if let Some(deadline) = keepalive_deadline {
+                    tokio::time::sleep_until(deadline).await;
                 }
+            }, if session.login_accepted && keepalive_deadline.is_some() => {
+                // Stock ServerSocket records both sends and receives. The
+                // keepalive is an empty offer and leaves the catalog cursor alone.
+                session.send_packet(OP_OFFERFILES, &0u32.to_le_bytes()).await?;
+                debug!("sent ED2K server keepalive to {}", server.base_endpoint());
+            }
+            _ = status_tick.tick(), if session.login_accepted => {
                 // The UDP global-server-status ping is GATED on its own 4.5h
                 // cadence and decoupled from the keepalive tick above: pinging on
                 // every ~60s keepalive is a ~270x over-ping (eMule pings at most
