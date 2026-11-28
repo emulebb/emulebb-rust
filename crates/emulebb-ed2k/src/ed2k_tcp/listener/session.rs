@@ -1030,12 +1030,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 notify::handle_out_of_part_requests(&transport, peer_addr);
             }
             (OP_EDONKEYPROT, OP_CHANGE_CLIENT_ID) => {
-                let known_server = server_state.read().await.endpoint;
-                let applied = peer_identity.apply_client_id_change(
+                let applied = peer_identity.apply_live_client_id_change(
                     peer_addr.ip(),
-                    known_server,
+                    Some(server_state.as_ref()),
+                    transfer_runtime,
                     &packet.payload,
-                )?;
+                ).await?;
                 dump_ed2k_tcp_listener_meta(
                     peer_addr,
                     Some(transport.mode),

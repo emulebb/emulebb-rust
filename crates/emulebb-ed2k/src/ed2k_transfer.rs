@@ -13,7 +13,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
@@ -327,6 +327,8 @@ pub struct Ed2kTransferRuntime {
     shared_catalog_generation: Arc<AtomicU64>,
     shared_files_visibility: AtomicU8,
     peer_browse: crate::ed2k_tcp::PeerBrowseRegistry,
+    /// Read-only peer-routing view of the profile's known eD2K server list.
+    known_server_ports: parking_lot::RwLock<HashMap<Ipv4Addr, Option<u16>>>,
     browse_catalog_reads: tokio::sync::Semaphore,
     /// Keyset cursor for a persisted catalog intentionally loaded only through
     /// the first publishable startup cohort. `pending` is claimed atomically so
@@ -728,6 +730,32 @@ impl Ed2kTransferRuntime {
         &self.peer_browse
     }
 
+    /// Publish the current numeric eD2K server directory for established peers.
+    pub fn replace_known_server_endpoints(
+        &self,
+        endpoints: impl IntoIterator<Item = SocketAddrV4>,
+    ) {
+        let mut ports = HashMap::new();
+        for endpoint in endpoints {
+            let port = Some(endpoint.port());
+            ports
+                .entry(*endpoint.ip())
+                .and_modify(|known| {
+                    if *known != port {
+                        *known = None;
+                    }
+                })
+                .or_insert(port);
+        }
+        *self.known_server_ports.write() = ports;
+    }
+
+    /// Return a canonical base endpoint only when the server IP is unambiguous.
+    pub fn known_server_endpoint(&self, ip: Ipv4Addr) -> Option<SocketAddr> {
+        let port = self.known_server_ports.read().get(&ip).copied().flatten()?;
+        Some(SocketAddrV4::new(ip, port).into())
+    }
+
     pub(crate) fn try_browse_catalog_read(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
         self.browse_catalog_reads.try_acquire().ok()
     }
@@ -962,6 +990,7 @@ impl Ed2kTransferRuntime {
             credit_system_enabled: AtomicBool::new(true),
             shared_files_visibility: AtomicU8::new(SharedFilesVisibility::Everyone as u8),
             peer_browse: crate::ed2k_tcp::PeerBrowseRegistry::default(),
+            known_server_ports: parking_lot::RwLock::default(),
             browse_catalog_reads: tokio::sync::Semaphore::new(2),
             ich_enabled: AtomicBool::new(true),
             #[cfg(test)]

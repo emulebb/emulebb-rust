@@ -370,7 +370,9 @@ impl EmulebbCore {
         if let Some(endpoint) = endpoint {
             let _ = parse_server_endpoint(endpoint)?;
         }
-        let config = self.effective_ed2k_config(&network.ed2k).await?;
+        let config = self
+            .prepare_ed2k_server_connect_config(&network.ed2k)
+            .await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             anyhow::bail!("ED2K connect requires at least one configured server");
         }

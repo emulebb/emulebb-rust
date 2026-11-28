@@ -1439,6 +1439,11 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
     );
     assert!(disabled.config().server_entries.is_empty());
     assert!(disabled.config().server_endpoints.is_empty());
+    let peer_server_ip = "203.0.113.71".parse().unwrap();
+    assert_eq!(
+        core.ed2k_transfers.known_server_endpoint(peer_server_ip),
+        Some(endpoint.parse().unwrap())
+    );
     assert!(core.ed2k_runtime.lock().await.is_some());
     assert!(!shutdown.load(Ordering::SeqCst));
 
@@ -1466,6 +1471,10 @@ async fn server_mutations_replace_the_plan_without_stopping_the_runtime() {
     let removed = wait_for_server_plan_update(&mut plan_rx).await;
     assert!(removed.config().server_entries.is_empty());
     assert!(removed.config().server_endpoints.is_empty());
+    assert_eq!(
+        core.ed2k_transfers.known_server_endpoint(peer_server_ip),
+        None
+    );
     assert!(core.ed2k_runtime.lock().await.is_some());
     assert!(!shutdown.load(Ordering::SeqCst));
 
