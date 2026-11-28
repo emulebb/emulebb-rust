@@ -17,6 +17,9 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+mod root_paths;
+pub(crate) use root_paths::SharedRootPaths;
+
 /// Runtime descriptor used by library scanning and native subscriptions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -38,37 +41,25 @@ pub fn consolidate_shared_directory_roots(
     roots: impl IntoIterator<Item = MetadataSharedDirectoryRoot>,
 ) -> Vec<MetadataSharedDirectoryRoot> {
     let mut combined: Vec<(MetadataSharedDirectoryRoot, PathBuf)> = Vec::new();
+    let mut paths = SharedRootPaths::default();
     for root in roots {
-        let key = shared_root_comparison_key(Path::new(&root.path));
+        let native = long_path(Path::new(&root.path));
         let eligible = root.shareable && root.accessible;
         if combined.iter().any(|(parent_root, parent)| {
-            key.starts_with(parent)
-                && (!eligible || (parent_root.shareable && parent_root.accessible))
+            (!eligible || (parent_root.shareable && parent_root.accessible))
                 && (!root.watch_enabled || parent_root.watch_enabled)
+                && paths.covers(parent, &native)
         }) {
             continue;
         }
         combined.retain(|(child_root, child)| {
-            !child.starts_with(&key)
-                || (!eligible && child_root.shareable && child_root.accessible)
+            (!eligible && child_root.shareable && child_root.accessible)
                 || (child_root.watch_enabled && !root.watch_enabled)
+                || !paths.covers(&native, child)
         });
-        combined.push((root, key));
+        combined.push((root, native));
     }
     combined.into_iter().map(|(root, _)| root).collect()
-}
-
-pub(crate) fn shared_root_comparison_key(path: &Path) -> PathBuf {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let display = normal_path_display(canonical);
-    // WHY: unavailable children cannot be canonicalized, but Windows casing
-    // and verbatim prefixes must still compare with their accessible parents.
-    // This comparison key never replaces the exact stored native path.
-    if cfg!(windows) {
-        PathBuf::from(display.to_lowercase())
-    } else {
-        PathBuf::from(display)
-    }
 }
 
 /// Current shared-directory configuration plus lightweight hashing status.

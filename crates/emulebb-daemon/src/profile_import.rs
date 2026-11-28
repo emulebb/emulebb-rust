@@ -474,11 +474,7 @@ fn validate_manifest(manifest: ProfileImportManifest) -> Result<ValidatedImport>
             "shared root must not contain traversal: {:?}",
             root.path
         );
-        let root_identity = if NativePath::platform() == "windows" {
-            root.path.to_ascii_lowercase()
-        } else {
-            root.path.clone()
-        };
+        let root_identity = emulebb_ed2k::long_path::long_path(path);
         ensure!(
             root_paths.insert(root_identity),
             "duplicate shared root: {:?}",
@@ -915,11 +911,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_shared_roots_are_case_insensitive() {
-        let error = validate_manifest(manifest_with_roots(&[r"C:\Shared", r"c:\shared"]))
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("duplicate shared root"));
+    fn windows_import_keeps_unresolved_case_variants() {
+        let temp = tempfile::tempdir().unwrap();
+        let upper = temp.path().join("Missing");
+        let lower = temp.path().join("missing");
+        let validated = validate_manifest(manifest_with_roots(&[
+            upper.to_str().unwrap(),
+            lower.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let roots = emulebb_core::consolidate_shared_directory_roots(validated.shared_roots);
+        assert_eq!(roots.len(), 2);
+        assert!(roots.iter().all(|root| !root.accessible));
     }
 }

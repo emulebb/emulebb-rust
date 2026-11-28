@@ -150,9 +150,17 @@ pub(super) fn execute(
     command: CategoryDbCommand,
 ) -> anyhow::Result<CategoryWrite> {
     match command {
-        CategoryDbCommand::CreateRoot(path, watch_enabled) => store
-            .create_library_root(std::path::Path::new(&path), watch_enabled, true)
-            .map(CategoryWrite::RootCreated),
+        CategoryDbCommand::CreateRoot(path, watch_enabled) => {
+            let mut roots = crate::shared_directories::SharedRootPaths::default();
+            store
+                .create_library_root_with_overlap(
+                    std::path::Path::new(&path),
+                    watch_enabled,
+                    true,
+                    |left, right| roots.overlap(left, right),
+                )
+                .map(CategoryWrite::RootCreated)
+        }
         CategoryDbCommand::DeleteRoot(id) => store
             .delete_library_root(id)
             .map(CategoryWrite::RootDeleted),
