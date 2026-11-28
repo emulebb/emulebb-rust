@@ -375,6 +375,7 @@ async fn listener_claims_low_id_callback_at_hello_without_a_second_upload_reques
         supports_direct_udp_callback: false,
         firewall_context: Default::default(),
         client_software: None,
+        stock_software: Default::default(),
     };
     let callback_hello = Ed2kHelloIdentity {
         direct_udp_callback: true,
@@ -400,6 +401,7 @@ async fn listener_claims_low_id_callback_at_hello_without_a_second_upload_reques
         supports_direct_udp_callback: true,
         firewall_context: Default::default(),
         client_software: None,
+        stock_software: Default::default(),
     };
 
     let (active, active_status) = runtime

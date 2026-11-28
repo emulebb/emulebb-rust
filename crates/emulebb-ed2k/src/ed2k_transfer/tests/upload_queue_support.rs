@@ -48,6 +48,7 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
         supports_direct_udp_callback: false,
         firewall_context: Default::default(),
         client_software: None,
+        stock_software: Default::default(),
     }
 }
 
@@ -74,6 +75,7 @@ pub(super) fn same_ip_upload_peer(port_marker: u8) -> Ed2kUploadPeerIdentity {
         supports_direct_udp_callback: false,
         firewall_context: Default::default(),
         client_software: None,
+        stock_software: Default::default(),
     }
 }
 

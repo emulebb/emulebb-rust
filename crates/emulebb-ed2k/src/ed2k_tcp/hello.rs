@@ -5,8 +5,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use crate::ed2k_transfer::Ed2kUploadPeerIdentity;
 use crate::{client_udp_version::local_client_udp_version, ed2k_string::Ed2kStringEncoding};
 
+use super::client_software::StockUploadSoftware;
 use super::hello_buddy::hello_buddy_snapshot;
 use super::hello_miscoptions::{
     MiscOptions1, decode_misc_options1, decode_misc_options2_connect_options,
@@ -16,12 +18,12 @@ use super::{
     CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_MOD_VERSION, CT_NAME, CT_VERSION, EDONKEY_VERSION,
     EMULE_ADVERTISED_KAD_VERSION, EMULE_CRYPT_REQUESTS, EMULE_CRYPT_SUPPORTS, EMULE_INFO_FEATURES,
     EMULE_PROTOCOL_VERSION, EMULE_SECURE_IDENT_VERSION, EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR,
-    EMULE_VERSION_SHORT, EMULE_VERSION_UPDATE, ET_COMMENTS, ET_COMPRESSION, ET_EXTENDEDREQUEST,
-    ET_FEATURES, ET_SOURCEEXCHANGE, ET_UDPPORT, ET_UDPVER, Ed2kHelloIdentity, HELLO_NICKNAME,
-    OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_HELLO, OP_HELLOANSWER,
-    TAG_SHORT_NAME_MASK, TAGTYPE_BLOB, TAGTYPE_BOOL, TAGTYPE_BOOLARRAY, TAGTYPE_BSOB,
-    TAGTYPE_FLOAT32, TAGTYPE_STR1, TAGTYPE_STR22, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16,
-    TAGTYPE_UINT32, TAGTYPE_UINT64, encode_packet,
+    EMULE_VERSION_SHORT, EMULE_VERSION_UPDATE, ET_COMMENTS, ET_COMPATIBLECLIENT, ET_COMPRESSION,
+    ET_EXTENDEDREQUEST, ET_FEATURES, ET_SOURCEEXCHANGE, ET_UDPPORT, ET_UDPVER, Ed2kHelloIdentity,
+    HELLO_NICKNAME, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_HELLO,
+    OP_HELLOANSWER, TAG_SHORT_NAME_MASK, TAGTYPE_BLOB, TAGTYPE_BOOL, TAGTYPE_BOOLARRAY,
+    TAGTYPE_BSOB, TAGTYPE_FLOAT32, TAGTYPE_STR1, TAGTYPE_STR22, TAGTYPE_STRING, TAGTYPE_UINT8,
+    TAGTYPE_UINT16, TAGTYPE_UINT32, TAGTYPE_UINT64, encode_packet,
 };
 
 pub(super) fn encode_hello_request(identity: Ed2kHelloIdentity) -> Vec<u8> {
@@ -273,6 +275,16 @@ pub(super) struct DecodedEmuleInfoProfile {
     /// Peer eMule compatibility version byte (eMule `m_byEmuleVersion`, leading
     /// byte of OP_EMULEINFO); feeds the old-client upload-score penalty.
     pub(super) emule_version: u8,
+    compatible_client: u8,
+}
+
+impl DecodedEmuleInfoProfile {
+    pub(super) fn apply_upload_version(&self, peer: &mut Ed2kUploadPeerIdentity) {
+        peer.emule_version = self.emule_version;
+        if self.supported_protocol {
+            peer.stock_software.apply_info(self.compatible_client);
+        }
+    }
 }
 
 /// File-request capabilities fixed by HELLO and amended by legacy eMule INFO.
@@ -316,6 +328,7 @@ impl ExtendedRequestNegotiation {
 
 struct DecodedHelloTag<'a> {
     tag_name: Option<u8>,
+    hybrid_tag: bool,
     base_type: u8,
     value: &'a [u8],
     remaining: &'a [u8],
@@ -330,10 +343,10 @@ fn decode_hello_tag(mut bytes: &[u8]) -> Result<DecodedHelloTag<'_>> {
     let base_type = type_byte & !TAG_SHORT_NAME_MASK;
     bytes = &bytes[1..];
 
-    let tag_name = if short_name {
+    let (tag_name, hybrid_tag) = if short_name {
         let name = bytes[0];
         bytes = &bytes[1..];
-        Some(name)
+        (Some(name), false)
     } else {
         if bytes.len() < 2 {
             anyhow::bail!("short eD2k hello long-name length");
@@ -344,8 +357,9 @@ fn decode_hello_tag(mut bytes: &[u8]) -> Result<DecodedHelloTag<'_>> {
             anyhow::bail!("short eD2k hello long-name bytes");
         }
         let name = if name_len == 1 { Some(bytes[0]) } else { None };
+        let hybrid_tag = bytes[..name_len].starts_with(b"pr");
         bytes = &bytes[name_len..];
-        name
+        (name, hybrid_tag)
     };
 
     let (value, remaining) = match base_type {
@@ -438,6 +452,7 @@ fn decode_hello_tag(mut bytes: &[u8]) -> Result<DecodedHelloTag<'_>> {
 
     Ok(DecodedHelloTag {
         tag_name,
+        hybrid_tag,
         base_type,
         value,
         remaining,
@@ -490,6 +505,7 @@ pub(super) struct DecodedHelloProfile {
     /// Peer software string derived from CT_EMULE_VERSION (e.g. `eMule v0.60.0`).
     /// `None` for pure-eDonkey peers that send no eMule version tag.
     pub(super) client_software: Option<String>,
+    pub(super) stock_software: StockUploadSoftware,
 }
 
 fn decode_hello_tag_u32(tag: &DecodedHelloTag<'_>) -> Option<u32> {
@@ -537,6 +553,14 @@ pub(super) fn decode_emule_info_profile(payload: &[u8]) -> Result<DecodedEmuleIn
                 }
                 Some(ET_COMMENTS) => profile.accepts_comments = value != 0,
                 Some(ET_EXTENDEDREQUEST) => profile.extended_requests_version = Some(value as u8),
+                Some(ET_COMPATIBLECLIENT)
+                    if matches!(
+                        tag.base_type,
+                        TAGTYPE_UINT8 | TAGTYPE_UINT16 | TAGTYPE_UINT32
+                    ) =>
+                {
+                    profile.compatible_client = value as u8;
+                }
                 Some(ET_FEATURES) => {
                     profile.supports_secure_ident = (value & 0x03) != 0;
                     profile.supports_preview = ((value >> 7) & 1) != 0;
@@ -584,6 +608,8 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let mut kad_version = 0;
     let mut emule_version_tag = None;
     let mut client_software = None;
+    let mut named = false;
+    let mut hybrid_tag = false;
     let mut supports_ext_multipacket = false;
     let mut source_exchange_version = 0;
     let mut supports_source_exchange = false;
@@ -598,6 +624,9 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let (mut buddy_ip, mut buddy_udp) = (None, None);
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
+        named |= tag.tag_name == Some(CT_NAME)
+            && matches!(tag.base_type, TAGTYPE_STRING | TAGTYPE_STR1..=TAGTYPE_STR22);
+        hybrid_tag |= tag.hybrid_tag;
         if tag.tag_name == Some(CT_EMULE_VERSION)
             && let Some(version_tag) = decode_hello_tag_u32(&tag)
         {
@@ -656,6 +685,13 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         identity.server_endpoint = Some(SocketAddr::new(IpAddr::V4(server_ip), server_port));
     }
 
+    let stock_software = StockUploadSoftware::from_hello(
+        named,
+        identity.user_hash,
+        hybrid_tag,
+        &cursor[6..],
+        emule_version_tag,
+    );
     Ok(DecodedHelloProfile {
         identity,
         kad_version,
@@ -677,6 +713,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         has_misc_options1,
         buddy: super::hello_buddy::DecodedHelloBuddy::from_tag_values(buddy_ip, buddy_udp),
         client_software,
+        stock_software,
     })
 }
 

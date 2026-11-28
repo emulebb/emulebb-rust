@@ -457,6 +457,40 @@ fn hello_answer_payload_with_raw_tags(tag_count: u32, raw_tags: &[u8]) -> Vec<u8
 }
 
 #[test]
+fn legacy_upload_classification_uses_hello_identity_evidence() {
+    use crate::ed2k_tcp::{CT_NAME, TAGTYPE_STR1};
+
+    let name = [TAGTYPE_STR1 | 0x80, CT_NAME, b'a'];
+    let mut answer = hello_answer_payload_with_raw_tags(1, &name);
+    let unknown_hash = decode_hello_answer_profile(&answer).unwrap();
+    assert!(!unknown_hash.stock_software.is_stock_class_below_ten());
+    answer[5] = 14;
+    answer[14] = 111;
+    let emule_hash = decode_hello_answer_profile(&answer).unwrap();
+    assert!(!emule_hash.is_mule_hello);
+    assert!(emule_hash.stock_software.is_stock_class_below_ten());
+    for trailer in [b"MLDK", b"\0\0\0\0"] {
+        let mut other = answer.clone();
+        other.extend_from_slice(trailer);
+        assert!(
+            !decode_hello_answer_profile(&other)
+                .unwrap()
+                .stock_software
+                .is_stock_class_below_ten()
+        );
+    }
+
+    let mut no_name = hello_answer_payload_with_raw_tags(0, &[]);
+    no_name[..16].copy_from_slice(&answer[..16]);
+    assert!(
+        !decode_hello_answer_profile(&no_name)
+            .unwrap()
+            .stock_software
+            .is_stock_class_below_ten()
+    );
+}
+
+#[test]
 fn legacy_info_before_hello_answer_preserves_extended_request_negotiation() {
     use crate::ed2k_tcp::{ET_COMPRESSION, ET_EXTENDEDREQUEST, hello::ExtendedRequestNegotiation};
 

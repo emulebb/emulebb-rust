@@ -71,6 +71,7 @@ fn reasking_peer_with_identity(
         supports_direct_udp_callback: false,
         firewall_context: Default::default(),
         client_software: None,
+        stock_software: Default::default(),
     }
 }
 

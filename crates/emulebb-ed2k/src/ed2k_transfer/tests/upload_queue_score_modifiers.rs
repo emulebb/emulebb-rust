@@ -41,7 +41,7 @@ fn banned_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUploadPeerIden
 /// An old eMule client (`m_byEmuleVersion <= 0x19`) that earns the x0.5 penalty.
 fn old_client_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUploadPeerIdentity {
     Ed2kUploadPeerIdentity {
-        emule_version: 0x10,
+        emule_version: 0x19,
         is_emule_client: true,
         ..upload_peer(octet, user_marker, client_id)
     }
@@ -130,9 +130,32 @@ async fn banned_peer_is_refused_at_admission() {
 
 #[tokio::test]
 async fn old_client_penalty_drops_score_below_modern_peer() {
+    old_client_ranks_below_modern_peer("old-client", old_client_peer(2, 0x02, 0x0A00_0062)).await;
+}
+
+#[tokio::test]
+async fn named_emule_hash_without_extensions_gets_old_client_penalty() {
+    let mut peer = upload_peer(2, 0x02, 0x0A00_0062);
+    let mut hash = peer.user_hash.unwrap();
+    hash[5] = 14;
+    hash[14] = 111;
+    peer.user_hash = Some(hash);
+    peer.emule_version = 0;
+    peer.is_emule_client = false;
+    peer.stock_software = crate::ed2k_tcp::client_software::StockUploadSoftware::from_hello(
+        true,
+        hash,
+        false,
+        &[],
+        None,
+    );
+    old_client_ranks_below_modern_peer("emule-hash", peer).await;
+}
+
+async fn old_client_ranks_below_modern_peer(label: &str, old_peer: Ed2kUploadPeerIdentity) {
     // An old eMule client (x0.5 penalty) ranks below a modern peer with the same
     // priority/credit once both have accrued the same waiting time.
-    let root = unique_test_dir("ed2k-upload-queue-old-client");
+    let root = unique_test_dir(&format!("ed2k-upload-queue-{label}"));
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x6B; 16]);
@@ -145,10 +168,18 @@ async fn old_client_penalty_drops_score_below_modern_peer() {
     // The old client enqueues FIRST (so registration order would favour it on a
     // tie), the modern peer second.
     let (old_handle, _old_status) = runtime
-        .begin_upload_session_at(old_client_peer(2, 0x02, 0x0A00_0062), &file_hash, now)
+        .begin_upload_session_at(old_peer, &file_hash, now)
         .await;
     let (modern_handle, _modern_status) = runtime
-        .begin_upload_session_at(upload_peer(3, 0x03, 0x0A00_0063), &file_hash, now)
+        .begin_upload_session_at(
+            Ed2kUploadPeerIdentity {
+                emule_version: 0x1a,
+                is_emule_client: true,
+                ..upload_peer(3, 0x03, 0x0A00_0063)
+            },
+            &file_hash,
+            now,
+        )
         .await;
 
     let scored_at = now + Duration::from_secs(10);
@@ -173,6 +204,11 @@ async fn old_client_penalty_drops_score_below_modern_peer() {
     assert!(old_entry.old_client_penalty_applied);
     assert!(!old_entry.low_ratio_applied);
     assert!(!old_entry.low_id_penalty_applied);
+    let modern_entry = snapshot
+        .iter()
+        .find(|entry| entry.client_id == Some(0x0A00_0063))
+        .expect("modern client waiter must be visible in snapshot");
+    assert!(!modern_entry.old_client_penalty_applied);
 }
 
 #[tokio::test]

@@ -35,7 +35,7 @@ mod aich_salvage;
 pub(crate) mod browse;
 mod buddy_link;
 mod buddy_liveness;
-mod client_software;
+pub(crate) mod client_software;
 mod codec;
 mod diag_event;
 mod download;
@@ -441,6 +441,7 @@ const ET_UDPVER: u8 = 0x22;
 const ET_SOURCEEXCHANGE: u8 = 0x23;
 const ET_COMMENTS: u8 = 0x24;
 const ET_EXTENDEDREQUEST: u8 = 0x25;
+const ET_COMPATIBLECLIENT: u8 = 0x26;
 const ET_FEATURES: u8 = 0x27;
 
 const EMULE_CRYPT_SUPPORTS: u8 = 0x01;
