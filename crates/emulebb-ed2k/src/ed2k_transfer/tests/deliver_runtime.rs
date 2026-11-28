@@ -2864,6 +2864,50 @@ async fn materialize_completed_payload_under_long_incoming_path() {
 }
 
 #[tokio::test]
+async fn long_delivery_leaf_is_collision_safe_and_survives_restart() {
+    let root = unique_test_dir("ed2k-deliver-long-leaf");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let incoming = root.join("incoming");
+    let original = format!("{}.bin", "漢🙂".repeat(125));
+    let first = ingest_completed_bytes(&runtime, &original, b"first payload").await;
+    let second = ingest_completed_bytes(&runtime, &original, b"second payload").await;
+    let (first_delivery, second_delivery) = tokio::join!(
+        runtime.materialize_completed_payload(first.token, &incoming),
+        runtime.materialize_completed_payload(second.token, &incoming),
+    );
+    let Ed2kDeliveryOutcome::Delivered(first_path) = first_delivery.unwrap() else {
+        panic!("first payload was not delivered");
+    };
+    let Ed2kDeliveryOutcome::Delivered(second_path) = second_delivery.unwrap() else {
+        panic!("second payload was not delivered");
+    };
+    assert_ne!(first_path, second_path);
+    for (path, payload) in [
+        (&first_path, b"first payload".as_slice()),
+        (&second_path, b"second payload".as_slice()),
+    ] {
+        assert_eq!(path.extension().unwrap(), "bin");
+        assert_eq!(fs::read(long_path(path)).unwrap(), payload);
+    }
+    assert_eq!(
+        runtime.manifest(first.token).await.unwrap().display_name,
+        original
+    );
+    drop(runtime);
+
+    let restarted = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    for (job, path) in [(first, first_path), (second, second_path)] {
+        assert_eq!(
+            restarted
+                .materialize_completed_payload(job.token, &incoming)
+                .await
+                .unwrap(),
+            Ed2kDeliveryOutcome::AlreadyDelivered(path),
+        );
+    }
+}
+
+#[tokio::test]
 async fn sharing_policy_blocks_internal_payload_admission_without_revoking_physical_evidence() {
     let root = unique_test_dir("sharing-payload-admission");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
