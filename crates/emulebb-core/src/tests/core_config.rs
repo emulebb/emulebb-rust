@@ -498,6 +498,7 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
         }
     });
 
+    let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
     *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
         search_handle,
         server_state,
@@ -505,7 +506,7 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
         dht,
         callback_sessions: ed2k_callback_session_channel().0,
         kad_persistence_finished: true,
-        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        kad_firewall: Arc::clone(&kad_firewall),
         reachability,
         nat: Arc::new(NatManager::default()),
         shutdown: Arc::clone(&shutdown),
@@ -524,10 +525,45 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     // Empty routing table: not connected and nothing to bootstrap from, so
     // we report not-bootstrapping (the always-running driver has no seeds).
     assert_eq!(status.kad.bootstrapping, Some(false));
-    // Unverified firewall state is reported as open (oracle IsFirewalledUDP).
-    assert_eq!(status.kad.firewalled, Some(false));
+    assert_eq!(status.kad.firewalled, None);
     assert_eq!(status.kad.users, None);
     assert_eq!(status.kad.files, None);
+
+    let now = chrono::Utc::now();
+    let helpers = ["192.0.2.11".parse().unwrap(), "192.0.2.12".parse().unwrap()];
+    {
+        let mut firewall = kad_firewall.lock().await;
+        assert!(firewall.begin_udp_check(helpers, [4672], now));
+        firewall.record_firewall_udp_packet(helpers[0], 0, 4672, now);
+    }
+    assert_eq!(core.status().await.kad.firewalled, Some(false));
+    assert!(
+        kad_firewall
+            .lock()
+            .await
+            .begin_udp_check(helpers, [4672], now)
+    );
+    assert_eq!(
+        core.status().await.kad.firewalled,
+        Some(false),
+        "retest retains the verified verdict"
+    );
+    {
+        let mut firewall = kad_firewall.lock().await;
+        for helper in helpers {
+            firewall.record_udp_check_request_sent(helper);
+            firewall.record_helper_test_failed(helper, "fixture helper disconnected");
+        }
+        assert!(firewall.finish_udp_check(now).is_some());
+    }
+    assert_eq!(core.status().await.kad.firewalled, Some(true));
+    assert!(
+        kad_firewall
+            .lock()
+            .await
+            .expire_udp_verification_if_stale(now + chrono::Duration::hours(3))
+    );
+    assert_eq!(core.status().await.kad.firewalled, None);
 
     core.set_kad_running(false).await;
     let stopped = core.status().await;
