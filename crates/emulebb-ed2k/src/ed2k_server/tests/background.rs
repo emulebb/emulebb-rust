@@ -1911,21 +1911,37 @@ async fn silent_server_returns_timed_out_and_keeps_the_session_connected() {
 
 #[tokio::test]
 async fn connected_udp_status_is_due_during_regular_command_traffic() {
+    assert_connected_udp_status_with_keepalive(None).await;
+}
+
+#[tokio::test]
+async fn long_tcp_keepalive_timeout_does_not_delay_the_first_udp_status_request() {
+    assert_connected_udp_status_with_keepalive(Some(Duration::from_secs(600))).await;
+}
+
+async fn assert_connected_udp_status_with_keepalive(keepalive: Option<Duration>) {
     let bind_ip = crate::test_bind_ip();
     let mut sockets = None;
-    for _ in 0..16 {
-        let udp = tokio::net::UdpSocket::bind((bind_ip, 0)).await.unwrap();
-        let tcp_port = udp.local_addr().unwrap().port() - 4;
-        if let Ok(listener) = TcpListener::bind((bind_ip, tcp_port)).await {
+    let mut occupied_tcp_candidates = Vec::new();
+    // Let the OS choose an available TCP base port first. Independently
+    // allocated ephemeral UDP ports can map to a reserved TCP range.
+    for _ in 0..32 {
+        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
+        if let Some(udp_port) = listener.local_addr().unwrap().port().checked_add(4)
+            && let Ok(udp) = tokio::net::UdpSocket::bind((bind_ip, udp_port)).await
+        {
             sockets = Some((listener, udp));
             break;
         }
+        occupied_tcp_candidates.push(listener);
     }
     let (listener, status_socket) = sockets.expect("could not allocate paired server ports");
+    drop(occupied_tcp_candidates);
     let server = background_test_server(listener.local_addr().unwrap());
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
     let mut context = background_test_context(Arc::clone(&state), Duration::from_secs(5));
     context.session.offer_files_capability_enabled = false;
+    context.session.keepalive_interval = keepalive;
     let cancel = context.session_cancel.clone();
     let (handle, inbox) = new_ed2k_server_search_channel(1);
     let task = tokio::spawn(async move {
@@ -1979,7 +1995,86 @@ async fn connected_udp_status_is_due_during_regular_command_traffic() {
         tokio::time::timeout(Duration::from_secs(1), peer.read(&mut packet))
             .await
             .is_err(),
-        "disabling TCP keepalive must leave the empty catalog's TCP session quiet"
+        "TCP keepalive must remain quiet before its deadline"
+    );
+    cancel.cancel();
+    assert_eq!(
+        task.await.unwrap().unwrap(),
+        ServerSessionExit::ContinueOrder
+    );
+}
+
+#[tokio::test]
+async fn tcp_keepalive_deadline_follows_the_last_received_packet_during_commands() {
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+    let server = background_test_server(listener.local_addr().unwrap());
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let mut context = background_test_context(Arc::clone(&state), Duration::from_secs(5));
+    context.session.offer_files_capability_enabled = false;
+    context.session.keepalive_interval = Some(Duration::from_secs(60));
+    let cancel = context.session_cancel.clone();
+    let (handle, inbox) = new_ed2k_server_search_channel(1);
+    let task = tokio::spawn(async move {
+        run_test_server_session(&server, &context, &Arc::new(Mutex::new(inbox))).await
+    });
+    let (mut peer, _) = listener.accept().await.unwrap();
+    read_login_request(&mut peer).await;
+    peer.write_all(&encode_packet(OP_IDCHANGE, &0x070200c0u32.to_le_bytes(), false).unwrap())
+        .await
+        .unwrap();
+    let refresh = || {
+        super::super::publish_shared_catalog_via_background_session(
+            &handle,
+            Duration::from_secs(5),
+            &cancel,
+        )
+    };
+    refresh().await.unwrap();
+    assert!(state.read().await.connected);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(40)).await;
+
+    let mut server_status = 42u32.to_le_bytes().to_vec();
+    server_status.extend_from_slice(&1u32.to_le_bytes());
+    peer.write_all(&encode_packet(OP_SERVERSTATUS, &server_status, false).unwrap())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.read().await.server_users == Some(42) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let received_at = tokio::time::Instant::now();
+
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(15)).await;
+        refresh().await.unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), peer.read_u8())
+            .await
+            .is_err(),
+        "the inbound server packet must reset the TCP idle deadline"
+    );
+    tokio::time::advance(
+        (received_at + Duration::from_secs(61))
+            .saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await;
+    refresh().await.unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_client_frame(&mut peer))
+        .await
+        .expect("TCP keepalive was starved by the commands");
+    assert_eq!(frame, (OP_OFFERFILES, 0u32.to_le_bytes().to_vec()));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), peer.read_u8())
+            .await
+            .is_err()
     );
     cancel.cancel();
     assert_eq!(

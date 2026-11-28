@@ -17,6 +17,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpSocket, TcpStream},
     sync::RwLock,
+    time::Instant as TokioInstant,
 };
 use tracing::{debug, warn};
 
@@ -153,7 +154,7 @@ pub(super) struct ServerSession {
     pub(super) trace_role: &'static str,
     pub(super) transport_mode: &'static str,
     diagnostic_connection_state: &'static str,
-    pub(super) last_tx: Instant,
+    pub(super) last_tcp_activity: TokioInstant,
     pub(super) receive_cipher: Option<Rc4KeyStream>,
     pub(super) send_cipher: Option<Rc4KeyStream>,
     /// Absolute stock `CONSERVTIMEOUT` deadline for this pending transport
@@ -408,7 +409,7 @@ impl ServerSession {
             trace_role,
             transport_mode,
             diagnostic_connection_state: "connecting",
-            last_tx: Instant::now(),
+            last_tcp_activity: TokioInstant::now(),
             receive_cipher: None,
             receive_frame: ServerFrameRead::default(),
             send_cipher: None,
@@ -452,7 +453,7 @@ impl ServerSession {
             trace_role: "test",
             transport_mode: "plaintext",
             diagnostic_connection_state: "connecting",
-            last_tx: Instant::now(),
+            last_tcp_activity: TokioInstant::now(),
             receive_cipher: None,
             receive_frame: ServerFrameRead::default(),
             send_cipher: None,
@@ -954,7 +955,7 @@ impl ServerSession {
             Ok(()) => {
                 #[cfg(feature = "packet-diagnostics")]
                 send_attempt.succeeded();
-                self.last_tx = Instant::now();
+                self.last_tcp_activity = TokioInstant::now();
                 Ok(())
             }
             Err(error) => {
@@ -1111,7 +1112,7 @@ impl ServerSession {
 
         self.receive_cipher = Some(receive_cipher);
         self.send_cipher = Some(send_cipher);
-        self.last_tx = Instant::now();
+        self.last_tcp_activity = TokioInstant::now();
         dump_ed2k_server_meta(self, "server obfuscation negotiated");
         Ok(())
     }
@@ -1119,7 +1120,10 @@ impl ServerSession {
     pub(super) async fn read_packet(&mut self) -> Result<Option<Ed2kPacket>> {
         loop {
             match self.read_framed_packet().await? {
-                ServerPacketRead::Packet(packet) => return Ok(Some(packet)),
+                ServerPacketRead::Packet(packet) => {
+                    self.last_tcp_activity = TokioInstant::now();
+                    return Ok(Some(packet));
+                }
                 ServerPacketRead::Eof => return Ok(None),
                 ServerPacketRead::DroppedPackedFrame => {}
             }
