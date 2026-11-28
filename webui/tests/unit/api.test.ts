@@ -229,7 +229,94 @@ describe("RestClient", () => {
 
     await expect(client.streamDownloadEvents(() => undefined)).rejects.toThrow("missing API key");
   });
+
+  it("streams split UTF-8 and line endings at the frame byte limit", async () => {
+    const encoder = new TextEncoder();
+    const payload = 'id: epoch:7\r\ndata: {"id":7,"epoch":"epoch","type":"download.changed","downloadId":"é"}';
+    const comment = ":" + "x".repeat(65_536 - encoder.encode(payload).length - 3) + "\r\n";
+    const bytes = encoder.encode(comment + payload + "\r\n\r\n");
+    const unicode = bytes.indexOf(0xc3);
+    const { body } = downloadEventBody([
+      bytes.slice(0, unicode + 1), bytes.slice(unicode + 1, -1), bytes.slice(-1)
+    ], true);
+    const receive = vi.fn();
+
+    await eventClient(body).streamDownloadEvents(receive);
+
+    expect(receive).toHaveBeenCalledExactlyOnceWith(
+      { id: 7, epoch: "epoch", type: "download.changed", downloadId: "é" }, "epoch:7"
+    );
+  });
+
+  it.each([
+    ["a complete oversized frame", new TextEncoder().encode("é".repeat(32_769) + "\n\n"), /buffer limit/],
+    ["an incomplete oversized frame", new TextEncoder().encode("x".repeat(65_537)), /buffer limit/],
+    ["invalid UTF-8", new Uint8Array([0xc3, 10, 10]), /invalid UTF-8/],
+    ["invalid JSON", new TextEncoder().encode("id: epoch:8\ndata: {\n\n"), /invalid JSON/],
+    ["an invalid payload", new TextEncoder().encode('id: epoch:8\ndata: {"type":"download.changed"}\n\n'), /invalid payload/]
+  ] as const)("cancels on %s and retains the last valid cursor in a shared read", async (_name, malformed, error) => {
+    const valid = new TextEncoder().encode("id: epoch:7\r\ndata: " + downloadEventJson + "\r\n\n");
+    const chunk = new Uint8Array(valid.length + malformed.length);
+    chunk.set(valid);
+    chunk.set(malformed, valid.length);
+    const { body, cancel } = downloadEventBody([chunk]);
+    const receive = vi.fn();
+
+    await expect(eventClient(body).streamDownloadEvents(receive)).rejects.toThrow(error);
+
+    expect(receive).toHaveBeenCalledExactlyOnceWith(JSON.parse(downloadEventJson), "epoch:7");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+  });
+
+  it("does not dispatch an unterminated event or forward an invalid header cursor", async () => {
+    const encoder = new TextEncoder();
+    const valid = "id: epoch:7\nid: broken\0cursor\ndata: " + downloadEventJson + "\n\n";
+    const partial = "id: epoch:8\ndata: " + downloadEventJson;
+    const { body } = downloadEventBody([encoder.encode(valid + partial)], true);
+    const receive = vi.fn();
+
+    await expect(eventClient(body).streamDownloadEvents(receive)).rejects.toThrow(/incomplete frame/);
+
+    expect(receive).toHaveBeenCalledExactlyOnceWith(JSON.parse(downloadEventJson), "epoch:7");
+    expect(body.locked).toBe(false);
+  });
+
+  it("cancels a pending read when the caller aborts", async () => {
+    const { body, cancel } = downloadEventBody([]);
+    const controller = new AbortController();
+    const receive = vi.fn();
+    const result = eventClient(body).streamDownloadEvents(receive, { signal: controller.signal });
+    await vi.waitFor(() => expect(body.locked).toBe(true));
+
+    controller.abort();
+    await result;
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+    expect(receive).not.toHaveBeenCalled();
+  });
 });
+
+const downloadEventJson = '{"id":7,"epoch":"epoch","type":"download.changed","downloadId":"1"}';
+
+function downloadEventBody(chunks: Uint8Array[], close = false) {
+  const cancel = vi.fn();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      if (close) controller.close();
+    },
+    cancel
+  });
+  return { body, cancel };
+}
+
+function eventClient(body: ReadableStream<Uint8Array>): RestClient {
+  return new RestClient({
+    fetch: async () => new Response(body, { headers: { "Content-Type": "text/event-stream" } })
+  });
+}
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(value), {

@@ -904,61 +904,89 @@ function normalizeBasePath(basePath: string): string {
   return basePath.replace(/\/+$/, "");
 }
 
+const DOWNLOAD_EVENT_FRAME_BYTES = 65_536;
+const SSE_LF = 10;
+const SSE_CR = 13;
+
 async function readDownloadEventStream(
   body: ReadableStream<Uint8Array>,
   onEvent: (event: DownloadEvent, cursor?: string) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  // Frame storage includes at most four bytes of an incomplete delimiter.
+  // Delimiting bytes first keeps a malformed frame from discarding earlier
+  // valid events delivered in the same read.
+  const frame = new Uint8Array(DOWNLOAD_EVENT_FRAME_BYTES + 4);
+  let length = 0;
+  let cancelled = false;
+  const cancelReader = () => {
+    if (!cancelled) {
+      cancelled = true;
+      void reader.cancel().catch(() => undefined);
+    }
+  };
+  signal?.addEventListener("abort", cancelReader, { once: true });
   try {
-    for (;;) {
-      if (signal?.aborted) {
+    while (!signal?.aborted) {
+      const { done, value } = await reader.read();
+      if (signal?.aborted) return;
+      if (done) {
+        if (length !== 0) throw new Error("Download event stream ended with an incomplete frame");
         return;
       }
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      buffer = drainSseFrames(buffer, onEvent);
-      if (buffer.length > 65_536) {
-        throw new Error("Download event frame exceeds the stream buffer limit");
+      for (const byte of value) {
+        frame[length++] = byte;
+        const separator = sseSeparatorLength(frame, length);
+        if (separator !== 0) {
+          const payloadLength = length - separator;
+          if (payloadLength > DOWNLOAD_EVENT_FRAME_BYTES) {
+            throw new Error("Download event frame exceeds the stream buffer limit");
+          }
+          let decoded: string;
+          try {
+            decoded = decoder.decode(frame.subarray(0, payloadLength));
+          } catch {
+            throw new Error("Download event frame contains invalid UTF-8");
+          }
+          const event = parseDownloadEventFrame(decoded);
+          length = 0;
+          if (event) onEvent(event.event, event.cursor);
+          if (signal?.aborted) return;
+        } else if (
+          length > DOWNLOAD_EVENT_FRAME_BYTES &&
+          length - ssePendingSeparatorLength(frame, length) > DOWNLOAD_EVENT_FRAME_BYTES
+        ) {
+          throw new Error("Download event frame exceeds the stream buffer limit");
+        }
       }
     }
-    buffer += decoder.decode();
-    drainSseFrames(`${buffer}\n\n`, onEvent);
+  } catch (error) {
+    cancelReader();
+    if (!signal?.aborted) throw error;
   } finally {
+    signal?.removeEventListener("abort", cancelReader);
+    if (signal?.aborted) cancelReader();
     reader.releaseLock();
   }
 }
 
-function drainSseFrames(buffer: string, onEvent: (event: DownloadEvent, cursor?: string) => void): string {
-  for (;;) {
-    const separator = sseFrameSeparator(buffer);
-    if (separator === undefined) {
-      return buffer;
-    }
-    const frame = buffer.slice(0, separator.index);
-    buffer = buffer.slice(separator.index + separator.length);
-    const event = parseDownloadEventFrame(frame);
-    if (event) {
-      onEvent(event.event, event.cursor);
-    }
-  }
+function sseLineEndingLength(frame: Uint8Array, end: number): number {
+  if (frame[end - 1] !== SSE_LF) return 0;
+  return frame[end - 2] === SSE_CR ? 2 : 1;
 }
 
-function sseFrameSeparator(buffer: string): { index: number; length: number } | undefined {
-  const lf = buffer.indexOf("\n\n");
-  const crlf = buffer.indexOf("\r\n\r\n");
-  if (lf < 0) {
-    return crlf < 0 ? undefined : { index: crlf, length: 4 };
-  }
-  if (crlf < 0 || lf < crlf) {
-    return { index: lf, length: 2 };
-  }
-  return { index: crlf, length: 4 };
+function sseSeparatorLength(frame: Uint8Array, length: number): number {
+  const ending = sseLineEndingLength(frame, length);
+  const preceding = ending === 0 ? 0 : sseLineEndingLength(frame, length - ending);
+  return preceding === 0 ? 0 : ending + preceding;
+}
+
+function ssePendingSeparatorLength(frame: Uint8Array, length: number): number {
+  return frame[length - 1] === SSE_CR
+    ? 1 + sseLineEndingLength(frame, length - 1)
+    : sseLineEndingLength(frame, length);
 }
 
 function parseDownloadEventFrame(frame: string): { event: DownloadEvent; cursor?: string } | undefined {
@@ -975,8 +1003,33 @@ function parseDownloadEventFrame(frame: string): { event: DownloadEvent; cursor?
   const cursor = frame.split(/\r?\n/)
     .filter((line) => line.startsWith("id:"))
     .map((line) => line.slice(3).replace(/^ /, ""))
+    .filter((value) => !/[^ -~]/.test(value))
     .at(-1);
-  return { event: JSON.parse(data) as DownloadEvent, cursor };
+  let event: unknown;
+  try {
+    event = JSON.parse(data);
+  } catch {
+    throw new Error("Download event frame contains invalid JSON");
+  }
+  if (!isDownloadEvent(event)) throw new Error("Download event frame has an invalid payload");
+  return { event, cursor };
+}
+
+function isDownloadEvent(event: unknown): event is DownloadEvent {
+  if (
+    !isRecord(event) || typeof event.id !== "number" ||
+    !Number.isInteger(event.id) || event.id < 0 ||
+    typeof event.epoch !== "string" || event.epoch === ""
+  ) return false;
+  if (event.type === "download.changed" || event.type === "download.removed") {
+    return typeof event.downloadId === "string" && event.downloadId !== "";
+  }
+  return event.type === "sync.reset" && (
+    event.reason === "initial" || event.reason === "reconnect" ||
+    event.reason === "lagged" || event.reason === "epoch-changed"
+  ) && (event.missed === undefined || (
+    typeof event.missed === "number" && Number.isInteger(event.missed) && event.missed >= 0
+  ));
 }
 
 function parseApiEnvelope<T>(

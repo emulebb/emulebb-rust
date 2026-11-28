@@ -137,7 +137,7 @@ test("Search refresh keeps results visible and reads once per cadence despite ev
     if (path === "capabilities") return route.fulfill({ json: { data: { capabilities: ["downloads.sse"] } } });
     if (path === "events") {
       return route.fulfill({ contentType: "text/event-stream", body: [1, 2, 3].map((id) =>
-        `id: ${id}\ndata: {"type":"updated"}\n\n`).join("") });
+        `id: ${id}\ndata: {"id":${id},"epoch":"test-epoch","type":"download.changed","downloadId":"1"}\n\n`).join("") });
     }
     if (path === "searches") return route.fulfill({ json: { data: [search], meta: { nextCursor: null } } });
     if (path === "searches/1") return route.fulfill({ json: { data: search } });
