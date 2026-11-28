@@ -8,6 +8,8 @@ pub enum DhtError {
     NoBootstrapNodes,
     #[error("bootstrap failed - no node responded")]
     BootstrapFailed,
+    #[error("configured Kad bootstrap seed sweep exhausted")]
+    BootstrapSweepExhausted,
     #[error("search timed out")]
     SearchTimeout,
     #[error("publish failed - no node accepted")]
