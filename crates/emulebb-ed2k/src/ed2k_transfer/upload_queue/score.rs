@@ -74,10 +74,10 @@ impl UploadScoreModifiers {
         all_time_upload_ratio_permille: i128,
     ) -> Self {
         // Master: (IsEmuleClient() || GetClientSoft() < 10) && m_byEmuleVersion <= 0x19.
-        // A non-mule client reports emule_version 0, which is <= 0x19; the
-        // `is_emule_client` flag carries the IsEmuleClient() leg.
-        let old_client =
-            peer.is_emule_client && peer.emule_version <= OLD_CLIENT_EMULE_VERSION_THRESHOLD;
+        // IsEmuleClient() tests the version byte. HELLO/INFO negotiation for wire
+        // extensions is independent of this score predicate.
+        let old_client = peer.emule_version <= OLD_CLIENT_EMULE_VERSION_THRESHOLD
+            && (peer.emule_version != 0 || peer.stock_software.is_stock_class_below_ten());
         Self {
             low_id,
             ident_bad_guy: peer.ident_bad_guy,

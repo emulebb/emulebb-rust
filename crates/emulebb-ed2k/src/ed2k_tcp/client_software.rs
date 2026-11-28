@@ -1,11 +1,11 @@
-//! eMule "compatible client" software identification.
+//! eMule compatible-client software identification for display and upload scoring.
 //!
 //! Derives a human-readable client-software string (e.g. `eMule v0.60.0`,
 //! `aMule v2.3.1`) from the peer's `CT_EMULE_VERSION` handshake tag, mirroring
 //! eMule's `CUpDownClient` handling in `BaseClient.cpp`: the tag's top byte is
 //! the compatible-client id (`Constants.h` `SO_*`) and the low three bytes pack
-//! the version as `major:minor:update:build` bitfields. Read/display only -- this
-//! never affects what we put on the wire, so it does not touch protocol parity.
+//! the version as `major:minor:update:build` bitfields. The upload queue uses
+//! the stock software classification separately from the display string.
 
 /// eMule compatible-client identifiers: the top byte of `CT_EMULE_VERSION` (also
 /// carried standalone in the `ET_COMPATIBLECLIENT` tag). Values match eMule
@@ -20,6 +20,58 @@ const SO_SHAREAZA_NEW2: u8 = 0x28;
 const SO_NEW2_MLDONKEY: u8 = 0x0a;
 const SO_MLDONKEY: u8 = 0x34;
 const SO_NEW_MLDONKEY: u8 = 0x98;
+
+/// HELLO and INFO evidence used by stock's `GetClientSoft() < 10` predicate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StockUploadSoftware {
+    named: bool,
+    emule_hash: bool,
+    mldonkey_trailer: bool,
+    hybrid: bool,
+    compatible_client: Option<u8>,
+}
+
+impl StockUploadSoftware {
+    pub(crate) fn from_hello(
+        named: bool,
+        user_hash: [u8; 16],
+        hybrid_tag: bool,
+        trailer: &[u8],
+        emule_version_tag: Option<u32>,
+    ) -> Self {
+        let mldonkey_trailer = trailer == b"MLDK";
+        Self {
+            named,
+            emule_hash: user_hash[5] == 14 && user_hash[14] == 111,
+            mldonkey_trailer,
+            hybrid: (trailer.len() == 4 && !mldonkey_trailer)
+                || (emule_version_tag.is_none() && hybrid_tag),
+            compatible_client: emule_version_tag.map(|version| (version >> 24) as u8),
+        }
+    }
+
+    pub(super) fn apply_info(&mut self, compatible_client: u8) {
+        self.compatible_client = Some(compatible_client);
+    }
+
+    pub(super) fn retain_negotiated_info(&mut self, previous: Self) {
+        self.compatible_client = self.compatible_client.or(previous.compatible_client);
+    }
+
+    pub(crate) fn is_stock_class_below_ten(self) -> bool {
+        if !self.named || (self.compatible_client.is_none() && !self.emule_hash) {
+            return false;
+        }
+        // BaseClient.cpp InitClientSoftwareVersion checks known clients first.
+        // Its default branch maps other compatible IDs to eMule or xMule,
+        // except for the MLdonkey and hybrid variants.
+        match self.compatible_client.unwrap_or(SO_EMULE) {
+            SO_CDONKEY | SO_XMULE | SO_AMULE | SO_SHAREAZA | SO_SHAREAZA_NEW2 => true,
+            SO_LPHANT | SO_NEW2_MLDONKEY => false,
+            _ => !self.mldonkey_trailer && !self.hybrid,
+        }
+    }
+}
 
 /// Map an eMule compatible-client id to its software name (eMule
 /// `BaseClient.cpp` `m_byCompatibleClient` switch).

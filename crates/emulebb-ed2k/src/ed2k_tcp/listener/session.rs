@@ -1167,11 +1167,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     if peer_upload_identity.udp_port.is_none() && profile.udp_port != 0 {
                         peer_upload_identity.udp_port = Some(profile.udp_port);
                     }
-                    // OP_EMULEINFO carries the real eMule compatibility version
-                    // byte (eMule m_byEmuleVersion), used for the old-client
-                    // upload-score penalty; an OP_EMULEINFO sender is an eMule
-                    // client (IsEmuleClient()).
-                    peer_upload_identity.emule_version = profile.emule_version;
+                    profile.apply_upload_version(&mut peer_upload_identity);
                     peer_upload_identity.is_emule_client = true;
                     // OP_EMULEINFO can also advertise comment acceptance (oracle
                     // BaseClient.cpp ProcessMuleInfoPacket m_byAcceptCommentVer);
@@ -1196,6 +1192,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 );
                 if let Ok(profile) = decode_emule_info_profile(&packet.payload) {
                     peer_extended_requests.apply_info(&profile);
+                    profile.apply_upload_version(&mut peer_upload_identity);
+                    let _ = upload_queue
+                        .refresh_peer_state(transfer_runtime, &peer_upload_identity)
+                        .await;
                 }
             }
             (OP_EMULEPROT, OP_SECIDENTSTATE) => {
@@ -1674,6 +1674,7 @@ pub(in crate::ed2k_tcp) fn upload_peer_identity_from_socket(
         supports_direct_udp_callback: false,
         firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
         client_software: None,
+        stock_software: Default::default(),
     }
 }
 
@@ -1719,6 +1720,7 @@ fn upload_peer_identity_from_hello(
         // the live server/Kad firewall state; defaults to non-firewalled here.
         firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
         client_software: profile.client_software.clone(),
+        stock_software: profile.stock_software,
     }
 }
 
@@ -1816,6 +1818,10 @@ pub(in crate::ed2k_tcp) fn apply_peer_hello_profile(
         .emule_version
         .max(state.upload_identity.emule_version);
     state.upload_identity.is_emule_client |= previous_identity.is_emule_client;
+    state
+        .upload_identity
+        .stock_software
+        .retain_negotiated_info(previous_identity.stock_software);
     state.upload_identity.firewall_context = previous_identity.firewall_context;
     // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
     state.upload_identity.should_crypt = should_crypt;
@@ -1953,6 +1959,51 @@ mod tests {
             upload_peer_identity_from_hello(peer_addr, &profile).udp_version,
             4
         );
+    }
+
+    #[test]
+    fn upload_identity_applies_compatible_client_from_emule_info() {
+        use crate::ed2k_tcp::{
+            EMULE_PROTOCOL_VERSION, ET_COMPATIBLECLIENT, TAGTYPE_UINT8,
+            hello::decode_emule_info_profile,
+        };
+
+        let peer_addr: SocketAddr = "198.51.100.21:41001".parse().unwrap();
+        let packet = encode_hello_request(Ed2kHelloIdentity {
+            user_hash: [0x21; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 0,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        });
+        let hello = decode_hello_profile(&packet[6..]).unwrap();
+        let mut peer = upload_peer_identity_from_hello(peer_addr, &hello);
+        assert_eq!(peer.emule_version, 0x99);
+
+        for (compatible_client, below_ten) in [(40, true), (10, false), (20, false), (0x77, true)] {
+            let info = [
+                0,
+                EMULE_PROTOCOL_VERSION,
+                1,
+                0,
+                0,
+                0,
+                TAGTYPE_UINT8,
+                1,
+                0,
+                ET_COMPATIBLECLIENT,
+                compatible_client,
+            ];
+            decode_emule_info_profile(&info)
+                .unwrap()
+                .apply_upload_version(&mut peer);
+            assert_eq!(peer.emule_version, 0);
+            assert_eq!(peer.stock_software.is_stock_class_below_ten(), below_ten);
+            assert!(peer.is_emule_client);
+        }
     }
 
     #[test]

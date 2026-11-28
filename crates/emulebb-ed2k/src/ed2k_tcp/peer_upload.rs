@@ -140,7 +140,7 @@ impl PeerUploadFacet {
         if self.peer_upload_identity.udp_port.is_none() && profile.udp_port != 0 {
             self.peer_upload_identity.udp_port = Some(profile.udp_port);
         }
-        self.peer_upload_identity.emule_version = profile.emule_version;
+        profile.apply_upload_version(&mut self.peer_upload_identity);
         self.peer_upload_identity.is_emule_client = true;
         self.peer_supports_secure_ident |= profile.supports_secure_ident;
         if profile.accepts_comments && self.peer_accept_comment_version == 0 {

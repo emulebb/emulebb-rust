@@ -190,10 +190,11 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     /// `0` for a non-mule client). Feeds the old-client score penalty. Excluded
     /// from identity eq/hash.
     pub emule_version: u8,
-    /// Whether the peer identified as an eMule-family client (sent a mule hello /
-    /// OP_EMULEINFO). Part of the old-client penalty predicate (eMule
-    /// `IsEmuleClient() || GetClientSoft() < 10`). Excluded from identity eq/hash.
+    /// Whether the peer negotiated eMule wire extensions via HELLO or INFO.
+    /// Excluded from identity eq/hash.
     pub is_emule_client: bool,
+    /// Stock software classification evidence used only for upload scoring.
+    pub stock_software: crate::ed2k_tcp::client_software::StockUploadSoftware,
     /// Peer's Kad UDP port (eMule `GetKadPort()`, high 16 of CT_EMULE_UDPPORTS);
     /// `0` when not Kad-reachable. A Kad-reachable peer is exempt from the
     /// firewalled-LowID callback admission guard. Excluded from identity eq/hash.
@@ -3313,6 +3314,7 @@ pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
         supports_direct_udp_callback: false,
         firewall_context: Ed2kUploadFirewallContext::default(),
         client_software: None,
+        stock_software: Default::default(),
     }
 }
 

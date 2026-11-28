@@ -513,6 +513,7 @@ mod tests {
             supports_direct_udp_callback,
             firewall_context: Ed2kUploadFirewallContext::default(),
             client_software: None,
+            stock_software: Default::default(),
         }
     }
 
