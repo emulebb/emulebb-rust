@@ -56,6 +56,7 @@ mod file_accounting;
 mod file_statistics_publication;
 pub use file_accounting::Ed2kFileUploadStatistics;
 mod deliver;
+mod delivery_leaf;
 mod delivery_tombstone;
 pub(crate) mod diag_bad_peer;
 pub(crate) mod diag_sched;

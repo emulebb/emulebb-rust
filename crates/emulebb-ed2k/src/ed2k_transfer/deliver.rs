@@ -50,6 +50,7 @@ use uuid::Uuid;
 
 use crate::long_path::long_path;
 
+use super::delivery_leaf::{DeliveryLeaf, staging_leaf};
 #[cfg(test)]
 use super::fs_durability::move_path_no_replace;
 use super::fs_durability::{
@@ -241,30 +242,6 @@ impl Ed2kTransferRuntime {
     }
 }
 
-fn delivery_candidate_name(
-    file_name: &str,
-    stem: &str,
-    extension: Option<&str>,
-    ordinal: u64,
-) -> String {
-    if ordinal == 0 {
-        return file_name.to_owned();
-    }
-    let mut index = ordinal;
-    let mut width = 2usize;
-    let mut limit = 99u64;
-    while index > limit {
-        index -= limit;
-        width += 1;
-        limit = limit.saturating_mul(10).saturating_add(9);
-    }
-    let suffix = format!("_{index:0width$}");
-    match extension {
-        Some(ext) => format!("{stem}{suffix}.{ext}"),
-        None => format!("{stem}{suffix}"),
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct OwnedDeliveryOutput {
     pub(super) path: PathBuf,
@@ -295,7 +272,7 @@ fn validate_delivery_attempt_paths(attempt: &MetadataTransferDeliveryAttempt) ->
         "delivery attempt {} paths do not share one target parent",
         attempt.attempt_id
     );
-    let expected_staging_name = format!(".emulebb-delivery-{}.tmp", attempt.attempt_id);
+    let expected_staging_name = staging_leaf(attempt.attempt_id);
     anyhow::ensure!(
         attempt
             .staging_path
@@ -431,13 +408,10 @@ impl Ed2kTransferRuntime {
                 format!("failed to create delivery directory {}", dest_dir.display())
             })?;
 
-        let file_name = sanitize_file_name(display_name);
-        let (stem, extension) = split_stem_extension(&file_name);
+        let leaf = DeliveryLeaf::for_destination(dest_dir, display_name).await?;
         for ordinal in 0..=u64::MAX {
-            let candidate_name =
-                delivery_candidate_name(&file_name, &stem, extension.as_deref(), ordinal);
-            let target_path = dest_dir.join(candidate_name);
-            if path_exists(&target_path).await {
+            let target_path = dest_dir.join(leaf.candidate(ordinal));
+            if delivery_target_occupied(&target_path).await? {
                 continue;
             }
             if self.metadata.delivery_output_is_excluded(&target_path)? {
@@ -451,7 +425,7 @@ impl Ed2kTransferRuntime {
             }
 
             let attempt_id = Uuid::new_v4();
-            let staging_path = dest_dir.join(format!(".emulebb-delivery-{attempt_id}.tmp"));
+            let staging_path = dest_dir.join(staging_leaf(attempt_id));
             self.begin_delivery_attempt(token, attempt_id, &target_path, &staging_path)
                 .await?;
             let source = source.to_owned();
@@ -1222,16 +1196,13 @@ async fn deliver_payload_file(
 ) -> Result<PathBuf> {
     validate_delivery_source(source, expected_size).await?;
     tokio::fs::create_dir_all(long_path(dest_dir)).await?;
-    let file_name = sanitize_file_name(display_name);
-    let (stem, extension) = split_stem_extension(&file_name);
+    let leaf = DeliveryLeaf::for_destination(dest_dir, display_name).await?;
     for index in 0..=u64::MAX {
-        let candidate_name =
-            delivery_candidate_name(&file_name, &stem, extension.as_deref(), index);
-        let target_path = dest_dir.join(candidate_name);
-        if path_exists(&target_path).await {
+        let target_path = dest_dir.join(leaf.candidate(index));
+        if delivery_target_occupied(&target_path).await? {
             continue;
         }
-        let staging_path = dest_dir.join(format!(".emulebb-delivery-{}.tmp", Uuid::new_v4()));
+        let staging_path = dest_dir.join(staging_leaf(Uuid::new_v4()));
         stage_delivery_payload(source, &staging_path, expected_size).await?;
         let _ = verify_delivery_fingerprint(&staging_path, expected_size, expected_hash).await?;
         match install_staged_payload(&staging_path, &target_path).await? {
@@ -1757,66 +1728,12 @@ pub(super) fn compute_ed2k_hash_from_handle(
     Ok(composite.finalize().into())
 }
 
-async fn path_exists(path: &Path) -> bool {
-    tokio::fs::metadata(long_path(path)).await.is_ok()
-}
-
-/// Replace filesystem-reserved characters in a canonical name so it is safe to
-/// use as a single path component on Windows and POSIX. Strips trailing dots /
-/// spaces (invalid as a Windows file name) and never returns an empty name.
-fn sanitize_file_name(name: &str) -> String {
-    let mut sanitized: String = name
-        .chars()
-        .map(|ch| match ch {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            ch if (ch as u32) < 0x20 => '_',
-            ch => ch,
-        })
-        .collect();
-    while sanitized.ends_with('.') || sanitized.ends_with(' ') {
-        sanitized.pop();
-    }
-    let mut sanitized = sanitized.trim_start().to_string();
-    if sanitized.is_empty() {
-        return "download".to_string();
-    }
-    if is_reserved_windows_leaf(&sanitized) {
-        let insertion = sanitized.find('.').unwrap_or(sanitized.len());
-        sanitized.insert(insertion, '_');
-    }
-    sanitized
-}
-
-/// Windows treats these basenames as DOS devices even when an extension is
-/// present. Protect them on every platform so a download profile remains
-/// portable and the delivered file is manageable by ordinary Windows tools.
-fn is_reserved_windows_leaf(name: &str) -> bool {
-    let candidate = name.trim_end_matches([' ', '.']);
-    let stem = candidate.split('.').next().unwrap_or(candidate);
-    let upper = stem.to_uppercase();
-    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$") {
-        return true;
-    }
-    let is_reserved_port = |prefix: &str| {
-        let Some(suffix) = upper.strip_prefix(prefix) else {
-            return false;
-        };
-        matches!(
-            suffix,
-            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-        )
-    };
-    is_reserved_port("COM") || is_reserved_port("LPT")
-}
-
-/// Split a file name into `(stem, Some(extension))`, or `(name, None)` when
-/// there is no usable extension (no dot, leading-dot dotfile, or empty tail).
-fn split_stem_extension(file_name: &str) -> (String, Option<String>) {
-    match file_name.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
-            (stem.to_string(), Some(extension.to_string()))
-        }
-        _ => (file_name.to_string(), None),
+async fn delivery_target_occupied(path: &Path) -> Result<bool> {
+    match tokio::fs::symlink_metadata(long_path(path)).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("could not inspect delivery target {}", path.display())),
     }
 }
 
@@ -1885,17 +1802,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn collision_suffixes_widen_after_each_full_group() {
-        use super::delivery_candidate_name;
-        let name = |n| delivery_candidate_name("abc.mp3", "abc", Some("mp3"), n);
-        assert_eq!(name(0), "abc.mp3");
-        assert_eq!(name(1), "abc_01.mp3");
-        assert_eq!(name(99), "abc_99.mp3");
-        assert_eq!(name(100), "abc_001.mp3");
-        assert_eq!(name(1098), "abc_999.mp3");
-        assert_eq!(name(1099), "abc_0001.mp3");
-    }
     use super::*;
 
     fn temp_dir() -> PathBuf {
@@ -1910,37 +1816,6 @@ mod tests {
             "emulebb-deliver-{}-{nanos}-{seq}",
             std::process::id()
         ))
-    }
-
-    #[test]
-    fn sanitize_replaces_reserved_characters() {
-        assert_eq!(sanitize_file_name("a/b\\c:d*e?.bin"), "a_b_c_d_e_.bin");
-        assert_eq!(sanitize_file_name("name."), "name");
-        assert_eq!(sanitize_file_name("trailing  "), "trailing");
-        assert_eq!(sanitize_file_name(""), "download");
-        assert_eq!(sanitize_file_name("Sample.Title.mkv"), "Sample.Title.mkv");
-        assert_eq!(sanitize_file_name("CON"), "CON_");
-        assert_eq!(sanitize_file_name("nul.txt"), "nul_.txt");
-        assert_eq!(sanitize_file_name("COM1.tar.gz"), "COM1_.tar.gz");
-        assert_eq!(sanitize_file_name("lpt².log"), "lpt²_.log");
-        assert_eq!(sanitize_file_name("CLOCK$.bin"), "CLOCK$_.bin");
-    }
-
-    #[test]
-    fn split_stem_extension_handles_edge_cases() {
-        assert_eq!(
-            split_stem_extension("movie.mkv"),
-            ("movie".to_string(), Some("mkv".to_string()))
-        );
-        assert_eq!(
-            split_stem_extension("archive.tar.gz"),
-            ("archive.tar".to_string(), Some("gz".to_string()))
-        );
-        assert_eq!(split_stem_extension("noext"), ("noext".to_string(), None));
-        assert_eq!(
-            split_stem_extension(".dotfile"),
-            (".dotfile".to_string(), None)
-        );
     }
 
     #[tokio::test]
